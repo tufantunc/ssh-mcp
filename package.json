@@ -1,0 +1,28 @@
+{
+  "name": "ssh-mcp",
+  "version": "1.0.0",
+  "description": "MCP server exposing SSH control for Linux servers via Model Context Protocol.",
+  "type": "module",
+  "bin": {
+    "ssh-mcp": "build/index.js"
+  },
+  "scripts": {
+    "prepare": "npm run build",
+    "build": "tsc --outDir build",
+    "inspect": "npx @modelcontextprotocol/inspector node build/index.js"
+  },
+  "files": [
+    "build"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.2",
+    "dotenv": "^16.3.1",
+    "ssh2": "^1.11.0",
+    "zod": "^3.24.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.31",
+    "@types/ssh2": "^1.15.5",
+    "typescript": "^5.4.5"
+  }
+}
