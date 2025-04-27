@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { McpError, ErrorCode, CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Client as SSHClient } from 'ssh2';
@@ -39,7 +41,7 @@ validateConfig(argvConfig);
 
 const server = new McpServer({
   name: 'SSH MCP Server',
-  version: '1.0.4',
+  version: '1.0.5',
   capabilities: {
     resources: {},
     tools: {},
