@@ -1,5 +1,3 @@
-// This file should be renamed to index.ts for TypeScript support
-import 'dotenv/config';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { McpError, ErrorCode, CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Client as SSHClient } from 'ssh2';
@@ -27,10 +25,22 @@ const USER = argvConfig.user;
 const PASSWORD = argvConfig.password;
 const KEY = argvConfig.key;
 
+function validateConfig(config: Record<string, string>) {
+  const errors = [];
+  if (!config.host) errors.push('Missing required --host');
+  if (!config.user) errors.push('Missing required --user');
+  if (config.port && isNaN(Number(config.port))) errors.push('Invalid --port');
+  if (errors.length > 0) {
+    throw new Error('Configuration error:\n' + errors.join('\n'));
+  }
+}
+
+validateConfig(argvConfig);
+
 
 const server = new McpServer({
   name: 'SSH MCP Server',
-  version: '1.0.0',
+  version: '1.0.4',
   capabilities: {
     resources: {},
     tools: {},
@@ -44,20 +54,29 @@ server.tool(
     command: z.string().describe("Shell command to execute on the remote SSH server"),
   },
   async ({ command }) => {
+    // Sanitize command input
+    if (typeof command !== 'string' || !command.trim()) {
+      throw new McpError(ErrorCode.InternalError, 'Command must be a non-empty string.');
+    }
     const sshConfig: any = {
       host: HOST,
       port: PORT,
       username: USER,
     };
-    
-    if (PASSWORD) {
-      sshConfig.password = PASSWORD;
-    } else if (KEY) {
-      const fs = await import('fs/promises');
-      sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+    try {
+      if (PASSWORD) {
+        sshConfig.password = PASSWORD;
+      } else if (KEY) {
+        const fs = await import('fs/promises');
+        sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+      }
+      const result = await execSshCommand(sshConfig, command);
+      return result;
+    } catch (err: any) {
+      // Wrap unexpected errors
+      if (err instanceof McpError) throw err;
+      throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
     }
-    const result = await execSshCommand(sshConfig, command);
-    return result;
   }
 );
 

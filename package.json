@@ -1,6 +1,7 @@
 {
   "name": "ssh-mcp",
-  "version": "1.0.3",
+  "license": "MIT",
+  "version": "1.0.4",
   "description": "MCP server exposing SSH control for Linux and Windows systems via Model Context Protocol.",
   "type": "module",
   "bin": {
@@ -16,7 +17,6 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.10.2",
-    "dotenv": "^16.3.1",
     "ssh2": "^1.11.0",
     "zod": "^3.24.3"
   },
