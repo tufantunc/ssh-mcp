@@ -1,6 +1,6 @@
 {
   "name": "ssh-mcp",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "MCP server exposing SSH control for Linux and Windows systems via Model Context Protocol.",
   "type": "module",
   "bin": {
@@ -8,7 +8,7 @@
   },
   "scripts": {
     "prepare": "npm run build",
-    "build": "tsc && shx chmod +x build/*.js",  
+    "build": "tsc && shx chmod +x build/*.js",
     "inspect": "npx @modelcontextprotocol/inspector node build/index.js"
   },
   "files": [
@@ -23,6 +23,7 @@
   "devDependencies": {
     "@types/node": "^20.17.31",
     "@types/ssh2": "^1.15.5",
+    "shx": "^0.4.0",
     "typescript": "^5.4.5"
   }
 }
