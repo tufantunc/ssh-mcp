@@ -1,14 +1,14 @@
 {
   "name": "ssh-mcp",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "MCP server exposing SSH control for Linux and Windows systems via Model Context Protocol.",
   "type": "module",
   "bin": {
-    "ssh-mcp": "./build/index.js"
+    "ssh-mcp": "build/index.js"
   },
   "scripts": {
     "prepare": "npm run build",
-    "build": "tsc --outDir build",
+    "build": "tsc && shx chmod +x build/*.js",  
     "inspect": "npx @modelcontextprotocol/inspector node build/index.js"
   },
   "files": [
