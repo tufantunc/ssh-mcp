@@ -4,7 +4,6 @@ import { Client as SSHClient } from 'ssh2';
 import { z } from 'zod';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
-// Parse SSH config from process.argv
 // Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key
 function parseArgv() {
   const args = process.argv.slice(2);
