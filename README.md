@@ -28,10 +28,18 @@
 - Execute shell commands on remote Linux and Windows systems
 - Secure authentication via password or SSH key
 - Built with TypeScript and the official MCP SDK
+- **Configurable timeout protection** with automatic process abortion
+- **Graceful timeout handling** - attempts to kill hanging processes before closing connections
 
 ### Tools
 
 - `exec`: Execute a shell command on the remote server
+  - **Parameters:**
+    - `command` (required): Shell command to execute on the remote SSH server
+  - **Timeout Configuration:**
+    - Timeout is configured via command line argument `--timeout` (in milliseconds)
+    - Default timeout: 60000ms (1 minute)
+    - When a command times out, the server automatically attempts to abort the running process before closing the connection
 
 ## Installation
 
@@ -48,11 +56,16 @@
 ## Client Setup
 
 You can configure Claude Desktop to use this MCP Server.
-   - `host`: Hostname or IP of the Linux or Windows server
-   - `port`: SSH port (default: 22)
-   - `user`: SSH username
-   - `password`: SSH password (or use `key` for key-based auth) (optional)
-   - `key`: Path to private SSH key (optional)
+
+**Required Parameters:**
+- `host`: Hostname or IP of the Linux or Windows server
+- `user`: SSH username
+
+**Optional Parameters:**
+- `port`: SSH port (default: 22)
+- `password`: SSH password (or use `key` for key-based auth)
+- `key`: Path to private SSH key
+- `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
 
 
 ```commandline
@@ -68,7 +81,8 @@ You can configure Claude Desktop to use this MCP Server.
                 "--port=22",
                 "--user=root",
                 "--password=pass",
-                "--key=path/to/key"
+                "--key=path/to/key",
+                "--timeout=30000"
             ]
         }
     }
