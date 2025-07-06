@@ -25,5 +25,29 @@
     "@types/ssh2": "^1.15.5",
     "shx": "^0.4.0",
     "typescript": "^5.4.5"
+  },
+  "homepage": "https://github.com/tufantunc/ssh-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tufantunc/ssh-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tufantunc/ssh-mcp/issues"
+  },
+  "keywords": [
+    "ssh",
+    "mcp",
+    "model-context-protocol",
+    "server",
+    "windows",
+    "linux",
+    "automation",
+    "remote",
+    "cli",
+    "typescript"
+  ],
+  "author": "tufantunc",
+  "engines": {
+    "node": ">=18"
   }
 }
