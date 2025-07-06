@@ -42,7 +42,7 @@ validateConfig(argvConfig);
 
 const server = new McpServer({
   name: 'SSH MCP Server',
-  version: '1.0.6',
+  version: '1.0.7',
   capabilities: {
     resources: {},
     tools: {},

@@ -1,7 +1,7 @@
 {
   "name": "ssh-mcp",
   "license": "MIT",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "MCP server exposing SSH control for Linux and Windows systems via Model Context Protocol.",
   "type": "module",
   "bin": {
