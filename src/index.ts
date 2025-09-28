@@ -39,6 +39,30 @@ function validateConfig(config: Record<string, string>) {
 
 validateConfig(argvConfig);
 
+// Command sanitization and validation
+function sanitizeCommand(command: string): string {
+  if (typeof command !== 'string') {
+    throw new McpError(ErrorCode.InvalidParams, 'Command must be a string');
+  }
+  
+  const trimmedCommand = command.trim();
+  if (!trimmedCommand) {
+    throw new McpError(ErrorCode.InvalidParams, 'Command cannot be empty');
+  }
+  
+  // Length check
+  if (trimmedCommand.length > 1000) {
+    throw new McpError(ErrorCode.InvalidParams, 'Command is too long (max 1000 characters)');
+  }
+  
+  return trimmedCommand;
+}
+
+// Escape command for use in shell contexts (like pkill)
+function escapeCommandForShell(command: string): string {
+  // Replace single quotes with escaped single quotes
+  return command.replace(/'/g, "'\"'\"'");
+}
 
 const server = new McpServer({
   name: 'SSH MCP Server',
@@ -57,9 +81,7 @@ server.tool(
   },
   async ({ command }) => {
     // Sanitize command input
-    if (typeof command !== 'string' || !command.trim()) {
-      throw new McpError(ErrorCode.InternalError, 'Command must be a non-empty string.');
-    }
+    const sanitizedCommand = sanitizeCommand(command);
 
     const sshConfig: any = {
       host: HOST,
@@ -73,7 +95,7 @@ server.tool(
         const fs = await import('fs/promises');
         sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
       }
-      const result = await execSshCommand(sshConfig, command);
+      const result = await execSshCommand(sshConfig, sanitizedCommand);
       return result;
     } catch (err: any) {
       // Wrap unexpected errors
@@ -99,7 +121,7 @@ async function execSshCommand(sshConfig: any, command: string): Promise<{ [x: st
           conn.end();
         }, 5000); // 5 second timeout for abort command
         
-        conn.exec('timeout 3s pkill -f "' + command + '" 2>/dev/null || true', (err, abortStream) => {
+        conn.exec('timeout 3s pkill -f \'' + escapeCommandForShell(command) + '\' 2>/dev/null || true', (err, abortStream) => {
           if (abortStream) {
             abortStream.on('close', () => {
               clearTimeout(abortTimeout);
