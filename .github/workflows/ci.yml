@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      sshd:
+        image: lscr.io/linuxserver/openssh-server:latest
+        env:
+          USER_NAME: test
+          PASSWORD_ACCESS: "true"
+          USER_PASSWORD: secret
+        ports:
+          - 2222:2222
+        options: >-
+          --health-cmd="nc -z localhost 2222 || exit 1"
+          --health-interval=2s
+          --health-timeout=2s
+          --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Wait for sshd
+        run: |
+          for i in {1..60}; do
+            nc -z 127.0.0.1 2222 && echo "sshd ready" && exit 0
+            sleep 1
+          done
+          echo "sshd not ready" && exit 1
+      - name: Run tests
+        env:
+          SSH_MCP_DISABLE_MAIN: "1"
+          SSH_HOST: 127.0.0.1
+          SSH_PORT: "2222"
+          SSH_USER: test
+          SSH_PASSWORD: secret
+        run: npm test
+
+
