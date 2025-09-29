@@ -18,7 +18,8 @@ function parseArgv() {
   }
   return config;
 }
-const argvConfig = parseArgv();
+const isCliEnabled = process.env.SSH_MCP_DISABLE_MAIN !== '1';
+const argvConfig = isCliEnabled ? parseArgv() : {} as Record<string, string>;
 
 const HOST = argvConfig.host;
 const PORT = argvConfig.port ? parseInt(argvConfig.port) : 22;
@@ -37,10 +38,12 @@ function validateConfig(config: Record<string, string>) {
   }
 }
 
-validateConfig(argvConfig);
+if (isCliEnabled) {
+  validateConfig(argvConfig);
+}
 
 // Command sanitization and validation
-function sanitizeCommand(command: string): string {
+export function sanitizeCommand(command: string): string {
   if (typeof command !== 'string') {
     throw new McpError(ErrorCode.InvalidParams, 'Command must be a string');
   }
@@ -59,14 +62,14 @@ function sanitizeCommand(command: string): string {
 }
 
 // Escape command for use in shell contexts (like pkill)
-function escapeCommandForShell(command: string): string {
+export function escapeCommandForShell(command: string): string {
   // Replace single quotes with escaped single quotes
   return command.replace(/'/g, "'\"'\"'");
 }
 
 const server = new McpServer({
   name: 'SSH MCP Server',
-  version: '1.0.7',
+  version: '1.0.9',
   capabilities: {
     resources: {},
     tools: {},
@@ -105,7 +108,7 @@ server.tool(
   }
 );
 
-async function execSshCommand(sshConfig: any, command: string): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
+export async function execSshCommand(sshConfig: any, command: string): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
   return new Promise((resolve, reject) => {
     const conn = new SSHClient();
     let timeoutId: NodeJS.Timeout;
@@ -191,7 +194,11 @@ async function main() {
   console.error("SSH MCP Server running on stdio");
 }
 
-main().catch((error) => {
-  console.error("Fatal error in main():", error);
-  process.exit(1);
-});
+if (process.env.SSH_MCP_DISABLE_MAIN !== '1') {
+  main().catch((error) => {
+    console.error("Fatal error in main():", error);
+    process.exit(1);
+  });
+}
+
+export { parseArgv, validateConfig };

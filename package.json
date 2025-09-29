@@ -1,7 +1,7 @@
 {
   "name": "ssh-mcp",
   "license": "MIT",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "MCP server exposing SSH control for Linux and Windows systems via Model Context Protocol.",
   "type": "module",
   "bin": {
@@ -10,7 +10,10 @@
   "scripts": {
     "prepare": "npm run build",
     "build": "tsc && shx chmod +x build/*.js",
-    "inspect": "npx @modelcontextprotocol/inspector node build/index.js"
+    "inspect": "npx @modelcontextprotocol/inspector node build/index.js",
+    "test": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run",
+    "test:watch": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest",
+    "coverage": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run --coverage"
   },
   "files": [
     "build"
@@ -18,13 +21,18 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.5",
     "ssh2": "^1.17.0",
-    "zod": "^4.1.5"
+    "zod": "3.23.8"
   },
   "devDependencies": {
-    "@types/node": "^24.3.0",
+    "@types/node": "^24.5.2",
     "@types/ssh2": "^1.15.5",
+    "cross-env": "^7.0.3",
     "shx": "^0.4.0",
-    "typescript": "^5.9.2"
+    "testcontainers": "^11.7.0",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
   },
   "homepage": "https://github.com/tufantunc/ssh-mcp#readme",
   "repository": {
