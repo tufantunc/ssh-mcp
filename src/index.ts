@@ -27,6 +27,24 @@ const USER = argvConfig.user;
 const PASSWORD = argvConfig.password;
 const KEY = argvConfig.key;
 const DEFAULT_TIMEOUT = argvConfig.timeout ? parseInt(argvConfig.timeout) : 60000; // 60 seconds default timeout
+// Max characters configuration:
+// - Default: 1000 characters
+// - When set via --maxChars:
+//   * a positive integer enforces that limit
+//   * 0 or a negative value disables the limit (no max)
+//   * the string "none" (case-insensitive) disables the limit (no max)
+const MAX_CHARS_RAW = argvConfig.maxChars;
+const MAX_CHARS = (() => {
+  if (typeof MAX_CHARS_RAW === 'string') {
+    const lowered = MAX_CHARS_RAW.toLowerCase();
+    if (lowered === 'none') return Infinity;
+    const parsed = parseInt(MAX_CHARS_RAW);
+    if (isNaN(parsed)) return 1000;
+    if (parsed <= 0) return Infinity;
+    return parsed;
+  }
+  return 1000;
+})();
 
 function validateConfig(config: Record<string, string>) {
   const errors = [];
@@ -54,8 +72,11 @@ export function sanitizeCommand(command: string): string {
   }
   
   // Length check
-  if (trimmedCommand.length > 1000) {
-    throw new McpError(ErrorCode.InvalidParams, 'Command is too long (max 1000 characters)');
+  if (Number.isFinite(MAX_CHARS) && trimmedCommand.length > (MAX_CHARS as number)) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `Command is too long (max ${MAX_CHARS} characters)`
+    );
   }
   
   return trimmedCommand;

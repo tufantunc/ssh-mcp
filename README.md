@@ -48,6 +48,10 @@
     - Timeout is configured via command line argument `--timeout` (in milliseconds)
     - Default timeout: 60000ms (1 minute)
     - When a command times out, the server automatically attempts to abort the running process before closing the connection
+  - **Max Command Length Configuration:**
+    - Max command characters are configured via `--maxChars`
+    - Default: `1000`
+    - No-limit mode: set `--maxChars=none` or any `<= 0` value (e.g. `--maxChars=0`)
 
 ## Installation
 
@@ -74,6 +78,7 @@ You can configure Claude Desktop to use this MCP Server.
 - `password`: SSH password (or use `key` for key-based auth)
 - `key`: Path to private SSH key
 - `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
+- `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
 
 
 ```commandline
@@ -90,7 +95,8 @@ You can configure Claude Desktop to use this MCP Server.
                 "--user=root",
                 "--password=pass",
                 "--key=path/to/key",
-                "--timeout=30000"
+                "--timeout=30000",
+                "--maxChars=none"
             ]
         }
     }
