@@ -89,7 +89,7 @@ export function escapeCommandForShell(command: string): string {
 }
 
 // SSH Connection Manager to maintain persistent connection
-class SSHConnectionManager {
+export class SSHConnectionManager {
   private conn: SSHClient | null = null;
   private sshConfig: any = null;
   private isConnecting = false;
@@ -234,7 +234,7 @@ server.tool(
 );
 
 // New function that uses persistent connection
-async function execSshCommandWithConnection(manager: SSHConnectionManager, command: string): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
+export async function execSshCommandWithConnection(manager: SSHConnectionManager, command: string): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
   return new Promise((resolve, reject) => {
     let timeoutId: NodeJS.Timeout;
     let isResolved = false;
