@@ -88,9 +88,103 @@ export function escapeCommandForShell(command: string): string {
   return command.replace(/'/g, "'\"'\"'");
 }
 
+// SSH Connection Manager to maintain persistent connection
+export class SSHConnectionManager {
+  private conn: SSHClient | null = null;
+  private sshConfig: any = null;
+  private isConnecting = false;
+  private connectionPromise: Promise<void> | null = null;
+
+  constructor(config: any) {
+    this.sshConfig = config;
+  }
+
+  async connect(): Promise<void> {
+    if (this.conn && this.isConnected()) {
+      return; // Already connected
+    }
+
+    if (this.isConnecting && this.connectionPromise) {
+      return this.connectionPromise; // Wait for ongoing connection
+    }
+
+    this.isConnecting = true;
+    this.connectionPromise = new Promise((resolve, reject) => {
+      this.conn = new SSHClient();
+      
+      const timeoutId = setTimeout(() => {
+        this.conn?.end();
+        this.conn = null;
+        this.isConnecting = false;
+        this.connectionPromise = null;
+        reject(new McpError(ErrorCode.InternalError, 'SSH connection timeout'));
+      }, 30000); // 30 seconds connection timeout
+
+      this.conn.on('ready', () => {
+        clearTimeout(timeoutId);
+        this.isConnecting = false;
+        console.error('SSH connection established');
+        resolve();
+      });
+
+      this.conn.on('error', (err) => {
+        clearTimeout(timeoutId);
+        this.conn = null;
+        this.isConnecting = false;
+        this.connectionPromise = null;
+        reject(new McpError(ErrorCode.InternalError, `SSH connection error: ${err.message}`));
+      });
+
+      this.conn.on('end', () => {
+        console.error('SSH connection ended');
+        this.conn = null;
+        this.isConnecting = false;
+        this.connectionPromise = null;
+      });
+
+      this.conn.on('close', () => {
+        console.error('SSH connection closed');
+        this.conn = null;
+        this.isConnecting = false;
+        this.connectionPromise = null;
+      });
+
+      this.conn.connect(this.sshConfig);
+    });
+
+    return this.connectionPromise;
+  }
+
+  isConnected(): boolean {
+    return this.conn !== null && (this.conn as any)._sock && !(this.conn as any)._sock.destroyed;
+  }
+
+  async ensureConnected(): Promise<void> {
+    if (!this.isConnected()) {
+      await this.connect();
+    }
+  }
+
+  getConnection(): SSHClient {
+    if (!this.conn) {
+      throw new McpError(ErrorCode.InternalError, 'SSH connection not established');
+    }
+    return this.conn;
+  }
+
+  close(): void {
+    if (this.conn) {
+      this.conn.end();
+      this.conn = null;
+    }
+  }
+}
+
+let connectionManager: SSHConnectionManager | null = null;
+
 const server = new McpServer({
   name: 'SSH MCP Server',
-  version: '1.0.9',
+  version: '1.2.0',
   capabilities: {
     resources: {},
     tools: {},
@@ -107,19 +201,29 @@ server.tool(
     // Sanitize command input
     const sanitizedCommand = sanitizeCommand(command);
 
-    const sshConfig: any = {
-      host: HOST,
-      port: PORT,
-      username: USER,
-    };
     try {
-      if (PASSWORD) {
-        sshConfig.password = PASSWORD;
-      } else if (KEY) {
-        const fs = await import('fs/promises');
-        sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+      // Initialize connection manager if not already done
+      if (!connectionManager) {
+        const sshConfig: any = {
+          host: HOST,
+          port: PORT,
+          username: USER,
+        };
+        
+        if (PASSWORD) {
+          sshConfig.password = PASSWORD;
+        } else if (KEY) {
+          const fs = await import('fs/promises');
+          sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+        }
+        
+        connectionManager = new SSHConnectionManager(sshConfig);
       }
-      const result = await execSshCommand(sshConfig, sanitizedCommand);
+
+      // Ensure connection is active (reconnect if needed)
+      await connectionManager.ensureConnected();
+
+      const result = await execSshCommandWithConnection(connectionManager, sanitizedCommand);
       return result;
     } catch (err: any) {
       // Wrap unexpected errors
@@ -129,6 +233,74 @@ server.tool(
   }
 );
 
+// New function that uses persistent connection
+export async function execSshCommandWithConnection(manager: SSHConnectionManager, command: string): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
+  return new Promise((resolve, reject) => {
+    let timeoutId: NodeJS.Timeout;
+    let isResolved = false;
+    
+    const conn = manager.getConnection();
+
+    // Set up timeout
+    timeoutId = setTimeout(() => {
+      if (!isResolved) {
+        isResolved = true;
+        // Try to abort the running command
+        const abortTimeout = setTimeout(() => {
+          // If abort command itself times out, we'll just reject
+        }, 5000);
+        
+        conn.exec('timeout 3s pkill -f \'' + escapeCommandForShell(command) + '\' 2>/dev/null || true', (err, abortStream) => {
+          if (abortStream) {
+            abortStream.on('close', () => {
+              clearTimeout(abortTimeout);
+            });
+          } else {
+            clearTimeout(abortTimeout);
+          }
+        });
+        reject(new McpError(ErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
+      }
+    }, DEFAULT_TIMEOUT);
+    
+    conn.exec(command, (err, stream) => {
+      if (err) {
+        if (!isResolved) {
+          isResolved = true;
+          clearTimeout(timeoutId);
+          reject(new McpError(ErrorCode.InternalError, `SSH exec error: ${err.message}`));
+        }
+        return;
+      }
+      let stdout = '';
+      let stderr = '';
+      stream.on('close', (code: number, signal: string) => {
+        if (!isResolved) {
+          isResolved = true;
+          clearTimeout(timeoutId);
+          if (stderr) {
+            reject(new McpError(ErrorCode.InternalError, `Error (code ${code}):\n${stderr}`));
+          } else {
+            resolve({
+              content: [{
+                type: 'text',
+                text: stdout,
+              }],
+            });
+          }
+        }
+      });
+      stream.on('data', (data: Buffer) => {
+        stdout += data.toString();
+      });
+      stream.stderr.on('data', (data: Buffer) => {
+        stderr += data.toString();
+      });
+    });
+  });
+}
+
+// Keep the old function for backward compatibility (used in tests)
 export async function execSshCommand(sshConfig: any, command: string): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
   return new Promise((resolve, reject) => {
     const conn = new SSHClient();
@@ -213,11 +385,32 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("SSH MCP Server running on stdio");
+
+  // Handle graceful shutdown
+  const cleanup = () => {
+    console.error("Shutting down SSH MCP Server...");
+    if (connectionManager) {
+      connectionManager.close();
+      connectionManager = null;
+    }
+    process.exit(0);
+  };
+
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
+  process.on('exit', () => {
+    if (connectionManager) {
+      connectionManager.close();
+    }
+  });
 }
 
 if (process.env.SSH_MCP_DISABLE_MAIN !== '1') {
   main().catch((error) => {
     console.error("Fatal error in main():", error);
+    if (connectionManager) {
+      connectionManager.close();
+    }
     process.exit(1);
   });
 }
