@@ -67,7 +67,7 @@
 
 ## Client Setup
 
-You can configure Claude Desktop to use this MCP Server.
+You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use this MCP Server.
 
 **Required Parameters:**
 - `host`: Hostname or IP of the Linux or Windows server
@@ -102,6 +102,62 @@ You can configure Claude Desktop to use this MCP Server.
     }
 }
 ```
+
+### Claude Code
+
+You can add this MCP server to Claude Code using the `claude mcp add` command. This is the recommended method for Claude Code.
+
+**Basic Installation:**
+
+```bash
+claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
+```
+
+**Installation Examples:**
+
+**With Password Authentication:**
+```bash
+claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --port=22 --user=admin --password=your_password
+```
+
+**With SSH Key Authentication:**
+```bash
+claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=example.com --user=root --key=/path/to/private/key
+```
+
+**With Custom Timeout and No Character Limit:**
+```bash
+claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --timeout=120000 --maxChars=none
+```
+
+**Installation Scopes:**
+
+You can specify the scope when adding the server:
+
+- **Local scope** (default): For personal use in the current project
+  ```bash
+  claude mcp add --transport stdio ssh-mcp --scope local -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
+  ```
+
+- **Project scope**: Share with your team via `.mcp.json` file
+  ```bash
+  claude mcp add --transport stdio ssh-mcp --scope project -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
+  ```
+
+- **User scope**: Available across all your projects
+  ```bash
+  claude mcp add --transport stdio ssh-mcp --scope user -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
+  ```
+
+
+**Verify Installation:**
+
+After adding the server, restart Claude Code and ask Cascade to execute a command:
+```
+"Can you run 'ls -la' on the remote server?"
+```
+
+For more information about MCP in Claude Code, see the [official documentation](https://docs.claude.com/en/docs/claude-code/mcp).
 
 ## Testing
 
