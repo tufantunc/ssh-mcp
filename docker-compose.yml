@@ -5,6 +5,7 @@ services:
       - USER_NAME=test
       - PASSWORD_ACCESS=true
       - USER_PASSWORD=secret
+      - SUDO_ACCESS=true
     ports:
       - "2222:2222"
 
