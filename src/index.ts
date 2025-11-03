@@ -327,6 +327,9 @@ server.tool(
     try {
       // Initialize connection manager if not already done
       if (!connectionManager) {
+        if (!HOST || !USER) {
+          throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
+        }
         const sshConfig: SSHConfig = {
           host: HOST,
           port: PORT,
