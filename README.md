@@ -45,6 +45,16 @@
   - **Parameters:**
     - `command` (required): Shell command to execute on the remote SSH server
   - **Timeout Configuration:**
+
+- `sudo-exec`: Execute a shell command with sudo elevation
+  - **Parameters:**
+    - `command` (required): Shell command to execute as root using sudo
+  - **Notes:**
+    - Requires `--sudoPassword` to be set for password-protected sudo
+    - Can be disabled by passing the `--disableSudo` flag at startup if sudo access is not needed or not available
+    - For persistent root access, consider using `--suPassword` instead which establishes a root shell
+    - Tool will not be available at all if server is started with `--disableSudo`
+  - **Timeout Configuration:**
     - Timeout is configured via command line argument `--timeout` (in milliseconds)
     - Default timeout: 60000ms (1 minute)
     - When a command times out, the server automatically attempts to abort the running process before closing the connection
@@ -77,8 +87,11 @@ You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use t
 - `port`: SSH port (default: 22)
 - `password`: SSH password (or use `key` for key-based auth)
 - `key`: Path to private SSH key
+- `sudoPassword`: Password for sudo elevation (when executing commands with sudo)
+- `suPassword`: Password for su elevation (when you need a persistent root shell)
 - `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
 - `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
+- `disableSudo`: Flag to disable the `sudo-exec` tool completely. Useful when sudo access is not needed or not available.
 
 
 ```commandline
@@ -128,6 +141,11 @@ claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=example.com
 **With Custom Timeout and No Character Limit:**
 ```bash
 claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --timeout=120000 --maxChars=none
+```
+
+**With Sudo and Su Support:**
+```bash
+claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --sudoPassword=sudo_pass --suPassword=root_pass
 ```
 
 **Installation Scopes:**
