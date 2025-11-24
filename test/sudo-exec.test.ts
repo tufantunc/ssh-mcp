@@ -8,20 +8,20 @@ import { join } from 'path';
 // the sudo-exec tool and assert the returned JSON-RPC response.
 
 const testServerPath = join(process.cwd(), 'build', 'index.js');
-const START_TIMEOUT = 5000;
+const START_TIMEOUT = 10000;  // 10 seconds for server startup with su elevation
 
 beforeAll(() => {
   process.env.SSH_MCP_TEST = '1';
 });
 
-function runMcpCommand(command: string, extraArgs: string[] = []): Promise<any> {
+function runMcpCommand(command: string, extraArgs: string[] = [], toolName = 'sudo-exec'): Promise<any> {
   const args = [
     testServerPath,
     '--host=127.0.0.1',
     '--port=2222',
     '--user=test',
     '--password=secret',
-    '--timeout=30000',
+    '--timeout=60000',
     ...extraArgs,
   ];
 
@@ -34,7 +34,7 @@ function runMcpCommand(command: string, extraArgs: string[] = []): Promise<any> 
     }, START_TIMEOUT);
 
     const initMsg = { jsonrpc: '2.0', id: 0, method: 'initialize', params: { capabilities: {}, clientInfo: { name: 't', version: '1' }, protocolVersion: '0.1.0' } };
-    const toolCall = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'sudo-exec', arguments: { command } } };
+    const toolCall = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: toolName, arguments: { command } } };
 
     child.stdout.on('data', (d) => {
       buffer += d.toString();
@@ -60,9 +60,17 @@ function runMcpCommand(command: string, extraArgs: string[] = []): Promise<any> 
     child.stderr.on('data', () => { /* ignore */ });
     child.on('error', (err) => { clearTimeout(startup); reject(err); });
 
-    // send init
-    child.stdin.write(JSON.stringify(initMsg) + '\n');
+    // Give the server a moment to initialize before sending messages
+    setTimeout(() => {
+      child.stdin.write(JSON.stringify(initMsg) + '\n');
+    }, 100);
   });
+}
+
+// Helper that runs a command using the server's `--suPassword` option.
+// It establishes an elevated su session at connection time so all commands run as root.
+function runSuMcpCommand(command: string, suPassword = 'secret', extraArgs: string[] = []): Promise<any> {
+  return runMcpCommand(command, [`--suPassword=${suPassword}`, ...extraArgs], 'exec');
 }
 
 describe('sudo-exec tool authentication', () => {
@@ -73,7 +81,7 @@ describe('sudo-exec tool authentication', () => {
     expect(suSetup.error).toBeUndefined();
 
     // Then set the root password to 'secret'
-    const passwdSetup = await runMcpCommand('echo "secret" | passwd root -S', ['--sudoPassword=secret']);
+    const passwdSetup = await runMcpCommand('echo "secret" | passwd --stdin', ['--sudoPassword=secret']);
     expect(passwdSetup.error).toBeUndefined();
   });
 
@@ -98,6 +106,13 @@ describe('sudo-exec tool authentication', () => {
     expect(cleanup.error).toBeUndefined();
   }, 60000); // Increased timeout for su operations
 
+  it('executes su when provided --suPassword', async () => {
+    const res = await runSuMcpCommand('whoami', 'secret');
+    expect(res.error).toBeUndefined();
+    const out = (res.result?.content?.[0]?.text || '').toLowerCase();
+    expect(out).toContain('root');
+  }, 60000);
+
   it('fails when sudo requires password but none provided', async () => {
     const res = await runMcpCommand('whoami');
     const text = (res.result?.content?.[0]?.text || '').toLowerCase();
@@ -118,17 +133,9 @@ describe('sudo-exec tool authentication', () => {
   });
 
   it('executes with correct sudo password', async () => {
-    const args = ['--sudoPassword=secret'];
-    console.error('Running with args:', args);
-    const res = await runMcpCommand('id', args);
-    if (res.error) {
-      console.error('Got error response:', res.error);
-    } else if (res.result) {
-      console.error('Got result:', res.result);
-    }
+    const res = await runMcpCommand('id', ['--sudoPassword=secret']);
     expect(res.error).toBeUndefined();
     const out = (res.result?.content?.[0]?.text || '').toLowerCase();
-    console.error('Output:', out);
     expect(out).toContain('uid=0');
   });
 });
