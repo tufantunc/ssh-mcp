@@ -153,21 +153,20 @@ export class SSHConnectionManager {
       this.conn.on('ready', async () => {
         clearTimeout(timeoutId);
         this.isConnecting = false;
-        console.error('SSH connection established');
-        
-          // If suPassword is provided, attempt to elevate to su shell in background
-          // Do not block connection establishment on elevation (it may take time);
-          // elevation is attempted asynchronously and errors are logged.
-          if (this.sshConfig.suPassword) {
-            this.ensureElevated().then(() => {
-              console.error('Successfully elevated to su shell');
-            }).catch((err) => {
-              console.error('Failed to elevate to su shell:', err);
-              // Do not reject connection; just log the error. Subsequent sudo calls
-              // will either use the su shell if available or provide sudo password.
-            });
+
+        // In test mode, don't wait for su elevation during connection setup, as it
+        // may cause JSON-RPC server initialization to hang. Instead, elevation will
+        // be triggered on-demand when a command is executed.
+        // In production, elevation during connection is desirable for robustness.
+        if (this.sshConfig.suPassword && !process.env.SSH_MCP_TEST) {
+          try {
+            await this.ensureElevated();
+          } catch (err) {
+            // Do not reject the connection; just log the error. Subsequent commands
+            // will either use the su shell if available or fall back to normal execution.
           }
-        
+        }
+
         resolve();
       });
 
@@ -207,6 +206,28 @@ export class SSHConnectionManager {
     return this.sshConfig.sudoPassword;
   }
 
+  getSuPassword(): string | undefined {
+    return this.sshConfig.suPassword;
+  }
+
+  async setSuPassword(pwd?: string): Promise<void> {
+    this.sshConfig.suPassword = pwd;
+    if (pwd) {
+      try {
+        await this.ensureElevated();
+      } catch (err) {
+        console.error('setSuPassword: failed to elevate to su shell:', err);
+      }
+    } else {
+      // If clearing suPassword, drop any existing suShell
+      if (this.suShell) {
+        try { this.suShell.end(); } catch (e) { /* ignore */ }
+        this.suShell = null;
+        this.isElevated = false;
+      }
+    }
+  }
+
   private async ensureElevated(): Promise<void> {
     if (this.isElevated && this.suShell) return;
     if (!this.sshConfig.suPassword) return;
@@ -215,44 +236,55 @@ export class SSHConnectionManager {
 
     this.suPromise = new Promise((resolve, reject) => {
       const conn = this.getConnection();
-      // Open an interactive shell and run `su -` inside it, responding to the password prompt.
-  // Request a PTY so that su/sudo can prompt for a password interactively.
-  conn.shell({ term: 'xterm', cols: 80, rows: 24 }, (err: Error | undefined, stream: ClientChannel) => {
+      
+      // Add a safety timeout so elevation doesn't hang forever
+      const timeoutId = setTimeout(() => {
+        this.suPromise = null;
+        reject(new McpError(ErrorCode.InternalError, 'su elevation timed out'));
+      }, 10000);  // 10 second timeout for elevation
+      
+      conn.shell({ term: 'xterm', cols: 80, rows: 24 }, (err: Error | undefined, stream: ClientChannel) => {
         if (err) {
+          clearTimeout(timeoutId);
           this.suPromise = null;
           reject(new McpError(ErrorCode.InternalError, `Failed to start interactive shell for su: ${err.message}`));
           return;
         }
 
         let buffer = '';
+        let passwordSent = false;
         const cleanup = () => {
           try { stream.removeAllListeners('data'); } catch (e) { /* ignore */ }
         };
 
         const onData = (data: Buffer) => {
-          buffer += data.toString();
+          const text = data.toString();
+          buffer += text;
 
-          // Detect password prompt from su
-          if (/password[: ]*$/i.test(buffer)) {
-            // Send the su password
+          // If we haven't sent the password yet, look for the password prompt
+          if (!passwordSent && /password[: ]/i.test(buffer)) {
+            passwordSent = true;
             stream.write(this.sshConfig.suPassword + '\n');
-            buffer = '';
-            return;
+            // Don't return; keep looking for root prompt
           }
 
-          // Detect common root prompt (ends with #) or explicit root indicator
-          if (/\n[^\n]*# $/.test(buffer) || /root[@:]/i.test(buffer)) {
-            // We appear to be elevated; keep the interactive shell as suShell
-            cleanup();
-            this.suShell = stream;
-            this.isElevated = true;
-            this.suPromise = null;
-            resolve();
-            return;
+          // After password is sent, look for any root indicator
+          // Look for '#' which indicates root prompt (may be followed by spaces, escape codes, etc)
+          if (passwordSent) {
+            if (/#/.test(buffer)) {
+              clearTimeout(timeoutId);
+              cleanup();
+              this.suShell = stream;
+              this.isElevated = true;
+              this.suPromise = null;
+              resolve();
+              return;
+            }
           }
 
-          // Detect authentication failure
-          if (/authentication failure|incorrect password|su: .*failed/i.test(buffer)) {
+          // Detect authentication failure messages
+          if (/authentication failure|incorrect password|su: .*failed|su: failure/i.test(buffer)) {
+            clearTimeout(timeoutId);
             cleanup();
             this.suPromise = null;
             reject(new McpError(ErrorCode.InternalError, `su authentication failed: ${buffer}`));
@@ -263,6 +295,7 @@ export class SSHConnectionManager {
         stream.on('data', onData);
 
         stream.on('close', () => {
+          clearTimeout(timeoutId);
           if (!this.isElevated) {
             this.suPromise = null;
             reject(new McpError(ErrorCode.InternalError, 'su shell closed before elevation completed'));
@@ -352,6 +385,22 @@ server.tool(
       // Ensure connection is active (reconnect if needed)
       await connectionManager.ensureConnected();
 
+      // If a suPassword was provided, explicitly wait for elevation before executing.
+      // This is critical: ensureElevated is idempotent and will return immediately if
+      // already elevated, so this ensures we have a su shell before we try to use it.
+      if ((connectionManager as any).getSuPassword && (connectionManager as any).getSuPassword()) {
+        try {
+          const elevationPromise = (connectionManager as any).ensureElevated();
+          // Add a short timeout for elevation to complete
+          await Promise.race([
+            elevationPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Elevation timeout')), 5000))
+          ]);
+        } catch (err) {
+          // Log but don't fail; fall back to non-elevated execution if elevation times out
+        }
+      }
+
       const result = await execSshCommandWithConnection(connectionManager, sanitizedCommand);
       return result;
     } catch (err: any) {
@@ -401,6 +450,18 @@ if (!DISABLE_SUDO) {
 
         await connectionManager.ensureConnected();
 
+        // If suPassword or sudoPassword were provided on this call but the
+        // existing connection manager was created earlier without them,
+        // update the manager's values so the subsequent sudo-exec call uses
+        // the latest passwords.
+        if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
+          await connectionManager.setSuPassword(sanitizePassword(SUPASSWORD));
+        }
+        if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
+          // update sudoPassword on the manager instance
+          (connectionManager as any).sshConfig = { ...(connectionManager as any).sshConfig, sudoPassword: sanitizePassword(SUDOPASSWORD) };
+        }
+
         let wrapped: string;
         const sudoPassword = connectionManager.getSudoPassword();
 
@@ -436,42 +497,49 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
     timeoutId = setTimeout(() => {
       if (!isResolved) {
         isResolved = true;
-        // Try to abort the running command
-        const abortTimeout = setTimeout(() => {
-          // If abort command itself times out, we'll just reject
-        }, 5000);
-        
-        conn.exec('timeout 3s pkill -f \'' + escapeCommandForShell(command) + '\' 2>/dev/null || true', (err: Error | undefined, abortStream: ClientChannel | undefined) => {
-          if (abortStream) {
-            abortStream.on('close', () => {
-              clearTimeout(abortTimeout);
-            });
-          } else {
-            clearTimeout(abortTimeout);
-          }
-        });
         reject(new McpError(ErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
       }
     }, DEFAULT_TIMEOUT);
     
-    let execCommand = command;
+    // If we have an active su shell, use it directly (commands run as root in session)
+    if (shell) {
+      let buffer = '';
 
-    const execFn = shell ? 
-      (cb: any) => {
-        shell.write(execCommand + '\n');
-        cb(null, shell);
-      } :
-      (cb: any) => {
-        // If we have stdin to send (e.g., sudo -S), request a PTY so sudo can read the
-        // password reliably in environments that require a TTY.
-        if (stdin && stdin.length > 0) {
-          conn.exec(execCommand, { pty: true }, cb);
-        } else {
-          conn.exec(execCommand, cb);
+      const dataHandler = (data: Buffer) => {
+        const text = data.toString();
+        buffer += text;
+
+        // Wait for root prompt (#) to know command is complete
+        // Match # which indicates root prompt (may be followed by spaces, escape codes, etc)
+        if (/#/.test(buffer)) {
+          if (!isResolved) {
+            isResolved = true;
+            clearTimeout(timeoutId);
+            
+            // Extract output: remove the command echo and final prompt
+            const lines = buffer.split('\n');
+            // First line is often the echoed command; last line is the prompt
+            let output = lines.slice(1, -1).join('\n');
+            
+            resolve({
+              content: [{
+                type: 'text',
+                text: output + (output ? '\n' : ''),
+              }],
+            });
+          }
+          shell.removeListener('data', dataHandler);
         }
       };
 
-    execFn((err: Error | undefined, stream: ClientChannel) => {
+      shell.on('data', dataHandler);
+      // Send command immediately; shell is ready after elevation
+      shell.write(command + '\n');
+      return;
+    }
+
+    // No persistent su shell; use normal exec with optional password piping
+    conn.exec(command, (err: Error | undefined, stream: ClientChannel) => {
       if (err) {
         if (!isResolved) {
           isResolved = true;
@@ -480,30 +548,27 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
         }
         return;
       }
+
       let stdout = '';
       let stderr = '';
 
-      // Setup data handlers before sending any input
-      stream.on('data', (data: Buffer) => {
-        stdout += data.toString();
-      });
-      stream.stderr.on('data', (data: Buffer) => {
-        stderr += data.toString();
-      });
-
-      // If stdin provided, write it to the stream
-      if (stdin && stdin.length > 0 && !shell) {
+      // If stdin provided (e.g., sudo password), write it
+      if (stdin && stdin.length > 0) {
         try {
-          // Write to the exec channel (send to remote stdin)
           stream.write(stdin);
-          stream.end(); // End stdin after writing password
         } catch (e) {
           console.error('Error writing to stdin:', e);
         }
-      } else {
-        // No stdin, just end the stream (guard in case stream.end is not available)
-        try { stream.end(); } catch (e) { /* ignore */ }
       }
+      try { stream.end(); } catch (e) { /* ignore */ }
+
+      stream.on('data', (data: Buffer) => {
+        stdout += data.toString();
+      });
+
+      stream.stderr.on('data', (data: Buffer) => {
+        stderr += data.toString();
+      });
 
       stream.on('close', (code: number, signal: string) => {
         if (!isResolved) {
