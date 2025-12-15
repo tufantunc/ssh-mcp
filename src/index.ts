@@ -75,12 +75,12 @@ export function sanitizeCommand(command: string): string {
   if (typeof command !== 'string') {
     throw new McpError(ErrorCode.InvalidParams, 'Command must be a string');
   }
-  
+
   const trimmedCommand = command.trim();
   if (!trimmedCommand) {
     throw new McpError(ErrorCode.InvalidParams, 'Command cannot be empty');
   }
-  
+
   // Length check
   if (Number.isFinite(MAX_CHARS) && trimmedCommand.length > (MAX_CHARS as number)) {
     throw new McpError(
@@ -88,7 +88,7 @@ export function sanitizeCommand(command: string): string {
       `Command is too long (max ${MAX_CHARS} characters)`
     );
   }
-  
+
   return trimmedCommand;
 }
 
@@ -141,7 +141,7 @@ export class SSHConnectionManager {
     this.isConnecting = true;
     this.connectionPromise = new Promise((resolve, reject) => {
       this.conn = new Client();
-      
+
       const timeoutId = setTimeout(() => {
         this.conn?.end();
         this.conn = null;
@@ -236,13 +236,13 @@ export class SSHConnectionManager {
 
     this.suPromise = new Promise((resolve, reject) => {
       const conn = this.getConnection();
-      
+
       // Add a safety timeout so elevation doesn't hang forever
       const timeoutId = setTimeout(() => {
         this.suPromise = null;
         reject(new McpError(ErrorCode.InternalError, 'su elevation timed out'));
       }, 10000);  // 10 second timeout for elevation
-      
+
       conn.shell({ term: 'xterm', cols: 80, rows: 24 }, (err: Error | undefined, stream: ClientChannel) => {
         if (err) {
           clearTimeout(timeoutId);
@@ -340,7 +340,7 @@ let connectionManager: SSHConnectionManager | null = null;
 
 const server = new McpServer({
   name: 'SSH MCP Server',
-  version: '1.3.0',
+  version: '1.4.0',
   capabilities: {
     resources: {},
     tools: {},
@@ -368,14 +368,14 @@ server.tool(
           port: PORT,
           username: USER,
         };
-        
+
         if (PASSWORD) {
           sshConfig.password = PASSWORD;
         } else if (KEY) {
           const fs = await import('fs/promises');
           sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
         }
-        
+
         if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
           sshConfig.suPassword = sanitizePassword(SUPASSWORD);
         }
@@ -427,7 +427,7 @@ if (!DISABLE_SUDO) {
           if (!HOST || !USER) {
             throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
           }
-          
+
           const sshConfig: SSHConfig = {
             host: HOST,
             port: PORT || 22,
@@ -489,7 +489,7 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
   return new Promise((resolve, reject) => {
     let timeoutId: NodeJS.Timeout;
     let isResolved = false;
-    
+
     const conn = manager.getConnection();
     const shell = (manager as any).suShell;  // Use su shell if available
 
@@ -500,7 +500,7 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
         reject(new McpError(ErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
       }
     }, DEFAULT_TIMEOUT);
-    
+
     // If we have an active su shell, use it directly (commands run as root in session)
     if (shell) {
       let buffer = '';
@@ -515,12 +515,12 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
           if (!isResolved) {
             isResolved = true;
             clearTimeout(timeoutId);
-            
+
             // Extract output: remove the command echo and final prompt
             const lines = buffer.split('\n');
             // First line is often the echoed command; last line is the prompt
             let output = lines.slice(1, -1).join('\n');
-            
+
             resolve({
               content: [{
                 type: 'text',
@@ -596,7 +596,7 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
     const conn = new Client();
     let timeoutId: NodeJS.Timeout;
     let isResolved = false;
-    
+
     // Set up timeout
     timeoutId = setTimeout(() => {
       if (!isResolved) {
@@ -606,7 +606,7 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
           // If abort command itself times out, force close connection
           conn.end();
         }, 5000); // 5 second timeout for abort command
-        
+
         conn.exec('timeout 3s pkill -f \'' + escapeCommandForShell(command) + '\' 2>/dev/null || true', (err: Error | undefined, abortStream: ClientChannel | undefined) => {
           if (abortStream) {
             abortStream.on('close', () => {
@@ -621,7 +621,7 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
         reject(new McpError(ErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
       }
     }, DEFAULT_TIMEOUT);
-    
+
     conn.on('ready', () => {
       conn.exec(command, (err: Error | undefined, stream: ClientChannel) => {
         if (err) {
