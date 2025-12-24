@@ -11,7 +11,11 @@
 
 [![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/tufantunc/ssh-mcp)](https://archestra.ai/mcp-catalog/tufantunc__ssh-mcp)
 
-**SSH MCP Server** is a local Model Context Protocol (MCP) server that exposes SSH control for Linux and Windows systems, enabling LLMs and other MCP clients to execute shell commands securely via SSH.
+**SSH MCP Server** is a local Model Context Protocol (MCP) server that exposes SSH control for Linux and Windows systems, enabling LLMs and other MCP clients to execute shell commands securely via SSH or Google IAP tunnel.
+
+## 🔥 Dynamic Connections
+
+**New in v2.0:** ssh-mcp now supports **dynamic connections** - specify the target server with each command instead of at server startup. One MCP server can manage connections to unlimited remote systems!
 
 ## Contents
 
@@ -26,15 +30,18 @@
 ## Quick Start
 
 - [Install](#installation) SSH MCP Server
-- [Configure](#configuration) SSH MCP Server
-- [Set up](#client-setup) your MCP Client (e.g. Claude Desktop, Cursor, etc)
-- Execute remote shell commands on your Linux or Windows server via natural language
+- [Set up](#client-setup) your MCP Client (e.g. Claude Code, Claude Desktop, Cursor, etc)
+- Ask Claude to execute commands on **any** remote server:
+  - "List processes on vm-bastion in project prj-fgo-s-fdj" (Google IAP)
+  - "Check disk space on 192.168.1.100" (Direct SSH)
+  - **No server restart needed** - connections are created dynamically!
 
 ## Features
 
 - MCP-compliant server exposing SSH capabilities
 - Execute shell commands on remote Linux and Windows systems
 - Secure authentication via password or SSH key
+- **Google IAP (Identity-Aware Proxy) support** for secure access to GCP instances without public IPs
 - Built with TypeScript and the official MCP SDK
 - **Configurable timeout protection** with automatic process abortion
 - **Graceful timeout handling** - attempts to kill hanging processes before closing connections
@@ -77,96 +84,148 @@
 
 ## Client Setup
 
-You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use this MCP Server.
+### Dynamic Mode (Recommended - v2.0+)
 
-**Required Parameters:**
-- `host`: Hostname or IP of the Linux or Windows server
-- `user`: SSH username
+In **dynamic mode**, you specify connection details **with each command** instead of at server startup. This allows Claude to connect to unlimited servers with a single MCP server.
 
-**Optional Parameters:**
-- `port`: SSH port (default: 22)
-- `password`: SSH password (or use `key` for key-based auth)
-- `key`: Path to private SSH key
-- `sudoPassword`: Password for sudo elevation (when executing commands with sudo)
-- `suPassword`: Password for su elevation (when you need a persistent root shell)
+**Global Parameters (optional):**
 - `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
 - `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
-- `disableSudo`: Flag to disable the `sudo-exec` tool completely. Useful when sudo access is not needed or not available.
+- `disableSudo`: Flag to disable the `sudo-exec` tool completely
 
+**Per-Command Parameters:**
 
-```commandline
-{
-    "mcpServers": {
-        "ssh-mcp": {
-            "command": "npx",
-            "args": [
-                "ssh-mcp",
-                "-y",
-                "--",
-                "--host=1.2.3.4",
-                "--port=22",
-                "--user=root",
-                "--password=pass",
-                "--key=path/to/key",
-                "--timeout=30000",
-                "--maxChars=none"
-            ]
-        }
-    }
-}
-```
+Connection details are specified when Claude calls the `exec` or `sudo-exec` tools:
+
+**For Direct SSH:**
+- `host`: Hostname or IP address (required)
+- `port`: SSH port (optional, default: 22)
+- `user`: SSH username (required)
+- `password`: SSH password (optional)
+- `privateKey`: SSH private key content (optional)
+- `privateKeyPath`: Path to SSH private key file (optional)
+- `sudoPassword`: Password for sudo (optional)
+- `suPassword`: Password for su elevation (optional)
+
+**For Google IAP:**
+- `iapInstance`: GCP VM instance name (required)
+- `iapProject`: GCP project ID (required)
+- `iapZone`: GCP zone (optional - gcloud auto-detects zone if not specified)
+- `user`: SSH username (required)
+- Authentication uses gcloud credentials (no password/key needed for IAP)
+- `sudoPassword`: Password for sudo (optional)
+- `suPassword`: Password for su elevation (optional)
+
+**Note:** Google IAP mode uses `gcloud compute ssh --tunnel-through-iap` which handles authentication through your gcloud credentials. Make sure you're logged in with `gcloud auth login` and have the necessary IAP permissions.
 
 ### Claude Code
 
-You can add this MCP server to Claude Code using the `claude mcp add` command. This is the recommended method for Claude Code.
+Add ssh-mcp to Claude Code using the `claude mcp add` command:
 
-**Basic Installation:**
+**Dynamic Mode (Recommended):**
 
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
+# Basic setup - no connection details needed at startup!
+claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp
+
+# With custom timeout and no character limit
+claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --timeout=120000 --maxChars=none
 ```
 
-**Installation Examples:**
+**That's it!** Now ask Claude to connect to any server:
 
-**With Password Authentication:**
+**Examples:**
+- **"List processes on vm-fgo-s-fdj-bastion in project prj-fgo-s-fdj as user admin"**
+  - Claude will use IAP to connect: `iapInstance=vm-fgo-s-fdj-bastion`, `iapProject=prj-fgo-s-fdj`, `user=admin`
+
+- **"Check disk space on 192.168.1.100 as root with key /path/to/key"**
+  - Claude will use direct SSH: `host=192.168.1.100`, `user=root`, `privateKeyPath=/path/to/key`
+
+- **"Restart nginx on server.example.com"**
+  - Claude will prompt for missing details (user, password, etc.)
+
+**How Authentication Works:**
+
+Claude needs to know credentials to connect. You can provide them:
+1. **In your prompt:** "Connect to 192.168.1.100 as user admin with password secret123"
+2. **Via environment variables** (for security - coming soon)
+3. **Stored in Claude's context** (Claude remembers credentials during the conversation)
+
+**Security Note:** Avoid hardcoding passwords in prompts. Use SSH keys when possible: `privateKeyPath=/path/to/key`
+
+---
+
+### Static Mode (Legacy - v1.x compatibility)
+
+In **static mode**, you specify connection details **at server startup**. One MCP server connects to one specific remote system. This mode is for backward compatibility and simple single-server setups.
+
+**Command-line usage:**
+
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --port=22 --user=admin --password=your_password
+# Direct SSH mode
+node build/index.js --host=192.168.1.100 --user=root --password=secret --timeout=60000
+
+# Google IAP mode
+node build/index.js --iapInstance=vm-name --iapProject=project-id --user=admin --iapZone=us-central1-a
+
+# With SSH key
+node build/index.js --host=server.example.com --user=deploy --key=/path/to/id_rsa
 ```
 
-**With SSH Key Authentication:**
+**Available startup parameters:**
+- `--host`: SSH hostname or IP (for direct SSH)
+- `--port`: SSH port (default: 22)
+- `--iapInstance`: GCP VM instance name (for IAP mode)
+- `--iapProject`: GCP project ID (for IAP mode)
+- `--iapZone`: GCP zone (optional - auto-detected)
+- `--user`: SSH username (required)
+- `--password`: SSH password
+- `--key`: Path to SSH private key file
+- `--sudoPassword`: Password for sudo commands
+- `--suPassword`: Password for su elevation
+- `--timeout`: Command timeout in ms (default: 60000)
+- `--maxChars`: Max command length (default: 1000)
+- `--disableSudo`: Disable sudo-exec tool
+
+**Note:** In static mode, you don't need to provide connection parameters with each command - they're pre-configured at startup.
+
+### HTTP/SSE Mode
+
+In **HTTP/SSE mode**, the server runs as a web service using Express, allowing MCP clients to connect via Server-Sent Events (SSE) and HTTP POST requests. This is useful for remote deployments, Docker containers, or environments where standard input/output (stdio) is not available.
+
+**Command-line usage:**
+
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=example.com --user=root --key=/path/to/private/key
+# Start the server on port 3000
+node build/index.js --port=3000
 ```
 
-**With Custom Timeout and No Character Limit:**
+**Endpoints:**
+- `GET /sse`: SSE endpoint for establishing the MCP connection
+- `POST /message`: Endpoint for sending JSON-RPC messages from the client
+- `GET /health`: Health check endpoint returning status and mode
+
+**Client Configuration:**
+
+To connect a client like Claude Desktop or another MCP client to the HTTP endpoint:
+
+```json
+{
+  "mcpServers": {
+    "ssh-mcp": {
+      "command": "node",
+      "args": ["build/index.js", "--port=3000"],
+      "url": "http://localhost:3000/sse"
+    }
+  }
+}
+```
+
+**Docker Example:**
+
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --timeout=120000 --maxChars=none
+docker run -p 3000:3000 -v ~/.ssh:/root/.ssh -v ~/.config/gcloud:/root/.config/gcloud ssh-mcp --port=3000
 ```
-
-**With Sudo and Su Support:**
-```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --sudoPassword=sudo_pass --suPassword=root_pass
-```
-
-**Installation Scopes:**
-
-You can specify the scope when adding the server:
-
-- **Local scope** (default): For personal use in the current project
-  ```bash
-  claude mcp add --transport stdio ssh-mcp --scope local -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
-  ```
-
-- **Project scope**: Share with your team via `.mcp.json` file
-  ```bash
-  claude mcp add --transport stdio ssh-mcp --scope project -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
-  ```
-
-- **User scope**: Available across all your projects
-  ```bash
-  claude mcp add --transport stdio ssh-mcp --scope user -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
-  ```
-
 
 **Verify Installation:**
 

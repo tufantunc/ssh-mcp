@@ -5,37 +5,74 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { Client, ClientChannel } from 'ssh2';
 import { z } from 'zod';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { spawn, ChildProcess } from 'child_process';
+import express from 'express';
+import cors from 'cors';
 
-// Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --disableSudo
+// Example usage:
+// Static mode (legacy): node build/index.js --host=1.2.3.4 --user=root --password=pass
+// IAP static mode: node build/index.js --iapInstance=vm-name --iapProject=project-id --user=root
+// Dynamic mode (recommended): node build/index.js --timeout=60000 --maxChars=none
+// HTTP/SSE mode: node build/index.js --port=3000
+// Then specify connection details in each command via the tools
 function parseArgv() {
   const args = process.argv.slice(2);
   const config: Record<string, string | null> = {};
-  for (const arg of args) {
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i];
     if (arg.startsWith('--')) {
       const equalIndex = arg.indexOf('=');
       if (equalIndex === -1) {
-        // Flag without value
-        config[arg.slice(2)] = null;
+        // No "=" sign - check if next arg is the value
+        const key = arg.slice(2);
+        const nextArg = args[i + 1];
+        if (nextArg && !nextArg.startsWith('--')) {
+          // Next arg is the value
+          config[key] = nextArg;
+          i += 2; // Skip both this arg and the value
+        } else {
+          // Flag without value
+          config[key] = null;
+          i++;
+        }
       } else {
         // Key=value pair
         config[arg.slice(2, equalIndex)] = arg.slice(equalIndex + 1);
+        i++;
       }
+    } else {
+      i++;
     }
   }
   return config;
 }
 const isTestMode = process.env.SSH_MCP_TEST === '1';
 const isCliEnabled = process.env.SSH_MCP_DISABLE_MAIN !== '1';
-const argvConfig = (isCliEnabled || isTestMode) ? parseArgv() : {} as Record<string, string>;
+// Always parse arguments to support static mode
+const argvConfig = parseArgv();
 
+// Static mode configuration (legacy - connection params at startup)
 const HOST = argvConfig.host;
 const PORT = argvConfig.port ? parseInt(argvConfig.port) : 22;
 const USER = argvConfig.user;
 const PASSWORD = argvConfig.password;
 const SUPASSWORD = argvConfig.suPassword;
 const SUDOPASSWORD = argvConfig.sudoPassword;
-const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
 const KEY = argvConfig.key;
+const IAP_INSTANCE = argvConfig.iapInstance;
+const IAP_PROJECT = argvConfig.iapProject;
+const IAP_ZONE = argvConfig.iapZone;
+
+// Detect if we're in static mode (connection params provided at startup)
+const IS_STATIC_MODE = !!(HOST || IAP_INSTANCE);
+
+// HTTP/SSE transport configuration
+const HTTP_PORT = argvConfig.port ? parseInt(argvConfig.port) : undefined;
+
+// Global configuration
+const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
 const DEFAULT_TIMEOUT = argvConfig.timeout ? parseInt(argvConfig.timeout) : 60000; // 60 seconds default timeout
 // Max characters configuration:
 // - Default: 1000 characters
@@ -56,11 +93,29 @@ const MAX_CHARS = (() => {
   return 1000;
 })();
 
+// Default IAP local port
+const DEFAULT_IAP_LOCAL_PORT = 2222;
+
 function validateConfig(config: Record<string, string | null>) {
   const errors = [];
-  if (!config.host) errors.push('Missing required --host');
-  if (!config.user) errors.push('Missing required --user');
+
+  // Validate global parameters
+  if (config.timeout && isNaN(Number(config.timeout))) errors.push('Invalid --timeout');
+  if (config.maxChars && config.maxChars !== 'none' && isNaN(Number(config.maxChars))) errors.push('Invalid --maxChars');
   if (config.port && isNaN(Number(config.port))) errors.push('Invalid --port');
+
+  // Validate static mode configuration (if connection params provided)
+  const isStaticMode = !!(config.host || config.iapInstance);
+  if (isStaticMode) {
+    // Either host or iapInstance+iapProject must be provided
+    if (config.host) {
+      if (!config.user) errors.push('Missing required --user for SSH mode');
+    } else if (config.iapInstance) {
+      if (!config.iapProject) errors.push('Missing required --iapProject for IAP mode');
+      if (!config.user) errors.push('Missing required --user for IAP mode');
+    }
+  }
+
   if (errors.length > 0) {
     throw new Error('Configuration error:\n' + errors.join('\n'));
   }
@@ -114,6 +169,163 @@ export interface SSHConfig {
   privateKey?: string;
   suPassword?: string;
   sudoPassword?: string;  // Password for sudo commands specifically (if different from suPassword)
+  // Google IAP tunnel configuration (optional)
+  iap?: {
+    enabled: boolean;
+    instanceName: string;
+    zone?: string;  // Optional: gcloud can auto-detect if instance name is unique
+    project: string;
+    localPort?: number;
+  };
+}
+
+// Google IAP Tunnel Manager
+// Connection parameters interface for dynamic connections
+export interface ConnectionParams {
+  // SSH direct mode
+  host?: string;
+  port?: number;
+  // IAP mode
+  iapInstance?: string;
+  iapProject?: string;
+  iapZone?: string;
+  iapLocalPort?: number;
+  // Authentication (common to both modes)
+  user: string;
+  password?: string;
+  privateKey?: string;
+  privateKeyPath?: string;
+  sudoPassword?: string;
+  suPassword?: string;
+}
+
+// Connection Pool for managing multiple dynamic connections
+export class ConnectionPool {
+  private connections: Map<string, SSHConnectionManager> = new Map();
+
+  /**
+   * Generate a unique key for a connection based on parameters
+   */
+  private getConnectionKey(params: ConnectionParams): string {
+    if (params.iapInstance && params.iapProject) {
+      return `iap:${params.iapProject}:${params.iapInstance}:${params.user}`;
+    } else if (params.host) {
+      return `ssh:${params.host}:${params.port || 22}:${params.user}`;
+    }
+    throw new Error('Either host or (iapInstance + iapProject) must be specified');
+  }
+
+  /**
+   * Convert ConnectionParams to SSHConfig
+   */
+  private async paramsToConfig(params: ConnectionParams): Promise<SSHConfig> {
+    // Validate connection parameters
+    if (!params.user) {
+      throw new McpError(ErrorCode.InvalidParams, 'Missing required parameter: user');
+    }
+
+    if (params.iapInstance && params.iapProject) {
+      // IAP mode
+      const config: SSHConfig = {
+        host: 'localhost',  // Will be overridden by tunnel
+        port: 22,           // Will be overridden by tunnel
+        username: params.user,
+        iap: {
+          enabled: true,
+          instanceName: params.iapInstance,
+          zone: params.iapZone,
+          project: params.iapProject,
+          localPort: params.iapLocalPort || DEFAULT_IAP_LOCAL_PORT
+        }
+      };
+
+      // Handle authentication
+      if (params.password) {
+        config.password = params.password;
+      } else if (params.privateKey) {
+        config.privateKey = params.privateKey;
+      } else if (params.privateKeyPath) {
+        const fs = await import('fs/promises');
+        config.privateKey = await fs.readFile(params.privateKeyPath, 'utf8');
+      }
+
+      if (params.sudoPassword) {
+        config.sudoPassword = sanitizePassword(params.sudoPassword);
+      }
+      if (params.suPassword) {
+        config.suPassword = sanitizePassword(params.suPassword);
+      }
+
+      return config;
+    } else if (params.host) {
+      // Direct SSH mode
+      const config: SSHConfig = {
+        host: params.host,
+        port: params.port || 22,
+        username: params.user
+      };
+
+      // Handle authentication
+      if (params.password) {
+        config.password = params.password;
+      } else if (params.privateKey) {
+        config.privateKey = params.privateKey;
+      } else if (params.privateKeyPath) {
+        const fs = await import('fs/promises');
+        config.privateKey = await fs.readFile(params.privateKeyPath, 'utf8');
+      }
+
+      if (params.sudoPassword) {
+        config.sudoPassword = sanitizePassword(params.sudoPassword);
+      }
+      if (params.suPassword) {
+        config.suPassword = sanitizePassword(params.suPassword);
+      }
+
+      return config;
+    } else {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'Either host or (iapInstance + iapProject) must be specified'
+      );
+    }
+  }
+
+  /**
+   * Get or create a connection for the given parameters
+   */
+  async getConnection(params: ConnectionParams): Promise<SSHConnectionManager> {
+    const key = this.getConnectionKey(params);
+
+    let manager = this.connections.get(key);
+
+    if (!manager || !manager.isConnected()) {
+      // Create new connection
+      const config = await this.paramsToConfig(params);
+      manager = new SSHConnectionManager(config);
+      await manager.connect();
+      this.connections.set(key, manager);
+    }
+
+    return manager;
+  }
+
+  /**
+   * Close all connections
+   */
+  closeAll(): void {
+    for (const manager of this.connections.values()) {
+      manager.close();
+    }
+    this.connections.clear();
+  }
+
+  /**
+   * Get connection count for debugging
+   */
+  getConnectionCount(): number {
+    return this.connections.size;
+  }
 }
 
 export class SSHConnectionManager {
@@ -124,12 +336,24 @@ export class SSHConnectionManager {
   private suShell: any = null;  // Store the elevated shell session
   private suPromise: Promise<void> | null = null;
   private isElevated = false;  // Track if we're in su mode
+  private originalHost: string;
+  private originalPort: number;
 
   constructor(config: SSHConfig) {
     this.sshConfig = config;
+    this.originalHost = config.host;
+    this.originalPort = config.port;
   }
 
   async connect(): Promise<void> {
+    // For IAP mode using gcloud ssh, we don't need a persistent connection
+    // Commands are executed directly via gcloud compute ssh
+    if (this.sshConfig.iap?.enabled) {
+      this.isConnecting = false;
+      this.connectionPromise = null;
+      return; // No connection needed for IAP mode
+    }
+
     if (this.conn && this.isConnected()) {
       return; // Already connected
     }
@@ -139,7 +363,7 @@ export class SSHConnectionManager {
     }
 
     this.isConnecting = true;
-    this.connectionPromise = new Promise((resolve, reject) => {
+    this.connectionPromise = new Promise(async (resolve, reject) => {
       this.conn = new Client();
 
       const timeoutId = setTimeout(() => {
@@ -199,6 +423,10 @@ export class SSHConnectionManager {
   }
 
   isConnected(): boolean {
+    // For IAP mode, we're always "connected" since we use gcloud ssh directly
+    if (this.sshConfig.iap?.enabled) {
+      return true;
+    }
     return this.conn !== null && (this.conn as any)._sock && !(this.conn as any)._sock.destroyed;
   }
 
@@ -336,11 +564,48 @@ export class SSHConnectionManager {
   }
 }
 
-let connectionManager: SSHConnectionManager | null = null;
+// Global connection pool for dynamic connections
+const connectionPool = new ConnectionPool();
+
+// Global static connection (for legacy static mode)
+let staticConnection: SSHConnectionManager | null = null;
+
+// Initialize static connection if in static mode
+async function initializeStaticConnection() {
+  if (!IS_STATIC_MODE) return;
+
+  const staticConfig: SSHConfig = {
+    host: HOST || 'localhost',
+    port: PORT,
+    username: USER!,
+    password: PASSWORD || undefined,
+    suPassword: SUPASSWORD || undefined,
+    sudoPassword: SUDOPASSWORD || undefined,
+  };
+
+  // Read private key from file if path provided
+  if (KEY) {
+    const fs = await import('fs/promises');
+    staticConfig.privateKey = await fs.readFile(KEY, 'utf8');
+  }
+
+  // Add IAP configuration if in IAP static mode
+  if (IAP_INSTANCE && IAP_PROJECT) {
+    staticConfig.iap = {
+      enabled: true,
+      instanceName: IAP_INSTANCE,
+      project: IAP_PROJECT,
+      zone: IAP_ZONE || undefined,
+      localPort: DEFAULT_IAP_LOCAL_PORT,
+    };
+  }
+
+  staticConnection = new SSHConnectionManager(staticConfig);
+}
 
 const server = new McpServer({
   name: 'SSH MCP Server',
-  version: '1.4.0',
+  version: '2.0.0',
   capabilities: {
     resources: {},
     tools: {},
@@ -349,49 +614,59 @@ const server = new McpServer({
 
 server.tool(
   "exec",
-  "Execute a shell command on the remote SSH server and return the output.",
+  IS_STATIC_MODE
+    ? "Execute a shell command on a remote server via SSH (direct) or Google IAP tunnel."
+    : "Execute a shell command on a remote server via SSH (direct) or Google IAP tunnel. Specify either 'host' for direct SSH or 'iapInstance+iapProject' for IAP mode.",
   {
-    command: z.string().describe("Shell command to execute on the remote SSH server"),
+    command: z.string().describe("Shell command to execute on the remote server"),
+    // SSH direct mode
+    host: z.string().optional().describe("SSH hostname or IP address (for direct SSH mode)"),
+    port: z.number().optional().describe("SSH port (default: 22)"),
+    // Google IAP mode
+    iapInstance: z.string().optional().describe("GCP VM instance name (for IAP tunnel mode)"),
+    iapProject: z.string().optional().describe("GCP project ID (for IAP tunnel mode)"),
+    iapZone: z.string().optional().describe("GCP zone (optional, gcloud can auto-detect if instance name is unique)"),
+    iapLocalPort: z.number().optional().describe("Local port for IAP tunnel (default: 2222)"),
+    // Authentication (common to both modes)
+    user: z.string().optional().describe("SSH username"),
+    password: z.string().optional().describe("SSH password"),
+    privateKey: z.string().optional().describe("SSH private key content (direct string)"),
+    privateKeyPath: z.string().optional().describe("Path to SSH private key file"),
+    sudoPassword: z.string().optional().describe("Password for sudo commands"),
+    suPassword: z.string().optional().describe("Password for persistent su elevation"),
   },
-  async ({ command }) => {
+  async (params) => {
+    const { command, ...connectionParams } = params;
     // Sanitize command input
     const sanitizedCommand = sanitizeCommand(command);
 
     try {
-      // Initialize connection manager if not already done
-      if (!connectionManager) {
-        if (!HOST || !USER) {
-          throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
-        }
-        const sshConfig: SSHConfig = {
-          host: HOST,
-          port: PORT,
-          username: USER,
-        };
+      let manager: SSHConnectionManager;
 
-        if (PASSWORD) {
-          sshConfig.password = PASSWORD;
-        } else if (KEY) {
-          const fs = await import('fs/promises');
-          sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+      // Use static connection in static mode, otherwise use dynamic connection pool
+      if (IS_STATIC_MODE) {
+        if (!staticConnection) {
+          throw new McpError(ErrorCode.InternalError, 'Static connection not initialized');
         }
-
-        if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-          sshConfig.suPassword = sanitizePassword(SUPASSWORD);
+        manager = staticConnection;
+        // Connect if not already connected
+        await manager.connect();
+      } else {
+        // Dynamic mode: get or create connection from pool
+        // In dynamic mode, user is required since connection is not pre-configured
+        if (!connectionParams.user) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            'Missing required parameter: user (dynamic mode requires connection parameters with each command)'
+          );
         }
-        connectionManager = new SSHConnectionManager(sshConfig);
+        manager = await connectionPool.getConnection(connectionParams as ConnectionParams);
       }
 
-      // Ensure connection is active (reconnect if needed)
-      await connectionManager.ensureConnected();
-
-      // If a suPassword was provided, explicitly wait for elevation before executing.
-      // This is critical: ensureElevated is idempotent and will return immediately if
-      // already elevated, so this ensures we have a su shell before we try to use it.
-      if ((connectionManager as any).getSuPassword && (connectionManager as any).getSuPassword()) {
+      // If a suPassword was provided, explicitly wait for elevation before executing
+      if ((manager as any).getSuPassword && (manager as any).getSuPassword()) {
         try {
-          const elevationPromise = (connectionManager as any).ensureElevated();
-          // Add a short timeout for elevation to complete
+          const elevationPromise = (manager as any).ensureElevated();
           await Promise.race([
             elevationPromise,
             new Promise((_, reject) => setTimeout(() => reject(new Error('Elevation timeout')), 5000))
@@ -401,7 +676,7 @@ server.tool(
         }
       }
 
-      const result = await execSshCommandWithConnection(connectionManager, sanitizedCommand);
+      const result = await execSshCommandWithConnection(manager, sanitizedCommand);
       return result;
     } catch (err: any) {
       // Wrap unexpected errors
@@ -415,67 +690,64 @@ server.tool(
 if (!DISABLE_SUDO) {
   server.tool(
     "sudo-exec",
-    "Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.",
+    IS_STATIC_MODE
+      ? "Execute a shell command with sudo elevation on a remote server via SSH (direct) or Google IAP tunnel."
+      : "Execute a shell command with sudo elevation on a remote server via SSH (direct) or Google IAP tunnel. Specify either 'host' for direct SSH or 'iapInstance+iapProject' for IAP mode.",
     {
-      command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
+      command: z.string().describe("Shell command to execute with sudo elevation"),
+      // SSH direct mode
+      host: z.string().optional().describe("SSH hostname or IP address (for direct SSH mode)"),
+      port: z.number().optional().describe("SSH port (default: 22)"),
+      // Google IAP mode
+      iapInstance: z.string().optional().describe("GCP VM instance name (for IAP tunnel mode)"),
+      iapProject: z.string().optional().describe("GCP project ID (for IAP tunnel mode)"),
+      iapZone: z.string().optional().describe("GCP zone (optional, gcloud can auto-detect if instance name is unique)"),
+      iapLocalPort: z.number().optional().describe("Local port for IAP tunnel (default: 2222)"),
+      // Authentication (common to both modes)
+      user: z.string().optional().describe("SSH username"),
+      password: z.string().optional().describe("SSH password"),
+      privateKey: z.string().optional().describe("SSH private key content (direct string)"),
+      privateKeyPath: z.string().optional().describe("Path to SSH private key file"),
+      sudoPassword: z.string().optional().describe("Password for sudo commands"),
+      suPassword: z.string().optional().describe("Password for persistent su elevation"),
     },
-    async ({ command }) => {
+    async (params) => {
+      const { command, ...connectionParams } = params;
       const sanitizedCommand = sanitizeCommand(command);
 
       try {
-        if (!connectionManager) {
-          if (!HOST || !USER) {
-            throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
-          }
+        let manager: SSHConnectionManager;
 
-          const sshConfig: SSHConfig = {
-            host: HOST,
-            port: PORT || 22,
-            username: USER,
-          };
-          if (PASSWORD) {
-            sshConfig.password = PASSWORD;
-          } else if (KEY) {
-            const fs = await import('fs/promises');
-            sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+        // Use static connection in static mode, otherwise use dynamic connection pool
+        if (IS_STATIC_MODE) {
+          if (!staticConnection) {
+            throw new McpError(ErrorCode.InternalError, 'Static connection not initialized');
           }
-          if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-            sshConfig.suPassword = sanitizePassword(SUPASSWORD);
+          manager = staticConnection;
+          // Connect if not already connected
+          await manager.connect();
+        } else {
+          // Dynamic mode: get or create connection from pool
+          if (!connectionParams.user) {
+            throw new McpError(ErrorCode.InvalidParams, 'Missing required parameter: user');
           }
-          if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-            sshConfig.sudoPassword = sanitizePassword(SUDOPASSWORD);
-          }
-          connectionManager = new SSHConnectionManager(sshConfig);
+          manager = await connectionPool.getConnection(connectionParams as ConnectionParams);
         }
 
-        await connectionManager.ensureConnected();
-
-        // If suPassword or sudoPassword were provided on this call but the
-        // existing connection manager was created earlier without them,
-        // update the manager's values so the subsequent sudo-exec call uses
-        // the latest passwords.
-        if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-          await connectionManager.setSuPassword(sanitizePassword(SUPASSWORD));
-        }
-        if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-          // update sudoPassword on the manager instance
-          (connectionManager as any).sshConfig = { ...(connectionManager as any).sshConfig, sudoPassword: sanitizePassword(SUDOPASSWORD) };
-        }
-
+        // Wrap command with sudo
         let wrapped: string;
-        const sudoPassword = connectionManager.getSudoPassword();
+        const sudoPassword = manager.getSudoPassword();
 
         if (!sudoPassword) {
           // No password provided, use -n to fail if sudo requires a password
           wrapped = `sudo -n sh -c '${sanitizedCommand.replace(/'/g, "'\\''")}'`;
         } else {
-          // Password provided — pipe it into sudo using printf. This avoids complex
-          // PTY/stdin handling on the SSH channel and is simpler and more reliable.
+          // Password provided — pipe it into sudo using printf
           const pwdEscaped = sudoPassword.replace(/'/g, "'\\''");
           wrapped = `printf '%s\\n' '${pwdEscaped}' | sudo -p "" -S sh -c '${sanitizedCommand.replace(/'/g, "'\\''")}'`;
         }
 
-        return await execSshCommandWithConnection(connectionManager, wrapped);
+        return await execSshCommandWithConnection(manager, wrapped);
       } catch (err: any) {
         if (err instanceof McpError) throw err;
         throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
@@ -484,8 +756,141 @@ if (!DISABLE_SUDO) {
   );
 }
 
+// Auto-detect zone for an instance if not provided
+async function autoDetectZone(instance: string, project: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const listProcess = spawn('gcloud', [
+      'compute',
+      'instances',
+      'list',
+      `--project=${project}`,
+      `--filter=name=${instance}`,
+      '--format=value(zone)'
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    listProcess.stdout?.on('data', (data: Buffer) => {
+      stdout += data.toString();
+    });
+
+    listProcess.stderr?.on('data', (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    listProcess.on('exit', (code) => {
+      if (code === 0) {
+        const zone = stdout.trim();
+        if (zone) {
+          resolve(zone);
+        } else {
+          reject(new Error(`Instance ${instance} not found in project ${project}`));
+        }
+      } else {
+        reject(new Error(`Failed to list instances: ${stderr}`));
+      }
+    });
+
+    listProcess.on('error', (err) => {
+      reject(new Error(`Failed to execute gcloud instances list: ${err.message}`));
+    });
+  });
+}
+
+// Execute command via gcloud compute ssh (for IAP mode)
+export async function execViaGcloudSSH(
+  instance: string,
+  project: string,
+  zone: string | undefined,
+  user: string,
+  command: string
+): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
+  return new Promise(async (resolve, reject) => {
+    // Auto-detect zone if not provided
+    let effectiveZone = zone;
+    if (!effectiveZone) {
+      try {
+        effectiveZone = await autoDetectZone(instance, project);
+      } catch (err: any) {
+        reject(new McpError(ErrorCode.InternalError, `Failed to auto-detect zone: ${err.message}`));
+        return;
+      }
+    }
+
+    const args = [
+      'compute',
+      'ssh',
+      `${user}@${instance}`,
+      '--tunnel-through-iap',
+      `--project=${project}`,
+      `--zone=${effectiveZone}`,
+      `--command=${command}`
+    ];
+
+    const gcloudProcess = spawn('gcloud', args, {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    gcloudProcess.stdout?.on('data', (data: Buffer) => {
+      stdout += data.toString();
+    });
+
+    gcloudProcess.stderr?.on('data', (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    // Set up timeout
+    const timeoutId = setTimeout(() => {
+      gcloudProcess.kill('SIGTERM');
+      reject(new McpError(ErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
+    }, DEFAULT_TIMEOUT);
+
+    gcloudProcess.on('exit', (code) => {
+      clearTimeout(timeoutId);
+
+      if (code === 0) {
+        resolve({
+          content: [{
+            type: 'text',
+            text: stdout,
+          }],
+        });
+      } else {
+        reject(new McpError(
+          ErrorCode.InternalError,
+          `gcloud ssh command failed with exit code ${code}.\nStderr: ${stderr}`
+        ));
+      }
+    });
+
+    gcloudProcess.on('error', (err) => {
+      clearTimeout(timeoutId);
+      reject(new McpError(ErrorCode.InternalError, `Failed to execute gcloud ssh: ${err.message}`));
+    });
+  });
+}
+
 // New function that uses persistent connection
 export async function execSshCommandWithConnection(manager: SSHConnectionManager, command: string, stdin?: string): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
+  // Check if this is IAP mode - if so, use gcloud ssh directly
+  const iapConfig = (manager as any).sshConfig?.iap;
+  if (iapConfig && iapConfig.enabled) {
+    return execViaGcloudSSH(
+      iapConfig.instanceName,
+      iapConfig.project,
+      iapConfig.zone,
+      (manager as any).sshConfig.username,
+      command
+    );
+  }
+
+  // Otherwise use standard SSH connection
   return new Promise((resolve, reject) => {
     let timeoutId: NodeJS.Timeout;
     let isResolved = false;
@@ -681,33 +1086,67 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
 }
 
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("SSH MCP Server running on stdio");
+  // Initialize static connection if in static mode
+  await initializeStaticConnection();
 
   // Handle graceful shutdown
   const cleanup = () => {
     console.error("Shutting down SSH MCP Server...");
-    if (connectionManager) {
-      connectionManager.close();
-      connectionManager = null;
-    }
+    connectionPool.closeAll();
     process.exit(0);
   };
 
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
   process.on('exit', () => {
-    if (connectionManager) {
-      connectionManager.close();
-    }
+    connectionPool.closeAll();
   });
+
+  // Choose transport based on --port parameter
+  if (HTTP_PORT) {
+    // HTTP/SSE mode
+    const app = express();
+    app.use(cors());
+    app.use(express.json());
+
+    // Health check endpoint
+    app.get('/health', (_req, res) => {
+      res.json({ status: 'ok', mode: IS_STATIC_MODE ? 'static' : 'dynamic' });
+    });
+
+    // SSE endpoint for MCP
+    app.get('/sse', async (req, res) => {
+      console.error('New SSE connection established');
+      const transport = new SSEServerTransport('/message', res);
+      await server.connect(transport);
+    });
+
+    // Message endpoint for client requests
+    app.post('/message', async (req, res) => {
+      // This will be handled by SSEServerTransport
+      res.status(200).end();
+    });
+
+    app.listen(HTTP_PORT, () => {
+      console.error(`SSH MCP Server running on http://localhost:${HTTP_PORT}`);
+      console.error(`SSE endpoint: http://localhost:${HTTP_PORT}/sse`);
+      console.error(`Health check: http://localhost:${HTTP_PORT}/health`);
+    });
+  } else {
+    // Stdio mode (default)
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error("SSH MCP Server running on stdio");
+  }
 }
 
 // Initialize server in test mode for automated tests
 if (isTestMode) {
-  const transport = new StdioServerTransport();
-  server.connect(transport).catch(error => {
+  (async () => {
+    await initializeStaticConnection();
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+  })().catch(error => {
     console.error("Fatal error connecting server:", error);
     process.exit(1);
   });
@@ -716,9 +1155,7 @@ if (isTestMode) {
 else if (isCliEnabled) {
   main().catch((error) => {
     console.error("Fatal error in main():", error);
-    if (connectionManager) {
-      connectionManager.close();
-    }
+    connectionPool.closeAll();
     process.exit(1);
   });
 }
