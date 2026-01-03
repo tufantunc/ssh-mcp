@@ -1,0 +1,19 @@
+// Added for testing purposes, requires docker compose to run
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "ssh-mcp-server": {
+      "type": "local",
+      "command": [
+        "node",
+        "build/index.js",
+        "--host=127.0.0.1",
+        "--port=2222",
+        "--user=test",
+        "--password=secret",
+        "--timeout=60000"
+      ],
+      "enabled": true,
+    },
+  },
+}
