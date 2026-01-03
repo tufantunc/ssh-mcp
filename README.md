@@ -44,11 +44,13 @@
 - `exec`: Execute a shell command on the remote server
   - **Parameters:**
     - `command` (required): Shell command to execute on the remote SSH server
+    - `description` (optional): Optional description of what this command will do (appended as a comment)
   - **Timeout Configuration:**
 
 - `sudo-exec`: Execute a shell command with sudo elevation
   - **Parameters:**
     - `command` (required): Shell command to execute as root using sudo
+    - `description` (optional): Optional description of what this command will do (appended as a comment)
   - **Notes:**
     - Requires `--sudoPassword` to be set for password-protected sudo
     - Can be disabled by passing the `--disableSudo` flag at startup if sudo access is not needed or not available

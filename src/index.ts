@@ -352,8 +352,9 @@ server.tool(
   "Execute a shell command on the remote SSH server and return the output.",
   {
     command: z.string().describe("Shell command to execute on the remote SSH server"),
+    description: z.string().optional().describe("Optional description of what this command will do"),
   },
-  async ({ command }) => {
+  async ({ command, description }) => {
     // Sanitize command input
     const sanitizedCommand = sanitizeCommand(command);
 
@@ -401,7 +402,12 @@ server.tool(
         }
       }
 
-      const result = await execSshCommandWithConnection(connectionManager, sanitizedCommand);
+      // Append description as comment if provided
+      const commandWithDescription = description
+        ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
+        : sanitizedCommand;
+
+      const result = await execSshCommandWithConnection(connectionManager, commandWithDescription);
       return result;
     } catch (err: any) {
       // Wrap unexpected errors
@@ -418,8 +424,9 @@ if (!DISABLE_SUDO) {
     "Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.",
     {
       command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
+      description: z.string().optional().describe("Optional description of what this command will do"),
     },
-    async ({ command }) => {
+    async ({ command, description }) => {
       const sanitizedCommand = sanitizeCommand(command);
 
       try {
@@ -465,14 +472,19 @@ if (!DISABLE_SUDO) {
         let wrapped: string;
         const sudoPassword = connectionManager.getSudoPassword();
 
+        // Append description as comment if provided
+        const commandWithDescription = description
+          ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
+          : sanitizedCommand;
+
         if (!sudoPassword) {
           // No password provided, use -n to fail if sudo requires a password
-          wrapped = `sudo -n sh -c '${sanitizedCommand.replace(/'/g, "'\\''")}'`;
+          wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
         } else {
           // Password provided — pipe it into sudo using printf. This avoids complex
           // PTY/stdin handling on the SSH channel and is simpler and more reliable.
           const pwdEscaped = sudoPassword.replace(/'/g, "'\\''");
-          wrapped = `printf '%s\\n' '${pwdEscaped}' | sudo -p "" -S sh -c '${sanitizedCommand.replace(/'/g, "'\\''")}'`;
+          wrapped = `printf '%s\\n' '${pwdEscaped}' | sudo -p "" -S sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
         }
 
         return await execSshCommandWithConnection(connectionManager, wrapped);
