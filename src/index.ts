@@ -340,7 +340,7 @@ let connectionManager: SSHConnectionManager | null = null;
 
 const server = new McpServer({
   name: 'SSH MCP Server',
-  version: '1.4.0',
+  version: '1.5.0',
   capabilities: {
     resources: {},
     tools: {},
