@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  # Example 1: SSH MCP with password authentication
+  ssh-mcp-password:
+    build: .
+    image: ssh-mcp:latest
+    container_name: ssh-mcp-password
+    stdin_open: true
+    tty: true
+    command:
+      - "--host=192.168.1.100"
+      - "--port=22"
+      - "--user=admin"
+      - "--password=your_password"
+      - "--timeout=60000"
+      - "--maxChars=none"
+    restart: unless-stopped
+    # Optional: for debugging
+    # volumes:
+    #   - ./logs:/app/logs
+
+  # Example 2: SSH MCP with SSH key authentication
+  ssh-mcp-key:
+    build: .
+    image: ssh-mcp:latest
+    container_name: ssh-mcp-key
+    stdin_open: true
+    tty: true
+    command:
+      - "--host=example.com"
+      - "--port=22"
+      - "--user=root"
+      - "--key=/root/.ssh/id_rsa"
+    volumes:
+      # Mount your SSH private key
+      - ~/.ssh/id_rsa:/root/.ssh/id_rsa:ro
+    restart: unless-stopped
+
+  # Example 3: SSH MCP with sudo support
+  ssh-mcp-sudo:
+    build: .
+    image: ssh-mcp:latest
+    container_name: ssh-mcp-sudo
+    stdin_open: true
+    tty: true
+    command:
+      - "--host=192.168.1.100"
+      - "--user=admin"
+      - "--password=user_password"
+      - "--sudoPassword=sudo_password"
+      - "--suPassword=root_password"
+      - "--timeout=120000"
+    restart: unless-stopped
+
+  # Example 4: For Docker MCP Gateway integration
+  # This service can be used with Docker MCP Gateway
+  ssh-mcp-gateway:
+    build: .
+    image: ssh-mcp:latest
+    container_name: ssh-mcp-gateway
+    stdin_open: true
+    tty: true
+    # Use environment variables for sensitive data
+    environment:
+      - SSH_HOST=${SSH_HOST:-192.168.1.100}
+      - SSH_PORT=${SSH_PORT:-22}
+      - SSH_USER=${SSH_USER:-admin}
+      - SSH_PASSWORD=${SSH_PASSWORD}
+      - SUDO_PASSWORD=${SUDO_PASSWORD}
+    # Command will use environment variables (requires modification to support env vars)
+    # For now, use command line args
+    command:
+      - "--host=${SSH_HOST:-192.168.1.100}"
+      - "--port=${SSH_PORT:-22}"
+      - "--user=${SSH_USER:-admin}"
+      - "--password=${SSH_PASSWORD}"
+      - "--sudoPassword=${SUDO_PASSWORD}"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge

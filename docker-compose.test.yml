@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # Test SSH sunucusu 1
+  ssh-test-1:
+    image: linuxserver/openssh-server:latest
+    container_name: ssh-test-1
+    hostname: ssh-test-1
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Istanbul
+      - PASSWORD_ACCESS=true
+      - USER_PASSWORD=secret
+      - USER_NAME=test
+    ports:
+      - "2222:2222"
+    restart: unless-stopped
+    networks:
+      - test-network
+
+  # Test SSH sunucusu 2
+  ssh-test-2:
+    image: linuxserver/openssh-server:latest
+    container_name: ssh-test-2
+    hostname: ssh-test-2
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Istanbul
+      - PASSWORD_ACCESS=true
+      - USER_PASSWORD=secret
+      - USER_NAME=test
+    ports:
+      - "2223:2222"
+    restart: unless-stopped
+    networks:
+      - test-network
+
+  # Test SSH sunucusu 3
+  ssh-test-3:
+    image: linuxserver/openssh-server:latest
+    container_name: ssh-test-3
+    hostname: ssh-test-3
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Istanbul
+      - PASSWORD_ACCESS=true
+      - USER_PASSWORD=secret
+      - USER_NAME=test
+    ports:
+      - "2224:2222"
+    restart: unless-stopped
+    networks:
+      - test-network
+
+networks:
+  test-network:
+    driver: bridge

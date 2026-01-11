@@ -1,0 +1,40 @@
+version: "3.8"
+
+services:
+  # Docker MCP Gateway
+  mcp-gateway:
+    image: docker/mcp-gateway:latest
+    container_name: mcp-gateway
+    stdin_open: true
+    tty: true
+    ports:
+      - "3000:3000" # Gateway API portu (eğer varsa)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./mcp-gateway-config:/config
+    environment:
+      - LOCALAPPDATA=/config
+    networks:
+      - mcp-network
+    restart: unless-stopped
+
+  # SSH MCP Server - vm6
+  ssh-mcp-vm6:
+    image: ssh-mcp:latest
+    container_name: ssh-mcp-vm6
+    stdin_open: true
+    tty: true
+    network_mode: host # Local network erişimi için
+    volumes:
+      - ~/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+    command:
+      - "--host=vm1.example.com"
+      - "--user=root"
+      - "--key=/root/.ssh/id_ed25519"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge

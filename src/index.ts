@@ -336,7 +336,85 @@ export class SSHConnectionManager {
   }
 }
 
-let connectionManager: SSHConnectionManager | null = null;
+// Connection pool for multiple hosts
+const connectionManagers: Map<string, SSHConnectionManager> = new Map();
+
+// Helper function to parse host:port from host parameter
+function parseHostPort(hostParam: string): { host: string; port: number } {
+  // Check if host includes port (e.g., "192.168.1.1:2222" or "example.com:22")
+  const match = hostParam.match(/^(.+):(\d+)$/);
+  if (match) {
+    return {
+      host: match[1],
+      port: parseInt(match[2], 10)
+    };
+  }
+  // No port specified, use default
+  return {
+    host: hostParam,
+    port: PORT
+  };
+}
+
+// Helper function to get or create connection manager for a host
+async function getConnectionManager(hostOverride?: string): Promise<SSHConnectionManager> {
+  const targetUser = USER; // For now, use same user. Could be extended.
+
+  if (!targetUser) {
+    throw new McpError(ErrorCode.InvalidParams, 'Missing required username');
+  }
+
+  // Parse host and port
+  let targetHost: string | null;
+  let targetPort: number;
+
+  if (hostOverride) {
+    const parsed = parseHostPort(hostOverride);
+    targetHost = parsed.host;
+    targetPort = parsed.port;
+  } else {
+    targetHost = HOST;
+    targetPort = PORT;
+  }
+
+  if (!targetHost) {
+    throw new McpError(ErrorCode.InvalidParams, 'Missing required host');
+  }
+
+  // Include port in connection key to support multiple ports on same host
+  const connectionKey = `${targetUser}@${targetHost}:${targetPort}`;
+
+  let manager = connectionManagers.get(connectionKey);
+  if (manager) {
+    return manager;
+  }
+
+  // Create new connection manager
+  const sshConfig: SSHConfig = {
+    host: targetHost,
+    port: targetPort,
+    username: targetUser,
+  };
+
+  if (PASSWORD) {
+    sshConfig.password = PASSWORD;
+  } else if (KEY) {
+    const fs = await import('fs/promises');
+    sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+  }
+
+  if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
+    sshConfig.suPassword = sanitizePassword(SUPASSWORD);
+  }
+  if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
+    sshConfig.sudoPassword = sanitizePassword(SUDOPASSWORD);
+  }
+
+  manager = new SSHConnectionManager(sshConfig);
+  connectionManagers.set(connectionKey, manager);
+
+  return manager;
+}
 
 const server = new McpServer({
   name: 'SSH MCP Server',
@@ -353,35 +431,15 @@ server.tool(
   {
     command: z.string().describe("Shell command to execute on the remote SSH server"),
     description: z.string().optional().describe("Optional description of what this command will do"),
+    host: z.string().optional().describe("Optional target host (defaults to configured host if not specified). Format: 'hostname' or 'hostname:port'. Examples: '192.168.1.100', 'example.com:2222'"),
   },
-  async ({ command, description }) => {
+  async ({ command, description, host }) => {
     // Sanitize command input
     const sanitizedCommand = sanitizeCommand(command);
 
     try {
-      // Initialize connection manager if not already done
-      if (!connectionManager) {
-        if (!HOST || !USER) {
-          throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
-        }
-        const sshConfig: SSHConfig = {
-          host: HOST,
-          port: PORT,
-          username: USER,
-        };
-
-        if (PASSWORD) {
-          sshConfig.password = PASSWORD;
-        } else if (KEY) {
-          const fs = await import('fs/promises');
-          sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
-        }
-
-        if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-          sshConfig.suPassword = sanitizePassword(SUPASSWORD);
-        }
-        connectionManager = new SSHConnectionManager(sshConfig);
-      }
+      // Get or create connection manager for the target host
+      const connectionManager = await getConnectionManager(host);
 
       // Ensure connection is active (reconnect if needed)
       await connectionManager.ensureConnected();
@@ -419,41 +477,20 @@ server.tool(
 
 // Expose sudo-exec tool unless explicitly disabled
 if (!DISABLE_SUDO) {
-  server.tool(
-    "sudo-exec",
-    "Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.",
-    {
-      command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
-      description: z.string().optional().describe("Optional description of what this command will do"),
-    },
-    async ({ command, description }) => {
+server.tool(
+  "sudo-exec",
+  "Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.",
+  {
+    command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
+    description: z.string().optional().describe("Optional description of what this command will do"),
+    host: z.string().optional().describe("Optional target host (defaults to configured host if not specified). Format: 'hostname' or 'hostname:port'. Examples: '192.168.1.100', 'example.com:2222'"),
+  },
+    async ({ command, description, host }) => {
       const sanitizedCommand = sanitizeCommand(command);
 
       try {
-        if (!connectionManager) {
-          if (!HOST || !USER) {
-            throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
-          }
-
-          const sshConfig: SSHConfig = {
-            host: HOST,
-            port: PORT || 22,
-            username: USER,
-          };
-          if (PASSWORD) {
-            sshConfig.password = PASSWORD;
-          } else if (KEY) {
-            const fs = await import('fs/promises');
-            sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
-          }
-          if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-            sshConfig.suPassword = sanitizePassword(SUPASSWORD);
-          }
-          if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-            sshConfig.sudoPassword = sanitizePassword(SUDOPASSWORD);
-          }
-          connectionManager = new SSHConnectionManager(sshConfig);
-        }
+        // Get or create connection manager for the target host
+        const connectionManager = await getConnectionManager(host);
 
         await connectionManager.ensureConnected();
 
@@ -495,6 +532,47 @@ if (!DISABLE_SUDO) {
     }
   );
 }
+
+// List active SSH connections
+server.tool(
+  "list-hosts",
+  "List all active SSH connections in the connection pool. Shows which hosts are currently connected.",
+  {},
+  async () => {
+    try {
+      const connections: Array<{host: string, connected: boolean}> = [];
+
+      for (const [key, manager] of connectionManagers.entries()) {
+        connections.push({
+          host: key,
+          connected: manager.isConnected()
+        });
+      }
+
+      // If no connections in pool yet, show the default configured host
+      if (connections.length === 0 && HOST) {
+        connections.push({
+          host: `${USER}@${HOST}:${PORT}`,
+          connected: false
+        });
+      }
+
+      const output = connections.length > 0
+        ? connections.map(c => `${c.host} (${c.connected ? 'connected' : 'not connected'})`).join('\n')
+        : 'No active connections';
+
+      return {
+        content: [{
+          type: 'text',
+          text: output
+        }]
+      };
+    } catch (err: any) {
+      if (err instanceof McpError) throw err;
+      throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
+    }
+  }
+);
 
 // New function that uses persistent connection
 export async function execSshCommandWithConnection(manager: SSHConnectionManager, command: string, stdin?: string): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
@@ -700,18 +778,18 @@ async function main() {
   // Handle graceful shutdown
   const cleanup = () => {
     console.error("Shutting down SSH MCP Server...");
-    if (connectionManager) {
-      connectionManager.close();
-      connectionManager = null;
+    for (const manager of connectionManagers.values()) {
+      manager.close();
     }
+    connectionManagers.clear();
     process.exit(0);
   };
 
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
   process.on('exit', () => {
-    if (connectionManager) {
-      connectionManager.close();
+    for (const manager of connectionManagers.values()) {
+      manager.close();
     }
   });
 }
@@ -728,8 +806,8 @@ if (isTestMode) {
 else if (isCliEnabled) {
   main().catch((error) => {
     console.error("Fatal error in main():", error);
-    if (connectionManager) {
-      connectionManager.close();
+    for (const manager of connectionManagers.values()) {
+      manager.close();
     }
     process.exit(1);
   });

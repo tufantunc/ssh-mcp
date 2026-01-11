@@ -19,6 +19,8 @@
 - [Features](#features)
 - [Installation](#installation)
 - [Client Setup](#client-setup)
+- [Docker Usage](#docker-usage)
+- [Multi-Host Usage](#multi-host-usage)
 - [Testing](#testing)
 - [Disclaimer](#disclaimer)
 - [Support](#support)
@@ -36,6 +38,8 @@
 - Execute shell commands on remote Linux and Windows systems
 - Secure authentication via password or SSH key
 - Built with TypeScript and the official MCP SDK
+- **Multi-host support** - manage connections to multiple SSH servers simultaneously
+- **Persistent connections** - connection pooling for better performance
 - **Configurable timeout protection** with automatic process abortion
 - **Graceful timeout handling** - attempts to kill hanging processes before closing connections
 
@@ -45,21 +49,32 @@
   - **Parameters:**
     - `command` (required): Shell command to execute on the remote SSH server
     - `description` (optional): Optional description of what this command will do (appended as a comment)
+    - `host` (optional): Target host to execute command on (supports multiple hosts)
   - **Timeout Configuration:**
+    - Timeout is configured via command line argument `--timeout` (in milliseconds)
+    - Default timeout: 60000ms (1 minute)
+    - When a command times out, the server automatically attempts to abort the running process before closing the connection
 
 - `sudo-exec`: Execute a shell command with sudo elevation
   - **Parameters:**
     - `command` (required): Shell command to execute as root using sudo
     - `description` (optional): Optional description of what this command will do (appended as a comment)
+    - `host` (optional): Target host to execute command on (supports multiple hosts)
   - **Notes:**
     - Requires `--sudoPassword` to be set for password-protected sudo
     - Can be disabled by passing the `--disableSudo` flag at startup if sudo access is not needed or not available
     - For persistent root access, consider using `--suPassword` instead which establishes a root shell
     - Tool will not be available at all if server is started with `--disableSudo`
-  - **Timeout Configuration:**
-    - Timeout is configured via command line argument `--timeout` (in milliseconds)
-    - Default timeout: 60000ms (1 minute)
-    - When a command times out, the server automatically attempts to abort the running process before closing the connection
+
+- `list-hosts`: List all active SSH connections in the connection pool
+  - **Parameters:** None
+  - **Returns:** List of hosts with their connection status (connected/not connected)
+  - **Notes:**
+    - Shows which hosts are currently connected
+    - Useful for managing multiple SSH connections
+    - Connection key format: `user@host`
+
+**Configuration:**
   - **Max Command Length Configuration:**
     - Max command characters are configured via `--maxChars`
     - Default: `1000`
@@ -178,6 +193,227 @@ After adding the server, restart Claude Code and ask Cascade to execute a comman
 ```
 
 For more information about MCP in Claude Code, see the [official documentation](https://docs.claude.com/en/docs/claude-code/mcp).
+
+## Docker Usage
+
+SSH MCP Server can be containerized and used with Docker or Docker MCP Gateway for isolated and portable deployments.
+
+### Building the Docker Image
+
+```bash
+# Build the image
+docker build -t ssh-mcp:latest .
+
+# Or using docker compose
+docker compose -f docker-compose.example.yml build
+```
+
+### Running with Docker
+
+**Basic usage with password authentication:**
+```bash
+docker run -i \
+  ssh-mcp:latest \
+  --host=192.168.1.100 \
+  --user=admin \
+  --password=your_password
+```
+
+**With SSH key authentication:**
+```bash
+docker run -i \
+  -v ~/.ssh/id_rsa:/root/.ssh/id_rsa:ro \
+  ssh-mcp:latest \
+  --host=example.com \
+  --user=root \
+  --key=/root/.ssh/id_rsa
+```
+
+**With sudo support:**
+```bash
+docker run -i \
+  ssh-mcp:latest \
+  --host=192.168.1.100 \
+  --user=admin \
+  --password=user_password \
+  --sudoPassword=sudo_password \
+  --timeout=120000
+```
+
+### Using with Docker MCP Gateway
+
+Docker MCP Gateway allows you to run MCP servers in containers and connect them to Claude Desktop or other MCP clients.
+
+**1. Build and publish the image (optional):**
+```bash
+# Tag for your registry
+docker build -t your-registry/ssh-mcp:latest .
+docker push your-registry/ssh-mcp:latest
+```
+
+**2. Configure Docker MCP Gateway:**
+
+Add to your MCP Gateway configuration:
+```json
+{
+  "mcpServers": {
+    "ssh-mcp": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "ssh-mcp:latest",
+        "--host=YOUR_HOST",
+        "--user=YOUR_USER",
+        "--password=YOUR_PASSWORD"
+      ]
+    }
+  }
+}
+```
+
+**3. Using docker-compose with MCP Gateway:**
+
+Create a `docker-compose.yml` based on the example file:
+```bash
+# Copy and customize the example
+cp docker-compose.example.yml docker-compose.yml
+# Edit docker-compose.yml with your settings
+```
+
+Configure MCP Gateway to use the compose service:
+```json
+{
+  "mcpServers": {
+    "ssh-mcp": {
+      "command": "docker",
+      "args": [
+        "compose",
+        "exec",
+        "-T",
+        "ssh-mcp-gateway"
+      ]
+    }
+  }
+}
+```
+
+### Environment Variables
+
+For security, you can use environment variables with Docker:
+
+```bash
+# Create a .env file
+cat > .env << EOF
+SSH_HOST=192.168.1.100
+SSH_PORT=22
+SSH_USER=admin
+SSH_PASSWORD=your_password
+SUDO_PASSWORD=sudo_password
+EOF
+
+# Run with environment variables
+docker run -i --env-file .env \
+  ssh-mcp:latest \
+  --host=\${SSH_HOST} \
+  --user=\${SSH_USER} \
+  --password=\${SSH_PASSWORD}
+```
+
+**Security Note:** Never commit `.env` files or sensitive credentials to version control.
+
+### Docker Image Details
+
+- **Base Image:** Node.js 20 Alpine (minimal size)
+- **Multi-stage build:** Optimized for production
+- **Includes:** OpenSSH client for SSH key support
+- **Entry Point:** `node build/index.js`
+
+### Troubleshooting
+
+**Permission issues with SSH keys:**
+```bash
+# Ensure correct permissions on host
+chmod 600 ~/.ssh/id_rsa
+
+# Then mount as read-only
+docker run -i -v ~/.ssh/id_rsa:/root/.ssh/id_rsa:ro ssh-mcp:latest ...
+```
+
+**Network connectivity:**
+```bash
+# Use host network if container can't reach SSH server
+docker run -i --network host ssh-mcp:latest --host=192.168.1.100 ...
+```
+
+## Multi-Host Usage
+
+SSH MCP Server supports managing multiple SSH connections simultaneously. You can execute commands on different hosts by specifying the `host` parameter.
+
+### How It Works
+
+1. The server maintains a connection pool with persistent connections to each host
+2. Connections are identified by `user@host:port` key
+3. The `host` parameter supports two formats:
+   - Hostname/IP only: `192.168.1.100` (uses default port from config)
+   - Hostname/IP with port: `192.168.1.100:2222` or `example.com:22`
+4. When you specify a `host` parameter in `exec` or `sudo-exec`, the server automatically:
+   - Creates a new connection if needed
+   - Reuses an existing connection if available
+   - Manages the connection lifecycle independently
+
+### Example Usage
+
+**Using MCP Inspector or Claude Desktop:**
+
+```javascript
+// Execute command on default host
+{
+  "command": "ls -la /tmp",
+  "description": "List files on server 1"
+}
+
+// Execute command on a different host (uses default port)
+{
+  "command": "df -h",
+  "description": "Check disk space on server 2",
+  "host": "192.168.1.101"
+}
+
+// Execute command on a host with specific port
+{
+  "command": "uptime",
+  "description": "Check uptime on server 3",
+  "host": "192.168.1.102:2222"
+}
+
+// Execute command on same host but different port
+{
+  "command": "hostname",
+  "description": "Get hostname from alternate SSH port",
+  "host": "192.168.1.100:2223"
+}
+
+// List all active connections
+// Call the 'list-hosts' tool with no parameters
+// Output format: user@host:port (connected/not connected)
+```
+
+### Benefits
+
+- **Performance**: Persistent connections reduce connection overhead
+- **Flexibility**: Manage multiple servers from a single MCP server instance
+- **Reliability**: Independent connection management - issues on one host don't affect others
+- **Convenience**: No need to start multiple MCP server instances
+
+### Notes
+
+- Each host connection uses the same authentication credentials (user/password/key) configured at startup
+- For different user credentials per host, you'll need to start separate MCP server instances
+- The `list-hosts` tool shows all active connections with format: `user@host:port (status)`
+- You can connect to the same host on different ports (e.g., `192.168.1.100:22` and `192.168.1.100:2222` are treated as separate connections)
+- Connection pooling ensures that repeated commands to the same host reuse existing connections for better performance
 
 ## Testing
 
