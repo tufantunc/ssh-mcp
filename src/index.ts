@@ -211,9 +211,14 @@ function validateConfig(config: Record<string, string | null>, resolved: { host?
   const errors = [];
   const hasHost = config.host || resolved.host;
   const hasUser = config.user || resolved.user;
+  const hasAnyConfig = config.host || config.user || config.alias;
 
-  if (!hasHost) errors.push('Missing required --host (or use --alias)');
-  if (!hasUser) errors.push('Missing required --user (or use --alias)');
+  // Only require host/user if some connection config was provided
+  // If no config provided, we'll use dynamic connection via the connect tool
+  if (hasAnyConfig) {
+    if (!hasHost) errors.push('Missing required --host (or use --alias)');
+    if (!hasUser) errors.push('Missing required --user (or use --alias)');
+  }
   if (config.port && isNaN(Number(config.port))) errors.push('Invalid --port');
   if (config.alias && !resolved.host) errors.push(`Could not resolve alias '${config.alias}' or alias is not an SSH command`);
   if (errors.length > 0) {
@@ -493,6 +498,15 @@ export class SSHConnectionManager {
 
 let connectionManager: SSHConnectionManager | null = null;
 
+// Dynamic connection config (can be changed via connect tool)
+let currentHost: string | undefined = HOST;
+let currentPort: number = PORT;
+let currentUser: string | undefined = USER;
+let currentKey: string | undefined = KEY;
+let currentPassword: string | undefined = PASSWORD || undefined;
+let currentSuPassword: string | undefined = SUPASSWORD || undefined;
+let currentSudoPassword: string | undefined = SUDOPASSWORD || undefined;
+
 const server = new McpServer({
   name: 'SSH MCP Server',
   version: '1.5.0',
@@ -501,6 +515,96 @@ const server = new McpServer({
     tools: {},
   },
 });
+
+// Connect tool for dynamic connection switching
+server.tool(
+  "connect",
+  "Connect to an SSH server using a shell alias or explicit connection parameters. Use this to switch between different servers dynamically.",
+  {
+    alias: z.string().optional().describe("Shell alias name (e.g., 'web', 'myserver') - will resolve from your bash/zsh aliases"),
+    host: z.string().optional().describe("SSH host (overrides alias)"),
+    user: z.string().optional().describe("SSH username (overrides alias)"),
+    port: z.number().optional().describe("SSH port (default: 22)"),
+    key: z.string().optional().describe("Path to SSH private key file"),
+  },
+  async ({ alias, host, user, port, key }) => {
+    try {
+      let resolvedConfig: ParsedSSHCommand = {};
+
+      // Resolve alias if provided
+      if (alias) {
+        const aliasValue = resolveShellAlias(alias);
+        if (!aliasValue) {
+          throw new McpError(ErrorCode.InvalidParams, `Could not resolve alias '${alias}'. Make sure it exists in your shell.`);
+        }
+        if (!aliasValue.startsWith('ssh ') && aliasValue !== 'ssh') {
+          throw new McpError(ErrorCode.InvalidParams, `Alias '${alias}' is not an SSH command: ${aliasValue}`);
+        }
+        resolvedConfig = parseSSHCommand(aliasValue);
+      }
+
+      // Merge explicit params with alias (explicit params override)
+      const finalHost = host || resolvedConfig.host;
+      const finalUser = user || resolvedConfig.user;
+      const finalPort = port || resolvedConfig.port || 22;
+      const finalKey = key || resolvedConfig.key;
+
+      if (!finalHost) {
+        throw new McpError(ErrorCode.InvalidParams, 'No host specified. Provide --alias or --host');
+      }
+      if (!finalUser) {
+        throw new McpError(ErrorCode.InvalidParams, 'No user specified. Provide --alias or --user');
+      }
+
+      // Close existing connection if any
+      if (connectionManager) {
+        connectionManager.close();
+        connectionManager = null;
+      }
+
+      // Update current config
+      currentHost = finalHost;
+      currentUser = finalUser;
+      currentPort = finalPort;
+      currentKey = finalKey;
+
+      // Build SSH config
+      const sshConfig: SSHConfig = {
+        host: finalHost,
+        port: finalPort,
+        username: finalUser,
+      };
+
+      if (finalKey) {
+        const fs = await import('fs/promises');
+        // Expand ~ in key path
+        let keyPath = finalKey;
+        if (keyPath.startsWith('~')) {
+          keyPath = join(homedir(), keyPath.slice(1));
+        }
+        sshConfig.privateKey = await fs.readFile(keyPath, 'utf8');
+      }
+
+      // Create and connect
+      connectionManager = new SSHConnectionManager(sshConfig);
+      await connectionManager.ensureConnected();
+
+      const connectionInfo = alias
+        ? `Connected to '${alias}' (${finalUser}@${finalHost}:${finalPort})`
+        : `Connected to ${finalUser}@${finalHost}:${finalPort}`;
+
+      return {
+        content: [{
+          type: 'text',
+          text: connectionInfo,
+        }],
+      };
+    } catch (err: any) {
+      if (err instanceof McpError) throw err;
+      throw new McpError(ErrorCode.InternalError, `Connection failed: ${err?.message || err}`);
+    }
+  }
+);
 
 server.tool(
   "exec",
@@ -516,24 +620,28 @@ server.tool(
     try {
       // Initialize connection manager if not already done
       if (!connectionManager) {
-        if (!HOST || !USER) {
-          throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
+        if (!currentHost || !currentUser) {
+          throw new McpError(ErrorCode.InvalidParams, 'Not connected. Use the "connect" tool first with an alias (e.g., connect with alias="web")');
         }
         const sshConfig: SSHConfig = {
-          host: HOST,
-          port: PORT,
-          username: USER,
+          host: currentHost,
+          port: currentPort,
+          username: currentUser,
         };
 
-        if (PASSWORD) {
-          sshConfig.password = PASSWORD;
-        } else if (KEY) {
+        if (currentPassword) {
+          sshConfig.password = currentPassword;
+        } else if (currentKey) {
           const fs = await import('fs/promises');
-          sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+          let keyPath = currentKey;
+          if (keyPath.startsWith('~')) {
+            keyPath = join(homedir(), keyPath.slice(1));
+          }
+          sshConfig.privateKey = await fs.readFile(keyPath, 'utf8');
         }
 
-        if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-          sshConfig.suPassword = sanitizePassword(SUPASSWORD);
+        if (currentSuPassword !== null && currentSuPassword !== undefined) {
+          sshConfig.suPassword = sanitizePassword(currentSuPassword);
         }
         connectionManager = new SSHConnectionManager(sshConfig);
       }
@@ -586,26 +694,30 @@ if (!DISABLE_SUDO) {
 
       try {
         if (!connectionManager) {
-          if (!HOST || !USER) {
-            throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
+          if (!currentHost || !currentUser) {
+            throw new McpError(ErrorCode.InvalidParams, 'Not connected. Use the "connect" tool first with an alias (e.g., connect with alias="web")');
           }
 
           const sshConfig: SSHConfig = {
-            host: HOST,
-            port: PORT || 22,
-            username: USER,
+            host: currentHost,
+            port: currentPort || 22,
+            username: currentUser,
           };
-          if (PASSWORD) {
-            sshConfig.password = PASSWORD;
-          } else if (KEY) {
+          if (currentPassword) {
+            sshConfig.password = currentPassword;
+          } else if (currentKey) {
             const fs = await import('fs/promises');
-            sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+            let keyPath = currentKey;
+            if (keyPath.startsWith('~')) {
+              keyPath = join(homedir(), keyPath.slice(1));
+            }
+            sshConfig.privateKey = await fs.readFile(keyPath, 'utf8');
           }
-          if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-            sshConfig.suPassword = sanitizePassword(SUPASSWORD);
+          if (currentSuPassword !== null && currentSuPassword !== undefined) {
+            sshConfig.suPassword = sanitizePassword(currentSuPassword);
           }
-          if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-            sshConfig.sudoPassword = sanitizePassword(SUDOPASSWORD);
+          if (currentSudoPassword !== null && currentSudoPassword !== undefined) {
+            sshConfig.sudoPassword = sanitizePassword(currentSudoPassword);
           }
           connectionManager = new SSHConnectionManager(sshConfig);
         }
@@ -616,12 +728,12 @@ if (!DISABLE_SUDO) {
         // existing connection manager was created earlier without them,
         // update the manager's values so the subsequent sudo-exec call uses
         // the latest passwords.
-        if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-          await connectionManager.setSuPassword(sanitizePassword(SUPASSWORD));
+        if (currentSuPassword !== null && currentSuPassword !== undefined) {
+          await connectionManager.setSuPassword(sanitizePassword(currentSuPassword));
         }
-        if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
+        if (currentSudoPassword !== null && currentSudoPassword !== undefined) {
           // update sudoPassword on the manager instance
-          (connectionManager as any).sshConfig = { ...(connectionManager as any).sshConfig, sudoPassword: sanitizePassword(SUDOPASSWORD) };
+          (connectionManager as any).sshConfig = { ...(connectionManager as any).sshConfig, sudoPassword: sanitizePassword(currentSudoPassword) };
         }
 
         let wrapped: string;
