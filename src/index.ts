@@ -5,8 +5,147 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { Client, ClientChannel } from 'ssh2';
 import { z } from 'zod';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { execSync } from 'child_process';
+import { homedir } from 'os';
+import { existsSync } from 'fs';
+import { join } from 'path';
+
+// Resolve a shell alias by running the user's shell
+export function resolveShellAlias(aliasName: string): string | null {
+  const shell = process.env.SHELL || '/bin/bash';
+
+  try {
+    // Use interactive shell to load aliases, then output the alias definition
+    // Works with both bash and zsh
+    const result = execSync(
+      `${shell} -i -c "type ${aliasName}" 2>/dev/null`,
+      { encoding: 'utf8', timeout: 5000 }
+    ).trim();
+
+    // Parse different shell output formats:
+    // zsh: "web: aliased to ssh root@185.66.200.78"
+    // bash: "web is aliased to 'ssh root@185.66.200.78'"
+
+    let sshCommand: string | null = null;
+
+    // zsh format: "name: aliased to command"
+    const zshMatch = result.match(/^[^:]+:\s*aliased to\s+(.+)$/);
+    if (zshMatch) {
+      sshCommand = zshMatch[1];
+    }
+
+    // bash format: "name is aliased to 'command'" or "name is aliased to `command`"
+    const bashMatch = result.match(/^[^\s]+\s+is\s+aliased\s+to\s+['`](.+)['`]$/);
+    if (bashMatch) {
+      sshCommand = bashMatch[1];
+    }
+
+    // Also handle alias output without quotes (some shells)
+    const simpleMatch = result.match(/^[^\s]+\s+is\s+aliased\s+to\s+(.+)$/);
+    if (!sshCommand && simpleMatch) {
+      sshCommand = simpleMatch[1].replace(/^['"`]|['"`]$/g, '');
+    }
+
+    return sshCommand;
+  } catch (error) {
+    return null;
+  }
+}
+
+// Parse SSH connection details from an SSH command string
+export interface ParsedSSHCommand {
+  user?: string;
+  host?: string;
+  port?: number;
+  key?: string;
+}
+
+export function parseSSHCommand(sshCommand: string): ParsedSSHCommand {
+  const result: ParsedSSHCommand = {};
+
+  // Remove 'ssh' prefix if present
+  let cmd = sshCommand.trim();
+  if (cmd.startsWith('ssh ')) {
+    cmd = cmd.slice(4).trim();
+  } else if (cmd === 'ssh') {
+    return result;
+  }
+
+  // Parse options and arguments
+  const parts = cmd.split(/\s+/);
+  let i = 0;
+
+  while (i < parts.length) {
+    const part = parts[i];
+
+    // Port: -p <port>
+    if (part === '-p' && i + 1 < parts.length) {
+      const portNum = parseInt(parts[i + 1], 10);
+      if (!isNaN(portNum)) {
+        result.port = portNum;
+      }
+      i += 2;
+      continue;
+    }
+
+    // Identity file: -i <keyfile>
+    if (part === '-i' && i + 1 < parts.length) {
+      let keyPath = parts[i + 1];
+      // Expand ~ to home directory
+      if (keyPath.startsWith('~')) {
+        keyPath = join(homedir(), keyPath.slice(1));
+      }
+      result.key = keyPath;
+      i += 2;
+      continue;
+    }
+
+    // Skip other options that take arguments
+    if (part.match(/^-[oJLRDwbcemFIOSTW]$/) && i + 1 < parts.length) {
+      i += 2;
+      continue;
+    }
+
+    // Skip flag-only options
+    if (part.startsWith('-')) {
+      i++;
+      continue;
+    }
+
+    // This should be user@host or just host
+    const userHostMatch = part.match(/^(?:([^@]+)@)?(.+)$/);
+    if (userHostMatch) {
+      if (userHostMatch[1]) {
+        result.user = userHostMatch[1];
+      }
+      result.host = userHostMatch[2];
+    }
+
+    i++;
+    // After finding host, stop (remaining args are remote commands)
+    break;
+  }
+
+  return result;
+}
+
+// Resolve alias and return merged config
+export async function resolveAliasConfig(aliasName: string): Promise<ParsedSSHCommand | null> {
+  const sshCommand = resolveShellAlias(aliasName);
+  if (!sshCommand) {
+    return null;
+  }
+
+  // Verify it's an SSH command
+  if (!sshCommand.startsWith('ssh ') && sshCommand !== 'ssh') {
+    return null;
+  }
+
+  return parseSSHCommand(sshCommand);
+}
 
 // Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --disableSudo
+// Or with alias: node build/index.js --alias=myserver
 function parseArgv() {
   const args = process.argv.slice(2);
   const config: Record<string, string | null> = {};
@@ -28,14 +167,26 @@ const isTestMode = process.env.SSH_MCP_TEST === '1';
 const isCliEnabled = process.env.SSH_MCP_DISABLE_MAIN !== '1';
 const argvConfig = (isCliEnabled || isTestMode) ? parseArgv() : {} as Record<string, string>;
 
-const HOST = argvConfig.host;
-const PORT = argvConfig.port ? parseInt(argvConfig.port) : 22;
-const USER = argvConfig.user;
+// Resolve alias if provided
+let aliasConfig: ParsedSSHCommand = {};
+if (argvConfig.alias) {
+  const resolved = resolveShellAlias(argvConfig.alias);
+  if (resolved) {
+    aliasConfig = parseSSHCommand(resolved);
+  } else {
+    console.error(`Warning: Could not resolve alias '${argvConfig.alias}'`);
+  }
+}
+
+// Merge config: explicit args override alias values
+const HOST = argvConfig.host || aliasConfig.host;
+const PORT = argvConfig.port ? parseInt(argvConfig.port) : (aliasConfig.port || 22);
+const USER = argvConfig.user || aliasConfig.user;
 const PASSWORD = argvConfig.password;
 const SUPASSWORD = argvConfig.suPassword;
 const SUDOPASSWORD = argvConfig.sudoPassword;
 const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
-const KEY = argvConfig.key;
+const KEY = argvConfig.key || aliasConfig.key;
 const DEFAULT_TIMEOUT = argvConfig.timeout ? parseInt(argvConfig.timeout) : 60000; // 60 seconds default timeout
 // Max characters configuration:
 // - Default: 1000 characters
@@ -56,18 +207,22 @@ const MAX_CHARS = (() => {
   return 1000;
 })();
 
-function validateConfig(config: Record<string, string | null>) {
+function validateConfig(config: Record<string, string | null>, resolved: { host?: string; user?: string }) {
   const errors = [];
-  if (!config.host) errors.push('Missing required --host');
-  if (!config.user) errors.push('Missing required --user');
+  const hasHost = config.host || resolved.host;
+  const hasUser = config.user || resolved.user;
+
+  if (!hasHost) errors.push('Missing required --host (or use --alias)');
+  if (!hasUser) errors.push('Missing required --user (or use --alias)');
   if (config.port && isNaN(Number(config.port))) errors.push('Invalid --port');
+  if (config.alias && !resolved.host) errors.push(`Could not resolve alias '${config.alias}' or alias is not an SSH command`);
   if (errors.length > 0) {
     throw new Error('Configuration error:\n' + errors.join('\n'));
   }
 }
 
 if (isCliEnabled) {
-  validateConfig(argvConfig);
+  validateConfig(argvConfig, aliasConfig);
 }
 
 // Command sanitization and validation
