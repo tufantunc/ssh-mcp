@@ -3,7 +3,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { Client, ClientChannel } from 'ssh2';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 // Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --disableSudo
@@ -338,23 +338,29 @@ export class SSHConnectionManager {
 
 let connectionManager: SSHConnectionManager | null = null;
 
+const execInputSchema: Record<string, z.ZodTypeAny> = {
+  command: z.string().describe("Shell command to execute on the remote SSH server"),
+  description: z.string().optional().describe("Optional description of what this command will do"),
+};
+
+const sudoExecInputSchema: Record<string, z.ZodTypeAny> = {
+  command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
+  description: z.string().optional().describe("Optional description of what this command will do"),
+};
+
 const server = new McpServer({
   name: 'SSH MCP Server',
   version: '1.5.0',
-  capabilities: {
-    resources: {},
-    tools: {},
-  },
 });
 
-server.tool(
+server.registerTool<any, any>(
   "exec",
-  "Execute a shell command on the remote SSH server and return the output.",
   {
-    command: z.string().describe("Shell command to execute on the remote SSH server"),
-    description: z.string().optional().describe("Optional description of what this command will do"),
+    description: "Execute a shell command on the remote SSH server and return the output.",
+    inputSchema: execInputSchema,
   },
-  async ({ command, description }) => {
+  async (args: any) => {
+    const { command, description } = args as { command: string; description?: string };
     // Sanitize command input
     const sanitizedCommand = sanitizeCommand(command);
 
@@ -419,14 +425,14 @@ server.tool(
 
 // Expose sudo-exec tool unless explicitly disabled
 if (!DISABLE_SUDO) {
-  server.tool(
+  server.registerTool<any, any>(
     "sudo-exec",
-    "Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.",
     {
-      command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
-      description: z.string().optional().describe("Optional description of what this command will do"),
+      description: "Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.",
+      inputSchema: sudoExecInputSchema,
     },
-    async ({ command, description }) => {
+    async (args: any) => {
+      const { command, description } = args as { command: string; description?: string };
       const sanitizedCommand = sanitizeCommand(command);
 
       try {
