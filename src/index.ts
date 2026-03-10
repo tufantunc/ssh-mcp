@@ -2,7 +2,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { Client, ClientChannel } from 'ssh2';
+import { Client, ClientChannel, SFTPWrapper } from 'ssh2';
 import { z } from 'zod';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
@@ -310,6 +310,19 @@ export class SSHConnectionManager {
     return this.suPromise;
   }
 
+  getSftp(): Promise<SFTPWrapper> {
+    const conn = this.getConnection();
+    return new Promise((resolve, reject) => {
+      conn.sftp((err: Error | undefined, sftp: SFTPWrapper) => {
+        if (err) {
+          reject(new McpError(ErrorCode.InternalError, `SFTP session error: ${err.message}`));
+          return;
+        }
+        resolve(sftp);
+      });
+    });
+  }
+
   async ensureConnected(): Promise<void> {
     if (!this.isConnected()) {
       await this.connect();
@@ -495,6 +508,123 @@ if (!DISABLE_SUDO) {
     }
   );
 }
+
+// Helper to ensure connection manager is initialized
+async function ensureConnectionManager(): Promise<SSHConnectionManager> {
+  if (!connectionManager) {
+    if (!HOST || !USER) {
+      throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
+    }
+    const sshConfig: SSHConfig = {
+      host: HOST,
+      port: PORT,
+      username: USER,
+    };
+    if (PASSWORD) {
+      sshConfig.password = PASSWORD;
+    } else if (KEY) {
+      const fs = await import('fs/promises');
+      sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+    }
+    if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
+      sshConfig.suPassword = sanitizePassword(SUPASSWORD);
+    }
+    connectionManager = new SSHConnectionManager(sshConfig);
+  }
+  await connectionManager.ensureConnected();
+  return connectionManager;
+}
+
+// SFTP file transfer tools
+server.tool(
+  "upload-file",
+  "Upload file content to the remote SSH server via SFTP.",
+  {
+    remotePath: z.string().describe("Absolute path on the remote server where the file will be written"),
+    content: z.string().describe("File content (text or base64-encoded for binary files)"),
+    encoding: z.enum(["utf8", "base64"]).default("utf8").optional().describe("Content encoding: 'utf8' for text files (default), 'base64' for binary files"),
+  },
+  async ({ remotePath, content, encoding }) => {
+    const enc = encoding || "utf8";
+    try {
+      const manager = await ensureConnectionManager();
+      const sftp = await manager.getSftp();
+
+      const buffer = enc === "base64"
+        ? Buffer.from(content, "base64")
+        : Buffer.from(content, "utf8");
+
+      return new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          sftp.end();
+          reject(new McpError(ErrorCode.InternalError, `Upload timed out after ${DEFAULT_TIMEOUT}ms`));
+        }, DEFAULT_TIMEOUT);
+
+        sftp.writeFile(remotePath, buffer, (err?: Error | null) => {
+          clearTimeout(timeoutId);
+          sftp.end();
+          if (err) {
+            reject(new McpError(ErrorCode.InternalError, `SFTP write error: ${err.message}`));
+            return;
+          }
+          resolve({
+            content: [{
+              type: 'text' as const,
+              text: `Uploaded ${buffer.length} bytes to ${remotePath}`,
+            }],
+          });
+        });
+      });
+    } catch (err: any) {
+      if (err instanceof McpError) throw err;
+      throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
+    }
+  }
+);
+
+server.tool(
+  "download-file",
+  "Download a file from the remote SSH server via SFTP.",
+  {
+    remotePath: z.string().describe("Absolute path of the file to download from the remote server"),
+    encoding: z.enum(["utf8", "base64"]).default("utf8").optional().describe("Output encoding: 'utf8' for text files (default), 'base64' for binary files"),
+  },
+  async ({ remotePath, encoding }) => {
+    const enc = encoding || "utf8";
+    try {
+      const manager = await ensureConnectionManager();
+      const sftp = await manager.getSftp();
+
+      return new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          sftp.end();
+          reject(new McpError(ErrorCode.InternalError, `Download timed out after ${DEFAULT_TIMEOUT}ms`));
+        }, DEFAULT_TIMEOUT);
+
+        sftp.readFile(remotePath, (err: Error | undefined, data: Buffer) => {
+          clearTimeout(timeoutId);
+          sftp.end();
+          if (err) {
+            reject(new McpError(ErrorCode.InternalError, `SFTP read error: ${err.message}`));
+            return;
+          }
+          const text = enc === "base64"
+            ? data.toString("base64")
+            : data.toString("utf8");
+          resolve({
+            content: [{
+              type: 'text' as const,
+              text,
+            }],
+          });
+        });
+      });
+    } catch (err: any) {
+      if (err instanceof McpError) throw err;
+      throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
+    }
+  }
+);
 
 // New function that uses persistent connection
 export async function execSshCommandWithConnection(manager: SSHConnectionManager, command: string, stdin?: string): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
