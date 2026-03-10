@@ -360,6 +360,35 @@ const server = new McpServer({
   },
 });
 
+// Shared helper to initialize and return the connection manager
+async function ensureConnectionManager(): Promise<SSHConnectionManager> {
+  if (!connectionManager) {
+    if (!HOST || !USER) {
+      throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
+    }
+    const sshConfig: SSHConfig = {
+      host: HOST,
+      port: PORT,
+      username: USER,
+    };
+    if (PASSWORD) {
+      sshConfig.password = PASSWORD;
+    } else if (KEY) {
+      const fs = await import('fs/promises');
+      sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+    }
+    if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
+      sshConfig.suPassword = sanitizePassword(SUPASSWORD);
+    }
+    if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
+      sshConfig.sudoPassword = sanitizePassword(SUDOPASSWORD);
+    }
+    connectionManager = new SSHConnectionManager(sshConfig);
+  }
+  await connectionManager.ensureConnected();
+  return connectionManager;
+}
+
 server.tool(
   "exec",
   "Execute a shell command on the remote SSH server and return the output.",
@@ -372,40 +401,14 @@ server.tool(
     const sanitizedCommand = sanitizeCommand(command);
 
     try {
-      // Initialize connection manager if not already done
-      if (!connectionManager) {
-        if (!HOST || !USER) {
-          throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
-        }
-        const sshConfig: SSHConfig = {
-          host: HOST,
-          port: PORT,
-          username: USER,
-        };
-
-        if (PASSWORD) {
-          sshConfig.password = PASSWORD;
-        } else if (KEY) {
-          const fs = await import('fs/promises');
-          sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
-        }
-
-        if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-          sshConfig.suPassword = sanitizePassword(SUPASSWORD);
-        }
-        connectionManager = new SSHConnectionManager(sshConfig);
-      }
-
-      // Ensure connection is active (reconnect if needed)
-      await connectionManager.ensureConnected();
+      const manager = await ensureConnectionManager();
 
       // If a suPassword was provided, explicitly wait for elevation before executing.
       // This is critical: ensureElevated is idempotent and will return immediately if
       // already elevated, so this ensures we have a su shell before we try to use it.
-      if ((connectionManager as any).getSuPassword && (connectionManager as any).getSuPassword()) {
+      if (manager.getSuPassword()) {
         try {
-          const elevationPromise = (connectionManager as any).ensureElevated();
-          // Add a short timeout for elevation to complete
+          const elevationPromise = (manager as any).ensureElevated();
           await Promise.race([
             elevationPromise,
             new Promise((_, reject) => setTimeout(() => reject(new Error('Elevation timeout')), 5000))
@@ -420,8 +423,7 @@ server.tool(
         ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
         : sanitizedCommand;
 
-      const result = await execSshCommandWithConnection(connectionManager, commandWithDescription);
-      return result;
+      return await execSshCommandWithConnection(manager, commandWithDescription);
     } catch (err: any) {
       // Wrap unexpected errors
       if (err instanceof McpError) throw err;
@@ -443,47 +445,21 @@ if (!DISABLE_SUDO) {
       const sanitizedCommand = sanitizeCommand(command);
 
       try {
-        if (!connectionManager) {
-          if (!HOST || !USER) {
-            throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
-          }
-
-          const sshConfig: SSHConfig = {
-            host: HOST,
-            port: PORT || 22,
-            username: USER,
-          };
-          if (PASSWORD) {
-            sshConfig.password = PASSWORD;
-          } else if (KEY) {
-            const fs = await import('fs/promises');
-            sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
-          }
-          if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-            sshConfig.suPassword = sanitizePassword(SUPASSWORD);
-          }
-          if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-            sshConfig.sudoPassword = sanitizePassword(SUDOPASSWORD);
-          }
-          connectionManager = new SSHConnectionManager(sshConfig);
-        }
-
-        await connectionManager.ensureConnected();
+        const manager = await ensureConnectionManager();
 
         // If suPassword or sudoPassword were provided on this call but the
         // existing connection manager was created earlier without them,
         // update the manager's values so the subsequent sudo-exec call uses
         // the latest passwords.
         if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-          await connectionManager.setSuPassword(sanitizePassword(SUPASSWORD));
+          await manager.setSuPassword(sanitizePassword(SUPASSWORD));
         }
         if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-          // update sudoPassword on the manager instance
-          (connectionManager as any).sshConfig = { ...(connectionManager as any).sshConfig, sudoPassword: sanitizePassword(SUDOPASSWORD) };
+          (manager as any).sshConfig = { ...(manager as any).sshConfig, sudoPassword: sanitizePassword(SUDOPASSWORD) };
         }
 
         let wrapped: string;
-        const sudoPassword = connectionManager.getSudoPassword();
+        const sudoPassword = manager.getSudoPassword();
 
         // Append description as comment if provided
         const commandWithDescription = description
@@ -491,48 +467,19 @@ if (!DISABLE_SUDO) {
           : sanitizedCommand;
 
         if (!sudoPassword) {
-          // No password provided, use -n to fail if sudo requires a password
           wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
         } else {
-          // Password provided — pipe it into sudo using printf. This avoids complex
-          // PTY/stdin handling on the SSH channel and is simpler and more reliable.
           const pwdEscaped = sudoPassword.replace(/'/g, "'\\''");
           wrapped = `printf '%s\\n' '${pwdEscaped}' | sudo -p "" -S sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
         }
 
-        return await execSshCommandWithConnection(connectionManager, wrapped);
+        return await execSshCommandWithConnection(manager, wrapped);
       } catch (err: any) {
         if (err instanceof McpError) throw err;
         throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
       }
     }
   );
-}
-
-// Helper to ensure connection manager is initialized
-async function ensureConnectionManager(): Promise<SSHConnectionManager> {
-  if (!connectionManager) {
-    if (!HOST || !USER) {
-      throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
-    }
-    const sshConfig: SSHConfig = {
-      host: HOST,
-      port: PORT,
-      username: USER,
-    };
-    if (PASSWORD) {
-      sshConfig.password = PASSWORD;
-    } else if (KEY) {
-      const fs = await import('fs/promises');
-      sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
-    }
-    if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-      sshConfig.suPassword = sanitizePassword(SUPASSWORD);
-    }
-    connectionManager = new SSHConnectionManager(sshConfig);
-  }
-  await connectionManager.ensureConnected();
-  return connectionManager;
 }
 
 // SFTP file transfer tools
@@ -542,15 +489,14 @@ server.tool(
   {
     remotePath: z.string().describe("Absolute path on the remote server where the file will be written"),
     content: z.string().describe("File content (text or base64-encoded for binary files)"),
-    encoding: z.enum(["utf8", "base64"]).default("utf8").optional().describe("Content encoding: 'utf8' for text files (default), 'base64' for binary files"),
+    encoding: z.enum(["utf8", "base64"]).default("utf8").describe("Content encoding: 'utf8' for text files (default), 'base64' for binary files"),
   },
   async ({ remotePath, content, encoding }) => {
-    const enc = encoding || "utf8";
     try {
       const manager = await ensureConnectionManager();
       const sftp = await manager.getSftp();
 
-      const buffer = enc === "base64"
+      const buffer = encoding === "base64"
         ? Buffer.from(content, "base64")
         : Buffer.from(content, "utf8");
 
@@ -587,10 +533,9 @@ server.tool(
   "Download a file from the remote SSH server via SFTP.",
   {
     remotePath: z.string().describe("Absolute path of the file to download from the remote server"),
-    encoding: z.enum(["utf8", "base64"]).default("utf8").optional().describe("Output encoding: 'utf8' for text files (default), 'base64' for binary files"),
+    encoding: z.enum(["utf8", "base64"]).default("utf8").describe("Output encoding: 'utf8' for text files (default), 'base64' for binary files"),
   },
   async ({ remotePath, encoding }) => {
-    const enc = encoding || "utf8";
     try {
       const manager = await ensureConnectionManager();
       const sftp = await manager.getSftp();
@@ -608,7 +553,7 @@ server.tool(
             reject(new McpError(ErrorCode.InternalError, `SFTP read error: ${err.message}`));
             return;
           }
-          const text = enc === "base64"
+          const text = encoding === "base64"
             ? data.toString("base64")
             : data.toString("utf8");
           resolve({
