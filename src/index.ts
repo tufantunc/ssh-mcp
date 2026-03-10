@@ -510,11 +510,11 @@ function validateRemotePath(remotePath: string): string {
 // SFTP file transfer tools
 server.tool(
   "upload-file",
-  "Upload file content to the remote SSH server via SFTP.",
+  "Upload file content to the remote SSH server via SFTP. Use this to create or overwrite files on the remote server. For text files (configs, scripts, source code), send content as-is with encoding 'utf8'. For binary files (images, archives, compiled binaries), base64-encode the content and set encoding to 'base64'. The file will be written atomically. Parent directories must already exist.",
   {
-    remotePath: z.string().describe("Absolute path on the remote server where the file will be written"),
-    content: z.string().describe("File content (text or base64-encoded for binary files)"),
-    encoding: z.enum(["utf8", "base64"]).default("utf8").describe("Content encoding: 'utf8' for text files (default), 'base64' for binary files"),
+    remotePath: z.string().describe("Absolute path on the remote server where the file will be written (e.g. /home/user/config.yml). Must start with /. Parent directory must exist."),
+    content: z.string().describe("The file content as a string. For text files, send the raw text. For binary files, send the base64-encoded content."),
+    encoding: z.enum(["utf8", "base64"]).default("utf8").describe("How to interpret the content parameter: 'utf8' for plain text files (default), 'base64' for binary files."),
   },
   async ({ remotePath, content, encoding }) => {
     const validatedPath = validateRemotePath(remotePath);
@@ -556,10 +556,10 @@ server.tool(
 
 server.tool(
   "download-file",
-  "Download a file from the remote SSH server via SFTP.",
+  "Download a file from the remote SSH server via SFTP and return its content. Use this to read files from the remote server without executing shell commands. For text files, the content is returned as a UTF-8 string. For binary files, set encoding to 'base64' to receive base64-encoded content. File size is limited by the --maxFileSize setting (default 10MB).",
   {
-    remotePath: z.string().describe("Absolute path of the file to download from the remote server"),
-    encoding: z.enum(["utf8", "base64"]).default("utf8").describe("Output encoding: 'utf8' for text files (default), 'base64' for binary files"),
+    remotePath: z.string().describe("Absolute path of the file to download from the remote server (e.g. /etc/nginx/nginx.conf). Must start with /."),
+    encoding: z.enum(["utf8", "base64"]).default("utf8").describe("How to encode the response: 'utf8' returns plain text (default, best for text files), 'base64' returns base64-encoded content (required for binary files)."),
   },
   async ({ remotePath, encoding }) => {
     const validatedPath = validateRemotePath(remotePath);

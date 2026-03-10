@@ -34,6 +34,7 @@
 
 - MCP-compliant server exposing SSH capabilities
 - Execute shell commands on remote Linux and Windows systems
+- **SFTP file transfer** - upload and download files without shell commands
 - Secure authentication via password or SSH key
 - Built with TypeScript and the official MCP SDK
 - **Configurable timeout protection** with automatic process abortion
@@ -56,7 +57,26 @@
     - Can be disabled by passing the `--disableSudo` flag at startup if sudo access is not needed or not available
     - For persistent root access, consider using `--suPassword` instead which establishes a root shell
     - Tool will not be available at all if server is started with `--disableSudo`
-  - **Timeout Configuration:**
+
+- `upload-file`: Upload file content to the remote server via SFTP
+  - **Parameters:**
+    - `remotePath` (required): Absolute path on the remote server (must start with `/`)
+    - `content` (required): File content as a string (raw text for utf8, base64-encoded for binary)
+    - `encoding` (optional): `"utf8"` (default) for text files, `"base64"` for binary files
+  - **Notes:**
+    - Parent directories must already exist
+    - Overwrites existing files
+    - Use `exec` with `mkdir -p` first if you need to create directories
+
+- `download-file`: Download a file from the remote server via SFTP
+  - **Parameters:**
+    - `remotePath` (required): Absolute path of the file to download (must start with `/`)
+    - `encoding` (optional): `"utf8"` (default) for text files, `"base64"` for binary files
+  - **Notes:**
+    - File size is limited by `--maxFileSize` (default: 10MB) to prevent out-of-memory
+    - Use `--maxFileSize=none` to disable the limit
+
+- **Timeout Configuration:**
     - Timeout is configured via command line argument `--timeout` (in milliseconds)
     - Default timeout: 60000ms (1 minute)
     - When a command times out, the server automatically attempts to abort the running process before closing the connection
@@ -93,6 +113,7 @@ You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use t
 - `suPassword`: Password for su elevation (when you need a persistent root shell)
 - `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
 - `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
+- `maxFileSize`: Maximum file size in bytes for `download-file` (default: 10485760 = 10MB). Use `none` or `0` to disable the limit.
 - `disableSudo`: Flag to disable the `sudo-exec` tool completely. Useful when sudo access is not needed or not available.
 
 
