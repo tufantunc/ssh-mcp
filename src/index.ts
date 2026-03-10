@@ -37,6 +37,19 @@ const SUDOPASSWORD = argvConfig.sudoPassword;
 const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
 const KEY = argvConfig.key;
 const DEFAULT_TIMEOUT = argvConfig.timeout ? parseInt(argvConfig.timeout) : 60000; // 60 seconds default timeout
+// Max file size for SFTP downloads (default 10MB, configurable via --maxFileSize or "none" to disable)
+const MAX_FILE_SIZE_RAW = argvConfig.maxFileSize;
+const MAX_FILE_SIZE = (() => {
+  if (typeof MAX_FILE_SIZE_RAW === 'string') {
+    const lowered = MAX_FILE_SIZE_RAW.toLowerCase();
+    if (lowered === 'none') return Infinity;
+    const parsed = parseInt(MAX_FILE_SIZE_RAW);
+    if (isNaN(parsed)) return 10 * 1024 * 1024;
+    if (parsed <= 0) return Infinity;
+    return parsed;
+  }
+  return 10 * 1024 * 1024; // 10MB default
+})();
 // Max characters configuration:
 // - Default: 1000 characters
 // - When set via --maxChars:
@@ -482,6 +495,18 @@ if (!DISABLE_SUDO) {
   );
 }
 
+// Validate remote path for SFTP operations
+function validateRemotePath(remotePath: string): string {
+  if (typeof remotePath !== 'string' || !remotePath.trim()) {
+    throw new McpError(ErrorCode.InvalidParams, 'remotePath must be a non-empty string');
+  }
+  const trimmed = remotePath.trim();
+  if (!trimmed.startsWith('/')) {
+    throw new McpError(ErrorCode.InvalidParams, 'remotePath must be an absolute path (start with /)');
+  }
+  return trimmed;
+}
+
 // SFTP file transfer tools
 server.tool(
   "upload-file",
@@ -492,6 +517,7 @@ server.tool(
     encoding: z.enum(["utf8", "base64"]).default("utf8").describe("Content encoding: 'utf8' for text files (default), 'base64' for binary files"),
   },
   async ({ remotePath, content, encoding }) => {
+    const validatedPath = validateRemotePath(remotePath);
     try {
       const manager = await ensureConnectionManager();
       const sftp = await manager.getSftp();
@@ -506,7 +532,7 @@ server.tool(
           reject(new McpError(ErrorCode.InternalError, `Upload timed out after ${DEFAULT_TIMEOUT}ms`));
         }, DEFAULT_TIMEOUT);
 
-        sftp.writeFile(remotePath, buffer, (err?: Error | null) => {
+        sftp.writeFile(validatedPath, buffer, (err?: Error | null) => {
           clearTimeout(timeoutId);
           sftp.end();
           if (err) {
@@ -516,7 +542,7 @@ server.tool(
           resolve({
             content: [{
               type: 'text' as const,
-              text: `Uploaded ${buffer.length} bytes to ${remotePath}`,
+              text: `Uploaded ${buffer.length} bytes to ${validatedPath}`,
             }],
           });
         });
@@ -536,9 +562,30 @@ server.tool(
     encoding: z.enum(["utf8", "base64"]).default("utf8").describe("Output encoding: 'utf8' for text files (default), 'base64' for binary files"),
   },
   async ({ remotePath, encoding }) => {
+    const validatedPath = validateRemotePath(remotePath);
     try {
       const manager = await ensureConnectionManager();
       const sftp = await manager.getSftp();
+
+      // Check file size before reading to prevent OOM
+      if (Number.isFinite(MAX_FILE_SIZE)) {
+        const stats = await new Promise<{ size: number }>((resolve, reject) => {
+          sftp.stat(validatedPath, (err: Error | undefined, stats: any) => {
+            if (err) {
+              reject(new McpError(ErrorCode.InternalError, `SFTP stat error: ${err.message}`));
+              return;
+            }
+            resolve(stats);
+          });
+        });
+        if (stats.size > MAX_FILE_SIZE) {
+          sftp.end();
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            `File size ${stats.size} bytes exceeds maximum allowed ${MAX_FILE_SIZE} bytes. Use --maxFileSize to increase or set to "none" to disable.`
+          );
+        }
+      }
 
       return new Promise((resolve, reject) => {
         const timeoutId = setTimeout(() => {
@@ -546,7 +593,7 @@ server.tool(
           reject(new McpError(ErrorCode.InternalError, `Download timed out after ${DEFAULT_TIMEOUT}ms`));
         }, DEFAULT_TIMEOUT);
 
-        sftp.readFile(remotePath, (err: Error | undefined, data: Buffer) => {
+        sftp.readFile(validatedPath, (err: Error | undefined, data: Buffer) => {
           clearTimeout(timeoutId);
           sftp.end();
           if (err) {
