@@ -23,6 +23,10 @@
 - [Disclaimer](#disclaimer)
 - [Support](#support)
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/tufantunc-ssh-mcp).
+
 ## Quick Start
 
 - [Install](#installation) SSH MCP Server
