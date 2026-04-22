@@ -78,14 +78,16 @@ function validateConfig(config: Record<string, string | null>) {
   if (!config.user) errors.push('Missing required --user');
   if (config.port && isNaN(Number(config.port))) errors.push('Invalid --port');
 
-  const transport = config.transport ?? 'ssh2';
+  const transportExplicit = config.transport;
   const kerberos = config.kerberos !== undefined && config.kerberos !== 'false';
+  // --kerberos alone implies --transport=openssh
+  const transport = transportExplicit ?? (kerberos ? 'openssh' : 'ssh2');
 
   if (transport !== 'ssh2' && transport !== 'openssh') {
     errors.push(`Invalid --transport=${transport} (expected: ssh2 or openssh)`);
   }
-  if (kerberos && transport === 'ssh2') {
-    errors.push('--kerberos requires --transport=openssh (or pass --kerberos alone, which implies openssh)');
+  if (kerberos && transportExplicit === 'ssh2') {
+    errors.push('--kerberos requires --transport=openssh (remove --transport=ssh2 or pass --kerberos alone)');
   }
   if (transport === 'ssh2' && (config.knownHostsFile || config.strictHostKeyChecking)) {
     errors.push('--knownHostsFile and --strictHostKeyChecking require --transport=openssh');
