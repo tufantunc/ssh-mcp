@@ -1,7 +1,7 @@
 {
   "name": "ssh-mcp",
   "license": "MIT",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "description": "MCP server exposing SSH control for Linux and Windows systems via Model Context Protocol.",
   "type": "module",
   "bin": {
@@ -52,7 +52,10 @@
     "automation",
     "remote",
     "cli",
-    "typescript"
+    "typescript",
+    "kerberos",
+    "gssapi",
+    "sso"
   ],
   "author": "tufantunc",
   "engines": {

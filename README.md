@@ -35,6 +35,7 @@
 - MCP-compliant server exposing SSH capabilities
 - Execute shell commands on remote Linux and Windows systems
 - Secure authentication via password or SSH key
+- **Kerberos / GSSAPI single-sign-on** via the OpenSSH subprocess transport — opt-in; see [Kerberos / OpenSSH Transport](#kerberos--openssh-transport)
 - Built with TypeScript and the official MCP SDK
 - **Configurable timeout protection** with automatic process abortion
 - **Graceful timeout handling** - attempts to kill hanging processes before closing connections
@@ -94,6 +95,11 @@ You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use t
 - `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
 - `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
 - `disableSudo`: Flag to disable the `sudo-exec` tool completely. Useful when sudo access is not needed or not available.
+- `transport`: Transport implementation. `ssh2` (default, unchanged) or `openssh` (spawns the system `ssh` binary — needed for Kerberos). See [Kerberos / OpenSSH Transport](#kerberos--openssh-transport).
+- `kerberos`: Flag shorthand for `--transport=openssh` with `GSSAPIAuthentication=yes`. Requires an active Kerberos ticket (TGT) on the client.
+- `gssapiDelegateCredentials`: `yes` or `no` (default `no`). Forwards the client TGT to the remote host for second-hop SSO. Use only against trusted hosts.
+- `knownHostsFile`: Path to a pinned `known_hosts` file (openssh transport only).
+- `strictHostKeyChecking`: `yes`, `no`, or `accept-new` (default `accept-new`; openssh transport only).
 
 
 ```commandline
@@ -178,6 +184,75 @@ After adding the server, restart Claude Code and ask Cascade to execute a comman
 ```
 
 For more information about MCP in Claude Code, see the [official documentation](https://docs.claude.com/en/docs/claude-code/mcp).
+
+## Kerberos / OpenSSH Transport
+
+> Experimental. Backwards-compatible: unchanged when `--transport` and `--kerberos` are both omitted.
+
+The default `ssh2`-based transport does not implement GSSAPI/Kerberos authentication (upstream issue [mscdex/ssh2#333](https://github.com/mscdex/ssh2/issues/333), open since 2015). When an **opt-in** OpenSSH subprocess transport is selected, the server delegates SSH to the operating system's `ssh` binary, which supports:
+
+- Kerberos SSO via GSSAPI (`-o GSSAPIAuthentication=yes`)
+- Public-key auth (`-i <key>`)
+- Password auth (via `SSH_ASKPASS`; not recommended — prefer Kerberos or keys)
+
+### When to use it
+
+- Windows client (domain-joined) → Linux target (AD-joined via SSSD/realmd, `sshd_config: GSSAPIAuthentication yes`): the user's logon TGT is consumed automatically by Win32-OpenSSH via SSPI. **No password. No key file.**
+- Any environment where a Kerberos KDC issues tickets and SSH is preferred over re-entering credentials.
+
+### Prerequisites
+
+1. The `ssh` binary must be on `PATH` (Windows: enabled by default since Windows 10 1803; Linux: `apt install openssh-client`).
+2. The **remote** `sshd_config` must have `GSSAPIAuthentication yes`.
+3. The user must have a valid TGT:
+   - **Windows (AD-joined):** automatic on login. Verify with `klist`.
+   - **Linux (MIT Kerberos):** run `kinit <user@REALM>` or use `k5start` with a keytab for service accounts.
+4. For an AD-integrated Linux target, SSSD/realmd must be joined to the domain.
+
+### Example — Claude Code / any MCP client
+
+```json
+{
+  "mcpServers": {
+    "ssh-mcp": {
+      "command": "npx",
+      "args": [
+        "-y", "ssh-mcp", "--",
+        "--host=ubuntu-dev.example.internal",
+        "--user=aduser@EXAMPLE.INTERNAL",
+        "--kerberos"
+      ]
+    }
+  }
+}
+```
+
+Equivalent expanded form:
+
+```bash
+npx -y ssh-mcp -- \
+  --transport=openssh \
+  --host=ubuntu-dev.example.internal \
+  --user=aduser@EXAMPLE.INTERNAL \
+  --strictHostKeyChecking=accept-new
+```
+
+### CLI flags added by this mode
+
+| Flag | Values | Default | Notes |
+|---|---|---|---|
+| `--transport` | `ssh2` / `openssh` | `ssh2` | Selects implementation |
+| `--kerberos` | flag | off | Implies `--transport=openssh` |
+| `--gssapiDelegateCredentials` | `yes` / `no` | `no` | Forward TGT (trusted hosts only) |
+| `--knownHostsFile` | path | `~/.ssh/known_hosts` | `openssh` only |
+| `--strictHostKeyChecking` | `yes` / `no` / `accept-new` | `accept-new` | `openssh` only |
+
+### Caveats and limitations
+
+- **No connection multiplexing on Windows.** Win32-OpenSSH does not support `ControlMaster` ([issue #1328](https://github.com/PowerShell/Win32-OpenSSH/issues/1328)). Each `exec` call spawns a fresh `ssh.exe` and performs a full Kerberos AP-REQ round trip. Expect ~100–300 ms extra latency per invocation on Windows. Linux/macOS may work around this with user-provided `ssh_config` `ControlMaster` settings — the transport does not configure multiplexing itself.
+- **Password mode via `SSH_ASKPASS`.** When `--password` is combined with `--transport=openssh`, the server writes a short-lived askpass helper to `%TEMP%/ssh-mcp-<pid>/` and exports the password through a per-process environment variable. The password never appears in `argv` but is briefly visible to same-user-session process inspection. Prefer Kerberos or key auth.
+- **`--suPassword` over OpenSSH transport** is implemented via `ssh -tt` with a local expect-style state machine (random-nonce sentinel prompts). Works, but has more moving parts than the ssh2 path. Report issues with stderr output if you hit a regression.
+- **Delegation (`GSSAPIDelegateCredentials=yes`)** is off by default. Enabling it forwards your TGT to the remote host, which can then impersonate you elsewhere — use only against fully trusted infrastructure. See Microsoft's guidance on Kerberos delegation.
 
 ## Testing
 
