@@ -6,22 +6,26 @@ import { Client, ClientChannel } from 'ssh2';
 import { z } from 'zod';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
-import { ISshTransport, TransportConfig, ExecResult } from './transports/types.js';
+import { ISshTransport, TransportConfig, ServerConfig, ExecResult, AuthMode } from './transports/types.js';
 import { SSHConnectionManager, SSHConfig } from './transports/ssh2.js';
 import { createTransport } from './transports/factory.js';
+import { TransportRegistry } from './transports/registry.js';
 import {
   sanitizeCommand as sanitizeCommandImpl,
   sanitizePassword,
   escapeCommandForShell,
 } from './utils/shell.js';
 
-// Re-exports for backward compatibility with existing tests (smoke.ssh.test.ts,
-// persistent-connection.test.ts, etc.).
+// Re-exports for backward compatibility with existing tests.
 export { SSHConnectionManager, escapeCommandForShell };
 export type { SSHConfig };
 
-// Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --disableSudo
-// Kerberos SSO:   node build/index.js --host=host --user=user@REALM --kerberos
+// =============================================================================
+// CLI parsing — two modes:
+//   (A) Multi-host: repeated --ssh=<JSON> (each JSON must include "name")
+//   (B) Legacy single-host: --host --user [--kerberos | --key | --password] ...
+// =============================================================================
+
 function parseArgv() {
   const args = process.argv.slice(2);
   const config: Record<string, string | null> = {};
@@ -31,18 +35,77 @@ function parseArgv() {
       if (equalIndex === -1) {
         config[arg.slice(2)] = null;
       } else {
-        config[arg.slice(2, equalIndex)] = arg.slice(equalIndex + 1);
+        const key = arg.slice(2, equalIndex);
+        // --ssh is handled separately below (repeatable); skip here so we
+        // don't clobber with only the last value.
+        if (key === 'ssh') continue;
+        config[key] = arg.slice(equalIndex + 1);
       }
     }
   }
   return config;
 }
 
+function collectSshJsonArgs(): string[] {
+  return process.argv.slice(2)
+    .filter(a => a.startsWith('--ssh='))
+    .map(a => a.slice('--ssh='.length));
+}
+
+function parseServerConfigJson(raw: string): ServerConfig {
+  let obj: any;
+  try {
+    obj = JSON.parse(raw);
+  } catch (e: any) {
+    throw new Error(`--ssh JSON parse error: ${e?.message || e}\nRaw: ${raw}`);
+  }
+  if (!obj.name) throw new Error('--ssh JSON missing required "name"');
+  if (!obj.host) throw new Error(`--ssh "${obj.name}" missing required "host"`);
+  const user = obj.user ?? obj.username;
+  if (!user) throw new Error(`--ssh "${obj.name}" missing required "user" (or "username")`);
+  const auth: AuthMode | undefined = obj.auth;
+  if (!auth || !['kerberos', 'key', 'password'].includes(auth)) {
+    throw new Error(`--ssh "${obj.name}" requires "auth": "kerberos" | "key" | "password"`);
+  }
+
+  const cfg: ServerConfig = {
+    name: obj.name,
+    host: obj.host,
+    port: obj.port ?? 22,
+    username: user,
+    authMode: auth,
+  };
+
+  switch (auth) {
+    case 'kerberos':
+      cfg.kerberos = true;
+      cfg.transport = 'openssh';
+      if (obj.gssapiDelegateCredentials) cfg.gssapiDelegateCredentials = obj.gssapiDelegateCredentials;
+      break;
+    case 'key':
+      cfg.transport = obj.transport ?? 'ssh2';
+      if (obj.keyPath) cfg.keyPath = obj.keyPath;
+      if (obj.privateKey) cfg.privateKey = obj.privateKey;
+      break;
+    case 'password':
+      cfg.transport = obj.transport ?? 'ssh2';
+      if (obj.password) cfg.password = obj.password;
+      break;
+  }
+
+  if (obj.sudoPassword) cfg.sudoPassword = obj.sudoPassword;
+  if (obj.suPassword) cfg.suPassword = obj.suPassword;
+  if (obj.knownHostsFile) cfg.knownHostsFile = obj.knownHostsFile;
+  if (obj.strictHostKeyChecking) cfg.strictHostKeyChecking = obj.strictHostKeyChecking;
+  return cfg;
+}
+
 const isTestMode = process.env.SSH_MCP_TEST === '1';
 const isCliEnabled = process.env.SSH_MCP_DISABLE_MAIN !== '1';
 const argvConfig = (isCliEnabled || isTestMode) ? parseArgv() : {} as Record<string, string>;
+const sshJsonArgs = (isCliEnabled || isTestMode) ? collectSshJsonArgs() : [];
 
-// Connection config (legacy flags)
+// Legacy (single-host) flags
 const HOST = argvConfig.host;
 const PORT = argvConfig.port ? parseInt(argvConfig.port) : 22;
 const USER = argvConfig.user;
@@ -65,38 +128,48 @@ const MAX_CHARS = (() => {
   return 1000;
 })();
 
-// Transport config (new flags)
 const TRANSPORT_FLAG = argvConfig.transport;
 const KERBEROS_FLAG = argvConfig.kerberos !== undefined && argvConfig.kerberos !== 'false';
 const GSSAPI_DELEGATE = argvConfig.gssapiDelegateCredentials;
 const KNOWN_HOSTS_FILE = argvConfig.knownHostsFile;
 const STRICT_HOST_KEY = argvConfig.strictHostKeyChecking;
 
-function validateConfig(config: Record<string, string | null>) {
+function validateConfig(config: Record<string, string | null>, multiHost: boolean) {
   const errors: string[] = [];
-  if (!config.host) errors.push('Missing required --host');
-  if (!config.user) errors.push('Missing required --user');
-  if (config.port && isNaN(Number(config.port))) errors.push('Invalid --port');
 
-  const transportExplicit = config.transport;
-  const kerberos = config.kerberos !== undefined && config.kerberos !== 'false';
-  // --kerberos alone implies --transport=openssh
-  const transport = transportExplicit ?? (kerberos ? 'openssh' : 'ssh2');
+  if (multiHost) {
+    // Multi-host mode: legacy single-host flags are disallowed to avoid ambiguity
+    const legacyFlags = ['host', 'user', 'password', 'key', 'kerberos', 'transport',
+                         'strictHostKeyChecking', 'knownHostsFile', 'gssapiDelegateCredentials'];
+    const set = legacyFlags.filter(f => config[f] !== undefined);
+    if (set.length > 0) {
+      errors.push(`Multi-host (--ssh) mode cannot be mixed with legacy single-host flags: ${set.map(s => '--' + s).join(', ')}`);
+    }
+  } else {
+    // Legacy single-host validation
+    if (!config.host) errors.push('Missing required --host (or use --ssh=<JSON> for multi-host mode)');
+    if (!config.user) errors.push('Missing required --user');
+    if (config.port && isNaN(Number(config.port))) errors.push('Invalid --port');
 
-  if (transport !== 'ssh2' && transport !== 'openssh') {
-    errors.push(`Invalid --transport=${transport} (expected: ssh2 or openssh)`);
-  }
-  if (kerberos && transportExplicit === 'ssh2') {
-    errors.push('--kerberos requires --transport=openssh (remove --transport=ssh2 or pass --kerberos alone)');
-  }
-  if (transport === 'ssh2' && (config.knownHostsFile || config.strictHostKeyChecking)) {
-    errors.push('--knownHostsFile and --strictHostKeyChecking require --transport=openssh');
-  }
-  if (STRICT_HOST_KEY && !['yes', 'no', 'accept-new'].includes(config.strictHostKeyChecking!)) {
-    errors.push('--strictHostKeyChecking must be one of: yes, no, accept-new');
-  }
-  if (GSSAPI_DELEGATE && !['yes', 'no'].includes(config.gssapiDelegateCredentials!)) {
-    errors.push('--gssapiDelegateCredentials must be yes or no');
+    const transportExplicit = config.transport;
+    const kerberos = config.kerberos !== undefined && config.kerberos !== 'false';
+    const transport = transportExplicit ?? (kerberos ? 'openssh' : 'ssh2');
+
+    if (transport !== 'ssh2' && transport !== 'openssh') {
+      errors.push(`Invalid --transport=${transport} (expected: ssh2 or openssh)`);
+    }
+    if (kerberos && transportExplicit === 'ssh2') {
+      errors.push('--kerberos requires --transport=openssh (remove --transport=ssh2 or pass --kerberos alone)');
+    }
+    if (transport === 'ssh2' && (config.knownHostsFile || config.strictHostKeyChecking)) {
+      errors.push('--knownHostsFile and --strictHostKeyChecking require --transport=openssh');
+    }
+    if (STRICT_HOST_KEY && !['yes', 'no', 'accept-new'].includes(config.strictHostKeyChecking!)) {
+      errors.push('--strictHostKeyChecking must be one of: yes, no, accept-new');
+    }
+    if (GSSAPI_DELEGATE && !['yes', 'no'].includes(config.gssapiDelegateCredentials!)) {
+      errors.push('--gssapiDelegateCredentials must be yes or no');
+    }
   }
 
   if (errors.length > 0) {
@@ -104,75 +177,67 @@ function validateConfig(config: Record<string, string | null>) {
   }
 }
 
+const isMultiHost = sshJsonArgs.length > 0;
+
 if (isCliEnabled) {
-  validateConfig(argvConfig);
+  validateConfig(argvConfig, isMultiHost);
 }
 
 export function sanitizeCommand(command: string): string {
   return sanitizeCommandImpl(command, MAX_CHARS as number);
 }
 
-function resolveTransport(): 'ssh2' | 'openssh' {
-  if (TRANSPORT_FLAG === 'openssh' || KERBEROS_FLAG) return 'openssh';
-  return 'ssh2';
-}
+// =============================================================================
+// Transport registry — lazy init, single entry for legacy single-host mode.
+// =============================================================================
 
-function resolveAuthMode(): 'kerberos' | 'key' | 'password' | undefined {
-  if (KERBEROS_FLAG) return 'kerberos';
-  if (KEY) return 'key';
-  if (PASSWORD) return 'password';
-  return undefined;
-}
+const registry = new TransportRegistry();
 
-async function buildTransportConfig(): Promise<TransportConfig> {
-  if (!HOST || !USER) {
-    throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
+async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
+  // ssh2 transport reads key contents in memory; openssh uses -i path.
+  if (cfg.transport === 'ssh2' && cfg.keyPath && !cfg.privateKey) {
+    const fs = await import('fs/promises');
+    cfg.privateKey = await fs.readFile(cfg.keyPath, 'utf8');
   }
+}
 
-  const cfg: TransportConfig = {
-    host: HOST,
-    port: PORT,
-    username: USER,
-    transport: resolveTransport(),
-    authMode: resolveAuthMode(),
-  };
-
-  if (PASSWORD) cfg.password = PASSWORD;
-  if (KEY) {
-    cfg.keyPath = KEY;
-    // ssh2 transport needs the key contents, not the path
-    if (cfg.transport === 'ssh2') {
-      const fs = await import('fs/promises');
-      cfg.privateKey = await fs.readFile(KEY, 'utf8');
+async function bootstrapRegistry(): Promise<void> {
+  if (isMultiHost) {
+    for (const raw of sshJsonArgs) {
+      const cfg = parseServerConfigJson(raw);
+      await prepareKeyContents(cfg);
+      registry.register(cfg);
     }
+  } else {
+    if (!HOST || !USER) return; // Test mode with no CLI — tools will error if called
+    const authMode: AuthMode | undefined = KERBEROS_FLAG ? 'kerberos'
+      : KEY ? 'key'
+      : PASSWORD ? 'password'
+      : undefined;
+    const resolvedTransport: 'ssh2' | 'openssh' =
+      (TRANSPORT_FLAG === 'openssh' || KERBEROS_FLAG) ? 'openssh' : 'ssh2';
+
+    const cfg: ServerConfig = {
+      name: 'default',
+      host: HOST,
+      port: PORT,
+      username: USER,
+      transport: resolvedTransport,
+      authMode,
+    };
+    if (PASSWORD) cfg.password = PASSWORD;
+    if (KEY) cfg.keyPath = KEY;
+    if (SUPASSWORD !== null && SUPASSWORD !== undefined) cfg.suPassword = sanitizePassword(SUPASSWORD);
+    if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) cfg.sudoPassword = sanitizePassword(SUDOPASSWORD);
+    if (KERBEROS_FLAG) cfg.kerberos = true;
+    if (GSSAPI_DELEGATE) cfg.gssapiDelegateCredentials = GSSAPI_DELEGATE as 'yes' | 'no';
+    if (KNOWN_HOSTS_FILE) cfg.knownHostsFile = KNOWN_HOSTS_FILE;
+    if (STRICT_HOST_KEY) cfg.strictHostKeyChecking = STRICT_HOST_KEY as 'yes' | 'no' | 'accept-new';
+    await prepareKeyContents(cfg);
+    registry.register(cfg);
   }
-  if (SUPASSWORD !== null && SUPASSWORD !== undefined) cfg.suPassword = sanitizePassword(SUPASSWORD);
-  if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) cfg.sudoPassword = sanitizePassword(SUDOPASSWORD);
-  if (KERBEROS_FLAG) cfg.kerberos = true;
-  if (GSSAPI_DELEGATE) cfg.gssapiDelegateCredentials = GSSAPI_DELEGATE as 'yes' | 'no';
-  if (KNOWN_HOSTS_FILE) cfg.knownHostsFile = KNOWN_HOSTS_FILE;
-  if (STRICT_HOST_KEY) cfg.strictHostKeyChecking = STRICT_HOST_KEY as 'yes' | 'no' | 'accept-new';
-
-  return cfg;
 }
 
-let activeTransport: ISshTransport | null = null;
-
-async function getOrCreateTransport(): Promise<ISshTransport> {
-  if (activeTransport) return activeTransport;
-  const cfg = await buildTransportConfig();
-  activeTransport = createTransport(cfg);
-  await activeTransport.init();
-  return activeTransport;
-}
-
-/**
- * Map ExecResult to MCP tool response. Preserves upstream semantics:
- *   - stderr present → reject with McpError (wraps as "Error (code N):\n<stderr>")
- *   - auth/host_key/connect/transport categories → reject with descriptive error
- *   - timeout → reject with timeout error
- *   - success → return {content: [{type:'text', text: stdout}]}
- */
 function resultToMcpContent(result: ExecResult) {
   if (result.category === 'timeout') {
     throw new McpError(ErrorCode.InternalError, result.stderr || `Command execution timed out after ${DEFAULT_TIMEOUT}ms`);
@@ -202,24 +267,25 @@ function resultToMcpContent(result: ExecResult) {
 
 const server = new McpServer({
   name: 'SSH MCP Server',
-  version: '2.0.0',
-  capabilities: {
-    resources: {},
-    tools: {},
-  },
+  version: '2.1.0',
+  capabilities: { resources: {}, tools: {} },
 });
+
+const connectionNameSchema = z.string().optional()
+  .describe('Name of the SSH connection (from --ssh config). Optional when only one server is configured.');
 
 server.tool(
   'exec',
-  'Execute a shell command on the remote SSH server and return the output.',
+  'Execute a shell command on a remote SSH server and return the output.',
   {
     command: z.string().describe('Shell command to execute on the remote SSH server'),
     description: z.string().optional().describe('Optional description of what this command will do'),
+    connectionName: connectionNameSchema,
   },
-  async ({ command, description }) => {
+  async ({ command, description, connectionName }) => {
     const sanitizedCommand = sanitizeCommand(command);
     try {
-      const t = await getOrCreateTransport();
+      const t = await registry.get(connectionName);
       const commandWithDescription = description
         ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
         : sanitizedCommand;
@@ -235,25 +301,28 @@ server.tool(
 if (!DISABLE_SUDO) {
   server.tool(
     'sudo-exec',
-    'Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.',
+    'Execute a shell command on a remote SSH server using sudo. Uses the configured sudoPassword if provided; otherwise assumes passwordless sudo.',
     {
       command: z.string().describe('Shell command to execute with sudo on the remote SSH server'),
       description: z.string().optional().describe('Optional description of what this command will do'),
+      connectionName: connectionNameSchema,
     },
-    async ({ command, description }) => {
+    async ({ command, description, connectionName }) => {
       const sanitizedCommand = sanitizeCommand(command);
       try {
-        const t = await getOrCreateTransport();
+        const t = await registry.get(connectionName);
         const commandWithDescription = description
           ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
           : sanitizedCommand;
-        const sudoPwd = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined)
+        // Legacy single-host mode may still pass --sudoPassword on CLI; in
+        // multi-host mode each ServerConfig carries its own sudoPassword.
+        const legacySudo = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined && !isMultiHost)
           ? sanitizePassword(SUDOPASSWORD)
           : undefined;
         const result = await t.execElevated(commandWithDescription, {
           timeoutMs: DEFAULT_TIMEOUT,
           mode: 'sudo',
-          password: sudoPwd,
+          password: legacySudo,
         });
         return resultToMcpContent(result);
       } catch (err: any) {
@@ -264,11 +333,27 @@ if (!DISABLE_SUDO) {
   );
 }
 
-// ===========================================================================
-// Legacy exports: preserved so existing tests (which import SSHConnectionManager,
-// execSshCommandWithConnection, execSshCommand) keep working without modification.
-// These call through to Ssh2Transport-equivalent logic or directly to ssh2.
-// ===========================================================================
+server.tool(
+  'list-servers',
+  'List all configured SSH server connections, their auth mode, and current connection status.',
+  {},
+  async () => {
+    const rows = registry.list();
+    if (rows.length === 0) {
+      return { content: [{ type: 'text', text: 'No SSH servers are configured.' }] };
+    }
+    const text = rows.map(r => {
+      const tag = r.isDefault ? ' (default)' : '';
+      const state = r.connected ? 'connected' : 'not yet connected';
+      return `- ${r.name}${tag}: ${r.username}@${r.host}:${r.port} [transport=${r.transport}, auth=${r.authMode}, ${state}]`;
+    }).join('\n');
+    return { content: [{ type: 'text', text }] };
+  }
+);
+
+// =============================================================================
+// Legacy exports preserved for existing test files.
+// =============================================================================
 
 export async function execSshCommandWithConnection(
   manager: SSHConnectionManager,
@@ -420,45 +505,43 @@ export async function execSshCommand(
   });
 }
 
-// ===========================================================================
+// =============================================================================
 // Server lifecycle
-// ===========================================================================
+// =============================================================================
 
 async function main() {
+  await bootstrapRegistry();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('SSH MCP Server running on stdio');
+  const mode = isMultiHost ? `multi-host (${registry.names().length} servers: ${registry.names().join(', ')})` : 'single-host';
+  console.error(`SSH MCP Server running on stdio — ${mode}`);
 
   const cleanup = () => {
     console.error('Shutting down SSH MCP Server...');
-    if (activeTransport) {
-      void activeTransport.close();
-      activeTransport = null;
-    }
+    void registry.closeAll();
     process.exit(0);
   };
 
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
-  process.on('exit', () => {
-    if (activeTransport) {
-      void activeTransport.close();
-    }
-  });
+  process.on('exit', () => { void registry.closeAll(); });
 }
 
 if (isTestMode) {
-  const transport = new StdioServerTransport();
-  server.connect(transport).catch(error => {
-    console.error('Fatal error connecting server:', error);
-    process.exit(1);
-  });
+  (async () => {
+    try {
+      await bootstrapRegistry();
+    } catch { /* tests may not configure hosts */ }
+    const transport = new StdioServerTransport();
+    server.connect(transport).catch(error => {
+      console.error('Fatal error connecting server:', error);
+      process.exit(1);
+    });
+  })();
 } else if (isCliEnabled) {
   main().catch((error) => {
     console.error('Fatal error in main():', error);
-    if (activeTransport) {
-      void activeTransport.close();
-    }
+    void registry.closeAll();
     process.exit(1);
   });
 }

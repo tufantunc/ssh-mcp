@@ -94,3 +94,13 @@ export interface TransportConfig {
   knownHostsFile?: string;
   strictHostKeyChecking?: 'yes' | 'no' | 'accept-new';
 }
+
+/**
+ * Named server configuration for multi-host mode. Emits TransportConfig
+ * at registry time, plus a required `name` that the MCP tools reference
+ * via `connectionName`.
+ */
+export interface ServerConfig extends TransportConfig {
+  /** Unique identifier referenced by MCP tools' connectionName argument. */
+  name: string;
+}
