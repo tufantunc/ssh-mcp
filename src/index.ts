@@ -238,7 +238,7 @@ async function bootstrapRegistry(): Promise<void> {
   }
 }
 
-function resultToMcpContent(result: ExecResult) {
+export function resultToMcpContent(result: ExecResult) {
   if (result.category === 'timeout') {
     throw new McpError(ErrorCode.InternalError, result.stderr || `Command execution timed out after ${DEFAULT_TIMEOUT}ms`);
   }
@@ -254,13 +254,23 @@ function resultToMcpContent(result: ExecResult) {
   if (result.category === 'transport') {
     throw new McpError(ErrorCode.InternalError, result.stderr || 'SSH transport error');
   }
-  if (result.stderr) {
-    throw new McpError(ErrorCode.InternalError, `Error (code ${result.exitCode}):\n${result.stderr}`);
+  // Only treat stderr as a hard failure when the command actually failed (non-zero exit).
+  // Many tools (sudo with -S, curl, git, apt) write progress/info to stderr on success.
+  const exitCode = result.exitCode ?? 0;
+  if (exitCode !== 0 && result.stderr) {
+    throw new McpError(ErrorCode.InternalError, `Error (code ${exitCode}):\n${result.stderr}`);
   }
+  // Success path: include stderr alongside stdout when it has substantive content.
+  const trimmedStderr = result.stderr.trim();
+  const text = trimmedStderr
+    ? (result.stdout
+        ? `${result.stdout.replace(/\n+$/, '')}\n[stderr]\n${result.stderr}`
+        : result.stderr)
+    : result.stdout;
   return {
     content: [{
       type: 'text' as const,
-      text: result.stdout,
+      text,
     }],
   };
 }

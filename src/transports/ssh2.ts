@@ -390,11 +390,12 @@ export class Ssh2Transport implements ISshTransport {
           if (!isResolved) {
             isResolved = true;
             clearTimeout(timeoutId);
+            const exitCode = code ?? 0;
             resolve({
               stdout,
               stderr,
-              exitCode: code ?? 0,
-              category: stderr ? 'remote_exit' : undefined,
+              exitCode,
+              category: exitCode !== 0 ? 'remote_exit' : undefined,
             });
           }
         });
