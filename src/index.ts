@@ -6,7 +6,7 @@ import { Client, ClientChannel } from 'ssh2';
 import { z } from 'zod';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
-// Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --disableSudo
+// Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --workdir=/var/www --disableSudo
 function parseArgv() {
   const args = process.argv.slice(2);
   const config: Record<string, string | null> = {};
@@ -37,6 +37,7 @@ const SUDOPASSWORD = argvConfig.sudoPassword;
 const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
 const KEY = argvConfig.key;
 const DEFAULT_TIMEOUT = argvConfig.timeout ? parseInt(argvConfig.timeout) : 60000; // 60 seconds default timeout
+const WORKDIR = argvConfig.workdir; // Optional default working directory
 // Max characters configuration:
 // - Default: 1000 characters
 // - When set via --maxChars:
@@ -105,6 +106,12 @@ export function escapeCommandForShell(command: string): string {
   return command.replace(/'/g, "'\"'\"'");
 }
 
+// Prepend working directory change if configured
+export function prependWorkdir(command: string, workdir?: string): string {
+  if (!workdir) return command;
+  return `cd '${workdir.replace(/'/g, "'\\''")}' && ${command}`;
+}
+
 // SSH Connection Manager to maintain persistent connection
 export interface SSHConfig {
   host: string;
@@ -114,6 +121,7 @@ export interface SSHConfig {
   privateKey?: string;
   suPassword?: string;
   sudoPassword?: string;  // Password for sudo commands specifically (if different from suPassword)
+  workdir?: string;  // Default working directory for command execution
 }
 
 export class SSHConnectionManager {
@@ -380,6 +388,11 @@ server.tool(
         if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
           sshConfig.suPassword = sanitizePassword(SUPASSWORD);
         }
+
+        if (WORKDIR) {
+          sshConfig.workdir = WORKDIR;
+        }
+
         connectionManager = new SSHConnectionManager(sshConfig);
       }
 
@@ -407,7 +420,10 @@ server.tool(
         ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
         : sanitizedCommand;
 
-      const result = await execSshCommandWithConnection(connectionManager, commandWithDescription);
+      // Prepend working directory if configured
+      const commandWithWorkdir = prependWorkdir(commandWithDescription, (connectionManager as any).sshConfig?.workdir);
+
+      const result = await execSshCommandWithConnection(connectionManager, commandWithWorkdir);
       return result;
     } catch (err: any) {
       // Wrap unexpected errors
@@ -452,6 +468,9 @@ if (!DISABLE_SUDO) {
           if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
             sshConfig.sudoPassword = sanitizePassword(SUDOPASSWORD);
           }
+          if (WORKDIR) {
+            sshConfig.workdir = WORKDIR;
+          }
           connectionManager = new SSHConnectionManager(sshConfig);
         }
 
@@ -477,14 +496,17 @@ if (!DISABLE_SUDO) {
           ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
           : sanitizedCommand;
 
+        // Prepend working directory if configured
+        const commandWithWorkdir = prependWorkdir(commandWithDescription, (connectionManager as any).sshConfig?.workdir);
+
         if (!sudoPassword) {
           // No password provided, use -n to fail if sudo requires a password
-          wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
+          wrapped = `sudo -n sh -c '${commandWithWorkdir.replace(/'/g, "'\\''")}'`;
         } else {
           // Password provided — pipe it into sudo using printf. This avoids complex
           // PTY/stdin handling on the SSH channel and is simpler and more reliable.
           const pwdEscaped = sudoPassword.replace(/'/g, "'\\''");
-          wrapped = `printf '%s\\n' '${pwdEscaped}' | sudo -p "" -S sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
+          wrapped = `printf '%s\\n' '${pwdEscaped}' | sudo -p "" -S sh -c '${commandWithWorkdir.replace(/'/g, "'\\''")}'`;
         }
 
         return await execSshCommandWithConnection(connectionManager, wrapped);

@@ -93,6 +93,7 @@ You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use t
 - `suPassword`: Password for su elevation (when you need a persistent root shell)
 - `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
 - `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
+- `workdir`: Default working directory for all command executions (all commands will be prefixed with `cd <workdir> &&`)
 - `disableSudo`: Flag to disable the `sudo-exec` tool completely. Useful when sudo access is not needed or not available.
 
 
@@ -111,7 +112,8 @@ You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use t
                 "--password=pass",
                 "--key=path/to/key",
                 "--timeout=30000",
-                "--maxChars=none"
+                "--maxChars=none",
+                "--workdir=/var/www"
             ]
         }
     }
@@ -140,15 +142,21 @@ claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.1
 claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=example.com --user=root --key=/path/to/private/key
 ```
 
-**With Custom Timeout and No Character Limit:**
+**With Custom Timeout, No Character Limit, and Default Working Directory:**
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --timeout=120000 --maxChars=none
+claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --timeout=120000 --maxChars=none --workdir=/var/www
 ```
 
 **With Sudo and Su Support:**
 ```bash
 claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --sudoPassword=sudo_pass --suPassword=root_pass
 ```
+
+**With Default Working Directory:**
+```bash
+claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --key=/path/to/key --workdir=/var/www/myapp
+```
+All commands executed will automatically run from `/var/www/myapp` (e.g., `cd /var/www/myapp && command`).
 
 **Installation Scopes:**
 
