@@ -41,21 +41,27 @@
 
 ### Tools
 
-- `exec`: Execute a shell command on the remote server
+- `exec`: Execute a shell command on the remote server without elevation. This tool is always available and always uses a normal SSH exec channel, even when elevated passwords are configured.
   - **Parameters:**
     - `command` (required): Shell command to execute on the remote SSH server
-    - `description` (optional): Optional description of what this command will do (appended as a comment)
+    - `description` (optional): Optional client-side description of what this command will do. This is not sent to the remote shell.
   - **Timeout Configuration:**
+
+- `su-exec`: Execute a shell command through a persistent `su` shell
+  - **Parameters:**
+    - `command` (required): Shell command to execute as root using `su`
+    - `description` (optional): Optional client-side description of what this command will do. This is not sent to the remote shell.
+  - **Notes:**
+    - Only available when `--suPassword` is configured
 
 - `sudo-exec`: Execute a shell command with sudo elevation
   - **Parameters:**
     - `command` (required): Shell command to execute as root using sudo
-    - `description` (optional): Optional description of what this command will do (appended as a comment)
+    - `description` (optional): Optional client-side description of what this command will do. This is not sent to the remote shell.
   - **Notes:**
-    - Requires `--sudoPassword` to be set for password-protected sudo
+    - Only available when `--sudoPassword` is configured
     - Can be disabled by passing the `--disableSudo` flag at startup if sudo access is not needed or not available
-    - For persistent root access, consider using `--suPassword` instead which establishes a root shell
-    - Tool will not be available at all if server is started with `--disableSudo`
+    - For persistent root access, use `su-exec` with `--suPassword`
   - **Timeout Configuration:**
     - Timeout is configured via command line argument `--timeout` (in milliseconds)
     - Default timeout: 60000ms (1 minute)
@@ -89,8 +95,8 @@ You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use t
 - `port`: SSH port (default: 22)
 - `password`: SSH password (or use `key` for key-based auth)
 - `key`: Path to private SSH key
-- `sudoPassword`: Password for sudo elevation (when executing commands with sudo)
-- `suPassword`: Password for su elevation (when you need a persistent root shell)
+- `sudoPassword`: Password for sudo elevation; enables the `sudo-exec` tool
+- `suPassword`: Password for su elevation; enables the `su-exec` tool
 - `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
 - `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
 - `disableSudo`: Flag to disable the `sudo-exec` tool completely. Useful when sudo access is not needed or not available.
@@ -201,4 +207,4 @@ This project follows a [Code of Conduct](./CODE_OF_CONDUCT.md) to ensure a welco
 
 ## Support
 
-If you find SSH MCP Server helpful, consider starring the repository or contributing! Pull requests and feedback are welcome. 
+If you find SSH MCP Server helpful, consider starring the repository or contributing! Pull requests and feedback are welcome.

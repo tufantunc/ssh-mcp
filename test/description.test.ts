@@ -75,22 +75,48 @@ describe('command description functionality', () => {
     expect(res.result?.content?.[0]?.text).toContain('test without description');
   });
 
-  it('should execute commands with simple description', async () => {
-    const res = await runMcpCommand('echo "test with description"', 'This is a test command');
+  it('should accept a description without sending it to the remote shell', async () => {
+    const res = await runMcpCommand('printf "command-only\\n"', 'SHOULD_NOT_APPEAR # description marker');
     expect(res.error).toBeUndefined();
-    expect(res.result?.content?.[0]?.text).toContain('test with description');
+    const output = res.result?.content?.[0]?.text || '';
+    expect(output).toContain('command-only');
+    expect(output).not.toContain('SHOULD_NOT_APPEAR');
+    expect(output).not.toContain('description marker');
   });
 
   it('should handle descriptions with special characters', async () => {
-    const res = await runMcpCommand('ls -la', 'List all files # detailed format');
+    const res = await runMcpCommand('printf "special-description-ok\\n"', 'List all files # detailed format');
     expect(res.error).toBeUndefined();
-    // The command should execute successfully even with special characters in description
+    const output = res.result?.content?.[0]?.text || '';
+    expect(output).toContain('special-description-ok');
+    expect(output).not.toContain('List all files');
   });
 
-  it('should work with sudo-exec tool and description', async () => {
-    const res = await runMcpCommand('whoami', 'Check current user identity', ['--sudoPassword=secret'], 'sudo-exec');
+  it('should not send descriptions through sudo-exec', async () => {
+    const res = await runMcpCommand('printf "sudo-command-only\\n"', 'SHOULD_NOT_APPEAR_SUDO', ['--sudoPassword=secret'], 'sudo-exec');
     expect(res.error).toBeUndefined();
-    // Should execute successfully with sudo
+    const output = res.result?.content?.[0]?.text || '';
+    expect(output).toContain('sudo-command-only');
+    expect(output).not.toContain('SHOULD_NOT_APPEAR_SUDO');
+  });
+
+  it('should not send descriptions through su-exec', async () => {
+    const res = await runMcpCommand('printf "su-command-only\\n"', 'SHOULD_NOT_APPEAR_SU', ['--suPassword=secret'], 'su-exec');
+    expect(res.error).toBeUndefined();
+    const output = res.result?.content?.[0]?.text || '';
+    expect(output).toContain('su-command-only');
+    expect(output).not.toContain('SHOULD_NOT_APPEAR_SU');
+  });
+
+  it('should allow su-exec commands that contain shell comments', async () => {
+    const command = 'printf "before\\n"\n# shell comment inside the command\nprintf "after\\n"';
+    const res = await runMcpCommand(command, 'client-side description with # marker', ['--suPassword=secret'], 'su-exec');
+    expect(res.error).toBeUndefined();
+    const output = res.result?.content?.[0]?.text || '';
+    expect(output).toContain('before');
+    expect(output).toContain('after');
+    expect(output).not.toContain('shell comment inside');
+    expect(output).not.toContain('client-side description');
   });
 
   it('should handle empty description parameter', async () => {

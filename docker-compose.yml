@@ -1,6 +1,6 @@
 services:
   ssh:
-    image: lscr.io/linuxserver/openssh-server:latest
+    image: ghcr.io/linuxserver/openssh-server:latest
     environment:
       - USER_NAME=test
       - PASSWORD_ACCESS=true

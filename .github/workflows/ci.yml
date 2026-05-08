@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       sshd:
-        image: lscr.io/linuxserver/openssh-server:latest
+        image: ghcr.io/linuxserver/openssh-server:latest
         env:
           USER_NAME: test
           PASSWORD_ACCESS: "true"

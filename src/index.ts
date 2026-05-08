@@ -99,6 +99,15 @@ function sanitizePassword(password: string | undefined): string | undefined {
   return password;
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function shellBase64Decode(value: string): string {
+  const encoded = Buffer.from(value, 'utf8').toString('base64');
+  return `printf '%s' ${shellQuote(encoded)} | base64 -d`;
+}
+
 // Escape command for use in shell contexts (like pkill)
 export function escapeCommandForShell(command: string): string {
   // Replace single quotes with escaped single quotes
@@ -153,20 +162,6 @@ export class SSHConnectionManager {
       this.conn.on('ready', async () => {
         clearTimeout(timeoutId);
         this.isConnecting = false;
-
-        // In test mode, don't wait for su elevation during connection setup, as it
-        // may cause JSON-RPC server initialization to hang. Instead, elevation will
-        // be triggered on-demand when a command is executed.
-        // In production, elevation during connection is desirable for robustness.
-        if (this.sshConfig.suPassword && !process.env.SSH_MCP_TEST) {
-          try {
-            await this.ensureElevated();
-          } catch (err) {
-            // Do not reject the connection; just log the error. Subsequent commands
-            // will either use the su shell if available or fall back to normal execution.
-          }
-        }
-
         resolve();
       });
 
@@ -228,7 +223,7 @@ export class SSHConnectionManager {
     }
   }
 
-  private async ensureElevated(): Promise<void> {
+  async ensureElevated(): Promise<void> {
     if (this.isElevated && this.suShell) return;
     if (!this.sshConfig.suPassword) return;
 
@@ -253,6 +248,7 @@ export class SSHConnectionManager {
 
         let buffer = '';
         let passwordSent = false;
+        const readyMarker = `__SSH_MCP_SU_READY_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
         const cleanup = () => {
           try { stream.removeAllListeners('data'); } catch (e) { /* ignore */ }
         };
@@ -264,22 +260,17 @@ export class SSHConnectionManager {
           // If we haven't sent the password yet, look for the password prompt
           if (!passwordSent && /password[: ]/i.test(buffer)) {
             passwordSent = true;
-            stream.write(this.sshConfig.suPassword + '\n');
-            // Don't return; keep looking for root prompt
+            stream.write(`${this.sshConfig.suPassword}\nstty -echo\n${shellBase64Decode(readyMarker)}; printf '\\n'\n`);
           }
 
-          // After password is sent, look for any root indicator
-          // Look for '#' which indicates root prompt (may be followed by spaces, escape codes, etc)
-          if (passwordSent) {
-            if (/#/.test(buffer)) {
-              clearTimeout(timeoutId);
-              cleanup();
-              this.suShell = stream;
-              this.isElevated = true;
-              this.suPromise = null;
-              resolve();
-              return;
-            }
+          if (passwordSent && buffer.replace(/\r/g, '').includes(readyMarker)) {
+            clearTimeout(timeoutId);
+            cleanup();
+            this.suShell = stream;
+            this.isElevated = true;
+            this.suPromise = null;
+            resolve();
+            return;
           }
 
           // Detect authentication failure messages
@@ -323,6 +314,13 @@ export class SSHConnectionManager {
     return this.conn;
   }
 
+  getSuShell(): ClientChannel {
+    if (!this.suShell || !this.isElevated) {
+      throw new McpError(ErrorCode.InternalError, 'su shell not established');
+    }
+    return this.suShell;
+  }
+
   close(): void {
     if (this.conn) {
       if (this.suShell) {
@@ -338,6 +336,44 @@ export class SSHConnectionManager {
 
 let connectionManager: SSHConnectionManager | null = null;
 
+async function createSshConfig(): Promise<SSHConfig> {
+  if (!HOST || !USER) {
+    throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
+  }
+
+  const sshConfig: SSHConfig = {
+    host: HOST,
+    port: PORT,
+    username: USER,
+  };
+
+  if (PASSWORD) {
+    sshConfig.password = PASSWORD;
+  } else if (KEY) {
+    const fs = await import('fs/promises');
+    sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+  }
+
+  const suPassword = sanitizePassword(SUPASSWORD ?? undefined);
+  if (suPassword) {
+    sshConfig.suPassword = suPassword;
+  }
+
+  const sudoPassword = sanitizePassword(SUDOPASSWORD ?? undefined);
+  if (sudoPassword) {
+    sshConfig.sudoPassword = sudoPassword;
+  }
+
+  return sshConfig;
+}
+
+async function getConnectionManager(): Promise<SSHConnectionManager> {
+  if (!connectionManager) {
+    connectionManager = new SSHConnectionManager(await createSshConfig());
+  }
+  return connectionManager;
+}
+
 const server = new McpServer({
   name: 'SSH MCP Server',
   version: '1.5.0',
@@ -352,141 +388,65 @@ server.tool(
   "Execute a shell command on the remote SSH server and return the output.",
   {
     command: z.string().describe("Shell command to execute on the remote SSH server"),
-    description: z.string().optional().describe("Optional description of what this command will do"),
+    description: z.string().optional().describe("Optional client-side description; not sent to the remote shell"),
   },
-  async ({ command, description }) => {
-    // Sanitize command input
+  async ({ command }) => {
     const sanitizedCommand = sanitizeCommand(command);
 
     try {
-      // Initialize connection manager if not already done
-      if (!connectionManager) {
-        if (!HOST || !USER) {
-          throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
-        }
-        const sshConfig: SSHConfig = {
-          host: HOST,
-          port: PORT,
-          username: USER,
-        };
-
-        if (PASSWORD) {
-          sshConfig.password = PASSWORD;
-        } else if (KEY) {
-          const fs = await import('fs/promises');
-          sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
-        }
-
-        if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-          sshConfig.suPassword = sanitizePassword(SUPASSWORD);
-        }
-        connectionManager = new SSHConnectionManager(sshConfig);
-      }
-
-      // Ensure connection is active (reconnect if needed)
+      const connectionManager = await getConnectionManager();
       await connectionManager.ensureConnected();
-
-      // If a suPassword was provided, explicitly wait for elevation before executing.
-      // This is critical: ensureElevated is idempotent and will return immediately if
-      // already elevated, so this ensures we have a su shell before we try to use it.
-      if ((connectionManager as any).getSuPassword && (connectionManager as any).getSuPassword()) {
-        try {
-          const elevationPromise = (connectionManager as any).ensureElevated();
-          // Add a short timeout for elevation to complete
-          await Promise.race([
-            elevationPromise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Elevation timeout')), 5000))
-          ]);
-        } catch (err) {
-          // Log but don't fail; fall back to non-elevated execution if elevation times out
-        }
-      }
-
-      // Append description as comment if provided
-      const commandWithDescription = description
-        ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
-        : sanitizedCommand;
-
-      const result = await execSshCommandWithConnection(connectionManager, commandWithDescription);
-      return result;
+      return await execSshCommandWithConnection(connectionManager, sanitizedCommand);
     } catch (err: any) {
-      // Wrap unexpected errors
       if (err instanceof McpError) throw err;
       throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
     }
   }
 );
 
-// Expose sudo-exec tool unless explicitly disabled
-if (!DISABLE_SUDO) {
+if (sanitizePassword(SUPASSWORD ?? undefined)) {
   server.tool(
-    "sudo-exec",
-    "Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.",
+    "su-exec",
+    "Execute a shell command on the remote SSH server through an elevated su shell.",
     {
-      command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
-      description: z.string().optional().describe("Optional description of what this command will do"),
+      command: z.string().describe("Shell command to execute with su on the remote SSH server"),
+      description: z.string().optional().describe("Optional client-side description; not sent to the remote shell"),
     },
-    async ({ command, description }) => {
+    async ({ command }) => {
       const sanitizedCommand = sanitizeCommand(command);
 
       try {
-        if (!connectionManager) {
-          if (!HOST || !USER) {
-            throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
-          }
-
-          const sshConfig: SSHConfig = {
-            host: HOST,
-            port: PORT || 22,
-            username: USER,
-          };
-          if (PASSWORD) {
-            sshConfig.password = PASSWORD;
-          } else if (KEY) {
-            const fs = await import('fs/promises');
-            sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
-          }
-          if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-            sshConfig.suPassword = sanitizePassword(SUPASSWORD);
-          }
-          if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-            sshConfig.sudoPassword = sanitizePassword(SUDOPASSWORD);
-          }
-          connectionManager = new SSHConnectionManager(sshConfig);
-        }
-
+        const connectionManager = await getConnectionManager();
         await connectionManager.ensureConnected();
+        return await execSshCommandWithSuConnection(connectionManager, sanitizedCommand);
+      } catch (err: any) {
+        if (err instanceof McpError) throw err;
+        throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
+      }
+    }
+  );
+}
 
-        // If suPassword or sudoPassword were provided on this call but the
-        // existing connection manager was created earlier without them,
-        // update the manager's values so the subsequent sudo-exec call uses
-        // the latest passwords.
-        if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-          await connectionManager.setSuPassword(sanitizePassword(SUPASSWORD));
-        }
-        if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-          // update sudoPassword on the manager instance
-          (connectionManager as any).sshConfig = { ...(connectionManager as any).sshConfig, sudoPassword: sanitizePassword(SUDOPASSWORD) };
-        }
+if (!DISABLE_SUDO && sanitizePassword(SUDOPASSWORD ?? undefined)) {
+  server.tool(
+    "sudo-exec",
+    "Execute a shell command on the remote SSH server using sudo and the configured sudo password.",
+    {
+      command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
+      description: z.string().optional().describe("Optional client-side description; not sent to the remote shell"),
+    },
+    async ({ command }) => {
+      const sanitizedCommand = sanitizeCommand(command);
 
-        let wrapped: string;
+      try {
+        const connectionManager = await getConnectionManager();
+        await connectionManager.ensureConnected();
         const sudoPassword = connectionManager.getSudoPassword();
-
-        // Append description as comment if provided
-        const commandWithDescription = description
-          ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
-          : sanitizedCommand;
-
         if (!sudoPassword) {
-          // No password provided, use -n to fail if sudo requires a password
-          wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
-        } else {
-          // Password provided — pipe it into sudo using printf. This avoids complex
-          // PTY/stdin handling on the SSH channel and is simpler and more reliable.
-          const pwdEscaped = sudoPassword.replace(/'/g, "'\\''");
-          wrapped = `printf '%s\\n' '${pwdEscaped}' | sudo -p "" -S sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
+          throw new McpError(ErrorCode.InvalidParams, 'sudo-exec requires --sudoPassword');
         }
 
+        const wrapped = `printf '%s\\n' ${shellQuote(sudoPassword)} | sudo -p "" -S sh -c ${shellQuote(sanitizedCommand)}`;
         return await execSshCommandWithConnection(connectionManager, wrapped);
       } catch (err: any) {
         if (err instanceof McpError) throw err;
@@ -503,7 +463,6 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
     let isResolved = false;
 
     const conn = manager.getConnection();
-    const shell = (manager as any).suShell;  // Use su shell if available
 
     // Set up timeout
     timeoutId = setTimeout(() => {
@@ -513,44 +472,8 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
       }
     }, DEFAULT_TIMEOUT);
 
-    // If we have an active su shell, use it directly (commands run as root in session)
-    if (shell) {
-      let buffer = '';
-
-      const dataHandler = (data: Buffer) => {
-        const text = data.toString();
-        buffer += text;
-
-        // Wait for root prompt (#) to know command is complete
-        // Match # which indicates root prompt (may be followed by spaces, escape codes, etc)
-        if (/#/.test(buffer)) {
-          if (!isResolved) {
-            isResolved = true;
-            clearTimeout(timeoutId);
-
-            // Extract output: remove the command echo and final prompt
-            const lines = buffer.split('\n');
-            // First line is often the echoed command; last line is the prompt
-            let output = lines.slice(1, -1).join('\n');
-
-            resolve({
-              content: [{
-                type: 'text',
-                text: output + (output ? '\n' : ''),
-              }],
-            });
-          }
-          shell.removeListener('data', dataHandler);
-        }
-      };
-
-      shell.on('data', dataHandler);
-      // Send command immediately; shell is ready after elevation
-      shell.write(command + '\n');
-      return;
-    }
-
-    // No persistent su shell; use normal exec with optional password piping
+    // Always use a normal SSH exec channel here. Elevated execution is exposed
+    // through explicit su-exec and sudo-exec tools.
     conn.exec(command, (err: Error | undefined, stream: ClientChannel) => {
       if (err) {
         if (!isResolved) {
@@ -599,6 +522,57 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
         }
       });
     });
+  });
+}
+
+export async function execSshCommandWithSuConnection(manager: SSHConnectionManager, command: string): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
+  await manager.ensureElevated();
+
+  return new Promise((resolve, reject) => {
+    const shell = manager.getSuShell();
+    const marker = `SSH_MCP_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const startMarker = `__${marker}_START__`;
+    const endMarker = `__${marker}_END__`;
+    let buffer = '';
+    let isResolved = false;
+
+    const dataHandler = (data: Buffer) => {
+      buffer += data.toString();
+      const normalized = buffer.replace(/\r/g, '');
+      const lines = normalized.split('\n');
+      const startLineIndex = lines.findIndex(line => line.endsWith(startMarker));
+      if (startLineIndex === -1) return;
+
+      const endLineIndex = lines.findIndex((line, index) => index > startLineIndex && line.includes(`${endMarker}:`));
+      if (endLineIndex === -1) return;
+
+      let output = lines.slice(startLineIndex + 1, endLineIndex).join('\n');
+      finish(output ? `${output}\n` : '');
+    };
+
+    const timeoutId = setTimeout(() => {
+      if (!isResolved) {
+        isResolved = true;
+        shell.removeListener('data', dataHandler);
+        reject(new McpError(ErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
+      }
+    }, DEFAULT_TIMEOUT);
+
+    const finish = (output: string) => {
+      if (isResolved) return;
+      isResolved = true;
+      clearTimeout(timeoutId);
+      shell.removeListener('data', dataHandler);
+      resolve({
+        content: [{
+          type: 'text',
+          text: output,
+        }],
+      });
+    };
+
+    shell.on('data', dataHandler);
+    shell.write(`${shellBase64Decode(startMarker)}; printf '\\n'; sh -c ${shellQuote(command)}; status=$?; printf '\\n'; ${shellBase64Decode(endMarker)}; printf ':%s\\n' "$status"\n`);
   });
 }
 
