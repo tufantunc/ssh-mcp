@@ -118,6 +118,35 @@ You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use t
 }
 ```
 
+Optional local guardrail with [Armorer Guard](https://github.com/ArmorerLabs/Armorer-Guard):
+
+```commandline
+{
+    "mcpServers": {
+        "ssh-mcp": {
+            "command": "armorer-guard",
+            "args": [
+                "mcp-proxy",
+                "--",
+                "npx",
+                "ssh-mcp",
+                "-y",
+                "--",
+                "--host=1.2.3.4",
+                "--port=22",
+                "--user=root",
+                "--password=pass",
+                "--key=path/to/key",
+                "--timeout=30000",
+                "--maxChars=none"
+            ]
+        }
+    }
+}
+```
+
+This wraps the same SSH MCP server with a local proxy that inspects remote-command tool arguments for prompt injection, credential leakage, exfiltration risk, and dangerous actions before forwarding safe calls.
+
 ### Claude Code
 
 You can add this MCP server to Claude Code using the `claude mcp add` command. This is the recommended method for Claude Code.
