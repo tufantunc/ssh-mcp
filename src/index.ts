@@ -36,6 +36,13 @@ const SUPASSWORD = argvConfig.suPassword;
 const SUDOPASSWORD = argvConfig.sudoPassword;
 const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
 const KEY = argvConfig.key;
+const PASSPHRASE = argvConfig.passphrase || process.env.SSH_PASSPHRASE;
+// iter-2026-05-22: when SSH_AUTH_SOCK is set we forward authentication to
+// the running ssh-agent instead of decrypting a private key locally with a
+// passphrase env. This keeps SSH_PASSPHRASE out of /proc/<pid>/environ once
+// the operator's agent is loaded with `ssh-add`. Falls back to passphrase
+// auth when the agent socket is not present.
+const SSH_AGENT_SOCK = process.env.SSH_AUTH_SOCK;
 const DEFAULT_TIMEOUT = argvConfig.timeout ? parseInt(argvConfig.timeout) : 60000; // 60 seconds default timeout
 // Max characters configuration:
 // - Default: 1000 characters
@@ -112,8 +119,10 @@ export interface SSHConfig {
   username: string;
   password?: string;
   privateKey?: string;
+  passphrase?: string;
+  agent?: string;          // path to the SSH_AUTH_SOCK; when set, ssh2 forwards auth to ssh-agent
   suPassword?: string;
-  sudoPassword?: string;  // Password for sudo commands specifically (if different from suPassword)
+  sudoPassword?: string;   // Password for sudo commands specifically (if different from suPassword)
 }
 
 export class SSHConnectionManager {
@@ -372,9 +381,25 @@ server.tool(
 
         if (PASSWORD) {
           sshConfig.password = PASSWORD;
+        } else if (SSH_AGENT_SOCK) {
+          // Agent-based auth: ssh2 talks to the running ssh-agent over the
+          // socket and the decrypted private key never enters this process.
+          // If the operator additionally provides --key, we still pass the
+          // key path as the public key hint so the agent picks the right
+          // identity when multiple are loaded.
+          sshConfig.agent = SSH_AGENT_SOCK;
+          if (KEY) {
+            const fs = await import('fs/promises');
+            try {
+              sshConfig.privateKey = await fs.readFile(KEY + '.pub', 'utf8');
+            } catch {
+              // Best effort — agent will iterate identities if no hint is given.
+            }
+          }
         } else if (KEY) {
           const fs = await import('fs/promises');
           sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+          if (PASSPHRASE) sshConfig.passphrase = PASSPHRASE;
         }
 
         if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
@@ -442,9 +467,20 @@ if (!DISABLE_SUDO) {
           };
           if (PASSWORD) {
             sshConfig.password = PASSWORD;
+          } else if (SSH_AGENT_SOCK) {
+            sshConfig.agent = SSH_AGENT_SOCK;
+            if (KEY) {
+              const fs = await import('fs/promises');
+              try {
+                sshConfig.privateKey = await fs.readFile(KEY + '.pub', 'utf8');
+              } catch {
+                // Best effort — agent will iterate identities if no hint is given.
+              }
+            }
           } else if (KEY) {
             const fs = await import('fs/promises');
             sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
+            if (PASSPHRASE) sshConfig.passphrase = PASSPHRASE;
           }
           if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
             sshConfig.suPassword = sanitizePassword(SUPASSWORD);
