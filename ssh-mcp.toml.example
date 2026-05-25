@@ -1,0 +1,47 @@
+# ssh-mcp first-class TOML config example.
+#
+# Equivalent CLI multi-host shape:
+#   --ssh='{"name":"prod-bastion","host":"bastion.example.com","port":22,"user":"aduser@EXAMPLE.INTERNAL","auth":"kerberos"}'
+#   --ssh='{"name":"lab","host":"lab.internal","user":"root","auth":"key","keyPath":"~/.ssh/lab_ed25519","sudoPassword":"..."}'
+
+[server]
+audit_dir = "~/.ssh-mcp"
+audit_max_bytes = 10000
+
+[webui]
+enabled = false
+host = "127.0.0.1"
+port = 8088
+# auth_token = "env:SSHMCP_WEBUI_TOKEN"  # required when host is non-loopback
+
+[approval]
+mode = "manual"
+fail_closed = true
+
+[approval.llm]
+endpoint = "https://api.openai.com/v1/chat/completions"
+api_key = "env:OPENAI_API_KEY"
+model = "gpt-4o-mini"
+timeout_ms = 8000
+
+[[sources]]
+id = "prod-bastion"
+description = "Production jump host. Allowed: read-only diagnostics."
+host = "bastion.example.com"
+port = 22
+user = "aduser@EXAMPLE.INTERNAL"
+auth = "kerberos"
+default = true
+
+[[sources]]
+id = "lab"
+description = "Lab box for experiments."
+host = "lab.internal"
+user = "root"
+auth = "key"
+key_path = "~/.ssh/lab_ed25519"
+sudo_password = "env:LAB_SUDO_PASS"
+
+# Optional per-source approval override for the immediately preceding source.
+[sources.approval]
+mode = "yolo"

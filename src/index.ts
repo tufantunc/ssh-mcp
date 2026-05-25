@@ -10,6 +10,8 @@ import { ISshTransport, TransportConfig, ServerConfig, ExecResult, AuthMode } fr
 import { SSHConnectionManager, SSHConfig } from './transports/ssh2.js';
 import { createTransport } from './transports/factory.js';
 import { TransportRegistry } from './transports/registry.js';
+import { resolveConfig } from './config/resolver.js';
+import type { ResolvedConfig } from './config/types.js';
 import {
   sanitizeCommand as sanitizeCommandImpl,
   sanitizePassword,
@@ -57,7 +59,7 @@ function parseServerConfigJson(raw: string): ServerConfig {
   try {
     obj = JSON.parse(raw);
   } catch (e: any) {
-    throw new Error(`--ssh JSON parse error: ${e?.message || e}\nRaw: ${raw}`);
+    throw new Error(`--ssh JSON parse error: ${e?.message || e}`);
   }
   if (!obj.name) throw new Error('--ssh JSON missing required "name"');
   if (!obj.host) throw new Error(`--ssh "${obj.name}" missing required "host"`);
@@ -133,6 +135,17 @@ const KERBEROS_FLAG = argvConfig.kerberos !== undefined && argvConfig.kerberos !
 const GSSAPI_DELEGATE = argvConfig.gssapiDelegateCredentials;
 const KNOWN_HOSTS_FILE = argvConfig.knownHostsFile;
 const STRICT_HOST_KEY = argvConfig.strictHostKeyChecking;
+const CONFIG_PATH = argvConfig.config;
+
+const legacyFlagNames = [
+  'host', 'user', 'password', 'key', 'kerberos', 'transport',
+  'strictHostKeyChecking', 'knownHostsFile', 'gssapiDelegateCredentials',
+  'suPassword', 'sudoPassword', 'disableSudo', 'port',
+] as const;
+
+function hasLegacyCliFlags(config: Record<string, string | null>): boolean {
+  return legacyFlagNames.some(f => config[f] !== undefined);
+}
 
 function validateConfig(config: Record<string, string | null>, multiHost: boolean) {
   const errors: string[] = [];
@@ -178,9 +191,65 @@ function validateConfig(config: Record<string, string | null>, multiHost: boolea
 }
 
 const isMultiHost = sshJsonArgs.length > 0;
+const hasLegacyCli = hasLegacyCliFlags(argvConfig);
+
+function buildLegacyServerConfig(): ServerConfig | undefined {
+  if (!HOST || !USER) return undefined;
+
+  const authMode: AuthMode | undefined = KERBEROS_FLAG ? 'kerberos'
+    : KEY ? 'key'
+    : PASSWORD ? 'password'
+    : undefined;
+  const resolvedTransport: 'ssh2' | 'openssh' =
+    (TRANSPORT_FLAG === 'openssh' || KERBEROS_FLAG) ? 'openssh' : 'ssh2';
+
+  const cfg: ServerConfig = {
+    name: 'default',
+    host: HOST,
+    port: PORT,
+    username: USER,
+    transport: resolvedTransport,
+    authMode,
+  };
+  if (PASSWORD) cfg.password = PASSWORD;
+  if (KEY) cfg.keyPath = KEY;
+  if (SUPASSWORD !== null && SUPASSWORD !== undefined) cfg.suPassword = sanitizePassword(SUPASSWORD);
+  if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) cfg.sudoPassword = sanitizePassword(SUDOPASSWORD);
+  if (KERBEROS_FLAG) cfg.kerberos = true;
+  if (GSSAPI_DELEGATE) cfg.gssapiDelegateCredentials = GSSAPI_DELEGATE as 'yes' | 'no';
+  if (KNOWN_HOSTS_FILE) cfg.knownHostsFile = KNOWN_HOSTS_FILE;
+  if (STRICT_HOST_KEY) cfg.strictHostKeyChecking = STRICT_HOST_KEY as 'yes' | 'no' | 'accept-new';
+  return cfg;
+}
+
+const cliSourceConfigs: ServerConfig[] = (() => {
+  if (isMultiHost) {
+    return sshJsonArgs.map(raw => parseServerConfigJson(raw));
+  }
+  if (hasLegacyCli) {
+    const legacy = buildLegacyServerConfig();
+    return legacy ? [legacy] : [];
+  }
+  return [];
+})();
+
+const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
+  ? resolveConfig({
+      cliSources: cliSourceConfigs,
+      cliConfigPath: typeof CONFIG_PATH === 'string' ? CONFIG_PATH : undefined,
+    })
+  : { sources: [], perSourceApproval: {} };
 
 if (isCliEnabled) {
-  validateConfig(argvConfig, isMultiHost);
+  if (isMultiHost) {
+    validateConfig(argvConfig, true);
+  } else if (hasLegacyCli) {
+    validateConfig(argvConfig, false);
+  } else if (resolvedConfig.sources.length === 0) {
+    throw new Error(
+      'Configuration error:\nMissing required --host (or use --ssh=<JSON>, --config=<path>, SSH_MCP_CONFIG, or a default ssh-mcp config.toml)',
+    );
+  }
 }
 
 export function sanitizeCommand(command: string): string {
@@ -202,39 +271,12 @@ async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
 }
 
 async function bootstrapRegistry(): Promise<void> {
-  if (isMultiHost) {
-    for (const raw of sshJsonArgs) {
-      const cfg = parseServerConfigJson(raw);
-      await prepareKeyContents(cfg);
-      registry.register(cfg);
-    }
-  } else {
-    if (!HOST || !USER) return; // Test mode with no CLI — tools will error if called
-    const authMode: AuthMode | undefined = KERBEROS_FLAG ? 'kerberos'
-      : KEY ? 'key'
-      : PASSWORD ? 'password'
-      : undefined;
-    const resolvedTransport: 'ssh2' | 'openssh' =
-      (TRANSPORT_FLAG === 'openssh' || KERBEROS_FLAG) ? 'openssh' : 'ssh2';
-
-    const cfg: ServerConfig = {
-      name: 'default',
-      host: HOST,
-      port: PORT,
-      username: USER,
-      transport: resolvedTransport,
-      authMode,
-    };
-    if (PASSWORD) cfg.password = PASSWORD;
-    if (KEY) cfg.keyPath = KEY;
-    if (SUPASSWORD !== null && SUPASSWORD !== undefined) cfg.suPassword = sanitizePassword(SUPASSWORD);
-    if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) cfg.sudoPassword = sanitizePassword(SUDOPASSWORD);
-    if (KERBEROS_FLAG) cfg.kerberos = true;
-    if (GSSAPI_DELEGATE) cfg.gssapiDelegateCredentials = GSSAPI_DELEGATE as 'yes' | 'no';
-    if (KNOWN_HOSTS_FILE) cfg.knownHostsFile = KNOWN_HOSTS_FILE;
-    if (STRICT_HOST_KEY) cfg.strictHostKeyChecking = STRICT_HOST_KEY as 'yes' | 'no' | 'accept-new';
+  for (const cfg of resolvedConfig.sources) {
     await prepareKeyContents(cfg);
     registry.register(cfg);
+  }
+  if (resolvedConfig.defaultName) {
+    registry.setDefault(resolvedConfig.defaultName);
   }
 }
 
