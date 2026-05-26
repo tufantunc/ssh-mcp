@@ -15,6 +15,8 @@ import {
   sanitizePassword,
   escapeCommandForShell,
 } from './utils/shell.js';
+import { AuditStore, resolveAuditDir, yoloApproval } from './audit/store.js';
+import { AuditTool } from './audit/types.js';
 
 // Re-exports for backward compatibility with existing tests.
 export { SSHConnectionManager, escapeCommandForShell };
@@ -115,6 +117,17 @@ const SUDOPASSWORD = argvConfig.sudoPassword;
 const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
 const KEY = argvConfig.key;
 const DEFAULT_TIMEOUT = argvConfig.timeout ? parseInt(argvConfig.timeout) : 60000;
+// TODO(toml-config): read [server].audit_dir / [server].audit_max_bytes from
+// the resolved TOML config once the toml-config card lands. For now, keep the
+// documented default and support env overrides for tests/operators.
+const AUDIT_DIR = resolveAuditDir(process.env.SSH_MCP_AUDIT_DIR);
+const AUDIT_MAX_BYTES = (() => {
+  const raw = process.env.SSH_MCP_AUDIT_MAX_BYTES;
+  if (!raw) return 10_000;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 10_000;
+})();
+const auditStore = new AuditStore({ auditDir: AUDIT_DIR, auditMaxBytes: AUDIT_MAX_BYTES });
 const MAX_CHARS_RAW = argvConfig.maxChars;
 const MAX_CHARS = (() => {
   if (typeof MAX_CHARS_RAW === 'string') {
@@ -238,6 +251,85 @@ async function bootstrapRegistry(): Promise<void> {
   }
 }
 
+function resolvedProfileName(connectionName?: string): string {
+  return connectionName ?? registry.getDefaultName() ?? 'default';
+}
+
+function auditExecution(params: {
+  tool: AuditTool;
+  profile: string;
+  command: string;
+  description?: string;
+  startedAt: number;
+  result?: ExecResult;
+  error?: unknown;
+  store?: AuditStore;
+}): void {
+  const now = new Date();
+  const durationMs = Math.max(0, Date.now() - params.startedAt);
+  const store = params.store ?? auditStore;
+  try {
+    store.append({
+      profile: params.profile,
+      tool: params.tool,
+      command: params.command,
+      description: params.description,
+      approval: yoloApproval(now),
+      exec: params.result
+        ? {
+            stdout: params.result.stdout ?? '',
+            stderr: params.result.stderr ?? '',
+            exitCode: params.result.exitCode ?? null,
+            durationMs,
+          }
+        : {
+            stdout: '',
+            stderr: params.error instanceof Error ? params.error.message : String(params.error ?? 'unknown error'),
+            exitCode: null,
+            durationMs,
+          },
+      now,
+    });
+  } catch (auditErr: any) {
+    // Audit failure must be visible but should not hide the real SSH result.
+    console.error(`audit log append failed: ${auditErr?.message || auditErr}`);
+  }
+}
+
+export async function executeAuditedTransportCommand(input: {
+  transport: Pick<ISshTransport, 'exec' | 'execElevated'>;
+  tool: AuditTool;
+  command: string;
+  description?: string;
+  profile?: string;
+  timeoutMs?: number;
+  sudoPassword?: string;
+  store: AuditStore;
+}) {
+  const sanitizedCommand = sanitizeCommand(input.command);
+  const commandWithDescription = input.description
+    ? `${sanitizedCommand} # ${input.description.replace(/#/g, '\\#')}`
+    : sanitizedCommand;
+  const startedAt = Date.now();
+  const result = input.tool === 'sudo-exec'
+    ? await input.transport.execElevated(commandWithDescription, {
+        timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT,
+        mode: 'sudo',
+        password: input.sudoPassword,
+      })
+    : await input.transport.exec(commandWithDescription, { timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT });
+  auditExecution({
+    tool: input.tool,
+    profile: input.profile ?? 'stub',
+    command: commandWithDescription,
+    description: input.description,
+    startedAt,
+    result,
+    store: input.store,
+  });
+  return resultToMcpContent(result);
+}
+
 export function resultToMcpContent(result: ExecResult) {
   if (result.category === 'timeout') {
     throw new McpError(ErrorCode.InternalError, result.stderr || `Command execution timed out after ${DEFAULT_TIMEOUT}ms`);
@@ -294,14 +386,27 @@ server.tool(
   },
   async ({ command, description, connectionName }) => {
     const sanitizedCommand = sanitizeCommand(command);
+    const profile = resolvedProfileName(connectionName);
+    const startedAt = Date.now();
+    let audited = false;
     try {
       const t = await registry.get(connectionName);
       const commandWithDescription = description
         ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
         : sanitizedCommand;
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
+      auditExecution({
+        tool: 'exec',
+        profile,
+        command: commandWithDescription,
+        description,
+        startedAt,
+        result,
+      });
+      audited = true;
       return resultToMcpContent(result);
     } catch (err: any) {
+      if (!audited) auditExecution({ tool: 'exec', profile, command: sanitizedCommand, description, startedAt, error: err });
       if (err instanceof McpError) throw err;
       throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
     }
@@ -319,6 +424,9 @@ if (!DISABLE_SUDO) {
     },
     async ({ command, description, connectionName }) => {
       const sanitizedCommand = sanitizeCommand(command);
+      const profile = resolvedProfileName(connectionName);
+      const startedAt = Date.now();
+      let audited = false;
       try {
         const t = await registry.get(connectionName);
         const commandWithDescription = description
@@ -334,8 +442,18 @@ if (!DISABLE_SUDO) {
           mode: 'sudo',
           password: legacySudo,
         });
+        auditExecution({
+          tool: 'sudo-exec',
+          profile,
+          command: commandWithDescription,
+          description,
+          startedAt,
+          result,
+        });
+        audited = true;
         return resultToMcpContent(result);
       } catch (err: any) {
+        if (!audited) auditExecution({ tool: 'sudo-exec', profile, command: sanitizedCommand, description, startedAt, error: err });
         if (err instanceof McpError) throw err;
         throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
       }
