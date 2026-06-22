@@ -46,12 +46,14 @@
   - **Parameters:**
     - `command` (required): Shell command to execute on the remote SSH server
     - `description` (optional): Optional description of what this command will do (appended as a comment)
+    - `connectionName` (required when multiple connections are configured; optional for a single source): the source id/name to target. Omitting it with more than one connection registered fails fast and lists the valid names; it does not silently route to a default.
   - **Timeout Configuration:**
 
 - `sudo-exec`: Execute a shell command with sudo elevation
   - **Parameters:**
     - `command` (required): Shell command to execute as root using sudo
     - `description` (optional): Optional description of what this command will do (appended as a comment)
+    - `connectionName` (required when multiple connections are configured; optional for a single source): the source id/name to target. Same fail-fast rule as `exec`.
   - **Notes:**
     - Requires `--sudoPassword` to be set for password-protected sudo
     - Can be disabled by passing the `--disableSudo` flag at startup if sudo access is not needed or not available

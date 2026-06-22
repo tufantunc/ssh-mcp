@@ -139,3 +139,6 @@ dist
 build/
 manual-kerberos-test.mjs
 manual-multi-host-test.mjs
+
+# Local scratch TMPDIR (used to dodge full /tmp tmpfs during tests)
+.tmp/
