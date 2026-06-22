@@ -1,35 +1,44 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { TransportRegistry } from '../registry.js';
-import type { ServerConfig } from '../types.js';
+import type { ServerConfig, ISshTransport } from '../types.js';
 
 /**
- * Characterization (golden master) test for TransportRegistry name resolution.
+ * TransportRegistry name-resolution contract.
  *
- * Purpose (D-0 / card t_997d701a): pin the CURRENT behavior of the registry
- * BEFORE the source-count-aware guard (D-A1) changes it, so the behavioral
- * delta becomes visible and reviewable in the diff. This file asserts the
- * CURRENT (pre-fix) contract — including the R1 landmine we intend to remove:
+ * History: D-0 (card t_997d701a) seeded this file as a *characterization* golden
+ * master that PINNED the pre-fix R1 landmine — multi-source + omitted
+ * connectionName silently resolving to the first-registered source (live
+ * default = EIP2-DB production PostgreSQL). D-A1 (card t_7e1261d2) lands the
+ * source-count-aware fail-fast guard, so the landmine case is now REPLACED by a
+ * positive throw assertion. That replacement is the whole point of a golden
+ * master: the behavior change shows up as a change to the test (P1-plan §7
+ * Branch A Step 1).
  *
- *   multi-source + omitted connectionName  ->  silently resolves to the
- *   first-registered source (registry.ts resolveName fallback, `return
- *   this.defaultName`). In the live deployment that first source is the
- *   EIP2-DB production PostgreSQL host.
+ * Post-fix contract pinned here:
+ *   - single source  + omitted name  -> resolves (omission UX preserved)
+ *   - multi  source  + omitted name  -> THROWS, listing valid names (R1 fixed)
+ *   - multi  source  + blank/ws name -> THROWS too (no '' slipping past as omit)
+ *   - any    source  + unknown name  -> THROWS (R2 regression guard, unchanged)
+ *   - opt-out (D-A2 seam)            -> multi + omitted reverts to default
  *
- * These tests MUST pass on the clean base (fab9d80). When D-A1 lands the
- * fail-fast guard, the "CURRENT LANDMINE" case below is expected to be
- * REPLACED by a positive throw assertion (see P1-plan §7 Branch A). That
- * replacement should be a deliberate, reviewed edit to THIS file — that is the
- * whole point of a golden master: the change of behavior shows up as a change
- * to the test.
- *
- * Network safety (card redline — never touch a real host): we never trigger an
- * outbound connection. get() only reaches createTransport()/init() when a name
- * resolves to a real default; we therefore exercise get() ONLY on its throw
- * paths (unknown name / empty registry), which reject inside resolveName()
- * before any transport is created. The silent-fallback landmine itself is
- * pinned via the public surface (getDefaultName / names / list), not by
- * opening a socket.
+ * Network safety (card redline — never touch a real host): we stub the transport
+ * factory so get() NEVER opens a socket. This lets the single-source success
+ * case exercise the FULL get() path (resolveName -> createTransport -> init)
+ * with an in-memory fake, while the throw cases reject inside resolveName before
+ * the factory is ever reached.
  */
+vi.mock('../factory.js', () => ({
+  createTransport: vi.fn(
+    (): ISshTransport => ({
+      name: 'openssh',
+      init: async () => {},
+      exec: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+      execElevated: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+      close: async () => {},
+    }),
+  ),
+}));
+
 function cfg(name: string): ServerConfig {
   return {
     name,
@@ -42,40 +51,136 @@ function cfg(name: string): ServerConfig {
   };
 }
 
-describe('TransportRegistry resolveName — CURRENT behavior (characterization / golden master)', () => {
-  it('single source: that source becomes the default (intended omission UX — to be PRESERVED)', () => {
+describe('TransportRegistry resolveName — source-count-aware fail-fast (D-A1 guard)', () => {
+  it('single source + omitted name: resolves through the full get() path (omission UX preserved)', async () => {
+    const r = new TransportRegistry();
+    r.register(cfg('only'));
+
+    // No throw: omission is intentional, safe convenience UX for true
+    // single-server deployments. Reaches the (stubbed) transport, no socket.
+    const t = await r.get(undefined);
+    expect(t).toBeTruthy();
+    expect(t.name).toBe('openssh');
+    expect(r.getDefaultName()).toBe('only');
+  });
+
+  it('multi source + omitted name: FAIL-FAST throw listing valid names (R1 landmine removed — was silent fallback to first)', async () => {
+    const r = new TransportRegistry();
+    r.register(cfg('first')); // first-registered-wins -> would have been silent default
+    r.register(cfg('second'));
+    r.register(cfg('third'));
+
+    await expect(r.get(undefined)).rejects.toThrow(
+      /connectionName is required when multiple SSH connections are configured/,
+    );
+
+    // Error must be actionable: list the available names so the caller can fix it.
+    const err = await r.get(undefined).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('first');
+    expect((err as Error).message).toContain('second');
+    expect((err as Error).message).toContain('third');
+  });
+
+  it('multi source + blank/whitespace name: FAIL-FAST equivalently (empty/ws must not slip through as omitted/default)', async () => {
+    const r = new TransportRegistry();
+    r.register(cfg('alpha'));
+    r.register(cfg('beta'));
+
+    await expect(r.get('')).rejects.toThrow(
+      /connectionName is required when multiple SSH connections are configured/,
+    );
+    await expect(r.get('   ')).rejects.toThrow(
+      /connectionName is required when multiple SSH connections are configured/,
+    );
+    await expect(r.get('\t')).rejects.toThrow(
+      /connectionName is required when multiple SSH connections are configured/,
+    );
+  });
+
+  it('multi source + valid name: resolves and routes to that source', async () => {
+    const r = new TransportRegistry();
+    r.register(cfg('first'));
+    r.register(cfg('second'));
+
+    const t = await r.get('second');
+    expect(t).toBeTruthy();
+    expect(t.name).toBe('openssh');
+  });
+
+  it('unknown non-empty name remains fail-fast (R2 regression guard — must NOT regress, and must NOT be masked by the new required-name message)', async () => {
+    const r = new TransportRegistry();
+    r.register(cfg('a'));
+    r.register(cfg('b'));
+
+    // resolveName throws on unknown names BEFORE any transport is created.
+    await expect(r.get('nonesuch')).rejects.toThrow(/Unknown connection name/);
+    const err = await r.get('nonesuch').catch((e: Error) => e);
+    expect((err as Error).message).not.toMatch(/connectionName is required/);
+  });
+
+  it('empty registry + omitted name: fail-fast "No servers registered" (no socket opened)', async () => {
+    const r = new TransportRegistry();
+    expect(r.hasAny()).toBe(false);
+
+    await expect(r.get(undefined)).rejects.toThrow(/No servers registered/);
+  });
+});
+
+describe('TransportRegistry — D-A2 opt-out seam (default must be safe: require-when-multi)', () => {
+  it('default (no opt-out): multi source + omitted name throws (safe default)', async () => {
+    const r = new TransportRegistry();
+    r.register(cfg('first'));
+    r.register(cfg('second'));
+
+    await expect(r.get(undefined)).rejects.toThrow(/connectionName is required/);
+  });
+
+  it('opt-out enabled: multi source + omitted name reverts to silent default (escape hatch D-A2 will wire from config)', async () => {
+    const r = new TransportRegistry({ requireConnectionWhenMulti: false });
+    r.register(cfg('first'));
+    r.register(cfg('second'));
+
+    // Opt-out explicitly restores legacy convenience: omission -> first default.
+    const t = await r.get(undefined);
+    expect(t).toBeTruthy();
+    expect(r.getDefaultName()).toBe('first');
+  });
+
+  it('setter form (D-A2 may inject post-construction) toggles the same behavior', async () => {
+    const r = new TransportRegistry();
+    r.register(cfg('first'));
+    r.register(cfg('second'));
+
+    r.setRequireConnectionWhenMulti(false);
+    await expect(r.get(undefined)).resolves.toBeTruthy();
+
+    r.setRequireConnectionWhenMulti(true);
+    await expect(r.get(undefined)).rejects.toThrow(/connectionName is required/);
+  });
+});
+
+describe('TransportRegistry — preserved invariants (must NOT regress)', () => {
+  it('single source: that source becomes the default', () => {
     const r = new TransportRegistry();
     r.register(cfg('only'));
 
     expect(r.getDefaultName()).toBe('only');
     expect(r.names()).toEqual(['only']);
-    expect(r.list().find(s => s.name === 'only')?.isDefault).toBe(true);
+    expect(r.list().find((s) => s.name === 'only')?.isDefault).toBe(true);
   });
 
-  it('CURRENT LANDMINE (to be CHANGED by D-A1): multi source defaults to the first-registered source, so an omitted connectionName would silently resolve here', () => {
-    const r = new TransportRegistry();
-    r.register(cfg('first'));   // first-registered-wins -> becomes default
-    r.register(cfg('second'));
-    r.register(cfg('third'));
-
-    // Today resolveName(undefined) returns this default with NO source-count
-    // check. This is the R1 silent fallback the D-A1 source guard will remove:
-    // post-fix, omission with >1 source must fail-fast instead of landing here.
-    expect(r.getDefaultName()).toBe('first');
-    expect(r.names()).toEqual(['first', 'second', 'third']);
-  });
-
-  it('guard surface: names().length reflects the REAL source count (the signal the future guard branches on — NOT the CLI isMultiHost flag)', () => {
+  it('names().length reflects the REAL source count (the signal the guard branches on — NOT the CLI isMultiHost flag)', () => {
     const r = new TransportRegistry();
     expect(r.hasAny()).toBe(false);
     expect(r.names().length).toBe(0);
 
     r.register(cfg('a'));
-    expect(r.names().length).toBe(1); // size === 1 -> guard will PRESERVE omission UX
+    expect(r.names().length).toBe(1); // size === 1 -> guard PRESERVES omission UX
     expect(r.hasAny()).toBe(true);
 
     r.register(cfg('b'));
-    expect(r.names().length).toBe(2); // size > 1  -> guard will REQUIRE connectionName
+    expect(r.names().length).toBe(2); // size > 1  -> guard REQUIRES connectionName
   });
 
   it('setDefault overrides first-registered-wins (default need not be source[0])', () => {
@@ -87,26 +192,9 @@ describe('TransportRegistry resolveName — CURRENT behavior (characterization /
     expect(r.getDefaultName()).toBe('second');
   });
 
-  it('register rejects duplicate names (existing invariant — must NOT regress)', () => {
+  it('register rejects duplicate names', () => {
     const r = new TransportRegistry();
     r.register(cfg('dup'));
     expect(() => r.register(cfg('dup'))).toThrow(/Duplicate server name/);
-  });
-
-  it('unknown connectionName already fail-fast today (R2 — regression guard, must NOT regress)', async () => {
-    const r = new TransportRegistry();
-    r.register(cfg('a'));
-    r.register(cfg('b'));
-
-    // resolveName throws on unknown names BEFORE any transport is created, so
-    // this never opens a socket.
-    await expect(r.get('nonesuch')).rejects.toThrow(/Unknown connection name/);
-  });
-
-  it('empty registry: omitted name fail-fast with "No servers registered" (no socket opened)', async () => {
-    const r = new TransportRegistry();
-    expect(r.hasAny()).toBe(false);
-
-    await expect(r.get(undefined)).rejects.toThrow(/No servers registered/);
   });
 });
