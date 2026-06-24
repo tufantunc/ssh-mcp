@@ -30,6 +30,7 @@ const fakeRegistry: RegistrySnapshot = {
   list: () => [
     {
       name: 'prod',
+      description: 'production bastion',
       host: 'h',
       port: 22,
       username: 'u',
