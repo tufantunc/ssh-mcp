@@ -103,4 +103,10 @@ export interface TransportConfig {
 export interface ServerConfig extends TransportConfig {
   /** Unique identifier referenced by MCP tools' connectionName argument. */
   name: string;
+  /** Human-readable host/profile policy description supplied to approval engines. */
+  description?: string;
+  /** Per-source approval override. */
+  approval?: {
+    mode?: import('../approval/types.js').ApprovalMode;
+  };
 }

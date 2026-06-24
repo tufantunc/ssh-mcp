@@ -418,7 +418,7 @@ server.tool(
     try {
       const t = await registry.get(connectionName);
       approvalDecision = await gateApproval({
-        profile: { id: connectionName ?? 'default' },
+        profile: registry.profile(connectionName),
         tool: 'exec',
         command: sanitizedCommand,
         description,
@@ -472,7 +472,7 @@ if (!DISABLE_SUDO) {
       try {
         const t = await registry.get(connectionName);
         approvalDecision = await gateApproval({
-          profile: { id: connectionName ?? 'default' },
+          profile: registry.profile(connectionName),
           tool: 'sudo-exec',
           command: sanitizedCommand,
           description,

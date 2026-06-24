@@ -1,4 +1,5 @@
 import { ISshTransport, ServerConfig } from './types.js';
+import type { ResolvedSource } from '../approval/types.js';
 import { createTransport } from './factory.js';
 
 /**
@@ -50,6 +51,17 @@ export class TransportRegistry {
 
   getDefaultName(): string | null {
     return this.defaultName;
+  }
+
+  /** Resolved approval profile for a given connection name. */
+  profile(name?: string): ResolvedSource {
+    const resolved = this.resolveName(name);
+    const cfg = this.configs.get(resolved)!;
+    return {
+      id: resolved,
+      description: cfg.description,
+      approval: cfg.approval,
+    };
   }
 
   /** Resolve name argument → canonical name. Falls back to default. */
