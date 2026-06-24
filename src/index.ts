@@ -11,12 +11,21 @@ import { SSHConnectionManager, SSHConfig } from './transports/ssh2.js';
 import { createTransport } from './transports/factory.js';
 import { TransportRegistry } from './transports/registry.js';
 import { resolveConfig } from './config/resolver.js';
-import type { ResolvedConfig } from './config/types.js';
+import type { ResolvedConfig, ApprovalMode } from './config/types.js';
 import {
   sanitizeCommand as sanitizeCommandImpl,
   sanitizePassword,
   escapeCommandForShell,
 } from './utils/shell.js';
+import {
+  gateApproval,
+  setApprovalEngine,
+  buildApprovalEngineFromConfig,
+  type ApprovalDecision,
+  type BuildEngineFromConfigInput,
+  type ApprovalDispatcher,
+} from './approval/index.js';
+import { loadAuditSink, type AuditSink } from './approval/audit-seam.js';
 
 // Re-exports for backward compatibility with existing tests.
 export { SSHConnectionManager, escapeCommandForShell };
@@ -280,6 +289,72 @@ async function bootstrapRegistry(): Promise<void> {
   }
 }
 
+/** Effective profile/connection name for gating + audit attribution. */
+function resolvedProfileName(connectionName?: string): string {
+  return connectionName ?? registry.getDefaultName() ?? 'default';
+}
+
+// =============================================================================
+// Approval engine + OPTIONAL audit-truth seam (Decision D2).
+//
+// The approval engine is the source of truth for whether a command runs. The
+// audit seam is OPTIONAL: when `src/audit/` is part of the build it logs the
+// real decision; when absent (e.g. on `pr/toml-config`, this lane's base) it
+// no-ops. `auditSink` starts as a no-op so the exec/sudo-exec handlers can call
+// it unconditionally; `wireApprovalAndAudit()` upgrades it at boot.
+// =============================================================================
+
+let auditSink: AuditSink = { record() { /* no-op until wired (or audit absent) */ } };
+
+/**
+ * Build the production approval engine from resolvedConfig. Returns null for
+ * the legacy CLI path (no [approval] section and no per-source overrides) so
+ * the gate keeps its backward-compatible `legacy:no-engine` allow.
+ *
+ * Throws (fatal at boot):
+ *   - manual mode requested but WebUI disabled (gate-12 invariant)
+ *   - smart mode requested but [approval.llm] missing endpoint or model
+ */
+function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
+  const approvalCfg = resolvedConfig.approval;
+  const perSourceModes: ApprovalMode[] = Object.values(resolvedConfig.perSourceApproval ?? {});
+  if (!approvalCfg?.mode && perSourceModes.length === 0) {
+    return null;
+  }
+  const input: BuildEngineFromConfigInput = {
+    defaultMode: approvalCfg?.mode,
+    fail_closed: approvalCfg?.fail_closed,
+    llm: approvalCfg?.llm,
+    perSourceModes,
+  };
+  return buildApprovalEngineFromConfig(input, {
+    manualOpts: { webuiEnabled: webuiActive },
+  });
+}
+
+/** Decide whether the WebUI will be active at boot (TOML or --webui). */
+function isWebUIActive(): boolean {
+  // `--webui` (bare flag) parses to a key present in argvConfig. The WebUI
+  // server itself lands in a later lane; here we only need the boot-time
+  // decision so manual-mode's gate-12 invariant resolves correctly.
+  const cliWebui = 'webui' in argvConfig;
+  return cliWebui || resolvedConfig.webui?.enabled === true;
+}
+
+/**
+ * Wire the approval engine into the gate and load the optional audit sink.
+ * Safe to call before the MCP transport connects so the first exec is gated.
+ */
+async function wireApprovalAndAudit(): Promise<void> {
+  const engine = buildProductionApprovalEngine(isWebUIActive());
+  setApprovalEngine(engine);
+  auditSink = await loadAuditSink({
+    auditDir: resolvedConfig.server?.audit_dir,
+    auditMaxBytes: resolvedConfig.server?.audit_max_bytes,
+  });
+}
+
+
 export function resultToMcpContent(result: ExecResult) {
   if (result.category === 'timeout') {
     throw new McpError(ErrorCode.InternalError, result.stderr || `Command execution timed out after ${DEFAULT_TIMEOUT}ms`);
@@ -336,14 +411,43 @@ server.tool(
   },
   async ({ command, description, connectionName }) => {
     const sanitizedCommand = sanitizeCommand(command);
+    const profile = resolvedProfileName(connectionName);
+    const startedAt = Date.now();
+    let audited = false;
+    let approvalDecision: ApprovalDecision | undefined;
     try {
       const t = await registry.get(connectionName);
+      approvalDecision = await gateApproval({
+        profile: { id: connectionName ?? 'default' },
+        tool: 'exec',
+        command: sanitizedCommand,
+        description,
+      });
       const commandWithDescription = description
         ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
         : sanitizedCommand;
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
+      auditSink.record({
+        tool: 'exec',
+        profile,
+        command: commandWithDescription,
+        description,
+        startedAt,
+        result,
+        approval: approvalDecision,
+      });
+      audited = true;
       return resultToMcpContent(result);
     } catch (err: any) {
+      if (!audited) auditSink.record({
+        tool: 'exec',
+        profile,
+        command: sanitizedCommand,
+        description,
+        startedAt,
+        error: err,
+        approval: approvalDecision,
+      });
       if (err instanceof McpError) throw err;
       throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
     }
@@ -361,8 +465,18 @@ if (!DISABLE_SUDO) {
     },
     async ({ command, description, connectionName }) => {
       const sanitizedCommand = sanitizeCommand(command);
+      const profile = resolvedProfileName(connectionName);
+      const startedAt = Date.now();
+      let audited = false;
+      let approvalDecision: ApprovalDecision | undefined;
       try {
         const t = await registry.get(connectionName);
+        approvalDecision = await gateApproval({
+          profile: { id: connectionName ?? 'default' },
+          tool: 'sudo-exec',
+          command: sanitizedCommand,
+          description,
+        });
         const commandWithDescription = description
           ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
           : sanitizedCommand;
@@ -376,8 +490,27 @@ if (!DISABLE_SUDO) {
           mode: 'sudo',
           password: legacySudo,
         });
+        auditSink.record({
+          tool: 'sudo-exec',
+          profile,
+          command: commandWithDescription,
+          description,
+          startedAt,
+          result,
+          approval: approvalDecision,
+        });
+        audited = true;
         return resultToMcpContent(result);
       } catch (err: any) {
+        if (!audited) auditSink.record({
+          tool: 'sudo-exec',
+          profile,
+          command: sanitizedCommand,
+          description,
+          startedAt,
+          error: err,
+          approval: approvalDecision,
+        });
         if (err instanceof McpError) throw err;
         throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
       }
@@ -563,6 +696,9 @@ export async function execSshCommand(
 
 async function main() {
   await bootstrapRegistry();
+  // Boot the approval engine + optional audit seam BEFORE the MCP transport so
+  // the very first exec / sudo-exec call is gated and (optionally) audited.
+  await wireApprovalAndAudit();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   const mode = isMultiHost ? `multi-host (${registry.names().length} servers: ${registry.names().join(', ')})` : 'single-host';
@@ -584,6 +720,9 @@ if (isTestMode) {
     try {
       await bootstrapRegistry();
     } catch { /* tests may not configure hosts */ }
+    try {
+      await wireApprovalAndAudit();
+    } catch { /* tests may not configure an approval engine */ }
     const transport = new StdioServerTransport();
     server.connect(transport).catch(error => {
       console.error('Fatal error connecting server:', error);

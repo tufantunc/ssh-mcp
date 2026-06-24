@@ -139,3 +139,6 @@ dist
 build/
 manual-kerberos-test.mjs
 manual-multi-host-test.mjs
+
+# Per-lane test/build scratch (mandated TMPDIR)
+.tmp/
