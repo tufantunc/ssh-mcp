@@ -41,6 +41,11 @@ export interface AuditExecInput {
 /** The seam surface the rest of the server depends on. Always safe to call. */
 export interface AuditSink {
   record(input: AuditExecInput): void;
+  /** Optional read-only tail used by the WebUI when src/audit is present. */
+  tail?(opts: { profile?: string; limit: number }): Promise<unknown[]>;
+  /** Optional execution event subscription used by WebUI SSE. */
+  on?(event: 'execution', listener: (record: unknown) => void): void;
+  off?(event: 'execution', listener: (record: unknown) => void): void;
 }
 
 export interface AuditSeamConfig {
@@ -58,6 +63,9 @@ export interface AuditSeamConfig {
 interface AuditModuleLike {
   AuditStore: new (cfg: { auditDir: string; auditMaxBytes: number }) => {
     append(record: unknown): unknown;
+    tail?(opts: { profile?: string; limit: number }): Promise<unknown[]>;
+    on?(event: 'execution', listener: (record: unknown) => void): void;
+    off?(event: 'execution', listener: (record: unknown) => void): void;
   };
   resolveAuditDir(override?: string | null): string;
   yoloApproval(now?: Date): unknown;
@@ -101,12 +109,26 @@ export async function loadAuditSink(config: AuditSeamConfig = {}): Promise<Audit
   }
 
   const auditDir = mod.resolveAuditDir(config.auditDir);
-  const store = new mod.AuditStore({
-    auditDir,
-    auditMaxBytes: config.auditMaxBytes ?? 10_000,
-  });
+  let store: InstanceType<AuditModuleLike['AuditStore']>;
+  try {
+    store = new mod.AuditStore({
+      auditDir,
+      auditMaxBytes: config.auditMaxBytes ?? 10_000,
+    });
+  } catch {
+    return NO_OP_SINK;
+  }
 
   return {
+    tail(opts: { profile?: string; limit: number }): Promise<unknown[]> {
+      return typeof store.tail === 'function' ? store.tail(opts) : Promise.resolve([]);
+    },
+    on(event: 'execution', listener: (record: unknown) => void): void {
+      if (typeof store.on === 'function') store.on(event, listener);
+    },
+    off(event: 'execution', listener: (record: unknown) => void): void {
+      if (typeof store.off === 'function') store.off(event, listener);
+    },
     record(input: AuditExecInput): void {
       try {
         const now = new Date();

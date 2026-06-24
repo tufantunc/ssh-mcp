@@ -91,6 +91,7 @@ export class TransportRegistry {
   /** Snapshot status for list-servers tool. */
   list(): Array<{
     name: string;
+    description?: string;
     host: string;
     port: number;
     username: string;
@@ -103,6 +104,7 @@ export class TransportRegistry {
     for (const [name, cfg] of this.configs) {
       out.push({
         name,
+        description: cfg.description,
         host: cfg.host,
         port: cfg.port,
         username: cfg.username,

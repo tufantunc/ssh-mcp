@@ -103,4 +103,6 @@ export interface TransportConfig {
 export interface ServerConfig extends TransportConfig {
   /** Unique identifier referenced by MCP tools' connectionName argument. */
   name: string;
+  /** Human-readable connection description for read-only status surfaces. */
+  description?: string;
 }

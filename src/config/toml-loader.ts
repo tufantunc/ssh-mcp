@@ -192,6 +192,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
 
     const out: ServerConfig = {
       name: src.id,
+      description: src.description,
       host: src.host,
       port: src.port ?? 22,
       username: src.user,

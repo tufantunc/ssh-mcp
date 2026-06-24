@@ -1,6 +1,6 @@
 /**
  * manual mode: enqueue PendingApproval, await external resolve (typically a
- * WebUI POST). The WebUI surface lives in a separate card; this module only
+ * external WebUI resolver). The WebUI surface lives in a separate card; this module only
  * cares about the queue and the resolve callback.
  *
  * Fatal-at-boot when WebUI is disabled — there's no UI to resolve the queue.

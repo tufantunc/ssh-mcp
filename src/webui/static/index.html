@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ssh-mcp status</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <h1>ssh-mcp <span class="muted">status</span></h1>
+    <div class="auth-row">
+      <input id="token" type="password" placeholder="auth token (optional on loopback)" autocomplete="off">
+      <button id="save-token" type="button">save</button>
+      <span id="conn-status" class="status">disconnected</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="panel-profiles">
+      <h2>Profiles</h2>
+      <table>
+        <thead><tr><th>name</th><th>description</th><th>host</th><th>user</th><th>auth</th><th>transport</th><th>approval</th><th>state</th></tr></thead>
+        <tbody id="profiles-body"><tr><td colspan="8" class="muted">loading…</td></tr></tbody>
+      </table>
+    </section>
+
+    <section id="panel-approvals">
+      <h2>Pending approvals <span id="approvals-count" class="badge">0</span> <span class="muted">read-only</span></h2>
+      <ul id="approvals-list" class="cards"></ul>
+    </section>
+
+    <section id="panel-executions">
+      <h2>Recent executions <span id="exec-count" class="badge">0</span></h2>
+      <ul id="exec-list" class="cards"></ul>
+    </section>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -26,6 +26,13 @@ import {
   type ApprovalDispatcher,
 } from './approval/index.js';
 import { loadAuditSink, type AuditSink } from './approval/audit-seam.js';
+import { startWebUI } from './webui/server.js';
+import type {
+  ManualApprovalQueue,
+  PendingApproval as WebUIPendingApproval,
+  ApprovalDecision as WebUIApprovalDecision,
+  AuditTail as WebUIAuditTail,
+} from './webui/types.js';
 
 // Re-exports for backward compatibility with existing tests.
 export { SSHConnectionManager, escapeCommandForShell };
@@ -86,6 +93,7 @@ function parseServerConfigJson(raw: string): ServerConfig {
     username: user,
     authMode: auth,
   };
+  if (typeof obj.description === 'string') cfg.description = obj.description;
 
   switch (auth) {
     case 'kerberos':
@@ -304,6 +312,7 @@ function resolvedProfileName(connectionName?: string): string {
 // it unconditionally; `wireApprovalAndAudit()` upgrades it at boot.
 // =============================================================================
 
+let approvalEngine: ApprovalDispatcher | null = null;
 let auditSink: AuditSink = { record() { /* no-op until wired (or audit absent) */ } };
 
 /**
@@ -346,14 +355,189 @@ function isWebUIActive(): boolean {
  * Safe to call before the MCP transport connects so the first exec is gated.
  */
 async function wireApprovalAndAudit(): Promise<void> {
-  const engine = buildProductionApprovalEngine(isWebUIActive());
-  setApprovalEngine(engine);
+  approvalEngine = buildProductionApprovalEngine(isWebUIActive());
+  setApprovalEngine(approvalEngine);
   auditSink = await loadAuditSink({
     auditDir: resolvedConfig.server?.audit_dir,
     auditMaxBytes: resolvedConfig.server?.audit_max_bytes,
   });
 }
 
+/** Bridge the in-process approval dispatcher to the read-only WebUI queue shape. */
+function buildWebUIApprovalQueueAdapter(engine: ApprovalDispatcher | null): ManualApprovalQueue | undefined {
+  if (!engine) return undefined;
+
+  const enqWrappers = new Map<Function, (p: any) => void>();
+  const resWrappers = new Map<Function, (p: any, d: any) => void>();
+  const toWebUI = (p: any): WebUIPendingApproval => ({
+    id: p.id,
+    profile: p.context?.profile?.id ?? 'default',
+    tool: p.context?.tool ?? 'exec',
+    command: p.context?.command ?? '',
+    description: p.context?.description,
+    enqueuedAt: p.enqueued_at,
+  });
+
+  return {
+    list: () => engine.listPending().map(toWebUI),
+    resolve: (id, decision: WebUIApprovalDecision) =>
+      engine.resolvePending(id, decision.decision, decision.reason, decision.decided_by),
+    on(event, listener) {
+      if (event === 'enqueue') {
+        const wrap = (p: any) => (listener as (p: WebUIPendingApproval) => void)(toWebUI(p));
+        enqWrappers.set(listener, wrap);
+        engine.on('enqueue', wrap);
+      } else if (event === 'resolve') {
+        const wrap = (p: any, d: WebUIApprovalDecision) =>
+          (listener as (p: WebUIPendingApproval, d: WebUIApprovalDecision) => void)(toWebUI(p), d);
+        resWrappers.set(listener, wrap);
+        engine.on('resolve', wrap);
+      }
+    },
+    off(event, listener) {
+      if (event === 'enqueue') {
+        const wrap = enqWrappers.get(listener);
+        if (wrap) {
+          engine.off('enqueue', wrap);
+          enqWrappers.delete(listener);
+        }
+      } else if (event === 'resolve') {
+        const wrap = resWrappers.get(listener);
+        if (wrap) {
+          engine.off('resolve', wrap);
+          resWrappers.delete(listener);
+        }
+      }
+    },
+  };
+}
+
+/** Bridge the optional audit seam to the read-only WebUI audit tail shape. */
+function buildWebUIAuditTailAdapter(sink: AuditSink): WebUIAuditTail | undefined {
+  if (typeof sink.tail !== 'function' || typeof sink.on !== 'function') return undefined;
+
+  const toWebUI = (r: any) => ({
+    ts: r.ts,
+    id: r.id,
+    profile: r.profile,
+    tool: r.tool,
+    command: r.command,
+    description: r.description,
+    approval: r.approval,
+    exec: r.exec
+      ? {
+          exit_code: r.exec.exit_code ?? undefined,
+          duration_ms: r.exec.duration_ms,
+          stdout_truncated: r.exec.stdout_truncated,
+          stderr_truncated: r.exec.stderr_truncated,
+          stdout: r.exec.stdout,
+          stderr: r.exec.stderr,
+        }
+      : undefined,
+  });
+  const listenerMap = new Map<Function, (r: unknown) => void>();
+
+  return {
+    tail: async opts => {
+      const records = await sink.tail!(opts);
+      return records.map(toWebUI);
+    },
+    on: (event, listener) => {
+      const wrap = (r: unknown) => listener(toWebUI(r));
+      listenerMap.set(listener, wrap);
+      sink.on!(event, wrap);
+    },
+    off: (event, listener) => {
+      const wrap = listenerMap.get(listener);
+      if (wrap && typeof sink.off === 'function') {
+        sink.off(event, wrap);
+        listenerMap.delete(listener);
+      }
+    },
+  };
+}
+
+function makeApprovalModeLookup(): (profileName: string) => string {
+  const defaultMode: ApprovalMode = resolvedConfig.approval?.mode ?? 'yolo';
+  const perSource = resolvedConfig.perSourceApproval ?? {};
+  return (name: string) => perSource[name] ?? defaultMode;
+}
+
+async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined> {
+  if (!isWebUIActive()) return undefined;
+
+  const tomlWebui = resolvedConfig.webui;
+  const host = tomlWebui?.host ?? '127.0.0.1';
+  const port = tomlWebui?.port ?? 8088;
+  const authToken = tomlWebui?.auth_token;
+
+  const handle = await startWebUI({
+    host,
+    port,
+    authToken,
+    registry: { list: () => registry.list() },
+    queue: buildWebUIApprovalQueueAdapter(approvalEngine),
+    audit: buildWebUIAuditTailAdapter(auditSink),
+    getApprovalMode: makeApprovalModeLookup(),
+  });
+  const tokenStatus = authToken ? 'token required' : 'anonymous loopback';
+  console.error(`SSH MCP WebUI running on http://${handle.address.host}:${handle.address.port}/ — ${tokenStatus}`);
+  return handle;
+}
+
+
+export async function executeAuditedTransportCommand(input: {
+  transport: Pick<ISshTransport, 'exec' | 'execElevated'>;
+  tool: 'exec' | 'sudo-exec';
+  command: string;
+  description?: string;
+  profile?: string;
+  timeoutMs?: number;
+  sudoPassword?: string;
+  store: { append(record: unknown): unknown };
+}) {
+  const sanitizedCommand = sanitizeCommand(input.command);
+  const commandWithDescription = input.description
+    ? `${sanitizedCommand} # ${input.description.replace(/#/g, '\\#')}`
+    : sanitizedCommand;
+  const startedAt = Date.now();
+  const result = input.tool === 'sudo-exec'
+    ? await input.transport.execElevated(commandWithDescription, {
+        timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT,
+        mode: 'sudo',
+        password: input.sudoPassword,
+      })
+    : await input.transport.exec(commandWithDescription, { timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT });
+
+  const now = new Date();
+  const durationMs = Math.max(0, Date.now() - startedAt);
+  try {
+    input.store.append({
+      profile: input.profile ?? 'stub',
+      tool: input.tool,
+      command: commandWithDescription,
+      description: input.description,
+      approval: {
+        mode: 'yolo',
+        decision: 'allow',
+        reason: 'approval engine not yet wired (yolo placeholder)',
+        decided_at: now.toISOString(),
+        decided_by: 'yolo',
+      },
+      exec: {
+        stdout: result.stdout ?? '',
+        stderr: result.stderr ?? '',
+        exitCode: result.exitCode ?? null,
+        durationMs,
+      },
+      now,
+    });
+  } catch (auditErr: any) {
+    console.error(`audit log append failed: ${auditErr?.message || auditErr}`);
+  }
+
+  return resultToMcpContent(result);
+}
 
 export function resultToMcpContent(result: ExecResult) {
   if (result.category === 'timeout') {
@@ -699,6 +883,7 @@ async function main() {
   // Boot the approval engine + optional audit seam BEFORE the MCP transport so
   // the very first exec / sudo-exec call is gated and (optionally) audited.
   await wireApprovalAndAudit();
+  const webuiHandle = await maybeStartWebUI();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   const mode = isMultiHost ? `multi-host (${registry.names().length} servers: ${registry.names().join(', ')})` : 'single-host';
@@ -706,6 +891,7 @@ async function main() {
 
   const cleanup = () => {
     console.error('Shutting down SSH MCP Server...');
+    if (webuiHandle) void webuiHandle.close().catch(() => { /* ignore */ });
     void registry.closeAll();
     process.exit(0);
   };

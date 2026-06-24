@@ -18,6 +18,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { EventEmitter } from 'node:events';
 
 import {
   AuditRecord,
@@ -132,20 +133,27 @@ export function buildRecord(input: BuildRecordInput): AuditRecord {
   return rec;
 }
 
-export class AuditStore {
+const DEFAULT_TAIL_BUFFER = 1000;
+
+export class AuditStore extends EventEmitter {
   private readonly auditDir: string;
   private readonly auditMaxBytes: number;
   private readonly maxFileBytes: number;
   private readonly retain: number;
+  private readonly tailBufferSize: number;
+  /** Rolling in-memory tail for read-only WebUI /api/executions. */
+  private readonly tailBuffer: AuditRecord[] = [];
 
   /** Track which day we last pruned, so we only prune once per day. */
   private lastPruneStamp: string | null = null;
 
-  constructor(cfg: AuditStoreConfig) {
+  constructor(cfg: AuditStoreConfig & { tailBufferSize?: number }) {
+    super();
     this.auditDir = cfg.auditDir;
     this.auditMaxBytes = cfg.auditMaxBytes ?? DEFAULT_AUDIT_MAX_BYTES;
     this.maxFileBytes = cfg.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
     this.retain = cfg.retain ?? DEFAULT_RETAIN;
+    this.tailBufferSize = cfg.tailBufferSize ?? DEFAULT_TAIL_BUFFER;
     fs.mkdirSync(this.auditDir, { recursive: true });
   }
 
@@ -164,6 +172,11 @@ export class AuditStore {
     const line = JSON.stringify(rec) + '\n';
     fs.appendFileSync(filePath, line, { encoding: 'utf8' });
 
+    this.tailBuffer.push(rec);
+    if (this.tailBuffer.length > this.tailBufferSize) {
+      this.tailBuffer.splice(0, this.tailBuffer.length - this.tailBufferSize);
+    }
+
     const stamp = utcDateStamp(now);
     if (this.lastPruneStamp !== stamp) {
       this.lastPruneStamp = stamp;
@@ -173,7 +186,24 @@ export class AuditStore {
         // best-effort
       }
     }
+    // Notify WebUI SSE subscribers after the line is flushed to disk so an
+    // event only fires for records that were actually persisted.
+    try {
+      this.emit('execution', rec);
+    } catch {
+      /* listener errors must not affect the audit path */
+    }
+
     return rec;
+  }
+
+  /** Read the most-recent records from the in-memory tail, optionally filtered by profile. */
+  async tail(opts: { profile?: string; limit: number }): Promise<AuditRecord[]> {
+    const rows = opts.profile
+      ? this.tailBuffer.filter(r => r.profile === opts.profile)
+      : this.tailBuffer.slice();
+    const limit = Math.max(1, opts.limit);
+    return rows.slice(-limit);
   }
 
   /** Path to the active file (today's UTC date). For tests + diagnostics. */

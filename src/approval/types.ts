@@ -75,7 +75,7 @@ export interface PendingApproval {
   id: string;
   enqueued_at: string;
   context: ApprovalContext;
-  /** Resolve from outside (WebUI POST handler). Returns true if the resolve
+  /** Resolve from outside (for example a future WebUI mutation handler). Returns true if the resolve
    * was applied; false if the request had already timed out or been resolved. */
   resolve: (decision: 'allow' | 'deny', note?: string, decided_by?: string) => boolean;
 }
