@@ -18,6 +18,18 @@ export interface ServerSection {
   audit_dir?: string;
   /** Per-record stdout/stderr cap. Default 10000. */
   audit_max_bytes?: number;
+  /**
+   * Multi-source connection guard (D-A2 escape hatch). When more than one
+   * [[sources]] is configured, a tool call that omits/blanks `connectionName`
+   * fails fast instead of silently routing to the first-registered (default)
+   * source — the R1 landmine fix.
+   *
+   * Default (unset) is `true` (safe: require an explicit name when multi-source).
+   * Set `false` ONLY as a temporary emergency rollback: it re-enables the
+   * dangerous legacy silent-default fallback. Single-source deployments are
+   * unaffected either way — omission always resolves the lone source.
+   */
+  require_connection?: boolean;
 }
 
 /** Top-level [webui] block — optional. WebUI is OFF unless enabled or --webui passed. */
@@ -87,6 +99,14 @@ export interface ResolvedConfig {
   defaultName?: string;
   /** Per-source approval override, keyed by source name. */
   perSourceApproval: Record<string, ApprovalMode>;
+  /**
+   * Resolved multi-source connection guard (D-A2). `true` (default) makes a
+   * multi-source registry reject omitted/blank `connectionName`; `false` is the
+   * emergency opt-out that restores the legacy silent-default fallback. Mirrors
+   * `[server].require_connection`. Always defined post-resolution so the boot
+   * path can inject it unconditionally via `setRequireConnectionWhenMulti`.
+   */
+  requireConnection: boolean;
   server?: ServerSection;
   webui?: WebUISection;
   approval?: ApprovalSection;

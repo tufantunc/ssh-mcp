@@ -148,3 +148,65 @@ auth = "kerberos"
     expect(() => resolveConfig({ cliSources: [], cliConfigPath: bad, env: {} })).toThrow(/parse failed/);
   });
 });
+
+describe('resolveConfig: requireConnection (D-A2 multi-source guard)', () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-mcp-resolver-rc-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const multiToml = `
+[[sources]]
+id = "a"
+host = "a.example"
+user = "u"
+auth = "kerberos"
+
+[[sources]]
+id = "b"
+host = "b.example"
+user = "u"
+auth = "kerberos"
+`;
+
+  it('defaults to true with no CLI and no TOML (safe default)', () => {
+    const cfg = resolveConfig({ cliSources: [], env: { XDG_CONFIG_HOME: path.join(tmp, 'none') } });
+    expect(cfg.requireConnection).toBe(true);
+  });
+
+  it('defaults to true with CLI sources and no TOML', () => {
+    const cfg = resolveConfig({ cliSources: [cliSource('a'), cliSource('b')], env: {} });
+    expect(cfg.requireConnection).toBe(true);
+  });
+
+  it('defaults to true from a TOML that omits the flag', () => {
+    const p = writeToml(tmp, 'multi.toml', multiToml);
+    const cfg = resolveConfig({ cliSources: [], cliConfigPath: p, env: {} });
+    expect(cfg.requireConnection).toBe(true);
+  });
+
+  it('carries the opt-out (false) from [server].require_connection', () => {
+    const p = writeToml(tmp, 'optout.toml', `
+[server]
+require_connection = false
+${multiToml}`);
+    const cfg = resolveConfig({ cliSources: [], cliConfigPath: p, env: {} });
+    expect(cfg.requireConnection).toBe(false);
+  });
+
+  it('honors the TOML flag even when CLI sources suppress the TOML source list', () => {
+    // require_connection is a top-level safety knob, like [webui]/[approval].
+    const p = writeToml(tmp, 'mixed.toml', `
+[server]
+require_connection = false
+${multiToml}`);
+    const cfg = resolveConfig({ cliSources: [cliSource('cli1'), cliSource('cli2')], cliConfigPath: p, env: {} });
+    expect(cfg.sources.map(s => s.name)).toEqual(['cli1', 'cli2']);
+    expect(cfg.requireConnection).toBe(false);
+  });
+});

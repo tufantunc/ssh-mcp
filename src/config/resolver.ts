@@ -69,6 +69,10 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
     sources,
     defaultName,
     perSourceApproval: hasCliSources ? {} : (fromToml?.perSourceApproval ?? {}),
+    // require_connection is a top-level safety knob: honor a TOML [server]
+    // value even when CLI sources are in charge (mirrors how [webui]/[approval]
+    // survive CLI source suppression). Absent any TOML, default to safe (true).
+    requireConnection: fromToml?.requireConnection ?? true,
     server: fromToml?.server,
     webui: fromToml?.webui,
     approval: fromToml?.approval,

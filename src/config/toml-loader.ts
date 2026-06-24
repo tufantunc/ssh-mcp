@@ -259,6 +259,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     sources: resolvedSources,
     defaultName,
     perSourceApproval,
+    // Safe default: require an explicit connectionName when multi-source.
+    // Opt out only via [server].require_connection = false.
+    requireConnection: server?.require_connection ?? true,
     server,
     webui,
     approval,
@@ -276,6 +279,12 @@ function validateServerSection(raw: any) {
       throw new Error('Config: [server].audit_max_bytes must be a positive number');
     }
     out.audit_max_bytes = raw.audit_max_bytes;
+  }
+  if (raw.require_connection !== undefined) {
+    if (typeof raw.require_connection !== 'boolean') {
+      throw new Error('Config: [server].require_connection must be a boolean');
+    }
+    out.require_connection = raw.require_connection;
   }
   return out;
 }

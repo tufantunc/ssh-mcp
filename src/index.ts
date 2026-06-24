@@ -238,7 +238,7 @@ const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
       cliSources: cliSourceConfigs,
       cliConfigPath: typeof CONFIG_PATH === 'string' ? CONFIG_PATH : undefined,
     })
-  : { sources: [], perSourceApproval: {} };
+  : { sources: [], perSourceApproval: {}, requireConnection: true };
 
 if (isCliEnabled) {
   if (isMultiHost) {

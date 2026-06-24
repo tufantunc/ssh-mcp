@@ -7,6 +7,23 @@
 [server]
 audit_dir = "~/.ssh-mcp"
 audit_max_bytes = 10000
+# Multi-source connection guard. Default: true (safe).
+#
+# When more than one [[sources]] is configured, a tool call that omits or blanks
+# `connectionName` FAILS FAST with the list of valid names, instead of silently
+# routing to the first-registered (default) source. This closes the R1 landmine
+# where an omitted name silently hit whichever host happened to register first.
+# Single-source deployments are unaffected — omission always resolves the lone
+# source regardless of this flag.
+#
+# require_connection = true   # default; leave it on.
+#
+# !!! DANGER — EMERGENCY OPT-OUT ONLY !!!
+# Setting this to false RE-ENABLES the dangerous legacy silent-default fallback:
+# a multi-source call with no connectionName will quietly run against the default
+# source. Use ONLY as a temporary rollback for a compatibility break, and remove
+# it as soon as callers are fixed. Do NOT ship false to production long-term.
+# require_connection = false
 
 [webui]
 enabled = false
