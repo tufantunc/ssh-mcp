@@ -172,6 +172,73 @@ describe('WebUI server', () => {
     expect(j.approvals[0].id).toBe('a-1');
   });
 
+  it('POST /api/approvals/:id/allow resolves the engine.decide promise', async () => {
+    const pending: PendingApproval = {
+      id: 'roundtrip-1',
+      profile: 'prod',
+      tool: 'exec',
+      command: 'shutdown -r now',
+      enqueuedAt: new Date().toISOString(),
+    };
+    const decisionPromise = queue.enqueue(pending);
+
+    const r1 = await get(handle, '/api/approvals');
+    const j1 = await r1.json();
+    expect(j1.approvals.map((a: any) => a.id)).toContain('roundtrip-1');
+
+    const r2 = await fetch(
+      `http://${handle.address.host}:${handle.address.port}/api/approvals/roundtrip-1/allow`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note: 'go for it' }),
+      },
+    );
+    if (r2.status !== 200) {
+      throw new Error(`unexpected status ${r2.status}: ${await r2.text()}`);
+    }
+    const j2 = await r2.json();
+    expect(j2).toMatchObject({ ok: true, id: 'roundtrip-1', decision: 'allow' });
+
+    const dec = await decisionPromise;
+    expect(dec.decision).toBe('allow');
+    expect(dec.reason).toBe('go for it');
+    expect(dec.decided_by).toMatch(/^webui:/);
+
+    const r3 = await get(handle, '/api/approvals');
+    const j3 = await r3.json();
+    expect(j3.approvals).toHaveLength(0);
+  });
+
+  it('POST allow on unknown id returns 404', async () => {
+    const r = await fetch(
+      `http://${handle.address.host}:${handle.address.port}/api/approvals/nope/allow`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+    );
+    expect(r.status).toBe(404);
+  });
+
+  it('POST deny resolves with deny', async () => {
+    const decisionPromise = queue.enqueue({
+      id: 'deny-1',
+      profile: 'lab',
+      tool: 'sudo-exec',
+      command: 'rm -rf /tmp/x',
+      enqueuedAt: new Date().toISOString(),
+    });
+    await fetch(
+      `http://${handle.address.host}:${handle.address.port}/api/approvals/deny-1/deny`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note: 'nope' }),
+      },
+    );
+    const d = await decisionPromise;
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toBe('nope');
+  });
+
 
   it('static index page is served on loopback without token', async () => {
     const r = await get(handle, '/');

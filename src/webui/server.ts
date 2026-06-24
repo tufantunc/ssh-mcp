@@ -3,10 +3,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { WebUIOptions, WebUIHandle } from './types.js';
+import type { WebUIOptions, WebUIHandle, ApprovalDecisionKind } from './types.js';
 import { handleProfiles } from './routes/profiles.js';
 import { handleExecutions } from './routes/executions.js';
-import { handleListApprovals } from './routes/approvals.js';
+import { handleListApprovals, handleDecideApproval } from './routes/approvals.js';
 import { SseHub } from './routes/sse.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -23,6 +23,31 @@ const STATIC_MIME: Record<string, string> = {
 
 function isLoopback(host: string): boolean {
   return host === '127.0.0.1' || host === '::1' || host === 'localhost';
+}
+
+/**
+ * Read JSON body from a request, capped at 1 MiB. Returns null on parse error.
+ */
+function readJson(req: http.IncomingMessage, max = 1024 * 1024): Promise<any | null> {
+  return new Promise(resolve => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > max) {
+        req.destroy();
+        resolve(null);
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      if (!raw.trim()) return resolve({});
+      try { resolve(JSON.parse(raw)); } catch { resolve(null); }
+    });
+    req.on('error', () => resolve(null));
+  });
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -151,6 +176,22 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
 
         if (pathname === '/api/approvals' && method === 'GET') {
           const r = handleListApprovals(opts.queue);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        const m = pathname.match(/^\/api\/approvals\/([^/]+)\/(allow|deny)$/);
+        if (m && method === 'POST') {
+          const id = decodeURIComponent(m[1]);
+          const kind = m[2] as ApprovalDecisionKind;
+          const body = await readJson(req);
+          if (body === null) {
+            sendJson(res, 400, { error: 'invalid JSON body' });
+            return;
+          }
+          const note = typeof body?.note === 'string' ? body.note : undefined;
+          const decidedBy = `webui:${req.socket.remoteAddress || 'unknown'}`;
+          const r = handleDecideApproval(opts.queue, id, kind, note, decidedBy);
           sendJson(res, r.status, r.body);
           return;
         }

@@ -105,7 +105,15 @@
         </div>
         <code>${escapeHtml(a.command)}</code>
         ${a.description ? `<div class="muted">${escapeHtml(a.description)}</div>` : ''}
-        <div class="muted">manual approve/deny controls ship in the mutation PR</div>`;
+        <div class="actions">
+          <input type="text" placeholder="optional note">
+          <button class="allow" data-act="allow">allow</button>
+          <button class="deny" data-act="deny">deny</button>
+        </div>`;
+      const noteInput = li.querySelector('input');
+      li.querySelectorAll('button').forEach(btn => {
+        btn.addEventListener('click', () => decide(a.id, btn.dataset.act, noteInput.value, li));
+      });
       list.appendChild(li);
     }
   }
@@ -144,6 +152,17 @@
     list.insertBefore(li, list.firstChild);
     const count = parseInt($('#exec-count').textContent || '0', 10) + 1;
     $('#exec-count').textContent = String(count);
+  }
+
+  async function decide(id, action, note, li) {
+    try {
+      const r = await fetch('/api/approvals/' + encodeURIComponent(id) + '/' + action, {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+        body: JSON.stringify({ note: note || '' }),
+      });
+      if (r.ok) { li.remove(); fetchApprovals(); }
+    } catch (_) {}
   }
 
 
