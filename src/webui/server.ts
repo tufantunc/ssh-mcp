@@ -7,6 +7,7 @@ import type { WebUIOptions, WebUIHandle, ApprovalDecisionKind } from './types.js
 import { handleProfiles } from './routes/profiles.js';
 import { handleExecutions } from './routes/executions.js';
 import { handleListApprovals, handleDecideApproval } from './routes/approvals.js';
+import { handleListModes, handleSetProfileMode, handleSetGlobalMode } from './routes/modes.js';
 import { SseHub } from './routes/sse.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -133,7 +134,7 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
     );
   }
 
-  const hub = new SseHub(opts.queue, opts.audit);
+  const hub = new SseHub(opts.queue, opts.audit, opts.modeController);
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -192,6 +193,37 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
           const note = typeof body?.note === 'string' ? body.note : undefined;
           const decidedBy = `webui:${req.socket.remoteAddress || 'unknown'}`;
           const r = handleDecideApproval(opts.queue, id, kind, note, decidedBy);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        // --- Live approval-mode switching (PR-7, in-memory only) ----------
+        if (pathname === '/api/approval-modes' && method === 'GET') {
+          const r = handleListModes(opts.modeController);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        if (pathname === '/api/approval-mode' && method === 'PUT') {
+          const body = await readJson(req);
+          if (body === null) {
+            sendJson(res, 400, { error: 'invalid JSON body' });
+            return;
+          }
+          const r = handleSetGlobalMode(opts.modeController, body);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        const modeMatch = pathname.match(/^\/api\/profiles\/([^/]+)\/approval-mode$/);
+        if (modeMatch && method === 'PUT') {
+          const id = decodeURIComponent(modeMatch[1]);
+          const body = await readJson(req);
+          if (body === null) {
+            sendJson(res, 400, { error: 'invalid JSON body' });
+            return;
+          }
+          const r = handleSetProfileMode(opts.modeController, id, body);
           sendJson(res, r.status, r.body);
           return;
         }

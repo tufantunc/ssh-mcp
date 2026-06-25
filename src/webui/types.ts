@@ -17,6 +17,43 @@ export interface PendingApproval {
 
 export type ApprovalDecisionKind = 'allow' | 'deny';
 
+/**
+ * Event emitted whenever a live approval-mode switch is applied. Mirrors the
+ * approval module's ModeChangedPayload but kept loose here so the WebUI doesn't
+ * import the approval types directly (reviewer reconciles at merge time).
+ */
+export interface ModeChangedEvent {
+  scope: 'global' | 'profile';
+  profileId?: string;
+  mode: string;
+  effective: string;
+  at: string;
+}
+
+/**
+ * Live approval-mode control surface (PR-7). The WebUI reads the current
+ * effective modes and pushes runtime switches back through this controller;
+ * `mode-changed` events flow to the SSE stream. All mutation is in-memory only
+ * (Decision D3) — the controller MUST NOT write back to the TOML config.
+ */
+export interface ModeController {
+  /** Modes that can be switched to right now (their sub-engine is armed). */
+  availableModes(): string[];
+  /** The current live global default mode. */
+  getGlobalMode(): string;
+  /** Effective mode for a profile (live override > static > global). */
+  getEffectiveMode(profileId: string): string;
+  /**
+   * Set (or clear, when `mode === null`) the per-profile override.
+   * Throws if `mode` names an unarmed engine.
+   */
+  setProfileMode(profileId: string, mode: string | null): ModeChangedEvent;
+  /** Replace the global default. Throws if `mode` names an unarmed engine. */
+  setGlobalMode(mode: string): ModeChangedEvent;
+  on(event: 'mode-changed', listener: (e: ModeChangedEvent) => void): void;
+  off?(event: 'mode-changed', listener: (...args: any[]) => void): void;
+}
+
 export interface ApprovalDecision {
   decision: ApprovalDecisionKind;
   reason: string;
@@ -104,6 +141,10 @@ export interface WebUIOptions {
   audit?: AuditTail;
   /** Optional resolver for the effective approval mode of each profile. */
   getApprovalMode?: (profileName: string) => string;
+  /** Optional live approval-mode controller (PR-7). When present, enables the
+   * mode-switch routes (`PUT .../approval-mode`, `GET /api/approval-modes`) and
+   * SSE `mode-changed` broadcasts. In-memory only (Decision D3). */
+  modeController?: ModeController;
 }
 
 export interface WebUIHandle {

@@ -1,5 +1,5 @@
 import type { ServerResponse } from 'node:http';
-import type { ManualApprovalQueue, AuditTail } from '../types.js';
+import type { ManualApprovalQueue, AuditTail, ModeController, ModeChangedEvent } from '../types.js';
 
 export interface SseClient {
   res: ServerResponse;
@@ -9,7 +9,7 @@ export interface SseClient {
 
 /**
  * SSE broadcaster. Keeps a list of active responses and forwards
- * pending-approval / execution events to all of them.
+ * pending-approval / execution / mode-changed events to all of them.
  *
  * Heartbeat comment lines every 25s keep idle clients warm through proxies.
  */
@@ -18,10 +18,12 @@ export class SseHub {
   private queueListenersEnq?: (...args: any[]) => void;
   private queueListenersRes?: (...args: any[]) => void;
   private auditListener?: (...args: any[]) => void;
+  private modeListener?: (...args: any[]) => void;
 
   constructor(
     private readonly queue?: ManualApprovalQueue,
     private readonly audit?: AuditTail,
+    private readonly modeController?: ModeController,
   ) {
     if (this.queue) {
       this.queueListenersEnq = (p: any) => this.broadcast('pending-approval', { action: 'enqueue', approval: p });
@@ -32,6 +34,10 @@ export class SseHub {
     if (this.audit) {
       this.auditListener = (r: any) => this.broadcast('execution', r);
       this.audit.on('execution', this.auditListener as any);
+    }
+    if (this.modeController) {
+      this.modeListener = (e: ModeChangedEvent) => this.broadcast('mode-changed', e);
+      this.modeController.on('mode-changed', this.modeListener as any);
     }
   }
 
@@ -85,6 +91,9 @@ export class SseHub {
     }
     if (this.audit && this.audit.off && this.auditListener) {
       this.audit.off('execution', this.auditListener);
+    }
+    if (this.modeController && this.modeController.off && this.modeListener) {
+      this.modeController.off('mode-changed', this.modeListener);
     }
   }
 }

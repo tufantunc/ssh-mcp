@@ -78,15 +78,73 @@
     if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" class="muted">no profiles registered</td></tr>'; return; }
     for (const p of rows) {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${p.name}${p.default ? ' <span class="muted">(default)</span>' : ''}</td>
+      tr.dataset.id = p.id;
+      tr.innerHTML = `<td>${escapeHtml(p.name)}${p.default ? ' <span class="muted">(default)</span>' : ''}</td>
                       <td>${escapeHtml(p.description || '')}</td>
-                      <td>${p.host}:${p.port}</td>
-                      <td>${p.user}</td>
-                      <td>${p.auth}</td>
-                      <td>${p.transport}</td>
-                      <td><span class="pill">${p.approval_mode_effective}</span></td>
+                      <td>${escapeHtml(p.host)}:${p.port}</td>
+                      <td>${escapeHtml(p.user)}</td>
+                      <td>${escapeHtml(p.auth)}</td>
+                      <td>${escapeHtml(p.transport)}</td>
+                      <td class="mode-cell"></td>
                       <td>${p.connected ? '<span class="pill allow">connected</span>' : '<span class="pill">idle</span>'}</td>`;
+      tr.querySelector('.mode-cell').appendChild(buildModeControl(p.id, p.approval_mode_effective));
       tbody.appendChild(tr);
+    }
+  }
+
+  // Build the per-profile approval-mode control: a <select> of available modes
+  // when the server exposes a mode controller, else a read-only pill (the
+  // read-only WebUI / no-engine case).
+  function buildModeControl(profileId, effective) {
+    if (!availableModes.length) {
+      const span = document.createElement('span');
+      span.className = 'pill';
+      span.textContent = effective || 'unknown';
+      return span;
+    }
+    const sel = document.createElement('select');
+    sel.className = 'mode-select';
+    sel.dataset.profile = profileId;
+    for (const m of availableModes) {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      if (m === effective) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', () => switchMode(profileId, sel.value, sel));
+    return sel;
+  }
+
+  // List of modes the server allows switching to (populated from
+  // /api/approval-modes). Empty => mode switching disabled (read-only).
+  let availableModes = [];
+
+  async function fetchModes() {
+    try {
+      const r = await fetch('/api/approval-modes', { headers: authHeaders() });
+      if (!r.ok) { availableModes = []; return; }
+      const data = await r.json();
+      availableModes = Array.isArray(data.modes) ? data.modes : [];
+    } catch (_) { availableModes = []; }
+  }
+
+  async function switchMode(profileId, mode, sel) {
+    if (sel) sel.disabled = true;
+    try {
+      const r = await fetch('/api/profiles/' + encodeURIComponent(profileId) + '/approval-mode', {
+        method: 'PUT',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+        body: JSON.stringify({ mode }),
+      });
+      if (!r.ok) {
+        // Revert the dropdown to the server's truth on failure.
+        fetchProfiles();
+      }
+    } catch (_) {
+      fetchProfiles();
+    } finally {
+      if (sel) sel.disabled = false;
     }
   }
 
@@ -186,11 +244,19 @@
     sse.addEventListener('execution', (ev) => {
       try { prependExecution(JSON.parse(ev.data)); } catch (_) {}
     });
+    sse.addEventListener('mode-changed', (ev) => {
+      // A live mode switch landed (possibly from another client). Re-fetch the
+      // profile snapshot so every open dashboard converges on server truth.
+      try { JSON.parse(ev.data); } catch (_) {}
+      fetchProfiles();
+    });
   }
 
   function bootstrap() {
     setConnStatus('connecting');
-    fetchProfiles();
+    // Fetch the available-modes list BEFORE profiles so the first render can
+    // draw the mode <select> controls.
+    fetchModes().then(() => fetchProfiles());
     fetchApprovals();
     fetchExecutions();
     openSse();

@@ -32,6 +32,7 @@ import type {
   PendingApproval as WebUIPendingApproval,
   ApprovalDecision as WebUIApprovalDecision,
   AuditTail as WebUIAuditTail,
+  ModeController as WebUIModeController,
 } from './webui/types.js';
 
 // Re-exports for backward compatibility with existing tests.
@@ -326,8 +327,13 @@ let auditSink: AuditSink = { record() { /* no-op until wired (or audit absent) *
  */
 function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
   const approvalCfg = resolvedConfig.approval;
-  const perSourceModes: ApprovalMode[] = Object.values(resolvedConfig.perSourceApproval ?? {});
-  if (!approvalCfg?.mode && perSourceModes.length === 0) {
+  const perSourceApproval = resolvedConfig.perSourceApproval ?? {};
+  const perSourceModes: ApprovalMode[] = Object.values(perSourceApproval);
+  // When the WebUI is active we still want a live-switchable engine even if no
+  // [approval] section and no per-source overrides exist — otherwise the gate
+  // keeps the legacy no-engine allow and there's nothing to switch. A bare
+  // yolo-default engine is the right baseline in that case.
+  if (!approvalCfg?.mode && perSourceModes.length === 0 && !webuiActive) {
     return null;
   }
   const input: BuildEngineFromConfigInput = {
@@ -335,6 +341,7 @@ function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher
     fail_closed: approvalCfg?.fail_closed,
     llm: approvalCfg?.llm,
     perSourceModes,
+    staticOverrides: perSourceApproval,
   };
   return buildApprovalEngineFromConfig(input, {
     manualOpts: { webuiEnabled: webuiActive },
@@ -458,9 +465,45 @@ function buildWebUIAuditTailAdapter(sink: AuditSink): WebUIAuditTail | undefined
 }
 
 function makeApprovalModeLookup(): (profileName: string) => string {
-  const defaultMode: ApprovalMode = resolvedConfig.approval?.mode ?? 'yolo';
-  const perSource = resolvedConfig.perSourceApproval ?? {};
-  return (name: string) => perSource[name] ?? defaultMode;
+  const staticDefaultMode: ApprovalMode = resolvedConfig.approval?.mode ?? 'yolo';
+  const staticPerSource = resolvedConfig.perSourceApproval ?? {};
+  return (name: string) => {
+    // Prefer the live engine so the WebUI reflects runtime switches; fall back
+    // to the static TOML resolution when no engine is wired (legacy path).
+    if (approvalEngine) return approvalEngine.getEffectiveMode(name);
+    return staticPerSource[name] ?? staticDefaultMode;
+  };
+}
+
+/**
+ * Bridge the in-process dispatcher to the WebUI's ModeController contract
+ * (PR-7). All mutation is in-memory only (Decision D3): this adapter calls the
+ * dispatcher's mode store, which never touches disk. Returns undefined when no
+ * engine is wired (mode switching disabled).
+ */
+function buildWebUIModeController(engine: ApprovalDispatcher | null): WebUIModeController | undefined {
+  if (!engine) return undefined;
+  const wrappers = new Map<Function, (e: any) => void>();
+  return {
+    availableModes: () => engine.availableModes(),
+    getGlobalMode: () => engine.getGlobalMode(),
+    getEffectiveMode: (profileId: string) => engine.getEffectiveMode(profileId),
+    setProfileMode: (profileId: string, mode: string | null) =>
+      engine.setProfileMode(profileId, mode as ApprovalMode | null),
+    setGlobalMode: (mode: string) => engine.setGlobalMode(mode as ApprovalMode),
+    on(event, listener) {
+      const wrap = (e: any) => listener(e);
+      wrappers.set(listener, wrap);
+      engine.on(event, wrap);
+    },
+    off(event, listener) {
+      const wrap = wrappers.get(listener);
+      if (wrap) {
+        engine.off(event, wrap);
+        wrappers.delete(listener);
+      }
+    },
+  };
 }
 
 async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined> {
@@ -479,6 +522,7 @@ async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined
     queue: buildWebUIApprovalQueueAdapter(approvalEngine),
     audit: buildWebUIAuditTailAdapter(auditSink),
     getApprovalMode: makeApprovalModeLookup(),
+    modeController: buildWebUIModeController(approvalEngine),
   });
   const tokenStatus = authToken ? 'token required' : 'anonymous loopback';
   console.error(`SSH MCP WebUI running on http://${handle.address.host}:${handle.address.port}/ — ${tokenStatus}`);
@@ -602,7 +646,7 @@ server.tool(
     try {
       const t = await registry.get(connectionName);
       approvalDecision = await gateApproval({
-        profile: { id: connectionName ?? 'default' },
+        profile: { id: profile },
         tool: 'exec',
         command: sanitizedCommand,
         description,
@@ -656,7 +700,7 @@ if (!DISABLE_SUDO) {
       try {
         const t = await registry.get(connectionName);
         approvalDecision = await gateApproval({
-          profile: { id: connectionName ?? 'default' },
+          profile: { id: profile },
           tool: 'sudo-exec',
           command: sanitizedCommand,
           description,

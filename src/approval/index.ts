@@ -14,12 +14,16 @@ export type {
   SmartApprovalOptions,
   ManualApprovalOptions,
   PendingApproval,
+  ModeChangedPayload,
 } from './types.js';
+export { APPROVAL_MODES, isApprovalMode } from './types.js';
 export { YoloApproval } from './yolo.js';
 export { SmartApproval } from './smart.js';
 export { ManualApproval, ManualApprovalDisabledError } from './manual.js';
+export { ApprovalModeStore, type ModeStoreSnapshot } from './mode-store.js';
 export {
   ApprovalDispatcher,
+  ModeUnavailableError,
   buildApprovalEngine,
   buildApprovalEngineFromConfig,
   type BuildApprovalEngineOptions,
