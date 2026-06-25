@@ -33,7 +33,10 @@ const CLI_LONG_SPACE_RE =
 // 1c. -p VALUE  (MySQL-style short flag).
 const CLI_SHORT_P_RE = /(^|\s)(-p)\s+(?:"[^"]*"|'[^']*'|[^\s]+)/g;
 
-// 1d. Authorization: Bearer <token>  / Authorization: Basic <token>
+// 1d. -pVALUE / "-pVALUE" / '-pVALUE' (MySQL attached password form).
+const CLI_SHORT_P_ATTACHED_RE = /(^|\s)(["']?)-p([^\s"']+)(\2)/g;
+
+// 1e. Authorization: Bearer ***  / Authorization: Basic ***
 const AUTH_HEADER_RE =
   /(Authorization\s*:\s*)(Bearer|Basic|Token)\s+([A-Za-z0-9_\-\.=+\/]+)/gi;
 
@@ -85,6 +88,7 @@ const RULES: Rule[] = [
   { re: CLI_LONG_EQ_RE, replace: (_m, key) => `${key}${REDACTED}` },
   { re: CLI_LONG_SPACE_RE, replace: (_m, key) => `${key} ${REDACTED}` },
   { re: CLI_SHORT_P_RE, replace: (_m, lead, flag) => `${lead}${flag} ${REDACTED}` },
+  { re: CLI_SHORT_P_ATTACHED_RE, replace: (_m, lead, quote) => `${lead}${quote}-p${REDACTED}${quote}` },
   { re: AUTH_HEADER_RE, replace: (_m, hdr, scheme) => `${hdr}${scheme} ${REDACTED}` },
   { re: SHELL_ASSIGN_RE, replace: (_m, key) => `${key}=${REDACTED}` },
   { re: JSON_KV_RE, replace: (_m, head) => `${head}"${REDACTED}"` },

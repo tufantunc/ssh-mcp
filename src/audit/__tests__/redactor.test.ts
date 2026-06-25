@@ -17,6 +17,30 @@ describe('audit redactor', () => {
     expect(out).not.toContain('tok123');
   });
 
+  it('redacts MySQL and MariaDB attached -pVALUE password args', () => {
+    const input = [
+      'mysql -uroot -psecret',
+      'mysql --password=longsecret',
+      'mysqldump -pdumpsecret',
+      'mariadb "-pquotedsecret"',
+      "mysql '-prepeated1' -prepeated2",
+    ].join(' && ');
+
+    const out = redact(input);
+
+    expect(out).toContain(`mysql -uroot -p${R}`);
+    expect(out).toContain(`mysql --password=${R}`);
+    expect(out).toContain(`mysqldump -p${R}`);
+    expect(out).toContain(`mariadb "-p${R}"`);
+    expect(out).toContain(`mysql '-p${R}' -p${R}`);
+    expect(out).not.toContain('secret');
+    expect(out).not.toContain('repeated');
+  });
+
+  it('does not redact bare MySQL -p prompt form', () => {
+    expect(redact('mysql -p')).toBe('mysql -p');
+  });
+
   it('redacts JSON/TOML-ish secret values', () => {
     const out = redact('{"password":"pw","nested_token":"tok","safe":"ok"}\napi_key = "abc"\ntoken abc');
     expect(out).toContain(`"password":"${R}"`);
