@@ -17,6 +17,19 @@ export class TransportRegistry {
   private transports = new Map<string, ISshTransport>();
   private initPromises = new Map<string, Promise<ISshTransport>>();
   private defaultName: string | null = null;
+  /**
+   * Live per-source description overrides (PR-8, Decision D3: in-memory only).
+   *
+   * Presence of a key means the source description has been overridden at
+   * runtime via the WebUI; the value is the override text (may be the empty
+   * string when an operator deliberately blanks the description). Deleting a
+   * key reverts to the TOML-seeded `ServerConfig.description`. This Map holds
+   * NOTHING on disk — a process restart discards every override and the boot
+   * config takes over again, exactly like the approval mode store. The
+   * approval engine re-reads the effective description on its NEXT decision
+   * because `profile()` applies the override on every call.
+   */
+  private descriptionOverrides = new Map<string, string>();
 
   register(config: ServerConfig): void {
     if (!config.name) {
@@ -59,9 +72,51 @@ export class TransportRegistry {
     const cfg = this.configs.get(resolved)!;
     return {
       id: resolved,
-      description: cfg.description,
+      description: this.effectiveDescription(resolved),
       approval: cfg.approval,
     };
+  }
+
+  /**
+   * Effective description for a source: live runtime override > TOML-seeded
+   * `ServerConfig.description`. Returns `undefined` when neither is set.
+   * Both `profile()` (the approval-engine read path) and `list()` (the WebUI
+   * status surface) resolve through here, so a live override is felt by the
+   * gate's next decision and every open dashboard at once.
+   */
+  private effectiveDescription(resolved: string): string | undefined {
+    const override = this.descriptionOverrides.get(resolved);
+    if (override !== undefined) return override;
+    return this.configs.get(resolved)?.description;
+  }
+
+  /**
+   * Set (text) or clear (`null` → revert to the TOML description) the live
+   * runtime description override for a source. In-memory only (Decision D3):
+   * never writes back to the config file. Returns the resulting effective
+   * description (the empty string when blanked or unset). Throws on an unknown
+   * connection name — the same contract as `get()` / `profile()`.
+   */
+  setDescription(name: string, description: string | null): string {
+    const resolved = this.resolveName(name);
+    if (description === null) {
+      this.descriptionOverrides.delete(resolved);
+    } else {
+      this.descriptionOverrides.set(resolved, description);
+    }
+    return this.effectiveDescription(resolved) ?? '';
+  }
+
+  /** Effective description for a source as a string (override > TOML > ''). */
+  getEffectiveDescription(name?: string): string {
+    const resolved = this.resolveName(name);
+    return this.effectiveDescription(resolved) ?? '';
+  }
+
+  /** The live runtime description override for `name`, if one is set. */
+  getDescriptionOverride(name?: string): string | undefined {
+    const resolved = this.resolveName(name);
+    return this.descriptionOverrides.get(resolved);
   }
 
   /** Resolve name argument → canonical name. Falls back to default. */
@@ -116,7 +171,7 @@ export class TransportRegistry {
     for (const [name, cfg] of this.configs) {
       out.push({
         name,
-        description: cfg.description,
+        description: this.effectiveDescription(name),
         host: cfg.host,
         port: cfg.port,
         username: cfg.username,

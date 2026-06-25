@@ -33,6 +33,8 @@ import type {
   ApprovalDecision as WebUIApprovalDecision,
   AuditTail as WebUIAuditTail,
   ModeController as WebUIModeController,
+  SourceController as WebUISourceController,
+  SourceUpdatedEvent as WebUISourceUpdatedEvent,
 } from './webui/types.js';
 
 // Re-exports for backward compatibility with existing tests.
@@ -506,6 +508,42 @@ function buildWebUIModeController(engine: ApprovalDispatcher | null): WebUIModeC
   };
 }
 
+/**
+ * Bridge the TransportRegistry's in-memory description override to the WebUI's
+ * SourceController contract (PR-8). All mutation is in-memory only (Decision
+ * D3): `registry.setDescription()` updates a Map and NEVER writes the TOML
+ * config. The approval engine re-reads the effective description on its next
+ * decision because `registry.profile()` applies the override on every call —
+ * so an edit takes effect live without a restart. This adapter owns the
+ * `source-updated` fan-out (the registry is a pure state-holder, like the
+ * ApprovalModeStore beneath the mode controller).
+ */
+function buildWebUISourceController(reg: TransportRegistry): WebUISourceController {
+  const listeners = new Set<(e: WebUISourceUpdatedEvent) => void>();
+  return {
+    hasSource: (id: string) => reg.names().includes(id),
+    getEffectiveDescription: (id: string) => reg.getEffectiveDescription(id),
+    setDescription(id: string, description: string | null): WebUISourceUpdatedEvent {
+      const effective = reg.setDescription(id, description);
+      const event: WebUISourceUpdatedEvent = {
+        id,
+        description: effective,
+        at: new Date().toISOString(),
+      };
+      for (const l of listeners) {
+        try { l(event); } catch { /* a bad listener must not break the edit */ }
+      }
+      return event;
+    },
+    on(_event, listener) {
+      listeners.add(listener);
+    },
+    off(_event, listener) {
+      listeners.delete(listener);
+    },
+  };
+}
+
 async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined> {
   if (!isWebUIActive()) return undefined;
 
@@ -523,6 +561,7 @@ async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined
     audit: buildWebUIAuditTailAdapter(auditSink),
     getApprovalMode: makeApprovalModeLookup(),
     modeController: buildWebUIModeController(approvalEngine),
+    sourceController: buildWebUISourceController(registry),
   });
   const tokenStatus = authToken ? 'token required' : 'anonymous loopback';
   console.error(`SSH MCP WebUI running on http://${handle.address.host}:${handle.address.port}/ — ${tokenStatus}`);

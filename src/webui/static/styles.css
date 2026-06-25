@@ -72,3 +72,13 @@ th { color: var(--muted); font-weight: 600; }
 .pill.deny { color: var(--danger); border-color: var(--danger); }
 .mode-select { font: inherit; font-size: 12px; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border); background: #0d1117; color: var(--fg); cursor: pointer; }
 .mode-select:disabled { opacity: 0.5; cursor: progress; }
+.desc-wrap { display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap; }
+.desc-text { white-space: pre-wrap; word-break: break-word; }
+.desc-edit { font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); cursor: pointer; }
+.desc-edit:hover { color: var(--fg); }
+.desc-input { width: 100%; min-width: 220px; font: inherit; font-size: 12px; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border); background: #0d1117; color: var(--fg); resize: vertical; }
+.desc-actions { display: flex; gap: 6px; margin-top: 4px; }
+.desc-actions button { font: inherit; font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--panel); color: var(--fg); cursor: pointer; }
+.desc-actions .desc-save { border-color: var(--ok); color: var(--ok); }
+.desc-actions button:disabled { opacity: 0.5; cursor: progress; }
+

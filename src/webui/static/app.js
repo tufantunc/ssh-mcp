@@ -50,6 +50,7 @@
       const r = await fetch('/api/profiles', { headers: authHeaders() });
       if (r.status === 401) { setConnStatus('error'); return; }
       const data = await r.json();
+      sourceEditEnabled = !!data.source_edit_enabled;
       renderProfiles(data.profiles || []);
     } catch (e) { /* ignore polling glitches */ }
   }
@@ -80,7 +81,7 @@
       const tr = document.createElement('tr');
       tr.dataset.id = p.id;
       tr.innerHTML = `<td>${escapeHtml(p.name)}${p.default ? ' <span class="muted">(default)</span>' : ''}</td>
-                      <td>${escapeHtml(p.description || '')}</td>
+                      <td class="desc-cell"></td>
                       <td>${escapeHtml(p.host)}:${p.port}</td>
                       <td>${escapeHtml(p.user)}</td>
                       <td>${escapeHtml(p.auth)}</td>
@@ -88,7 +89,86 @@
                       <td class="mode-cell"></td>
                       <td>${p.connected ? '<span class="pill allow">connected</span>' : '<span class="pill">idle</span>'}</td>`;
       tr.querySelector('.mode-cell').appendChild(buildModeControl(p.id, p.approval_mode_effective));
+      tr.querySelector('.desc-cell').appendChild(buildDescriptionControl(p.id, p.description || ''));
       tbody.appendChild(tr);
+    }
+  }
+
+  // Build the per-source description cell. When the server exposes a source
+  // controller (sourceEditEnabled), the cell is click-to-edit: a textarea with
+  // save / revert that PUTs /api/sources/:id/description (in-memory only).
+  // Otherwise it is plain read-only text (the read-only WebUI case).
+  function buildDescriptionControl(sourceId, description) {
+    const wrap = document.createElement('div');
+    wrap.className = 'desc-wrap';
+    wrap.dataset.source = sourceId;
+
+    const text = document.createElement('span');
+    text.className = 'desc-text';
+    text.textContent = description || '—';
+
+    if (!sourceEditEnabled) {
+      wrap.appendChild(text);
+      return wrap;
+    }
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'desc-edit';
+    editBtn.textContent = 'edit';
+    editBtn.title = 'Edit description (live, in-memory only — not written to TOML)';
+    editBtn.addEventListener('click', () => openDescriptionEditor(wrap, sourceId, description));
+
+    wrap.appendChild(text);
+    wrap.appendChild(editBtn);
+    return wrap;
+  }
+
+  function openDescriptionEditor(wrap, sourceId, current) {
+    wrap.innerHTML = '';
+    const ta = document.createElement('textarea');
+    ta.className = 'desc-input';
+    ta.value = current || '';
+    ta.rows = 3;
+
+    const actions = document.createElement('div');
+    actions.className = 'desc-actions';
+    const save = document.createElement('button');
+    save.type = 'button'; save.className = 'desc-save'; save.textContent = 'save';
+    const revert = document.createElement('button');
+    revert.type = 'button'; revert.className = 'desc-revert'; revert.textContent = 'revert to config';
+    const cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.className = 'desc-cancel'; cancel.textContent = 'cancel';
+
+    save.addEventListener('click', () => saveDescription(sourceId, ta.value, save));
+    revert.addEventListener('click', () => saveDescription(sourceId, null, revert));
+    cancel.addEventListener('click', () => fetchProfiles());
+
+    actions.appendChild(save);
+    actions.appendChild(revert);
+    actions.appendChild(cancel);
+    wrap.appendChild(ta);
+    wrap.appendChild(actions);
+    ta.focus();
+  }
+
+  // PUT the description override. `description === null` reverts to the TOML
+  // value. A successful edit also lands as an SSE source-updated event, which
+  // triggers fetchProfiles() so every open dashboard converges on server truth.
+  async function saveDescription(sourceId, description, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch('/api/sources/' + encodeURIComponent(sourceId) + '/description', {
+        method: 'PUT',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+        body: JSON.stringify({ description }),
+      });
+      // On success or failure, re-sync from server truth.
+      fetchProfiles();
+    } catch (_) {
+      fetchProfiles();
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
 
@@ -119,6 +199,11 @@
   // List of modes the server allows switching to (populated from
   // /api/approval-modes). Empty => mode switching disabled (read-only).
   let availableModes = [];
+
+  // Whether the server exposes the live description-edit surface (PR-8).
+  // Detected at bootstrap from /api/approval-modes' sibling capability probe;
+  // false => read-only description cells (the read-only WebUI case).
+  let sourceEditEnabled = false;
 
   async function fetchModes() {
     try {
@@ -247,6 +332,12 @@
     sse.addEventListener('mode-changed', (ev) => {
       // A live mode switch landed (possibly from another client). Re-fetch the
       // profile snapshot so every open dashboard converges on server truth.
+      try { JSON.parse(ev.data); } catch (_) {}
+      fetchProfiles();
+    });
+    sse.addEventListener('source-updated', (ev) => {
+      // A live description edit landed (possibly from another client). Re-fetch
+      // the profile snapshot so every open dashboard converges on server truth.
       try { JSON.parse(ev.data); } catch (_) {}
       fetchProfiles();
     });

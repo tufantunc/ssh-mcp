@@ -8,6 +8,7 @@ import { handleProfiles } from './routes/profiles.js';
 import { handleExecutions } from './routes/executions.js';
 import { handleListApprovals, handleDecideApproval } from './routes/approvals.js';
 import { handleListModes, handleSetProfileMode, handleSetGlobalMode } from './routes/modes.js';
+import { handleSetSourceDescription } from './routes/sources.js';
 import { SseHub } from './routes/sse.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -134,7 +135,7 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
     );
   }
 
-  const hub = new SseHub(opts.queue, opts.audit, opts.modeController);
+  const hub = new SseHub(opts.queue, opts.audit, opts.modeController, opts.sourceController);
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -164,7 +165,7 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
         }
 
         if (pathname === '/api/profiles' && method === 'GET') {
-          const r = handleProfiles(opts.registry, opts.getApprovalMode);
+          const r = handleProfiles(opts.registry, opts.getApprovalMode, !!opts.sourceController);
           sendJson(res, r.status, r.body);
           return;
         }
@@ -224,6 +225,20 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
             return;
           }
           const r = handleSetProfileMode(opts.modeController, id, body);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        // --- Live per-source description editing (PR-8, in-memory only) -----
+        const descMatch = pathname.match(/^\/api\/sources\/([^/]+)\/description$/);
+        if (descMatch && method === 'PUT') {
+          const id = decodeURIComponent(descMatch[1]);
+          const body = await readJson(req);
+          if (body === null) {
+            sendJson(res, 400, { error: 'invalid JSON body' });
+            return;
+          }
+          const r = handleSetSourceDescription(opts.sourceController, id, body);
           sendJson(res, r.status, r.body);
           return;
         }

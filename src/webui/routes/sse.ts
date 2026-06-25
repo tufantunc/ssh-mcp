@@ -1,5 +1,5 @@
 import type { ServerResponse } from 'node:http';
-import type { ManualApprovalQueue, AuditTail, ModeController, ModeChangedEvent } from '../types.js';
+import type { ManualApprovalQueue, AuditTail, ModeController, ModeChangedEvent, SourceController, SourceUpdatedEvent } from '../types.js';
 
 export interface SseClient {
   res: ServerResponse;
@@ -19,11 +19,13 @@ export class SseHub {
   private queueListenersRes?: (...args: any[]) => void;
   private auditListener?: (...args: any[]) => void;
   private modeListener?: (...args: any[]) => void;
+  private sourceListener?: (...args: any[]) => void;
 
   constructor(
     private readonly queue?: ManualApprovalQueue,
     private readonly audit?: AuditTail,
     private readonly modeController?: ModeController,
+    private readonly sourceController?: SourceController,
   ) {
     if (this.queue) {
       this.queueListenersEnq = (p: any) => this.broadcast('pending-approval', { action: 'enqueue', approval: p });
@@ -38,6 +40,10 @@ export class SseHub {
     if (this.modeController) {
       this.modeListener = (e: ModeChangedEvent) => this.broadcast('mode-changed', e);
       this.modeController.on('mode-changed', this.modeListener as any);
+    }
+    if (this.sourceController) {
+      this.sourceListener = (e: SourceUpdatedEvent) => this.broadcast('source-updated', e);
+      this.sourceController.on('source-updated', this.sourceListener as any);
     }
   }
 
@@ -94,6 +100,9 @@ export class SseHub {
     }
     if (this.modeController && this.modeController.off && this.modeListener) {
       this.modeController.off('mode-changed', this.modeListener);
+    }
+    if (this.sourceController && this.sourceController.off && this.sourceListener) {
+      this.sourceController.off('source-updated', this.sourceListener);
     }
   }
 }
