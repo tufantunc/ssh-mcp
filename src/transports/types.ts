@@ -103,6 +103,10 @@ export interface TransportConfig {
 export interface ServerConfig extends TransportConfig {
   /** Unique identifier referenced by MCP tools' connectionName argument. */
   name: string;
-  /** Human-readable connection description for read-only status surfaces. */
+  /** Human-readable connection description for read-only status surfaces and approval engines. */
   description?: string;
+  /** Per-source approval override. */
+  approval?: {
+    mode?: import('../approval/types.js').ApprovalMode;
+  };
 }

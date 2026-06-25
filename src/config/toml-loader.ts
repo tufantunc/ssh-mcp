@@ -181,6 +181,12 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
         `Config: sources.${src.id}.gssapi_delegate_credentials must be yes|no`,
       );
     }
+    if (src.default !== undefined && typeof src.default !== 'boolean') {
+      throw new Error(`Config: sources.${src.id}.default must be a boolean`);
+    }
+    if (src.description !== undefined && typeof src.description !== 'string') {
+      throw new Error(`Config: sources.${src.id}.description must be a string`);
+    }
 
     // Default transport mirrors index.ts logic: kerberos -> openssh, else explicit, else ssh2.
     const resolvedTransport: 'ssh2' | 'openssh' = src.transport
@@ -228,6 +234,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
 
     if (sudoPassword !== undefined) out.sudoPassword = sudoPassword;
     if (suPassword !== undefined) out.suPassword = suPassword;
+    if (src.description !== undefined) out.description = src.description;
     if (src.known_hosts_file) out.knownHostsFile = expandHome(src.known_hosts_file);
     if (src.strict_host_key_checking) out.strictHostKeyChecking = src.strict_host_key_checking;
 
@@ -242,12 +249,13 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       defaultName = src.id;
     }
 
-    if (src.approval && src.approval.mode) {
+    if (src.approval?.mode) {
       if (!VALID_APPROVAL_MODE.includes(src.approval.mode)) {
         throw new Error(
           `Config: sources.${src.id}.approval.mode must be one of: ${VALID_APPROVAL_MODE.join(', ')}`,
         );
       }
+      out.approval = { mode: src.approval.mode };
       perSourceApproval[src.id] = src.approval.mode;
     }
   }
