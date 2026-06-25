@@ -19,6 +19,7 @@
 - [Features](#features)
 - [Installation](#installation)
 - [Client Setup](#client-setup)
+- [TOML config watch / hot reload](#toml-config-watch--hot-reload)
 - [Testing](#testing)
 - [Disclaimer](#disclaimer)
 - [Support](#support)
@@ -253,6 +254,36 @@ npx -y ssh-mcp -- \
 - **Password mode via `SSH_ASKPASS`.** When `--password` is combined with `--transport=openssh`, the server writes a short-lived askpass helper to `%TEMP%/ssh-mcp-<pid>/` and exports the password through a per-process environment variable. The password never appears in `argv` but is briefly visible to same-user-session process inspection. Prefer Kerberos or key auth.
 - **`--suPassword` over OpenSSH transport** is implemented via `ssh -tt` with a local expect-style state machine (random-nonce sentinel prompts). Works, but has more moving parts than the ssh2 path. Report issues with stderr output if you hit a regression.
 - **Delegation (`GSSAPIDelegateCredentials=yes`)** is off by default. Enabling it forwards your TGT to the remote host, which can then impersonate you elsewhere — use only against fully trusted infrastructure. See Microsoft's guidance on Kerberos delegation.
+
+## TOML config watch / hot reload
+
+When the server is started from a TOML config file (`--config=<path>`, `$SSH_MCP_CONFIG`, or a discovered `~/.config/ssh-mcp/config.toml` / `~/.ssh-mcp/config.toml`), it **watches that file and hot-reloads on change** — no restart needed. Edit the file, save, and within ~500ms the running server picks up the new configuration. (CLI/`--ssh=<JSON>` boots are not file-backed, so there is nothing to watch — the watcher is simply not started.)
+
+### What reloads (and what does not)
+
+| Reloaded live | NOT reloaded |
+|---|---|
+| The set of named connections (`[[sources]]`) and their parameters | The **MCP tool list** (`exec` / `sudo-exec` / `list-servers`) |
+| Per-source `description` | The WebUI bind host/port/auth token |
+| Approval policy: `[approval].mode` + per-source `[sources.approval].mode` | The audit-log destination |
+
+A reload re-establishes the **file** as the source of truth: any live in-memory overrides made through the WebUI (an edited description, a switched approval mode) are dropped in favour of the freshly-loaded file values. All reload mutation is in-memory — the server **never writes the config file back**, so an edit can't feedback-loop with the watcher.
+
+### Safety: validate-before-swap with rollback
+
+A bad edit can't take the server down. The reload is transactional:
+
+1. **Parse + validate** the new file. If it fails to parse or validate, the server logs the error and **keeps every existing connection and the current approval policy** untouched.
+2. **Swap** connections + approval policy atomically. If any step fails (e.g. a key file became unreadable, or the new policy selects an approval mode whose engine wasn't armed at boot — see below), the server **rolls both layers back together** to the last known-good state.
+3. **Broadcast** a `config-reloaded` SSE event so every open WebUI dashboard re-fetches and converges on the new server truth.
+
+Multiple rapid saves (editors often fire several change events per save) are **debounced** into a single reload (~500ms window), and a change arriving while a reload is in flight is coalesced into exactly one trailing reload.
+
+### STDIO transport caveat
+
+> Hot reload refreshes connections, descriptions, and approval policy — it does **not** add or remove MCP tools. ssh-mcp's tool set (`exec` / `sudo-exec` / `list-servers`) is static and registered once at startup, so a STDIO client never needs to reconnect to keep working. The WebUI receives the `config-reloaded` SSE event and updates live; STDIO MCP clients see the new connection set the next time they call `list-servers` or target a connection by name. (This mirrors dbhub's documented STDIO limitation, where the tool list *is* config-derived; here it isn't, so the caveat is narrower.)
+
+> **Switching INTO a newly-configured `smart` or `manual` mode needs a restart.** The approval sub-engines (yolo / smart / manual) are built once at boot from the engines that are *armed* then — e.g. `smart` is only armed when `[approval.llm]` was present at startup. A hot reload can freely switch *among already-armed* modes, but a reload that newly introduces `[approval.llm]` (or first enables the WebUI for `manual`) is rejected and rolled back; restart the server to arm the new engine.
 
 ## Testing
 

@@ -22,6 +22,7 @@ import { YoloApproval } from './yolo.js';
 import { SmartApproval } from './smart.js';
 import { ManualApproval } from './manual.js';
 import { ApprovalModeStore } from './mode-store.js';
+import type { ModeStoreState } from './mode-store.js';
 
 export interface BuildApprovalEngineOptions {
   /** Default approval mode when a source has no [sources.approval] override. */
@@ -197,6 +198,44 @@ export class ApprovalDispatcher extends EventEmitter implements ApprovalEngine {
     } catch (err: any) {
       throw new ModeUnavailableError(mode, err?.message ?? 'engine not configured');
     }
+  }
+
+  /**
+   * Hot-reload the approval POLICY from a freshly-loaded config (PR-9). Re-seeds
+   * the global default + static per-source overrides and clears live runtime
+   * overrides, so the edited file becomes the source of truth again.
+   *
+   * Sub-engines (yolo/smart/manual) are NEVER rebuilt — only the mode store is
+   * re-seeded — so this is allocation-free and cannot change which transports
+   * or LLM endpoint are wired. That means a reload can only select among modes
+   * already armed at boot: a new default/override naming an UNARMED engine
+   * (e.g. switch to `smart` when no `[approval.llm]` was configured at startup)
+   * is rejected with {@link ModeUnavailableError} and the store is left
+   * untouched (validate-before-swap — atomic). The reloader maps that to a
+   * kept-old-policy outcome; switching INTO a newly-configured smart/manual
+   * engine still requires a restart, exactly like dbhub's tool-list caveat.
+   */
+  reloadPolicy(input: { defaultMode?: ApprovalMode; staticOverrides?: Record<string, ApprovalMode> }): void {
+    const nextDefault: ApprovalMode = input.defaultMode ?? 'yolo';
+    const nextStatic = input.staticOverrides ?? {};
+    // Validate-before-swap: every mode the new policy can resolve to must have
+    // an armed sub-engine. Throws (leaving the store untouched) on the first
+    // unarmed mode.
+    this.assertSwitchable(nextDefault);
+    for (const mode of Object.values(nextStatic)) {
+      this.assertSwitchable(mode);
+    }
+    this.modeStore.reseed(nextDefault, nextStatic);
+  }
+
+  /** Capture the mode-store state for external rollback (PR-9). */
+  captureModeState(): ModeStoreState {
+    return this.modeStore.capture();
+  }
+
+  /** Restore a previously captured mode-store state (PR-9 rollback). */
+  restoreModeState(state: ModeStoreState): void {
+    this.modeStore.restore(state);
   }
 
   listPending(): PendingApproval[] {

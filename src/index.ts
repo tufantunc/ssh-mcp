@@ -12,6 +12,8 @@ import { createTransport } from './transports/factory.js';
 import { TransportRegistry } from './transports/registry.js';
 import { resolveConfig } from './config/resolver.js';
 import type { ResolvedConfig, ApprovalMode } from './config/types.js';
+import { startConfigWatcher } from './config/config-watcher.js';
+import { ConfigReloader } from './config/reloader.js';
 import {
   sanitizeCommand as sanitizeCommandImpl,
   sanitizePassword,
@@ -35,6 +37,7 @@ import type {
   ModeController as WebUIModeController,
   SourceController as WebUISourceController,
   SourceUpdatedEvent as WebUISourceUpdatedEvent,
+  ConfigReloadController as WebUIConfigReloadController,
 } from './webui/types.js';
 
 // Re-exports for backward compatibility with existing tests.
@@ -544,6 +547,68 @@ function buildWebUISourceController(reg: TransportRegistry): WebUISourceControll
   };
 }
 
+// =============================================================================
+// Config hot-reload (PR-9). The reloader owns the parse→validate→swap→rollback
+// transaction; the watcher debounces fs.watch and drives it. Reload scope =
+// connections + per-source description + approval policy. The MCP tool list is
+// NEVER reloaded (Decision D4) — it is static and registered once at startup,
+// so STDIO clients need no reconnect. All mutation is in-memory (D3): a reload
+// reseeds from the file but writes nothing back, so it can't loop the watcher.
+// =============================================================================
+
+let configReloader: ConfigReloader | null = null;
+let stopConfigWatcher: (() => void) | null = null;
+
+/**
+ * Re-resolve the boot config from disk using the same precedence chain as
+ * startup. Only ever called on the TOML-driven path (the watcher isn't started
+ * for `--ssh`/legacy CLI), so `cliSources` is empty and TOML wins. Throws on any
+ * parse/validation error — the reloader treats a throw as "keep the old config".
+ */
+function reloadResolveConfig(): ResolvedConfig {
+  return resolveConfig({
+    cliSources: cliSourceConfigs,
+    cliConfigPath: typeof CONFIG_PATH === 'string' ? CONFIG_PATH : undefined,
+  });
+}
+
+/**
+ * Build the ConfigReloader bound to the live registry + approval engine. Only
+ * meaningful when a TOML config path exists (TOML-driven boot); returns null
+ * otherwise so the watcher is never started for CLI/`--ssh` mode.
+ */
+function buildConfigReloader(): ConfigReloader | null {
+  if (!resolvedConfig.configPath) return null;
+  return new ConfigReloader({
+    registry,
+    loadConfig: reloadResolveConfig,
+    engine: approvalEngine ?? undefined,
+    prepareSources: async (sources) => {
+      for (const cfg of sources) await prepareKeyContents(cfg);
+    },
+  });
+}
+
+/** Adapt the ConfigReloader (an EventEmitter) to the WebUI's read-only controller. */
+function buildWebUIReloadController(reloader: ConfigReloader | null): WebUIConfigReloadController | undefined {
+  if (!reloader) return undefined;
+  const wrappers = new Map<Function, (e: any) => void>();
+  return {
+    on(event, listener) {
+      const wrap = (e: any) => listener(e);
+      wrappers.set(listener, wrap);
+      reloader.on(event, wrap);
+    },
+    off(event, listener) {
+      const wrap = wrappers.get(listener);
+      if (wrap) {
+        reloader.off(event, wrap);
+        wrappers.delete(listener);
+      }
+    },
+  };
+}
+
 async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined> {
   if (!isWebUIActive()) return undefined;
 
@@ -562,6 +627,7 @@ async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined
     getApprovalMode: makeApprovalModeLookup(),
     modeController: buildWebUIModeController(approvalEngine),
     sourceController: buildWebUISourceController(registry),
+    reloadController: buildWebUIReloadController(configReloader),
   });
   const tokenStatus = authToken ? 'token required' : 'anonymous loopback';
   console.error(`SSH MCP WebUI running on http://${handle.address.host}:${handle.address.port}/ — ${tokenStatus}`);
@@ -966,7 +1032,18 @@ async function main() {
   // Boot the approval engine + optional audit seam BEFORE the MCP transport so
   // the very first exec / sudo-exec call is gated and (optionally) audited.
   await wireApprovalAndAudit();
+  // Build the config reloader AFTER the approval engine exists so a hot reload
+  // reseeds policy in lockstep with connections. Null for CLI/`--ssh` boots.
+  configReloader = buildConfigReloader();
   const webuiHandle = await maybeStartWebUI();
+  // Start the debounced TOML watcher LAST so the WebUI's reloadController is
+  // already subscribed before any file change can fire `config-reloaded`.
+  if (configReloader && resolvedConfig.configPath) {
+    stopConfigWatcher = startConfigWatcher({
+      configPath: resolvedConfig.configPath,
+      onChange: async () => { await configReloader!.reload(); },
+    });
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
   const mode = isMultiHost ? `multi-host (${registry.names().length} servers: ${registry.names().join(', ')})` : 'single-host';
@@ -974,6 +1051,7 @@ async function main() {
 
   const cleanup = () => {
     console.error('Shutting down SSH MCP Server...');
+    if (stopConfigWatcher) { try { stopConfigWatcher(); } catch { /* ignore */ } }
     if (webuiHandle) void webuiHandle.close().catch(() => { /* ignore */ });
     void registry.closeAll();
     process.exit(0);

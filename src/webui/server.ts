@@ -135,7 +135,7 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
     );
   }
 
-  const hub = new SseHub(opts.queue, opts.audit, opts.modeController, opts.sourceController);
+  const hub = new SseHub(opts.queue, opts.audit, opts.modeController, opts.sourceController, opts.reloadController);
 
   const server = http.createServer(async (req, res) => {
     try {

@@ -97,6 +97,30 @@ export interface ApprovalDecision {
 }
 
 /**
+ * Event emitted whenever a TOML config hot-reload is applied (PR-9). Carries
+ * the post-reload connection name list + effective default. Kept loose (string
+ * fields) so the WebUI doesn't import the config types directly. In-memory
+ * reload only (Decision D3/D4) — the tool list is never part of this.
+ */
+export interface ConfigReloadedEvent {
+  sources: string[];
+  defaultName: string | null;
+  at: string;
+}
+
+/**
+ * Live config-reload control surface (PR-9). The boot path passes the
+ * ConfigReloader (an EventEmitter) here; the SSE hub subscribes and rebroadcasts
+ * `config-reloaded` to every open dashboard so each re-fetches the profile
+ * snapshot. Read-only from the WebUI's perspective — the UI never triggers a
+ * reload, it only reacts to file-driven reloads.
+ */
+export interface ConfigReloadController {
+  on(event: 'config-reloaded', listener: (e: ConfigReloadedEvent) => void): void;
+  off?(event: 'config-reloaded', listener: (...args: any[]) => void): void;
+}
+
+/**
  * Listener API for the manual approval queue.
  *
  * The approval-engine card's `approval/manual.ts` implementation must satisfy
@@ -185,6 +209,10 @@ export interface WebUIOptions {
    * enables the description-edit route (`PUT /api/sources/:id/description`) and
    * SSE `source-updated` broadcasts. In-memory only (Decision D3). */
   sourceController?: SourceController;
+  /** Optional config-reload controller (PR-9). When present, the SSE hub
+   * subscribes to it and rebroadcasts `config-reloaded` so every dashboard
+   * re-fetches after a TOML hot reload. Read-only; in-memory reload (D4). */
+  reloadController?: ConfigReloadController;
 }
 
 export interface WebUIHandle {
