@@ -19,11 +19,13 @@ import {
 } from './utils/shell.js';
 import {
   gateApproval,
+  getApprovalDecisionFromError,
   setApprovalEngine,
   buildApprovalEngineFromConfig,
   type ApprovalDecision,
   type BuildEngineFromConfigInput,
   type ApprovalDispatcher,
+  type ResolvedSource,
 } from './approval/index.js';
 import { loadAuditSink, type AuditSink } from './approval/audit-seam.js';
 
@@ -411,6 +413,34 @@ function resolvedProfileName(connectionName?: string): string {
   return connectionName ?? registry.getDefaultName() ?? 'default';
 }
 
+export function buildApprovalProfile(
+  id: string,
+  perSourceApproval: Record<string, ApprovalMode> = {},
+  source?: { description?: string },
+): ResolvedSource {
+  const mode = perSourceApproval[id];
+  return {
+    id,
+    ...(source?.description ? { description: source.description } : {}),
+    ...(mode ? { approval: { mode } } : {}),
+  };
+}
+
+function approvalProfileForConnection(connectionName?: string): ResolvedSource {
+  const id = resolvedProfileName(connectionName);
+  const source = resolvedConfig.sources.find(s => s.name === id);
+  return buildApprovalProfile(id, resolvedConfig.perSourceApproval ?? {}, source);
+}
+
+export function appendDescriptionComment(command: string, description?: string): string {
+  if (!description) return command;
+  const safeDescription = description
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[\t\f\v ]+/g, ' ')
+    .trim();
+  return safeDescription ? `${command} # ${safeDescription}` : command;
+}
+
 // =============================================================================
 // Approval engine + OPTIONAL audit-truth seam (Decision D2).
 //
@@ -435,7 +465,7 @@ let auditSink: AuditSink = { record() { /* no-op until wired (or audit absent) *
 function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
   const approvalCfg = resolvedConfig.approval;
   const perSourceModes: ApprovalMode[] = Object.values(resolvedConfig.perSourceApproval ?? {});
-  if (!approvalCfg?.mode && perSourceModes.length === 0) {
+  if (approvalCfg === undefined && perSourceModes.length === 0) {
     return null;
   }
   const input: BuildEngineFromConfigInput = {
@@ -528,6 +558,7 @@ server.tool(
   },
   async ({ command, description, connectionName }) => {
     const sanitizedCommand = sanitizeCommand(command);
+    const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
     const profile = resolvedProfileName(connectionName);
     const startedAt = Date.now();
     let audited = false;
@@ -535,14 +566,11 @@ server.tool(
     try {
       const t = await registry.get(connectionName);
       approvalDecision = await gateApproval({
-        profile: { id: connectionName ?? 'default' },
+        profile: approvalProfileForConnection(connectionName),
         tool: 'exec',
-        command: sanitizedCommand,
+        command: commandWithDescription,
         description,
       });
-      const commandWithDescription = description
-        ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
-        : sanitizedCommand;
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
       auditSink.record({
         tool: 'exec',
@@ -556,10 +584,11 @@ server.tool(
       audited = true;
       return resultToMcpContent(result);
     } catch (err: any) {
+      approvalDecision = approvalDecision ?? getApprovalDecisionFromError(err);
       if (!audited) auditSink.record({
         tool: 'exec',
         profile,
-        command: sanitizedCommand,
+        command: commandWithDescription,
         description,
         startedAt,
         error: err,
@@ -582,6 +611,7 @@ if (!DISABLE_SUDO) {
     },
     async ({ command, description, connectionName }) => {
       const sanitizedCommand = sanitizeCommand(command);
+      const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
       const profile = resolvedProfileName(connectionName);
       const startedAt = Date.now();
       let audited = false;
@@ -589,14 +619,11 @@ if (!DISABLE_SUDO) {
       try {
         const t = await registry.get(connectionName);
         approvalDecision = await gateApproval({
-          profile: { id: connectionName ?? 'default' },
+          profile: approvalProfileForConnection(connectionName),
           tool: 'sudo-exec',
-          command: sanitizedCommand,
+          command: commandWithDescription,
           description,
         });
-        const commandWithDescription = description
-          ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
-          : sanitizedCommand;
         // Legacy single-host mode may still pass --sudoPassword on CLI; in
         // multi-host mode each ServerConfig carries its own sudoPassword.
         const legacySudo = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined && !isMultiHost)
@@ -619,10 +646,11 @@ if (!DISABLE_SUDO) {
         audited = true;
         return resultToMcpContent(result);
       } catch (err: any) {
+        approvalDecision = approvalDecision ?? getApprovalDecisionFromError(err);
         if (!audited) auditSink.record({
           tool: 'sudo-exec',
           profile,
-          command: sanitizedCommand,
+          command: commandWithDescription,
           description,
           startedAt,
           error: err,

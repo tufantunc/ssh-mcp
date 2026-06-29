@@ -136,6 +136,40 @@ describe('SmartApproval — fail-closed (default)', () => {
     expect(d.reason).toMatch(/timed out/);
   });
 
+  it('keeps the timeout armed while reading the response body', async () => {
+    let signal: AbortSignal | undefined;
+    const fetchImpl = vi.fn(
+      (_url: string, init: any) => {
+        signal = init.signal;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          text: () => new Promise<string>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => {
+              const err: any = new Error('aborted while reading body');
+              err.name = 'AbortError';
+              reject(err);
+            });
+          }),
+        });
+      },
+    );
+    const s = new SmartApproval(makeOpts({
+      llm: {
+        endpoint: 'https://example.invalid/v1/chat/completions',
+        api_key: 'test-key',
+        model: 'gpt-4o-mini',
+        timeout_ms: 20,
+      },
+      fetchImpl: fetchImpl as any,
+    }));
+
+    const d = await s.decide(ctx);
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toMatch(/timed out/);
+    expect(d.decided_by).toBe('smart-llm:timeout');
+  });
+
   it('denies on transport (network) error', async () => {
     const fetchImpl = vi.fn(() => Promise.reject(new Error('ECONNRESET')));
     const s = new SmartApproval(makeOpts({ fetchImpl: fetchImpl as any }));

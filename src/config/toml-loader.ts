@@ -244,6 +244,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       authMode: src.auth,
       transport: resolvedTransport,
     };
+    if (typeof src.description === 'string' && src.description.length > 0) {
+      out.description = src.description;
+    }
 
     switch (src.auth) {
       case 'kerberos':

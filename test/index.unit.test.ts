@@ -8,6 +8,8 @@ import {
   resolveAuthMode,
   buildTransportConfig,
   hasLegacyCliFlags,
+  buildApprovalProfile,
+  appendDescriptionComment,
 } from '../src/index';
 import type { ExecResult } from '../src/transports/types';
 
@@ -122,6 +124,34 @@ describe('buildTransportConfig (finding 2: no unconditional key read for passwor
     expect(cfg.transport).toBe('openssh');
     expect(cfg.keyPath).toBe('/nonexistent/path/to/key');
     expect(cfg.privateKey).toBeUndefined();
+  });
+});
+
+describe('approval command/context helpers', () => {
+  it('threads per-source approval mode and source description into the approval profile', () => {
+    const profile = buildApprovalProfile(
+      'prod',
+      { prod: 'manual' },
+      { description: 'production host; maintenance window required' },
+    );
+
+    expect(profile).toEqual({
+      id: 'prod',
+      description: 'production host; maintenance window required',
+      approval: { mode: 'manual' },
+    });
+  });
+
+  it('does not leak another source approval mode into the default profile', () => {
+    const profile = buildApprovalProfile('default', { prod: 'smart' });
+    expect(profile).toEqual({ id: 'default' });
+  });
+
+  it('neutralizes description newlines before appending the shell comment', () => {
+    const assembled = appendDescriptionComment('true', 'safe note\nrm -rf /tmp/should-not-run # nested');
+    expect(assembled).toMatch(/^true # /);
+    expect(assembled).toContain('rm -rf /tmp/should-not-run');
+    expect(assembled).not.toMatch(/[\r\n]/);
   });
 });
 

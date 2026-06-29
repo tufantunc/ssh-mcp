@@ -112,38 +112,46 @@ export class SmartApproval implements ApprovalEngine {
       );
     }
 
-    let response: { ok: boolean; status: number; text: () => Promise<string> };
+    let phase: 'request' | 'body' = 'request';
+    let raw: string;
     try {
-      response = await fetchImpl(this.opts.llm.endpoint, {
+      const response: { ok: boolean; status: number; text: () => Promise<string> } = await fetchImpl(this.opts.llm.endpoint, {
         method: 'POST',
         headers,
         body,
         signal: controller.signal,
       });
-    } catch (err: any) {
-      clearTimeout(timer);
-      const aborted = err?.name === 'AbortError' || /aborted/i.test(String(err?.message ?? ''));
-      const reason = aborted
-        ? `smart approval: LLM request timed out after ${timeoutMs}ms`
-        : `smart approval: LLM request failed: ${err?.message ?? err}`;
-      return this.failClosedDecision(fail_closed, reason, 'smart-llm:transport-error');
-    }
-    clearTimeout(timer);
 
-    if (!response.ok) {
-      const reason = `smart approval: LLM returned HTTP ${response.status}`;
-      return this.failClosedDecision(fail_closed, reason, `smart-llm:http-${response.status}`);
-    }
+      if (!response.ok) {
+        const reason = `smart approval: LLM returned HTTP ${response.status}`;
+        return this.failClosedDecision(fail_closed, reason, `smart-llm:http-${response.status}`);
+      }
 
-    let raw: string;
-    try {
+      phase = 'body';
       raw = await response.text();
     } catch (err: any) {
+      const aborted = err?.name === 'AbortError' || /aborted/i.test(String(err?.message ?? ''));
+      if (aborted) {
+        return this.failClosedDecision(
+          fail_closed,
+          `smart approval: LLM request timed out after ${timeoutMs}ms`,
+          'smart-llm:timeout',
+        );
+      }
+      if (phase === 'request') {
+        return this.failClosedDecision(
+          fail_closed,
+          `smart approval: LLM request failed: ${err?.message ?? err}`,
+          'smart-llm:transport-error',
+        );
+      }
       return this.failClosedDecision(
         fail_closed,
         `smart approval: failed to read LLM body: ${err?.message ?? err}`,
         'smart-llm:read-error',
       );
+    } finally {
+      clearTimeout(timer);
     }
 
     let judgement: LlmJudgement;

@@ -133,7 +133,7 @@ export function buildApprovalEngineFromConfig(
   options: BuildEngineFromConfigOptions,
 ): ApprovalDispatcher {
   // Default mode mirrors TOML default ('manual' per ApprovalSection comment).
-  const defaultMode: ApprovalMode = approval?.defaultMode ?? 'yolo';
+  const defaultMode: ApprovalMode = approval?.defaultMode ?? 'manual';
   const perSource = approval?.perSourceModes ?? [];
   const usedModes = new Set<ApprovalMode>([defaultMode, ...perSource]);
 

@@ -108,6 +108,35 @@ describe('buildApprovalEngineFromConfig — mode dispatch', () => {
     ).toThrow(ManualApprovalDisabledError);
   });
 
+  it('omitted mode defaults to documented manual mode when [approval] is present', async () => {
+    const dispatcher = buildApprovalEngineFromConfig(
+      {},
+      { manualOpts: { webuiEnabled: true, timeout_ms: 5000 } },
+    );
+    setApprovalEngine(dispatcher);
+    try {
+      const p = gateApproval(baseCtx);
+      await Promise.resolve();
+      const pending = dispatcher.listPending();
+      expect(pending).toHaveLength(1);
+      dispatcher.resolvePending(pending[0].id, 'allow', 'default manual ok', 'webui:test');
+      const d = await p;
+      expect(d.mode).toBe('manual');
+      expect(d.decided_by).toBe('webui:test');
+    } finally {
+      setApprovalEngine(null);
+    }
+  });
+
+  it('omitted mode still enforces manual mode WebUI requirement', () => {
+    expect(() =>
+      buildApprovalEngineFromConfig(
+        {},
+        { manualOpts: { webuiEnabled: false } },
+      ),
+    ).toThrow(ManualApprovalDisabledError);
+  });
+
   it('per-source override forces the right sub-engine to be built', async () => {
     // default=yolo, but a per-source override declares manual mode — the
     // dispatcher must construct ManualApproval at boot, not lazily on first use.
