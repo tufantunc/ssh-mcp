@@ -13,6 +13,7 @@ function runMcpCommand(command: string, description?: string, extraArgs: string[
   const args = [
     testServerPath,
     '--host=127.0.0.1',
+    '--insecureHostKey',
     '--port=2222',
     '--user=test',
     '--password=secret',

@@ -10,6 +10,7 @@ describe('maxChars CLI configuration', () => {
       const longCommand = 'echo ' + 'x'.repeat(1000);
       const args = [
         '--host=127.0.0.1',
+        '--insecureHostKey',
         '--user=test',
         '--password=secret',
         '--timeout=5000'
@@ -53,6 +54,7 @@ describe('maxChars CLI configuration', () => {
       const longCommand = 'echo ' + 'x'.repeat(50);
       const args = [
         '--host=127.0.0.1',
+        '--insecureHostKey',
         '--user=test',
         '--password=secret',
         '--timeout=5000',
@@ -96,6 +98,7 @@ describe('maxChars CLI configuration', () => {
       const veryLongCommand = 'echo ' + 'x'.repeat(10000);
       const args = [
         '--host=127.0.0.1',
+        '--insecureHostKey',
         '--user=test',
         '--password=secret',
         '--timeout=5000',
@@ -138,6 +141,7 @@ describe('maxChars CLI configuration', () => {
       const veryLongCommand = 'echo ' + 'x'.repeat(10000);
       const args = [
         '--host=127.0.0.1',
+        '--insecureHostKey',
         '--user=test',
         '--password=secret',
         '--timeout=5000',
@@ -182,6 +186,7 @@ describe('maxChars CLI configuration', () => {
       const longCommand = 'echo ' + 'x'.repeat(1000);
       const args = [
         '--host=127.0.0.1',
+        '--insecureHostKey',
         '--user=test',
         '--password=secret',
         '--timeout=5000',

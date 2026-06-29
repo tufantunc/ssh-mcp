@@ -5,6 +5,10 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { Client, ClientChannel } from 'ssh2';
 import { z } from 'zod';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { createHash, createHmac } from 'crypto';
+import { readFileSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 
 // Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --disableSudo
 function parseArgv() {
@@ -28,14 +32,34 @@ const isTestMode = process.env.SSH_MCP_TEST === '1';
 const isCliEnabled = process.env.SSH_MCP_DISABLE_MAIN !== '1';
 const argvConfig = (isCliEnabled || isTestMode) ? parseArgv() : {} as Record<string, string>;
 
-const HOST = argvConfig.host;
-const PORT = argvConfig.port ? parseInt(argvConfig.port) : 22;
-const USER = argvConfig.user;
-const PASSWORD = argvConfig.password;
-const SUPASSWORD = argvConfig.suPassword;
-const SUDOPASSWORD = argvConfig.sudoPassword;
+// Credential resolution: an explicit CLI flag always takes precedence over the
+// environment variable. Passing secrets via env vars keeps them out of the
+// process argument list (visible to other local users via `ps`/proc) and out of
+// committed MCP client configs. `undefined` means "not provided"; for the su/sudo
+// passwords we preserve the existing null/undefined distinction used downstream.
+function resolveSecret(flag: string | null | undefined, env: string | undefined): string | null | undefined {
+  if (flag !== undefined) return flag;       // flag wins (including bare flag => null)
+  if (env !== undefined && env !== '') return env;
+  return undefined;
+}
+
+const HOST = argvConfig.host ?? process.env.SSH_MCP_HOST;
+const PORT = argvConfig.port ? parseInt(argvConfig.port) : (process.env.SSH_MCP_PORT ? parseInt(process.env.SSH_MCP_PORT) : 22);
+const USER = argvConfig.user ?? process.env.SSH_MCP_USER;
+const PASSWORD = resolveSecret(argvConfig.password, process.env.SSH_MCP_PASSWORD) ?? undefined;
+const SUPASSWORD = resolveSecret(argvConfig.suPassword, process.env.SSH_MCP_SU_PASSWORD);
+const SUDOPASSWORD = resolveSecret(argvConfig.sudoPassword, process.env.SSH_MCP_SUDO_PASSWORD);
 const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
-const KEY = argvConfig.key;
+const KEY = argvConfig.key ?? process.env.SSH_MCP_KEY_PATH;
+
+// Host key verification settings (defends against man-in-the-middle attacks).
+// By default the server verifies the host key against the user's known_hosts file
+// and refuses to connect if it is not found there. A pinned fingerprint may be
+// supplied with --hostFingerprint, and verification can be disabled (with a loud
+// warning) using --insecureHostKey for ephemeral/throwaway hosts.
+const HOST_FINGERPRINT = argvConfig.hostFingerprint ?? process.env.SSH_MCP_HOST_FINGERPRINT ?? undefined;
+const KNOWN_HOSTS_PATH = argvConfig.knownHosts ?? process.env.SSH_MCP_KNOWN_HOSTS ?? join(homedir(), '.ssh', 'known_hosts');
+const INSECURE_HOST_KEY = argvConfig.insecureHostKey !== undefined || process.env.SSH_MCP_INSECURE_HOST_KEY === '1';
 const DEFAULT_TIMEOUT = argvConfig.timeout ? parseInt(argvConfig.timeout) : 60000; // 60 seconds default timeout
 // Max characters configuration:
 // - Default: 1000 characters
@@ -105,6 +129,118 @@ export function escapeCommandForShell(command: string): string {
   return command.replace(/'/g, "'\"'\"'");
 }
 
+// Strip CR/LF (and collapse whitespace) from a description before appending it as
+// a shell comment. Without this, a newline in the description would terminate the
+// comment and inject an extra command line into the shell.
+export function sanitizeDescription(description: string): string {
+  return description.replace(/[\r\n]+/g, ' ').replace(/#/g, '\\#').trim();
+}
+
+// Build a `printf` invocation that emits a unique sentinel line. The embedded ""
+// splits the literal so the sentinel string appears only in the command's OUTPUT,
+// never in the PTY's echo of the input. This lets us detect command boundaries in
+// a persistent root shell reliably, even when a command's own output contains '#'
+// or other prompt-like characters (the previous heuristic broke on such output).
+export function sentinelEcho(label: string, token: string, suffix = ''): string {
+  return `printf '%s\\n' "SSH_MCP""_${label}_${token}${suffix}"`;
+}
+
+// --- Host key verification helpers (defense against MITM) ---
+
+// OpenSSH-style SHA256 fingerprint ("SHA256:<base64 without padding>") of a raw
+// host key buffer, matching `ssh-keygen -lf`.
+export function sshKeyFingerprintSha256(key: Buffer): string {
+  return 'SHA256:' + createHash('sha256').update(key).digest('base64').replace(/=+$/, '');
+}
+
+// Whether a raw host key buffer matches an expected fingerprint. Accepts modern
+// SHA256 fingerprints ("SHA256:..." or bare base64) and legacy MD5 hex
+// fingerprints ("MD5:aa:bb:..." or "aa:bb:...").
+export function matchesFingerprint(key: Buffer, expected: string): boolean {
+  const exp = expected.trim();
+  const isMd5 = /^MD5:/i.test(exp) || /^([0-9a-f]{2}:){15}[0-9a-f]{2}$/i.test(exp);
+  if (isMd5) {
+    const got = createHash('md5').update(key).digest('hex');
+    const want = exp.replace(/^MD5:/i, '').replace(/:/g, '').toLowerCase();
+    return got === want;
+  }
+  const got = createHash('sha256').update(key).digest('base64').replace(/=+$/, '');
+  const want = exp.replace(/^SHA256:/i, '').replace(/=+$/, '');
+  return got === want;
+}
+
+// Whether a host field from a known_hosts line matches one of the candidate
+// host identifiers. Supports plain comma-separated patterns and hashed
+// (|1|salt|hash) entries.
+function knownHostsFieldMatches(hostField: string, candidates: string[]): boolean {
+  if (hostField.startsWith('|1|')) {
+    const segs = hostField.split('|'); // ['', '1', <b64 salt>, <b64 hash>]
+    if (segs.length < 4) return false;
+    let salt: Buffer;
+    try { salt = Buffer.from(segs[2], 'base64'); } catch { return false; }
+    const expectedHash = segs[3];
+    return candidates.some((h) => createHmac('sha1', salt).update(h).digest('base64') === expectedHash);
+  }
+  const patterns = hostField.split(',');
+  return patterns.some((p) => candidates.includes(p));
+}
+
+// Whether the given known_hosts content contains an entry for this host:port
+// whose key exactly matches the presented host key.
+export function knownHostsHasKey(content: string, host: string, port: number, key: Buffer): boolean {
+  // OpenSSH records non-default ports as "[host]:port"; port 22 is stored bare.
+  const candidates = port === 22 ? [host] : [`[${host}]:${port}`];
+  const b64key = key.toString('base64');
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    let parts = line.split(/\s+/);
+    if (parts[0].startsWith('@')) parts = parts.slice(1); // @cert-authority / @revoked markers
+    if (parts.length < 3) continue;
+    const [hostField, , keyData] = parts;
+    if (keyData !== b64key) continue;
+    if (knownHostsFieldMatches(hostField, candidates)) return true;
+  }
+  return false;
+}
+
+export interface HostKeyVerifyOptions {
+  host: string;
+  port: number;
+  hostFingerprint?: string;
+  insecure?: boolean;
+}
+
+// Decide whether to accept a presented host key. Pure/synchronous so it can be
+// unit tested; the caller is responsible for reading known_hosts from disk.
+export function verifyHostKeySync(
+  key: Buffer,
+  opts: HostKeyVerifyOptions,
+  knownHostsContent?: string,
+): { ok: boolean; reason: string } {
+  if (opts.insecure) {
+    return { ok: true, reason: 'host key verification disabled (--insecureHostKey)' };
+  }
+  if (opts.hostFingerprint) {
+    if (matchesFingerprint(key, opts.hostFingerprint)) {
+      return { ok: true, reason: 'host key matches pinned fingerprint' };
+    }
+    return {
+      ok: false,
+      reason: `host key fingerprint mismatch (presented ${sshKeyFingerprintSha256(key)})`,
+    };
+  }
+  if (knownHostsContent && knownHostsHasKey(knownHostsContent, opts.host, opts.port, key)) {
+    return { ok: true, reason: 'host key found in known_hosts' };
+  }
+  return {
+    ok: false,
+    reason:
+      `host key not found in known_hosts (presented ${sshKeyFingerprintSha256(key)}). ` +
+      'Add it to your known_hosts, pin it with --hostFingerprint, or use --insecureHostKey to disable verification.',
+  };
+}
+
 // SSH Connection Manager to maintain persistent connection
 export interface SSHConfig {
   host: string;
@@ -114,6 +250,39 @@ export interface SSHConfig {
   privateKey?: string;
   suPassword?: string;
   sudoPassword?: string;  // Password for sudo commands specifically (if different from suPassword)
+  hostFingerprint?: string;   // Pinned host key fingerprint (SHA256 or MD5)
+  knownHostsPath?: string;    // Path to known_hosts (defaults to ~/.ssh/known_hosts)
+  insecureHostKey?: boolean;  // Disable host key verification (vulnerable to MITM)
+}
+
+// Build the ssh2 connect config, injecting a hostVerifier so we never silently
+// accept an unverified host key (ssh2 auto-accepts when no verifier is supplied).
+export function buildConnectConfig(sshConfig: SSHConfig): any {
+  const cfg: any = { ...sshConfig };
+  const { host, port, hostFingerprint, insecureHostKey } = sshConfig;
+  const knownHostsPath = sshConfig.knownHostsPath || join(homedir(), '.ssh', 'known_hosts');
+
+  cfg.hostVerifier = (key: Buffer): boolean => {
+    let knownHostsContent: string | undefined;
+    if (!insecureHostKey && !hostFingerprint) {
+      try { knownHostsContent = readFileSync(knownHostsPath, 'utf8'); } catch { /* treat as empty */ }
+    }
+    const result = verifyHostKeySync(
+      key,
+      { host, port, hostFingerprint, insecure: insecureHostKey },
+      knownHostsContent,
+    );
+    if (insecureHostKey) {
+      console.error(
+        'WARNING: SSH host key verification is DISABLED (--insecureHostKey). ' +
+        'The connection is vulnerable to man-in-the-middle attacks.',
+      );
+    } else if (!result.ok) {
+      console.error(`SSH host key verification failed: ${result.reason}`);
+    }
+    return result.ok;
+  };
+  return cfg;
 }
 
 export class SSHConnectionManager {
@@ -124,9 +293,16 @@ export class SSHConnectionManager {
   private suShell: any = null;  // Store the elevated shell session
   private suPromise: Promise<void> | null = null;
   private isElevated = false;  // Track if we're in su mode
+  private tokenSeq = 0;        // Monotonic counter for unique command sentinels
 
   constructor(config: SSHConfig) {
     this.sshConfig = config;
+  }
+
+  // Unique-per-command token used to fence command output in the persistent shell.
+  nextToken(): string {
+    this.tokenSeq += 1;
+    return 'k' + this.tokenSeq.toString(36) + 'z';
   }
 
   async connect(): Promise<void> {
@@ -192,7 +368,7 @@ export class SSHConnectionManager {
         this.connectionPromise = null;
       });
 
-      this.conn.connect(this.sshConfig);
+      this.conn.connect(buildConnectConfig(this.sshConfig));
     });
 
     return this.connectionPromise;
@@ -253,41 +429,53 @@ export class SSHConnectionManager {
 
         let buffer = '';
         let passwordSent = false;
+        let probeSent = false;
+        const readyToken = this.nextToken();
+        const readyRe = new RegExp('SSH_MCP_READY_' + readyToken);
+        const authFailRe = /authentication failure|incorrect password|su: .*fail/i;
         const cleanup = () => {
           try { stream.removeAllListeners('data'); } catch (e) { /* ignore */ }
         };
+        const fail = (msg: string) => {
+          clearTimeout(timeoutId);
+          cleanup();
+          try { stream.end(); } catch (e) { /* ignore */ }
+          this.suPromise = null;
+          reject(new McpError(ErrorCode.InternalError, msg));
+        };
 
         const onData = (data: Buffer) => {
-          const text = data.toString();
-          buffer += text;
+          buffer += data.toString();
 
-          // If we haven't sent the password yet, look for the password prompt
+          // If we haven't sent the password yet, look for the password prompt.
           if (!passwordSent && /password[: ]/i.test(buffer)) {
             passwordSent = true;
+            buffer = '';  // reset so stale output can't trigger the checks below
             stream.write(this.sshConfig.suPassword + '\n');
-            // Don't return; keep looking for root prompt
+            // Turn off PTY echo so command input isn't mixed into command output,
+            // then emit a unique readiness sentinel. If su failed, this runs in the
+            // unprivileged shell and would still print READY — so the auth-failure
+            // check below (which su prints first) takes precedence.
+            stream.write('stty -echo 2>/dev/null\n');
+            stream.write(sentinelEcho('READY', readyToken) + '\n');
+            probeSent = true;
+            return;
           }
 
-          // After password is sent, look for any root indicator
-          // Look for '#' which indicates root prompt (may be followed by spaces, escape codes, etc)
-          if (passwordSent) {
-            if (/#/.test(buffer)) {
-              clearTimeout(timeoutId);
-              cleanup();
-              this.suShell = stream;
-              this.isElevated = true;
-              this.suPromise = null;
-              resolve();
-              return;
-            }
+          // Detect authentication failure messages before accepting the shell.
+          if (passwordSent && authFailRe.test(buffer)) {
+            fail('su authentication failed');
+            return;
           }
 
-          // Detect authentication failure messages
-          if (/authentication failure|incorrect password|su: .*failed|su: failure/i.test(buffer)) {
+          // Accept the elevated shell only once our readiness sentinel is echoed back.
+          if (probeSent && readyRe.test(buffer)) {
             clearTimeout(timeoutId);
             cleanup();
+            this.suShell = stream;
+            this.isElevated = true;
             this.suPromise = null;
-            reject(new McpError(ErrorCode.InternalError, `su authentication failed: ${buffer}`));
+            resolve();
             return;
           }
         };
@@ -338,14 +526,18 @@ export class SSHConnectionManager {
 
 let connectionManager: SSHConnectionManager | null = null;
 
-const server = new McpServer({
-  name: 'SSH MCP Server',
-  version: '1.5.0',
-  capabilities: {
-    resources: {},
-    tools: {},
+const server = new McpServer(
+  {
+    name: 'SSH MCP Server',
+    version: '1.5.0',
   },
-});
+  {
+    capabilities: {
+      resources: {},
+      tools: {},
+    },
+  },
+);
 
 server.tool(
   "exec",
@@ -368,6 +560,9 @@ server.tool(
           host: HOST,
           port: PORT,
           username: USER,
+          hostFingerprint: HOST_FINGERPRINT,
+          knownHostsPath: KNOWN_HOSTS_PATH,
+          insecureHostKey: INSECURE_HOST_KEY,
         };
 
         if (PASSWORD) {
@@ -404,7 +599,7 @@ server.tool(
 
       // Append description as comment if provided
       const commandWithDescription = description
-        ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
+        ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
         : sanitizedCommand;
 
       const result = await execSshCommandWithConnection(connectionManager, commandWithDescription);
@@ -439,6 +634,9 @@ if (!DISABLE_SUDO) {
             host: HOST,
             port: PORT || 22,
             username: USER,
+            hostFingerprint: HOST_FINGERPRINT,
+            knownHostsPath: KNOWN_HOSTS_PATH,
+            insecureHostKey: INSECURE_HOST_KEY,
           };
           if (PASSWORD) {
             sshConfig.password = PASSWORD;
@@ -474,20 +672,22 @@ if (!DISABLE_SUDO) {
 
         // Append description as comment if provided
         const commandWithDescription = description
-          ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
+          ? `${sanitizedCommand} # ${sanitizeDescription(description)}`
           : sanitizedCommand;
 
         if (!sudoPassword) {
           // No password provided, use -n to fail if sudo requires a password
           wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
-        } else {
-          // Password provided — pipe it into sudo using printf. This avoids complex
-          // PTY/stdin handling on the SSH channel and is simpler and more reliable.
-          const pwdEscaped = sudoPassword.replace(/'/g, "'\\''");
-          wrapped = `printf '%s\\n' '${pwdEscaped}' | sudo -p "" -S sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
+          return await execSshCommandWithConnection(connectionManager, wrapped);
         }
 
-        return await execSshCommandWithConnection(connectionManager, wrapped);
+        // Password provided — feed it to `sudo -S` over the channel's stdin instead
+        // of embedding it in the command string. Embedding it (e.g. via `printf <pwd> |`)
+        // would expose the password in the remote process list (`ps`) and shell history.
+        // `-p ""` suppresses the prompt and `-k` ignores any cached credentials so the
+        // password is always read from the first line of stdin.
+        wrapped = `sudo -p "" -S -k sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
+        return await execSshCommandWithConnection(connectionManager, wrapped, sudoPassword + '\n');
       } catch (err: any) {
         if (err instanceof McpError) throw err;
         throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
@@ -513,40 +713,47 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
       }
     }, DEFAULT_TIMEOUT);
 
-    // If we have an active su shell, use it directly (commands run as root in session)
+    // If we have an active su shell, use it directly (commands run as root in session).
+    // We fence the command between two unique sentinels so we can locate its exact
+    // output regardless of what the command prints, and capture its exit code.
     if (shell) {
       let buffer = '';
+      const token = manager.nextToken();
+      const beginRe = new RegExp('SSH_MCP_BEGIN_' + token + '\\r?\\n');
+      const endRe = new RegExp('SSH_MCP_END_' + token + ':(\\d+)');
 
       const dataHandler = (data: Buffer) => {
-        const text = data.toString();
-        buffer += text;
+        buffer += data.toString();
 
-        // Wait for root prompt (#) to know command is complete
-        // Match # which indicates root prompt (may be followed by spaces, escape codes, etc)
-        if (/#/.test(buffer)) {
-          if (!isResolved) {
-            isResolved = true;
-            clearTimeout(timeoutId);
+        const endMatch = buffer.match(endRe);
+        if (!endMatch) return;
+        if (isResolved) return;
+        isResolved = true;
+        clearTimeout(timeoutId);
+        shell.removeListener('data', dataHandler);
 
-            // Extract output: remove the command echo and final prompt
-            const lines = buffer.split('\n');
-            // First line is often the echoed command; last line is the prompt
-            let output = lines.slice(1, -1).join('\n');
+        // Output is everything between the begin sentinel's output line and the
+        // end sentinel. (PTY echo is disabled during elevation, so input lines
+        // don't appear here.)
+        const beginMatch = buffer.match(beginRe);
+        let output = beginMatch
+          ? buffer.slice((beginMatch.index as number) + beginMatch[0].length, endMatch.index)
+          : buffer.slice(0, endMatch.index);
+        output = output.replace(/\r/g, '').replace(/\n+$/, '');
 
-            resolve({
-              content: [{
-                type: 'text',
-                text: output + (output ? '\n' : ''),
-              }],
-            });
-          }
-          shell.removeListener('data', dataHandler);
-        }
+        resolve({
+          content: [{
+            type: 'text',
+            text: output + (output ? '\n' : ''),
+          }],
+        });
       };
 
       shell.on('data', dataHandler);
-      // Send command immediately; shell is ready after elevation
+      // Begin sentinel, the command, then an end sentinel carrying the exit code.
+      shell.write(sentinelEcho('BEGIN', token) + '\n');
       shell.write(command + '\n');
+      shell.write('__rc=$?; ' + sentinelEcho('END', token, ':$__rc') + '\n');
       return;
     }
 
@@ -688,7 +895,7 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
         reject(new McpError(ErrorCode.InternalError, `SSH connection error: ${err.message}`));
       }
     });
-    conn.connect(sshConfig);
+    conn.connect(buildConnectConfig(sshConfig));
   });
 }
 

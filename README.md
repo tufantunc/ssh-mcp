@@ -95,6 +95,30 @@ You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use t
 - `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
 - `disableSudo`: Flag to disable the `sudo-exec` tool completely. Useful when sudo access is not needed or not available.
 
+**Host Key Verification (defends against man-in-the-middle attacks):**
+- `hostFingerprint`: Pin the server's host key fingerprint (e.g. `SHA256:...`, as printed by `ssh-keyscan <host> | ssh-keygen -lf -`). When set, the server connects only if the presented key matches.
+- `knownHosts`: Path to a `known_hosts` file used for verification (default: `~/.ssh/known_hosts`).
+- `insecureHostKey`: Flag to **disable** host key verification entirely. The connection becomes vulnerable to MITM attacks; only use for throwaway/ephemeral hosts. A warning is printed to stderr when set.
+
+By default the server verifies the host key against your `known_hosts` and **refuses to connect** if the key is unknown. Either add the host to `known_hosts` first (e.g. `ssh-keyscan -p <port> <host> >> ~/.ssh/known_hosts`), pin it with `--hostFingerprint`, or pass `--insecureHostKey` to opt out.
+
+**Passing secrets via environment variables (recommended):**
+
+To keep credentials out of the process list (`ps`) and out of committed MCP client configs, you can pass secrets through environment variables instead of CLI flags. A CLI flag, when present, always takes precedence over the corresponding variable.
+
+| Variable | Equivalent flag |
+|---|---|
+| `SSH_MCP_HOST` / `SSH_MCP_PORT` / `SSH_MCP_USER` | `--host` / `--port` / `--user` |
+| `SSH_MCP_PASSWORD` | `--password` |
+| `SSH_MCP_KEY_PATH` | `--key` |
+| `SSH_MCP_SU_PASSWORD` | `--suPassword` |
+| `SSH_MCP_SUDO_PASSWORD` | `--sudoPassword` |
+| `SSH_MCP_HOST_FINGERPRINT` | `--hostFingerprint` |
+| `SSH_MCP_KNOWN_HOSTS` | `--knownHosts` |
+| `SSH_MCP_INSECURE_HOST_KEY=1` | `--insecureHostKey` |
+
+> ⚠️ **Do not put passwords in a `--scope project` MCP config**, since that writes the secret in plaintext into a `.mcp.json` file that is typically committed to your repository. Prefer SSH keys, environment variables, or `--scope local`/`--scope user`.
+
 
 ```commandline
 {
@@ -159,9 +183,9 @@ You can specify the scope when adding the server:
   claude mcp add --transport stdio ssh-mcp --scope local -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
   ```
 
-- **Project scope**: Share with your team via `.mcp.json` file
+- **Project scope**: Share with your team via `.mcp.json` file. ⚠️ This file is usually committed to your repository — **do not embed a password here**. Use an SSH key or a `SSH_MCP_PASSWORD` environment variable instead.
   ```bash
-  claude mcp add --transport stdio ssh-mcp --scope project -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
+  claude mcp add --transport stdio ssh-mcp --scope project -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --key=/path/to/private/key
   ```
 
 - **User scope**: Available across all your projects

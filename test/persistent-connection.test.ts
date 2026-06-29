@@ -37,7 +37,7 @@ describe('SSHConnectionManager', () => {
 
   describe('Integration Tests (with live SSH server)', () => {
     let manager: SSHConnectionManager;
-    const sshConfig = { host, port, username, password };
+    const sshConfig = { host, port, username, password, insecureHostKey: true };
 
     beforeEach(() => {
       manager = new SSHConnectionManager(sshConfig);
@@ -280,8 +280,8 @@ describe('SSHConnectionManager', () => {
 
   describe('Connection Lifecycle', () => {
     it('should handle multiple connection managers independently', async () => {
-      const manager1 = new SSHConnectionManager({ host, port, username, password });
-      const manager2 = new SSHConnectionManager({ host, port, username, password });
+      const manager1 = new SSHConnectionManager({ host, port, username, password, insecureHostKey: true });
+      const manager2 = new SSHConnectionManager({ host, port, username, password, insecureHostKey: true });
       
       try {
         await manager1.connect();
@@ -302,7 +302,7 @@ describe('SSHConnectionManager', () => {
     }, 60000);
 
     it('should properly clean up after close', async () => {
-      const manager = new SSHConnectionManager({ host, port, username, password });
+      const manager = new SSHConnectionManager({ host, port, username, password, insecureHostKey: true });
       
       await manager.connect();
       expect(manager.isConnected()).toBe(true);
@@ -348,7 +348,7 @@ describe('SSHConnectionManager', () => {
     }, 40000);
 
     it('should handle command execution errors gracefully', async () => {
-      const manager = new SSHConnectionManager({ host, port, username, password });
+      const manager = new SSHConnectionManager({ host, port, username, password, insecureHostKey: true });
       
       try {
         await manager.connect();

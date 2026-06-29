@@ -8,7 +8,7 @@ const password = process.env.SSH_PASSWORD || 'secret';
 
 describe('ssh smoke', () => {
   it('executes echo ok', async () => {
-    const result: any = await execSshCommand({ host, port, username, password }, 'echo ok');
+    const result: any = await execSshCommand({ host, port, username, password, insecureHostKey: true }, 'echo ok');
     expect(result.content[0]).toEqual({ type: 'text', text: 'ok\n' });
   }, 20000);
 });
