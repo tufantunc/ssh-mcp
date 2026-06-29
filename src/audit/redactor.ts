@@ -15,7 +15,7 @@
  *   5. AWS access-key-id shapes (AKIA/ASIA + 16 chars).
  *   6. AWS secret-access-key when on the same line as a hint.
  *   7. JWT tokens (three base64url segments).
- *   8. GitHub PATs (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`).
+ *   8. GitHub PATs (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`).
  *   9. Slack tokens (`xox[abprs]-...`).
  *  10. Google API keys (`AIza...`, 39 chars).
  */
@@ -70,8 +70,10 @@ const AWS_SECRET_HINT_RE =
 // 7. JWT (three base64url segments).
 const JWT_RE = /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
 
-// 8. GitHub PATs
-const GITHUB_TOKEN_RE = /\bgh[opusr]_[A-Za-z0-9]{20,255}\b/g;
+// 8. GitHub PATs — classic (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) and
+//    fine-grained (`github_pat_...`, which embeds underscores in its body).
+const GITHUB_TOKEN_RE =
+  /\b(?:gh[opusr]_[A-Za-z0-9]{20,255}|github_pat_[A-Za-z0-9_]{40,255})\b/g;
 
 // 9. Slack tokens
 const SLACK_TOKEN_RE = /\bxox[abprs]-[A-Za-z0-9\-]{10,}\b/g;
