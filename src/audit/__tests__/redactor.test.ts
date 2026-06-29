@@ -72,4 +72,21 @@ describe('audit redactor', () => {
     expect(out).not.toContain(jwt);
     expect((out.match(/<redacted>/g) ?? []).length).toBeGreaterThanOrEqual(3);
   });
+
+  it('redacts classic and fine-grained GitHub PATs', () => {
+    const classic = 'ghp_' + 'A'.repeat(36);
+    const fineGrained = 'github_pat_' + 'B'.repeat(22) + '_' + 'C'.repeat(59);
+    const out = redact(`token ${classic} other ${fineGrained} end`);
+    expect(out).not.toContain(classic);
+    expect(out).not.toContain(fineGrained);
+    expect((out.match(/<redacted>/g) ?? []).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('redacts a fine-grained PAT embedded in a remote URL', () => {
+    const fineGrained = 'github_pat_' + 'D'.repeat(22) + '_' + 'E'.repeat(59);
+    const url = `https://x-access-token:${fineGrained}@github.com/owner/repo.git`;
+    const out = redact(`git clone ${url}`);
+    expect(out).not.toContain(fineGrained);
+    expect(out).toContain('<redacted>');
+  });
 });

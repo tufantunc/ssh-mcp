@@ -47,6 +47,12 @@ export interface ApprovalSection {
 /** A single [[sources]] entry from the TOML. */
 export interface TomlSource {
   id: string;
+  /**
+   * Human-readable label for the source. RESERVED: parsed and type-checked
+   * here but not yet projected into ServerConfig — a downstream task
+   * (webui-description-edit) consumes it. Documented in ssh-mcp.toml.example so
+   * configs can declare it ahead of that consumer landing.
+   */
   description?: string;
   host: string;
   port?: number;

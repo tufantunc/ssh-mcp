@@ -7,7 +7,10 @@
  * tests pin that contract so a future refactor can't silently make audit a
  * hard build/runtime prerequisite.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { loadAuditSink } from '../audit-seam.js';
 import type { ApprovalDecision } from '../types.js';
@@ -51,5 +54,39 @@ describe('optional audit seam', () => {
         error: new Error('boom'),
       }),
     ).not.toThrow();
+  });
+
+  it('surfaces a diagnostic (not a silent no-op) when a present audit store fails to construct', async () => {
+    // The audit module IS part of this build, so a construction failure here
+    // is a real present-but-broken store (e.g. unwritable audit_dir), not the
+    // documented missing-module path. It must be visible, not swallowed.
+    // Force AuditStore's mkdirSync to fail with ENOTDIR by nesting the audit
+    // dir under an existing regular file.
+    const dir = mkdtempSync(join(tmpdir(), 'ssh-mcp-audit-seam-'));
+    const filePath = join(dir, 'not-a-dir');
+    writeFileSync(filePath, 'x');
+    const brokenAuditDir = join(filePath, 'audit'); // child of a file => ENOTDIR
+
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const sink = await loadAuditSink({ auditDir: brokenAuditDir });
+      // Still returns a usable no-op sink (must not throw to callers)...
+      expect(typeof sink.record).toBe('function');
+      expect(() =>
+        sink.record({
+          tool: 'exec',
+          profile: 'prod',
+          command: 'uptime',
+          startedAt: Date.now(),
+          result: { stdout: 'ok', stderr: '', exitCode: 0 },
+        }),
+      ).not.toThrow();
+      // ...but the failure was surfaced.
+      expect(errSpy).toHaveBeenCalled();
+      const logged = errSpy.mock.calls.map(c => String(c[0])).join('\n');
+      expect(logged).toMatch(/audit store initialization failed/i);
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });

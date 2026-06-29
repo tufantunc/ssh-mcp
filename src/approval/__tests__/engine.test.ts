@@ -66,4 +66,16 @@ describe('ApprovalDispatcher', () => {
     expect(d.listPending()).toEqual([]);
     expect(d.resolvePending('nonexistent', 'allow')).toBe(false);
   });
+
+  it('exposes defaultMode matching what decide() enforces for a no-override source', async () => {
+    // Finding 2 regression guard: status surfaces (the WebUI /api/profiles
+    // approval_mode_effective) must report the mode the gate actually
+    // enforces. For a source with no per-source override, decide() falls back
+    // to opts.defaultMode; the public `defaultMode` getter must equal it so a
+    // lookup built on the getter can never advertise a different gate.
+    const d = new ApprovalDispatcher({ defaultMode: 'yolo' });
+    expect(d.defaultMode).toBe('yolo');
+    const enforced = await d.decide(baseCtx); // baseCtx has no approval.mode
+    expect(enforced.mode).toBe(d.defaultMode);
+  });
 });
