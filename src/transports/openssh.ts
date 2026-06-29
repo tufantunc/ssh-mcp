@@ -66,6 +66,17 @@ export class OpenSshTransport implements ISshTransport {
   async execElevated(command: string, opts: ExecElevatedOptions): Promise<ExecResult> {
     if (opts.mode === 'sudo') {
       const pwd = opts.password ?? this.cfg.sudoPassword;
+      // Match ssh2 persistent-root semantics: the ssh2 transport establishes a
+      // root `su` shell at connect time when --suPassword is set, so its
+      // sudo-exec re-enters that already-root shell and `sudo -n` trivially
+      // succeeds. The OpenSSH transport spawns a fresh process per command, so a
+      // plain `sudo -n` would run as the unprivileged user and fail for users
+      // who followed the documented persistent-root `--suPassword` setup. When
+      // no sudo password is available but a su password is, run the command as
+      // root via su to preserve equivalent behaviour.
+      if (pwd === undefined && this.cfg.suPassword) {
+        return this.runSuViaPty(command, this.cfg.suPassword, opts);
+      }
       const wrapped = buildSudoWrapper(command, pwd);
       return this.runSsh(wrapped, opts);
     }
@@ -111,7 +122,7 @@ export class OpenSshTransport implements ISshTransport {
   }
 
   /**
-   * Write a `.cmd` askpass helper to a temp dir and remember its path.
+   * Write a `.cmd`/`.sh` askpass helper to a temp dir and remember its path.
    * Password lives in an env var passed only to spawned ssh children —
    * never written to disk, never placed in argv.
    */
@@ -121,9 +132,7 @@ export class OpenSshTransport implements ISshTransport {
     const isWindows = process.platform === 'win32';
     const helperName = isWindows ? 'askpass.cmd' : 'askpass.sh';
     const helperPath = path.join(dir, helperName);
-    const content = isWindows
-      ? `@echo off\r\necho %${envName}%\r\n`
-      : `#!/bin/sh\nprintf '%s\\n' "$${envName}"\n`;
+    const content = renderAskpassHelper(envName, isWindows);
     await fs.writeFile(helperPath, content, { encoding: 'utf8' });
     if (!isWindows) {
       await fs.chmod(helperPath, 0o700);
@@ -271,6 +280,12 @@ export class OpenSshTransport implements ISshTransport {
       let buffer = '';
       let stdoutTail = '';
       let capturedStdout = '';
+      // Unbounded capture of all stdout received while in the EXEC state. The
+      // scanning `buffer` below is truncated to ~4KB to bound regex cost, but
+      // truncating the captured output would silently drop the head of any
+      // command emitting more than ~8KB (inconsistent with runSsh, which
+      // returns the full stream). Keep the full EXEC output here.
+      let execCapture = '';
       let capturedStderr = '';
       let exitCode: number | null = null;
       let timedOut = false;
@@ -301,12 +316,17 @@ export class OpenSshTransport implements ISshTransport {
       // Initial state: wait up to 10s for `su` password prompt
       setStateTimer(10000, 'awaiting su password prompt');
 
+      // Overall hard deadline. types.ts ExecOptions.timeoutMs is documented as a
+      // hard ceiling every transport must enforce; runSsh applies it to the
+      // whole spawn, so the su path must too. The handshake phases (su prompt,
+      // password, root-shell sentinel) are bounded by their own per-state timers
+      // above; they do not get an extra budget on top of the contract deadline.
       const overallTimer = setTimeout(() => {
         timedOut = true;
         clearStateTimer();
         child.kill('SIGTERM');
         setTimeout(() => { if (!child.killed) child.kill('SIGKILL'); }, 2000);
-      }, opts.timeoutMs + 30000);
+      }, opts.timeoutMs);
 
       child.stdout?.on('data', (chunk: Buffer) => {
         const text = chunk.toString('utf8');
@@ -314,6 +334,9 @@ export class OpenSshTransport implements ISshTransport {
         // Keep last ~4KB for regex scanning
         if (buffer.length > 8192) buffer = buffer.slice(buffer.length - 4096);
         stdoutTail = buffer;
+        // Accumulate the full EXEC-state output separately from the truncated
+        // scan buffer so large command output is not lost (see execCapture decl).
+        if (state === 'EXEC') execCapture += text;
 
         if (failRe.test(stdoutTail)) {
           clearStateTimer();
@@ -358,7 +381,12 @@ export class OpenSshTransport implements ISshTransport {
           const m = stdoutTail.match(endRe);
           if (m) {
             exitCode = parseInt(m[1], 10);
-            capturedStdout = stdoutTail.slice(0, m.index).replace(/\r\n/g, '\n');
+            // Derive output from the unbounded EXEC capture (not the truncated
+            // scan buffer) so large command output is preserved in full. Locate
+            // the end-marker within the full capture for the slice boundary.
+            const em = execCapture.match(endRe);
+            const endIdx = em ? em.index! : execCapture.length;
+            capturedStdout = execCapture.slice(0, endIdx).replace(/\r\n/g, '\n');
             // Strip the echoed PS1-sentinel leftovers if any
             capturedStdout = capturedStdout.replace(new RegExp(`${readyMark}\\$\\s*`, 'g'), '');
             // Strip the echoed command lines (best effort)
@@ -423,6 +451,32 @@ export class OpenSshTransport implements ISshTransport {
       });
     });
   }
+}
+
+/**
+ * Render the askpass helper script body that prints the password held in the
+ * given environment variable, followed by a newline.
+ *
+ * Windows: a naive `@echo off` + `echo %VAR%` is unsafe — CMD expands `%VAR%`
+ * and then re-parses the resulting line, so a password containing `& | < > ^ %`
+ * breaks the echo (and thus auth). Even `setlocal EnableDelayedExpansion` +
+ * `echo !VAR!` mishandles `!`. Instead, shell out to PowerShell and read the
+ * variable verbatim via `$env:VAR`: the password value is fetched at runtime by
+ * PowerShell and never substituted onto a command line, so no metacharacter is
+ * ever re-interpreted. The env var NAME is `[A-Za-z0-9_]`-only (it is always
+ * `SSH_MCP_PW_<pid>`), so embedding it in the command string is safe.
+ *
+ * POSIX: `printf '%s\n' "$VAR"` is already metacharacter-safe.
+ */
+export function renderAskpassHelper(envName: string, isWindows: boolean): string {
+  if (isWindows) {
+    return (
+      `@echo off\r\n` +
+      `powershell -NoProfile -NonInteractive -Command ` +
+      `"[Console]::Out.Write($env:${envName} + [char]10)"\r\n`
+    );
+  }
+  return `#!/bin/sh\nprintf '%s\\n' "$${envName}"\n`;
 }
 
 /**
