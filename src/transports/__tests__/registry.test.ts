@@ -66,10 +66,23 @@ describe('TransportRegistry.profile() — read path', () => {
     expect(lab.approval).toBeUndefined();
   });
 
-  it('falls back to the registry default when no name is given', () => {
+  it('refuses an omitted name when multiple sources lack an explicit default', () => {
     const { registry } = registryFrom(TWO_SOURCE_TOML);
 
-    // `lab` is the first registered source -> the default.
+    // This fixture marks no source as default, so registryFrom() never calls
+    // setDefault(). profile() delegates to the same resolveName() guard as
+    // get(): with >1 source and no explicit default it must refuse to silently
+    // pick the first-registered host (the merged multi-host hardening), rather
+    // than land an approval decision against the wrong machine.
+    expect(() => registry.profile()).toThrow(
+      /connectionName is required when multiple servers are configured: lab, dc03/,
+    );
+  });
+
+  it('resolves an omitted name to the explicit default after setDefault()', () => {
+    const { registry } = registryFrom(TWO_SOURCE_TOML);
+    registry.setDefault('lab');
+
     const def = registry.profile();
     expect(def.id).toBe('lab');
     expect(def.approval).toBeUndefined();

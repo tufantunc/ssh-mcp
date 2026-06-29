@@ -17,6 +17,8 @@ export class TransportRegistry {
   private transports = new Map<string, ISshTransport>();
   private initPromises = new Map<string, Promise<ISshTransport>>();
   private defaultName: string | null = null;
+  /** True only when setDefault() was called; first-registered fallback leaves this false. */
+  private defaultExplicit = false;
 
   register(config: ServerConfig): void {
     if (!config.name) {
@@ -38,6 +40,7 @@ export class TransportRegistry {
       throw new Error(`Cannot set default to unknown server: ${name}`);
     }
     this.defaultName = name;
+    this.defaultExplicit = true;
   }
 
   /** Returns names of all registered servers in registration order. */
@@ -75,6 +78,16 @@ export class TransportRegistry {
     if (this.defaultName === null) {
       throw new Error('No servers registered');
     }
+    // When connectionName is omitted and more than one server is configured,
+    // refuse to silently pick the first-registered host — the command could
+    // land on the wrong machine. The connectionName tool arg is advertised as
+    // optional only for the single-server case (see connectionNameSchema in
+    // index.ts). A deliberate setDefault() re-enables the omit-name shortcut.
+    if (!name && this.configs.size > 1 && !this.defaultExplicit) {
+      throw new Error(
+        `connectionName is required when multiple servers are configured: ${this.names().join(', ')}`
+      );
+    }
     return this.defaultName;
   }
 
@@ -91,10 +104,19 @@ export class TransportRegistry {
     const cfg = this.configs.get(resolved)!;
     const initPromise = (async () => {
       const t = createTransport(cfg);
-      await t.init();
-      this.transports.set(resolved, t);
-      this.initPromises.delete(resolved);
-      return t;
+      try {
+        await t.init();
+        // Cache the live transport only on successful init.
+        this.transports.set(resolved, t);
+        return t;
+      } finally {
+        // Always clear the in-flight entry so a rejected init (e.g. a transient
+        // connect timeout to a temporarily-unreachable host) is NOT cached.
+        // Otherwise every later get() would replay the same rejection via the
+        // pending-promise return above, and the connection could never retry
+        // without a process restart.
+        this.initPromises.delete(resolved);
+      }
     })();
     this.initPromises.set(resolved, initPromise);
     return initPromise;
