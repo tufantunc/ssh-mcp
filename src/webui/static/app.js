@@ -105,6 +105,14 @@
     const sel = document.createElement('select');
     sel.className = 'mode-select';
     sel.dataset.profile = profileId;
+    // Leading "inherit" option clears any live per-profile override (PUT
+    // {mode:null}), letting the profile revert to its static/global mode.
+    // Without it an operator who overrides a profile could never undo it from
+    // the UI — the live override would stay pinned until restart.
+    const inherit = document.createElement('option');
+    inherit.value = '';
+    inherit.textContent = 'inherit';
+    sel.appendChild(inherit);
     for (const m of availableModes) {
       const opt = document.createElement('option');
       opt.value = m;
@@ -119,23 +127,79 @@
   // List of modes the server allows switching to (populated from
   // /api/approval-modes). Empty => mode switching disabled (read-only).
   let availableModes = [];
+  // Live global default mode (the fallback applied to any profile without an
+  // override). Populated from /api/approval-modes `global` and kept in sync
+  // with scope:'global' mode-changed SSE events.
+  let globalMode = null;
 
   async function fetchModes() {
     try {
       const r = await fetch('/api/approval-modes', { headers: authHeaders() });
-      if (!r.ok) { availableModes = []; return; }
+      if (!r.ok) { availableModes = []; globalMode = null; renderGlobalControl(); return; }
       const data = await r.json();
       availableModes = Array.isArray(data.modes) ? data.modes : [];
-    } catch (_) { availableModes = []; }
+      globalMode = typeof data.global === 'string' ? data.global : null;
+    } catch (_) { availableModes = []; globalMode = null; }
+    renderGlobalControl();
+  }
+
+  // Render the global-default approval-mode control in the header: a <select>
+  // bound to PUT /api/approval-mode when the server exposes a mode controller,
+  // else nothing (read-only / no-engine case).
+  function renderGlobalControl() {
+    const host = $('#global-mode-control');
+    if (!host) return;
+    host.innerHTML = '';
+    if (!availableModes.length || globalMode == null) return;
+    const label = document.createElement('span');
+    label.className = 'muted';
+    label.textContent = 'global:';
+    host.appendChild(label);
+    const sel = document.createElement('select');
+    sel.className = 'mode-select';
+    sel.id = 'global-mode-select';
+    for (const m of availableModes) {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      if (m === globalMode) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', () => switchGlobalMode(sel.value, sel));
+    host.appendChild(sel);
+  }
+
+  async function switchGlobalMode(mode, sel) {
+    if (sel) sel.disabled = true;
+    try {
+      const r = await fetch('/api/approval-mode', {
+        method: 'PUT',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+        body: JSON.stringify({ mode }),
+      });
+      if (r.ok) {
+        globalMode = mode;
+      } else {
+        // Revert the dropdown to the server's truth on failure.
+        fetchModes();
+      }
+    } catch (_) {
+      fetchModes();
+    } finally {
+      if (sel) sel.disabled = false;
+    }
   }
 
   async function switchMode(profileId, mode, sel) {
     if (sel) sel.disabled = true;
+    // The "inherit" option carries an empty value; serialize it as {mode:null}
+    // so the server clears the override instead of pinning a literal '' mode.
+    const payload = mode === '' ? null : mode;
     try {
       const r = await fetch('/api/profiles/' + encodeURIComponent(profileId) + '/approval-mode', {
         method: 'PUT',
         headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
-        body: JSON.stringify({ mode }),
+        body: JSON.stringify({ mode: payload }),
       });
       if (!r.ok) {
         // Revert the dropdown to the server's truth on failure.
@@ -253,9 +317,16 @@
       try { prependExecution(JSON.parse(ev.data)); } catch (_) {}
     });
     sse.addEventListener('mode-changed', (ev) => {
-      // A live mode switch landed (possibly from another client). Re-fetch the
-      // profile snapshot so every open dashboard converges on server truth.
-      try { JSON.parse(ev.data); } catch (_) {}
+      // A live mode switch landed (possibly from another client). Reflect a
+      // global-scope switch into the header control immediately, then re-fetch
+      // the profile snapshot so every open dashboard converges on server truth.
+      try {
+        const m = JSON.parse(ev.data);
+        if (m && m.scope === 'global' && typeof m.mode === 'string') {
+          globalMode = m.mode;
+          renderGlobalControl();
+        }
+      } catch (_) {}
       fetchProfiles();
     });
   }
