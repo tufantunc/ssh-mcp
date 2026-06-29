@@ -66,10 +66,12 @@ describe('TransportRegistry.profile() — read path', () => {
     expect(lab.approval).toBeUndefined();
   });
 
-  it('falls back to the registry default when no name is given', () => {
+  it('falls back to the registry default when no name is given (after an explicit default is set)', () => {
     const { registry } = registryFrom(TWO_SOURCE_TOML);
 
-    // `lab` is the first registered source -> the default.
+    // With multiple sources the omit-name shortcut is enabled only by a
+    // deliberate setDefault() (PR #3 R1 fix: never silently pick a host).
+    registry.setDefault('lab');
     const def = registry.profile();
     expect(def.id).toBe('lab');
     expect(def.approval).toBeUndefined();

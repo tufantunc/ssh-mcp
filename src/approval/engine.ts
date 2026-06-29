@@ -238,6 +238,16 @@ export class ApprovalDispatcher extends EventEmitter implements ApprovalEngine {
     this.modeStore.restore(state);
   }
 
+  /**
+   * The mode `decide()` falls back to when a source carries no per-source
+   * override (`ctx.profile.approval?.mode`). Exposed read-only so status
+   * surfaces (e.g. the WebUI `/api/profiles` view) can report the
+   * genuinely-enforced default instead of guessing a different fallback.
+   */
+  get defaultMode(): ApprovalMode {
+    return this.opts.defaultMode;
+  }
+
   listPending(): PendingApproval[] {
     return this.manual?.listPending() ?? [];
   }
@@ -293,7 +303,7 @@ export function buildApprovalEngineFromConfig(
   options: BuildEngineFromConfigOptions,
 ): ApprovalDispatcher {
   // Default mode mirrors TOML default ('manual' per ApprovalSection comment).
-  const defaultMode: ApprovalMode = approval?.defaultMode ?? 'yolo';
+  const defaultMode: ApprovalMode = approval?.defaultMode ?? 'manual';
   const perSource = approval?.perSourceModes ?? [];
   const usedModes = new Set<ApprovalMode>([defaultMode, ...perSource]);
 

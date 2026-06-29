@@ -33,6 +33,7 @@ export {
 export {
   setApprovalEngine,
   getApprovalEngine,
+  getApprovalDecisionFromError,
   gateApproval,
   listPendingApprovals,
   resolvePendingApproval,
