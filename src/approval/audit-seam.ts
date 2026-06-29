@@ -115,7 +115,16 @@ export async function loadAuditSink(config: AuditSeamConfig = {}): Promise<Audit
       auditDir,
       auditMaxBytes: config.auditMaxBytes ?? 10_000,
     });
-  } catch {
+  } catch (storeErr: any) {
+    // The audit module IS part of this build (import + AuditStore both
+    // resolved), so this is a real, present-but-broken store — e.g. an
+    // unwritable `[server].audit_dir`. Degrading silently here would hide a
+    // compliance-audit failure AND leave the WebUI execution feed empty with
+    // no signal. Surface it. (Only the missing-module path above is allowed
+    // to degrade quietly — that is the documented Decision-D2 optional seam.)
+    console.error(
+      `audit store initialization failed (audit logging disabled): ${storeErr?.message || storeErr}`,
+    );
     return NO_OP_SINK;
   }
 

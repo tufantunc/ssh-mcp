@@ -605,9 +605,20 @@ function buildWebUIAuditTailAdapter(sink: AuditSink): WebUIAuditTail | undefined
 }
 
 function makeApprovalModeLookup(): (profileName: string) => string {
-  const defaultMode: ApprovalMode = resolvedConfig.approval?.mode ?? 'yolo';
   const perSource = resolvedConfig.perSourceApproval ?? {};
-  return (name: string) => perSource[name] ?? defaultMode;
+  // Mirror exactly what ApprovalDispatcher.decide() enforces so the WebUI
+  // never advertises a gate that is not actually applied:
+  //   - no engine wired        -> gateApproval() takes the legacy no-engine
+  //                               allow path (yolo-equivalent);
+  //   - per-source override set -> decide() honors ctx.profile.approval.mode,
+  //                               which the handlers thread in via
+  //                               approvalProfileForConnection();
+  //   - otherwise               -> decide() falls back to the engine's own
+  //                               resolved default mode.
+  return (name: string): string => {
+    if (!approvalEngine) return 'yolo';
+    return perSource[name] ?? approvalEngine.defaultMode;
+  };
 }
 
 async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined> {

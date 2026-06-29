@@ -78,13 +78,13 @@
     if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" class="muted">no profiles registered</td></tr>'; return; }
     for (const p of rows) {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${p.name}${p.default ? ' <span class="muted">(default)</span>' : ''}</td>
+      tr.innerHTML = `<td>${escapeHtml(p.name)}${p.default ? ' <span class="muted">(default)</span>' : ''}</td>
                       <td>${escapeHtml(p.description || '')}</td>
-                      <td>${p.host}:${p.port}</td>
-                      <td>${p.user}</td>
-                      <td>${p.auth}</td>
-                      <td>${p.transport}</td>
-                      <td><span class="pill">${p.approval_mode_effective}</span></td>
+                      <td>${escapeHtml(p.host)}:${escapeHtml(p.port)}</td>
+                      <td>${escapeHtml(p.user)}</td>
+                      <td>${escapeHtml(p.auth)}</td>
+                      <td>${escapeHtml(p.transport)}</td>
+                      <td><span class="pill">${escapeHtml(p.approval_mode_effective)}</span></td>
                       <td>${p.connected ? '<span class="pill allow">connected</span>' : '<span class="pill">idle</span>'}</td>`;
       tbody.appendChild(tr);
     }
@@ -99,9 +99,9 @@
       li.dataset.id = a.id;
       li.innerHTML = `
         <div class="row1">
-          <span class="profile">${a.profile}</span>
-          <span class="muted">${a.tool}</span>
-          <span class="ts">${fmtTime(a.enqueuedAt)}</span>
+          <span class="profile">${escapeHtml(a.profile)}</span>
+          <span class="muted">${escapeHtml(a.tool)}</span>
+          <span class="ts">${escapeHtml(fmtTime(a.enqueuedAt))}</span>
         </div>
         <code>${escapeHtml(a.command)}</code>
         ${a.description ? `<div class="muted">${escapeHtml(a.description)}</div>` : ''}
@@ -119,10 +119,10 @@
       const dec = r.approval && r.approval.decision;
       li.innerHTML = `
         <div class="row1">
-          <span class="profile">${r.profile}</span>
-          <span class="muted">${r.tool}</span>
-          ${dec ? `<span class="pill ${dec}">${dec}</span>` : ''}
-          <span class="ts">${fmtTime(r.ts)}</span>
+          <span class="profile">${escapeHtml(r.profile)}</span>
+          <span class="muted">${escapeHtml(r.tool)}</span>
+          ${dec ? `<span class="pill ${escapeAttr(dec)}">${escapeHtml(dec)}</span>` : ''}
+          <span class="ts">${escapeHtml(fmtTime(r.ts))}</span>
         </div>
         <code>${escapeHtml(r.command)}</code>`;
       list.appendChild(li);
@@ -135,10 +135,10 @@
     const dec = rec.approval && rec.approval.decision;
     li.innerHTML = `
       <div class="row1">
-        <span class="profile">${rec.profile}</span>
-        <span class="muted">${rec.tool}</span>
-        ${dec ? `<span class="pill ${dec}">${dec}</span>` : ''}
-        <span class="ts">${fmtTime(rec.ts)}</span>
+        <span class="profile">${escapeHtml(rec.profile)}</span>
+        <span class="muted">${escapeHtml(rec.tool)}</span>
+        ${dec ? `<span class="pill ${escapeAttr(dec)}">${escapeHtml(dec)}</span>` : ''}
+        <span class="ts">${escapeHtml(fmtTime(rec.ts))}</span>
       </div>
       <code>${escapeHtml(rec.command)}</code>`;
     list.insertBefore(li, list.firstChild);
@@ -148,7 +148,15 @@
 
 
   function escapeHtml(s) {
-    return String(s || '').replace(/[&<>"']/g, ch => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[ch]);
+    return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[ch]);
+  }
+
+  // Stricter escaping for values interpolated into an unquoted HTML attribute
+  // context (e.g. a CSS class). Drops everything outside a conservative
+  // allowlist so an attacker-influenced value can never break out of the
+  // attribute, even though current callers only pass the allow/deny enum.
+  function escapeAttr(s) {
+    return String(s == null ? '' : s).replace(/[^a-zA-Z0-9_-]/g, '');
   }
 
   let sse;
