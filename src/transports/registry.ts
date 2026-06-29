@@ -29,7 +29,8 @@ export interface TransportRegistryOptions {
  * When MULTIPLE configs are registered, an omitted/blank connectionName is a
  * fail-fast error by default (see {@link TransportRegistryOptions}). This
  * removes the R1 landmine where omission silently routed to whichever source
- * happened to be registered first.
+ * happened to be registered first. A deliberate {@link setDefault} re-enables
+ * the omit-name shortcut for callers that pick a canonical default.
  */
 export class TransportRegistry {
   private configs = new Map<string, ServerConfig>();
@@ -37,6 +38,8 @@ export class TransportRegistry {
   private initPromises = new Map<string, Promise<ISshTransport>>();
   private defaultName: string | null = null;
   private requireConnectionWhenMulti: boolean;
+  /** True only when setDefault() was called; first-registered fallback leaves this false. */
+  private defaultExplicit = false;
 
   constructor(options: TransportRegistryOptions = {}) {
     // Safe default: require an explicit name when multiple sources exist unless
@@ -73,6 +76,7 @@ export class TransportRegistry {
       throw new Error(`Cannot set default to unknown server: ${name}`);
     }
     this.defaultName = name;
+    this.defaultExplicit = true;
   }
 
   /** Returns names of all registered servers in registration order. */
@@ -95,9 +99,10 @@ export class TransportRegistry {
    *   ("Unknown connection name" — R2 regression guard).
    * - An omitted OR blank/whitespace-only name with multiple sources fails fast
    *   ("connectionName is required ...") by default — the R1 landmine fix —
-   *   unless the require-when-multi guard is opted out.
-   * - An omitted/blank name with a single source (or opt-out) resolves to the
-   *   default, preserving the single-server omission convenience.
+   *   unless either escape hatch is engaged (global opt-out, or a deliberate
+   *   setDefault()).
+   * - An omitted/blank name with a single source (or an engaged escape hatch)
+   *   resolves to the default, preserving the single-server omission convenience.
    */
   private resolveName(name?: string): string {
     // Normalize first: a blank/whitespace-only name ('' / '   ' / '\t') must be
@@ -121,14 +126,18 @@ export class TransportRegistry {
     // R1 landmine fix: with multiple sources, refuse to silently pick the
     // default. Branch on the ACTUAL registered source count (configs.size), not
     // the CLI isMultiHost flag (which is false for a 9-source TOML deployment).
-    if (this.requireConnectionWhenMulti && this.configs.size > 1) {
+    // Two independent escape hatches re-enable omission:
+    //   - requireConnectionWhenMulti === false (global opt-out, D-A2 config seam)
+    //   - a deliberate setDefault() call (defaultExplicit): the operator picked
+    //     a canonical default, so omission is an explicit choice, not a landmine.
+    if (this.requireConnectionWhenMulti && this.configs.size > 1 && !this.defaultExplicit) {
       throw new Error(
         `connectionName is required when multiple SSH connections are configured. ` +
           `Specify one of: ${this.names().join(', ')}.`
       );
     }
 
-    // size === 1 (or opt-out): preserve omission convenience.
+    // size === 1 (or an engaged escape hatch): preserve omission convenience.
     return this.defaultName;
   }
 
@@ -145,10 +154,19 @@ export class TransportRegistry {
     const cfg = this.configs.get(resolved)!;
     const initPromise = (async () => {
       const t = createTransport(cfg);
-      await t.init();
-      this.transports.set(resolved, t);
-      this.initPromises.delete(resolved);
-      return t;
+      try {
+        await t.init();
+        // Cache the live transport only on successful init.
+        this.transports.set(resolved, t);
+        return t;
+      } finally {
+        // Always clear the in-flight entry so a rejected init (e.g. a transient
+        // connect timeout to a temporarily-unreachable host) is NOT cached.
+        // Otherwise every later get() would replay the same rejection via the
+        // pending-promise return above, and the connection could never retry
+        // without a process restart.
+        this.initPromises.delete(resolved);
+      }
     })();
     this.initPromises.set(resolved, initPromise);
     return initPromise;
