@@ -19,6 +19,10 @@ import {
   PendingApproval,
 } from './types.js';
 
+export interface ApprovalDeniedMcpError extends McpError {
+  approval?: ApprovalDecision;
+}
+
 let activeEngine: ApprovalEngine | null = null;
 
 export function setApprovalEngine(engine: ApprovalEngine | null): void {
@@ -27,6 +31,10 @@ export function setApprovalEngine(engine: ApprovalEngine | null): void {
 
 export function getApprovalEngine(): ApprovalEngine | null {
   return activeEngine;
+}
+
+export function getApprovalDecisionFromError(err: unknown): ApprovalDecision | undefined {
+  return (err as ApprovalDeniedMcpError | undefined)?.approval;
 }
 
 /**
@@ -49,10 +57,12 @@ export async function gateApproval(ctx: ApprovalContext): Promise<ApprovalDecisi
   }
   const decision = await activeEngine.decide(ctx);
   if (decision.decision === 'deny') {
-    throw new McpError(
+    const err = new McpError(
       ErrorCode.InvalidRequest,
       `approval denied (${decision.mode}/${decision.decided_by}): ${decision.reason}`,
-    );
+    ) as ApprovalDeniedMcpError;
+    err.approval = decision;
+    throw err;
   }
   return decision;
 }
