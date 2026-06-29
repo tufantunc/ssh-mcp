@@ -42,12 +42,17 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
   if (!tomlPath && env.SSH_MCP_CONFIG) tomlPath = env.SSH_MCP_CONFIG;
   if (!tomlPath) tomlPath = discoverConfigPath(env);
 
+  // When CLI sources are present they win and suppress the TOML source list
+  // (see "CLI wins" semantics above). In that case a TOML that exists only to
+  // supply top-level sections (e.g. just [webui]) is legitimate and must not be
+  // rejected for having zero [[sources]]. Tolerate empty sources accordingly.
+  const hasCliSources = inputs.cliSources.length > 0;
+
   const fromToml: ResolvedConfig | undefined = tomlPath
-    ? loadTomlFile(tomlPath, { env })
+    ? loadTomlFile(tomlPath, { env, allowEmptySources: hasCliSources })
     : undefined;
 
   // --- assemble final ResolvedConfig -------------------------------------
-  const hasCliSources = inputs.cliSources.length > 0;
 
   // Per spec: CLI sources win and SUPPRESS the TOML source list (avoid
   // confusing union semantics + double-registration). Top-level TOML

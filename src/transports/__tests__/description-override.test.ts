@@ -90,9 +90,11 @@ describe('TransportRegistry live description override — read path', () => {
     expect(registry.profile('lab').description).toBeUndefined();
   });
 
-  it('falls back to the default source when name is omitted', () => {
+  it('falls back to the default source when name is omitted (after an explicit default is set)', () => {
     const { registry } = registryFrom(TWO_SOURCE_TOML);
-    // `lab` is first-registered => default.
+    // With multiple sources the omit-name shortcut is enabled only by a
+    // deliberate setDefault() (PR #3 R1 fix: never silently pick a host).
+    registry.setDefault('lab');
     expect(registry.getEffectiveDescription()).toBe('');
     registry.setDescription('lab', 'default-host note');
     expect(registry.getEffectiveDescription()).toBe('default-host note');
