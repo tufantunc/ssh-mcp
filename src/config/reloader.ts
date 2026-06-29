@@ -143,6 +143,30 @@ export class ConfigReloader extends EventEmitter {
 
     // --- 3. Swap, validate-before-commit per layer, rollback on any error. --
     try {
+      // Security guard (no-engine path): when the server booted WITHOUT an
+      // approval engine (no [approval] policy + WebUI disabled), gateApproval
+      // falls back to `legacy:no-engine` allow — effectively yolo. A reload
+      // can reseed the registry, but it CANNOT arm an engine that wasn't built
+      // at boot (sub-engines are constructed once; see ApprovalDispatcher). So
+      // if the new file introduces a policy that would CHANGE enforcement
+      // (any default or per-source mode other than yolo), applying the rest of
+      // the reload would silently report success while commands stay
+      // unenforced — a config that requires approval on a fresh boot would run
+      // wide open after a hot reload. Reject and roll back instead. Switching
+      // INTO manual/smart needs a restart (documented in the README).
+      if (!this.engine) {
+        const introduced: ApprovalMode[] = [];
+        if (next.approval?.mode) introduced.push(next.approval.mode);
+        for (const m of Object.values(next.perSourceApproval ?? {})) introduced.push(m);
+        const enforcing = introduced.find(m => m !== 'yolo');
+        if (enforcing) {
+          throw new Error(
+            `new config selects approval mode "${enforcing}" but no approval engine is armed ` +
+            `(server booted with no [approval] policy and WebUI disabled) — restart to arm it`,
+          );
+        }
+      }
+
       if (this.prepareSources) {
         await this.prepareSources(next.sources);
       }

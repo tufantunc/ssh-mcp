@@ -709,7 +709,17 @@ let stopConfigWatcher: (() => void) | null = null;
 function reloadResolveConfig(): ResolvedConfig {
   return resolveConfig({
     cliSources: cliSourceConfigs,
-    cliConfigPath: typeof CONFIG_PATH === 'string' ? CONFIG_PATH : undefined,
+    // Pin reloads to the EXACT file the boot resolver settled on (the same file
+    // the watcher is attached to), NOT the raw `--config` flag. CONFIG_PATH is
+    // undefined for env-var (`SSH_MCP_CONFIG`) and default-discovered boots, so
+    // passing it would make the reloader RE-RUN discovery: if a higher-
+    // precedence config (e.g. an explicit `--config`-style path, or an
+    // `SSH_MCP_CONFIG` that appeared in the environment) showed up after boot,
+    // an edit to the WATCHED file could end up applying a DIFFERENT file.
+    // `resolvedConfig.configPath` is the absolute path resolved at startup;
+    // feeding it back as the highest-precedence input keeps the loader and the
+    // watcher pinned to one file for the whole process lifetime.
+    cliConfigPath: resolvedConfig.configPath,
   });
 }
 

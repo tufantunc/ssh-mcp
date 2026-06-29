@@ -44,6 +44,16 @@ export class TransportRegistry {
   private descriptionOverrides = new Map<string, string>();
   /** True only when setDefault() was called; first-registered fallback leaves this false. */
   private defaultExplicit = false;
+  /**
+   * Monotonic reload generation (PR-9). Bumped by {@link closeAll} — the step a
+   * config hot-reload calls to drop stale transports. A `get()` whose `init()`
+   * is still in flight captures the generation up front and re-checks it after
+   * `init()` resolves: if it changed, a reload completed underneath the init, so
+   * the freshly-dialed transport was built from the now-stale config and MUST
+   * NOT be cached (otherwise it resurrects an old host/auth connection after
+   * closeAll already cleared the map). In-memory only.
+   */
+  private reloadGeneration = 0;
 
   register(config: ServerConfig): void {
     if (!config.name) {
@@ -169,21 +179,34 @@ export class TransportRegistry {
     if (pending) return pending;
 
     const cfg = this.configs.get(resolved)!;
+    const gen = this.reloadGeneration;
     const initPromise = (async () => {
       const t = createTransport(cfg);
       try {
         await t.init();
-        // Cache the live transport only on successful init.
-        this.transports.set(resolved, t);
-        return t;
       } finally {
         // Always clear the in-flight entry so a rejected init (e.g. a transient
         // connect timeout to a temporarily-unreachable host) is NOT cached.
         // Otherwise every later get() would replay the same rejection via the
         // pending-promise return above, and the connection could never retry
-        // without a process restart.
+        // without a process restart. Cleared BEFORE the generation re-check
+        // below so the recursive re-get on a mid-init reload can't deadlock on
+        // this very promise.
         this.initPromises.delete(resolved);
       }
+      // A config hot-reload (replaceAll + closeAll) may have completed while we
+      // were awaiting init(). If so, `t` was dialed against the pre-reload
+      // config; caching it would resurrect a stale connection for `resolved`
+      // after closeAll already cleared the map. Discard it and re-resolve
+      // against the CURRENT config so the caller gets a transport built from
+      // the new parameters (or a clear error if `resolved` was removed).
+      if (this.reloadGeneration !== gen) {
+        await t.close().catch(() => { /* best effort */ });
+        return this.get(name);
+      }
+      // Cache the live transport only on successful, still-current init.
+      this.transports.set(resolved, t);
+      return t;
     })();
     this.initPromises.set(resolved, initPromise);
     return initPromise;
@@ -219,6 +242,10 @@ export class TransportRegistry {
   }
 
   async closeAll(): Promise<void> {
+    // Bump the reload generation FIRST so any get() whose init() is still in
+    // flight (captured the old generation) discards its soon-to-be-stale
+    // transport instead of repopulating the map we are about to clear.
+    this.reloadGeneration++;
     const tasks: Promise<void>[] = [];
     for (const t of this.transports.values()) {
       tasks.push(t.close().catch(() => { /* best effort */ }));

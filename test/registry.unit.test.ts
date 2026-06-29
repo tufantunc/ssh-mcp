@@ -147,6 +147,73 @@ describe('TransportRegistry.get (finding 1: rejected init must not be cached)', 
   });
 });
 
+describe('TransportRegistry.get (finding 1: stale in-flight init must not survive a reload)', () => {
+  it('discards a transport whose init resolves AFTER a reload (closeAll) completes', async () => {
+    // Deferred init: hold the first get('alpha') open across a full reload.
+    let resolveOldInit: () => void = () => {};
+    const oldInit = vi.fn<() => Promise<void>>().mockImplementation(
+      () => new Promise<void>((res) => { resolveOldInit = res; }),
+    );
+    const oldStub = makeStub(oldInit);
+    oldStub.close = vi.fn().mockResolvedValue(undefined);
+
+    // The post-reload re-dial uses a brand-new transport that inits instantly.
+    const newStub = makeStub(vi.fn().mockResolvedValue(undefined));
+
+    // First createTransport() (pre-reload) -> oldStub; second (post-reload re-get) -> newStub.
+    createTransportMock.mockReturnValueOnce(oldStub).mockReturnValue(newStub);
+
+    const r = new TransportRegistry();
+    r.register(makeConfig('alpha'));
+
+    // 1. Kick off a get() whose init() is now parked mid-flight.
+    const inflight = r.get('alpha');
+    // 2. A config hot-reload swaps params for 'alpha' and drops stale transports.
+    r.replaceAll([{ ...makeConfig('alpha'), host: 'alpha2.example' }]);
+    await r.closeAll();
+    // 3. NOW let the old init resolve — it must NOT repopulate the registry.
+    resolveOldInit();
+    const got = await inflight;
+
+    // The in-flight get re-resolved against the current config and returned the
+    // fresh transport, not the stale one. The stale transport was closed.
+    expect(got).toBe(newStub);
+    expect(oldStub.close).toHaveBeenCalledTimes(1);
+
+    // A subsequent get() returns the cached fresh transport (no re-init).
+    const next = await r.get('alpha');
+    expect(next).toBe(newStub);
+    // 'alpha' is connected via the NEW transport only.
+    expect(r.list().find((x) => x.name === 'alpha')!.connected).toBe(true);
+  });
+
+  it('does not cache the stale transport even when the reloaded config dropped its name', async () => {
+    let resolveOldInit: () => void = () => {};
+    const oldInit = vi.fn<() => Promise<void>>().mockImplementation(
+      () => new Promise<void>((res) => { resolveOldInit = res; }),
+    );
+    const oldStub = makeStub(oldInit);
+    oldStub.close = vi.fn().mockResolvedValue(undefined);
+    const newStub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValueOnce(oldStub).mockReturnValue(newStub);
+
+    const r = new TransportRegistry();
+    r.register(makeConfig('alpha'));
+
+    const inflight = r.get('alpha');
+    // Reload replaces 'alpha' with a different source entirely.
+    r.replaceAll([makeConfig('beta')]);
+    await r.closeAll();
+    resolveOldInit();
+
+    // 'alpha' no longer exists -> the re-resolve surfaces a clear error, and the
+    // stale transport is still discarded/closed (never cached).
+    await expect(inflight).rejects.toThrow(/Unknown connection name: alpha/);
+    expect(oldStub.close).toHaveBeenCalledTimes(1);
+    expect(r.list().map((x) => x.name)).toEqual(['beta']);
+  });
+});
+
 describe('TransportRegistry.list / closeAll', () => {
   it('reports connection status and default flag', async () => {
     const stub = makeStub(vi.fn().mockResolvedValue(undefined));

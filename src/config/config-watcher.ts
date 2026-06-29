@@ -23,6 +23,7 @@
  */
 
 import * as fs from 'fs';
+import * as path from 'path';
 
 /** Default debounce window. Matches dbhub. Editors fire multiple change events. */
 export const DEFAULT_DEBOUNCE_MS = 500;
@@ -91,15 +92,32 @@ export function startConfigWatcher(options: ConfigWatcherOptions): (() => void) 
     if (typeof (debounceTimer as any).unref === 'function') (debounceTimer as any).unref();
   };
 
+  // Watch the PARENT DIRECTORY and filter events for the config file's
+  // basename, rather than watching the file inode directly. Editors and tools
+  // (and many deploy scripts) save via atomic rename: they write a temp file
+  // and rename it over config.toml, which REPLACES the inode. A watcher bound
+  // to the old inode (`fs.watch(configPath)`) receives the first rename and is
+  // then attached to a unlinked inode, so subsequent edits to the new file are
+  // never seen — the README "watches that file and hot-reloads on change"
+  // contract silently breaks after one save. A directory watcher survives the
+  // rename because the directory inode is stable, and still sees plain in-place
+  // writes (filename === basename). This mirrors dbhub's chokidar behaviour
+  // using only Node's built-in fs.watch.
+  const dir = path.dirname(configPath);
+  const base = path.basename(configPath);
+
   let watcher: fs.FSWatcher;
   try {
-    watcher = fs.watch(configPath, (eventType) => {
-      // Most platforms emit 'change'; some emit 'rename' on save-via-replace.
-      // Treat both as "the file might have changed" and let the parse step in
-      // onChange be the real validator.
-      if (eventType === 'change' || eventType === 'rename') {
-        scheduleReload();
-      }
+    watcher = fs.watch(dir, (eventType, filename) => {
+      // Most platforms emit 'change'; some emit 'rename' on save-via-replace
+      // or temp-file churn. Treat both as "the watched file might have changed"
+      // and let the parse step in onChange be the real validator. fs.watch on a
+      // directory reports the affected entry in `filename`; when the platform
+      // omits it (rare) we conservatively schedule a reload rather than miss an
+      // edit. Events for OTHER files in the directory are ignored.
+      if (eventType !== 'change' && eventType !== 'rename') return;
+      if (filename != null && path.basename(filename.toString()) !== base) return;
+      scheduleReload();
     });
   } catch (err: any) {
     log(`Config watcher: failed to watch ${configPath}: ${err?.message || err}`);

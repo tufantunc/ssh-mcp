@@ -228,6 +228,106 @@ auth = "kerberos"
   });
 });
 
+describe('ConfigReloader — no approval engine wired (security: cannot silently apply unenforced policy)', () => {
+  // The most likely real-world trap: server booted with NO [approval] section
+  // and WebUI off -> buildProductionApprovalEngine returns null -> the reloader
+  // is constructed WITHOUT an engine. gateApproval is then legacy:no-engine
+  // (allow). A hot reload can reseed connections but cannot ARM an engine that
+  // was never built, so a new config that selects manual/smart/per-source
+  // non-yolo must be REJECTED and rolled back — never reported as applied.
+  it('rejects + rolls back a reload that introduces a global manual policy', async () => {
+    const registry = freshRegistry(TOML_A);
+    // No engine passed — exactly the no-[approval]/WebUI-off boot shape.
+    const reloader = new ConfigReloader({
+      registry,
+      loadConfig: () => parseTomlConfig(TOML_B) as ResolvedConfig, // [approval] mode = "manual"
+      log: () => {},
+    });
+    const events: ConfigReloadedEvent[] = [];
+    reloader.on('config-reloaded', e => events.push(e));
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/rolled back/);
+    expect(res.reason).toMatch(/no approval engine is armed/);
+    // Connections untouched (no half-apply), no success event.
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+    expect(registry.getDefaultName()).toBe('alpha');
+    expect(events).toHaveLength(0);
+  });
+
+  it('rejects + rolls back a reload that introduces a per-source non-yolo policy', async () => {
+    const registry = freshRegistry(TOML_A);
+    const perSourceManualToml = `
+[approval]
+mode = "yolo"
+
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+
+[[sources]]
+id = "beta"
+host = "beta.example"
+user = "root"
+auth = "kerberos"
+approval = { mode = "manual" }
+`;
+    const reloader = new ConfigReloader({
+      registry,
+      loadConfig: () => parseTomlConfig(perSourceManualToml) as ResolvedConfig,
+      log: () => {},
+    });
+    const events: ConfigReloadedEvent[] = [];
+    reloader.on('config-reloaded', e => events.push(e));
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/no approval engine is armed/);
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+    expect(events).toHaveLength(0);
+  });
+
+  it('still applies a no-engine reload when the new policy is yolo / absent (no enforcement change)', async () => {
+    const registry = freshRegistry(TOML_A);
+    // New file keeps everything yolo (TOML_A is mode = "yolo") but swaps the
+    // source set, proving the guard only blocks ENFORCEMENT-changing policies.
+    const yoloSwapToml = `
+[approval]
+mode = "yolo"
+
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+
+[[sources]]
+id = "gamma"
+host = "gamma.example"
+user = "root"
+auth = "kerberos"
+`;
+    const reloader = new ConfigReloader({
+      registry,
+      loadConfig: () => parseTomlConfig(yoloSwapToml) as ResolvedConfig,
+      log: () => {},
+    });
+    const events: ConfigReloadedEvent[] = [];
+    reloader.on('config-reloaded', e => events.push(e));
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(true);
+    expect(registry.names()).toEqual(['alpha', 'gamma']);
+    expect(events).toHaveLength(1);
+  });
+});
+
 describe('ConfigReloader — in-memory only (no disk write-back)', () => {
   it('never mutates the config file on disk during a reload', async () => {
     const { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } = await import('node:fs');
@@ -243,9 +343,13 @@ describe('ConfigReloader — in-memory only (no disk write-back)', () => {
     try {
       const registry = freshRegistry(TOML_A);
       // A reload that genuinely swaps the source set (TOML_B) — the most likely
-      // moment a buggy implementation might "persist" back to disk.
+      // moment a buggy implementation might "persist" back to disk. TOML_B flips
+      // policy to manual, so wire a manual-armed engine; otherwise the no-engine
+      // enforcement guard would (correctly) reject the manual policy and this
+      // test would never exercise the actual swap path it cares about.
       const reloader = new ConfigReloader({
         registry,
+        engine: freshEngine(),
         loadConfig: () => parseTomlConfig(TOML_B) as ResolvedConfig,
         log: () => {},
       });

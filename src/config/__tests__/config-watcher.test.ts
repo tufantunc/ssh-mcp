@@ -7,7 +7,7 @@
  * to exactly one trailing reload (re-entrancy guard); a throwing callback must
  * not kill the watcher; an empty path is a no-op (CLI mode).
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -140,5 +140,61 @@ describe('startConfigWatcher', () => {
     writeFileSync(cfgPath, 'sources = []\n# after-stop\n');
     await sleep(120);
     expect(calls).toBe(0);
+  });
+
+  it('keeps firing after an atomic-rename save replaces the file inode', async () => {
+    let calls = 0;
+    stop = startConfigWatcher({
+      configPath: cfgPath,
+      debounceMs: 60,
+      onChange: () => { calls++; },
+      log: () => {},
+    });
+    expect(stop).toBeTypeOf('function');
+
+    // First save via atomic rename: editors/tools write a temp file then
+    // rename it over config.toml, which REPLACES the inode. A file-inode
+    // watcher would see this once and then go deaf; a directory watcher does
+    // not.
+    const tmp1 = join(dir, '.config.toml.tmp1');
+    writeFileSync(tmp1, 'sources = []\n# rename-1\n');
+    renameSync(tmp1, cfgPath);
+    await sleep(160);
+    expect(calls).toBe(1);
+
+    // Plain in-place edit to the NEW inode still fires — proves the watcher is
+    // not stuck on the old, now-unlinked inode.
+    writeFileSync(cfgPath, 'sources = []\n# in-place\n');
+    await sleep(160);
+    expect(calls).toBe(2);
+
+    // A SECOND atomic-rename save also fires — this is exactly what breaks with
+    // a file-bound fs.watch (it only re-arms, at best, for one rename).
+    const tmp2 = join(dir, '.config.toml.tmp2');
+    writeFileSync(tmp2, 'sources = []\n# rename-2\n');
+    renameSync(tmp2, cfgPath);
+    await sleep(160);
+    expect(calls).toBe(3);
+  });
+
+  it('ignores changes to OTHER files in the watched directory', async () => {
+    let calls = 0;
+    stop = startConfigWatcher({
+      configPath: cfgPath,
+      debounceMs: 60,
+      onChange: () => { calls++; },
+      log: () => {},
+    });
+
+    // Churn a sibling file in the same directory — must NOT trigger a reload.
+    const sibling = join(dir, 'unrelated.toml');
+    writeFileSync(sibling, 'noise = 1\n');
+    await sleep(160);
+    expect(calls).toBe(0);
+
+    // The watched file still fires.
+    writeFileSync(cfgPath, 'sources = []\n# real\n');
+    await sleep(160);
+    expect(calls).toBe(1);
   });
 });
