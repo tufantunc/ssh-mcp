@@ -79,6 +79,47 @@ export function capUtf8(s: string, maxBytes: number): { text: string; truncated:
   return { text: buf.slice(0, end).toString('utf8'), truncated: true };
 }
 
+/**
+ * Headroom (bytes) scanned by the redactor beyond the final output cap.
+ *
+ * Bounded so a single secret token that *begins* within the retained `cap`
+ * window is still fully present for the redactor to match, even if it
+ * straddles the cap boundary — without paying redaction CPU/memory over an
+ * unbounded (multi-MB) raw stdout/stderr. 4 KiB comfortably covers every
+ * single-token shape the redactor knows (GitHub PAT ≤255, JWT, AWS, Google,
+ * Slack) and a full RSA/ed25519 PEM private-key block.
+ */
+export const REDACT_SCAN_HEADROOM_BYTES = 4096;
+
+/**
+ * Bound, then redact, then cap — in that order.
+ *
+ * The naive `capUtf8(redact(s), cap)` redacts the *entire* raw string before
+ * truncation, so a megabyte of command output pays full regex cost even
+ * though only `cap` bytes survive. Here we first cap the raw text to
+ * `cap + REDACT_SCAN_HEADROOM_BYTES` (the bytes the redactor is allowed to
+ * scan), redact that bounded slice, then cap the redacted result to `cap`.
+ * The headroom guarantees a token whose prefix lands inside the kept window
+ * is matched in full (and thus replaced with `<redacted>`) rather than being
+ * sliced mid-token into a partial-secret leak.
+ *
+ * The reported `truncated` flag is true if bytes were dropped at *either*
+ * stage, preserving the semantics of the previous cap-after-redact path.
+ */
+export function capThenRedact(
+  s: string,
+  cap: number,
+): { text: string; truncated: boolean } {
+  if (cap <= 0) return { text: '', truncated: s.length > 0 };
+  // 1. Bound the bytes the redactor scans.
+  const scan = capUtf8(s, cap + REDACT_SCAN_HEADROOM_BYTES);
+  // 2. Redact within the bounded window.
+  const redacted = redact(scan.text);
+  // 3. Cap the redacted text to the final size.
+  const final = capUtf8(redacted, cap);
+  return { text: final.text, truncated: scan.truncated || final.truncated };
+}
+
 export interface BuildRecordInput {
   profile: string;
   tool: AuditTool;
@@ -116,8 +157,8 @@ export function buildRecord(input: BuildRecordInput): AuditRecord {
   };
 
   if (input.exec) {
-    const so = capUtf8(redact(input.exec.stdout), cap);
-    const se = capUtf8(redact(input.exec.stderr), cap);
+    const so = capThenRedact(input.exec.stdout, cap);
+    const se = capThenRedact(input.exec.stderr, cap);
     const execSection: AuditExecSection = {
       exit_code: input.exec.exitCode,
       duration_ms: input.exec.durationMs,
@@ -146,7 +187,15 @@ export class AuditStore {
     this.auditMaxBytes = cfg.auditMaxBytes ?? DEFAULT_AUDIT_MAX_BYTES;
     this.maxFileBytes = cfg.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
     this.retain = cfg.retain ?? DEFAULT_RETAIN;
-    fs.mkdirSync(this.auditDir, { recursive: true });
+    // Audit logs contain command lines + captured output; keep them
+    // owner-only. mkdir mode is masked by umask, so chmod afterwards to
+    // enforce 0700 on both freshly-created and pre-existing directories.
+    fs.mkdirSync(this.auditDir, { recursive: true, mode: 0o700 });
+    try {
+      fs.chmodSync(this.auditDir, 0o700);
+    } catch {
+      // best-effort: dir may live on a filesystem that ignores chmod
+    }
   }
 
   /** Build + write a record. Returns the written record (after redaction/capping). */
@@ -162,7 +211,19 @@ export class AuditStore {
     });
 
     const line = JSON.stringify(rec) + '\n';
-    fs.appendFileSync(filePath, line, { encoding: 'utf8' });
+    // Owner-only (0600). The mode option only applies when the file is
+    // created, and is masked by umask; chmod on first create enforces it
+    // even under a permissive umask. Existing files keep their mode across
+    // appends (no per-append chmod syscall on the hot path).
+    const existedBefore = fs.existsSync(filePath);
+    fs.appendFileSync(filePath, line, { encoding: 'utf8', mode: 0o600 });
+    if (!existedBefore) {
+      try {
+        fs.chmodSync(filePath, 0o600);
+      } catch {
+        // best-effort
+      }
+    }
 
     const stamp = utcDateStamp(now);
     if (this.lastPruneStamp !== stamp) {

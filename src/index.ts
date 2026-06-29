@@ -137,7 +137,17 @@ const AUDIT_MAX_BYTES = (() => {
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 10_000;
 })();
-const auditStore = new AuditStore({ auditDir: AUDIT_DIR, auditMaxBytes: AUDIT_MAX_BYTES });
+// Audit store is constructed lazily (see getAuditStore) so that merely
+// importing this module — e.g. under SSH_MCP_DISABLE_MAIN=1 for library use
+// or unit tests — never performs audit-directory filesystem I/O. The store
+// is materialized on first actual audit write (CLI/tool execution).
+let _auditStore: AuditStore | null = null;
+function getAuditStore(): AuditStore {
+  if (_auditStore === null) {
+    _auditStore = new AuditStore({ auditDir: AUDIT_DIR, auditMaxBytes: AUDIT_MAX_BYTES });
+  }
+  return _auditStore;
+}
 const MAX_CHARS_RAW = argvConfig.maxChars;
 const MAX_CHARS = (() => {
   if (typeof MAX_CHARS_RAW === 'string') {
@@ -365,7 +375,7 @@ function auditExecution(params: {
 }): void {
   const now = new Date();
   const durationMs = Math.max(0, Date.now() - params.startedAt);
-  const store = params.store ?? auditStore;
+  const store = params.store ?? getAuditStore();
   try {
     store.append({
       profile: params.profile,
