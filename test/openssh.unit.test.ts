@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { classifyError, OpenSshTransport } from '../src/transports/openssh';
+import { describe, it, expect, vi } from 'vitest';
+import { classifyError, OpenSshTransport, renderAskpassHelper } from '../src/transports/openssh';
 
 describe('classifyError', () => {
   it('returns undefined for success (exit 0)', () => {
@@ -138,5 +138,72 @@ describe('OpenSshTransport.buildArgs', () => {
     const args = t.buildArgs({ timeoutMs: 60000 });
     expect(args).toContain('ServerAliveInterval=30');
     expect(args).toContain('ServerAliveCountMax=3');
+  });
+});
+
+describe('renderAskpassHelper (finding 5: Windows metachar-safe password echo)', () => {
+  it('does not use a bare `echo %VAR%` on Windows', () => {
+    const content = renderAskpassHelper('SSH_MCP_PW_1234', true);
+    // The bug was `echo %VAR%`, which CMD re-parses and breaks on & | < > ^ %.
+    expect(content).not.toMatch(/echo\s+%SSH_MCP_PW_1234%/);
+  });
+
+  it('reads the password via PowerShell $env:VAR (no command-line substitution)', () => {
+    const content = renderAskpassHelper('SSH_MCP_PW_1234', true);
+    expect(content).toContain('powershell');
+    expect(content).toContain('$env:SSH_MCP_PW_1234');
+    // Password value itself is never placed in the script text.
+    expect(content).not.toContain('hunter2');
+  });
+
+  it('emits a metacharacter-safe printf on POSIX', () => {
+    const content = renderAskpassHelper('SSH_MCP_PW_1234', false);
+    expect(content).toContain('#!/bin/sh');
+    expect(content).toContain('printf');
+    expect(content).toContain('"$SSH_MCP_PW_1234"');
+    // Must NOT interpolate the value unquoted (would break on metacharacters).
+    expect(content).not.toMatch(/echo\s+\$SSH_MCP_PW_1234/);
+  });
+});
+
+describe('OpenSshTransport.execElevated sudo mode (finding 6: route via su when only suPassword set)', () => {
+  function makeTransport(cfg: any) {
+    const t = new OpenSshTransport({
+      host: 'h', port: 22, username: 'u', ...cfg,
+    });
+    const runSuViaPty = vi.fn().mockResolvedValue({ stdout: 'root-out', stderr: '', exitCode: 0 });
+    const runSsh = vi.fn().mockResolvedValue({ stdout: 'sudo-out', stderr: '', exitCode: 0 });
+    (t as any).runSuViaPty = runSuViaPty;
+    (t as any).runSsh = runSsh;
+    return { t, runSuViaPty, runSsh };
+  }
+
+  it('routes sudo-exec through the su PTY when only suPassword is set (no sudo password)', async () => {
+    const { t, runSuViaPty, runSsh } = makeTransport({ suPassword: 'supw' });
+    await t.execElevated('whoami', { timeoutMs: 60000, mode: 'sudo' });
+    expect(runSuViaPty).toHaveBeenCalledTimes(1);
+    expect(runSuViaPty).toHaveBeenCalledWith('whoami', 'supw', expect.objectContaining({ mode: 'sudo' }));
+    expect(runSsh).not.toHaveBeenCalled();
+  });
+
+  it('uses the normal sudo wrapper when a sudo password is available', async () => {
+    const { t, runSuViaPty, runSsh } = makeTransport({ suPassword: 'supw', sudoPassword: 'sudopw' });
+    await t.execElevated('whoami', { timeoutMs: 60000, mode: 'sudo' });
+    expect(runSsh).toHaveBeenCalledTimes(1);
+    expect(runSuViaPty).not.toHaveBeenCalled();
+  });
+
+  it('uses the normal sudo wrapper (passwordless) when neither su nor sudo password is set', async () => {
+    const { t, runSuViaPty, runSsh } = makeTransport({});
+    await t.execElevated('whoami', { timeoutMs: 60000, mode: 'sudo' });
+    expect(runSsh).toHaveBeenCalledTimes(1);
+    expect(runSuViaPty).not.toHaveBeenCalled();
+  });
+
+  it('prefers an explicit per-call sudo password over the su fallback', async () => {
+    const { t, runSuViaPty, runSsh } = makeTransport({ suPassword: 'supw' });
+    await t.execElevated('whoami', { timeoutMs: 60000, mode: 'sudo', password: 'callpw' });
+    expect(runSsh).toHaveBeenCalledTimes(1);
+    expect(runSuViaPty).not.toHaveBeenCalled();
   });
 });

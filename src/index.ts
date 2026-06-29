@@ -187,6 +187,94 @@ export function sanitizeCommand(command: string): string {
   return sanitizeCommandImpl(command, MAX_CHARS as number);
 }
 
+function resolveTransport(opts: { transportFlag?: string | null; kerberos?: boolean }): 'ssh2' | 'openssh' {
+  if (opts.transportFlag === 'openssh' || opts.kerberos) return 'openssh';
+  return 'ssh2';
+}
+
+/**
+ * Resolve the effective auth mode from the provided credential flags.
+ *
+ * Precedence: kerberos > password > key. Password is ranked above key to
+ * preserve the legacy ssh2 behaviour (base `main`): when both a password and a
+ * key path are supplied, the password wins and the key file is never read. This
+ * avoids an ENOENT crash for password configs that still carry a stale/sample
+ * `--key=path/to/key`.
+ */
+export function resolveAuthMode(opts: {
+  kerberos?: boolean;
+  key?: string | null;
+  password?: string | null;
+}): 'kerberos' | 'key' | 'password' | undefined {
+  if (opts.kerberos) return 'kerberos';
+  if (opts.password) return 'password';
+  if (opts.key) return 'key';
+  return undefined;
+}
+
+/**
+ * Inputs for {@link buildTransportConfig}. Mirrors the legacy CLI flags but is
+ * passed explicitly so the resolution logic is pure and unit-testable.
+ */
+export interface BuildTransportConfigInputs {
+  host?: string | null;
+  port: number;
+  username?: string | null;
+  password?: string | null;
+  key?: string | null;
+  suPassword?: string | null;
+  sudoPassword?: string | null;
+  kerberos?: boolean;
+  transportFlag?: string | null;
+  gssapiDelegateCredentials?: string | null;
+  knownHostsFile?: string | null;
+  strictHostKeyChecking?: string | null;
+}
+
+export async function buildTransportConfig(inputs: BuildTransportConfigInputs): Promise<TransportConfig> {
+  const { host, username } = inputs;
+  if (!host || !username) {
+    throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
+  }
+
+  const transport = resolveTransport({ transportFlag: inputs.transportFlag, kerberos: inputs.kerberos });
+  const authMode = resolveAuthMode({
+    kerberos: inputs.kerberos,
+    password: inputs.password,
+    key: inputs.key,
+  });
+
+  const cfg: TransportConfig = {
+    host,
+    port: inputs.port,
+    username,
+    transport,
+    authMode,
+  };
+
+  if (inputs.password) cfg.password = inputs.password;
+  if (inputs.key) {
+    cfg.keyPath = inputs.key;
+    // ssh2 transport needs the key contents, not the path — but only when the
+    // key is the resolved auth mode. A password config that also carries a
+    // stale/sample --key must NOT read the (possibly nonexistent) key file,
+    // which would otherwise throw ENOENT before connecting (regression vs base
+    // main, where password took precedence and the key was never read).
+    if (transport === 'ssh2' && authMode === 'key') {
+      const fs = await import('fs/promises');
+      cfg.privateKey = await fs.readFile(inputs.key, 'utf8');
+    }
+  }
+  if (inputs.suPassword !== null && inputs.suPassword !== undefined) cfg.suPassword = sanitizePassword(inputs.suPassword);
+  if (inputs.sudoPassword !== null && inputs.sudoPassword !== undefined) cfg.sudoPassword = sanitizePassword(inputs.sudoPassword);
+  if (inputs.kerberos) cfg.kerberos = true;
+  if (inputs.gssapiDelegateCredentials) cfg.gssapiDelegateCredentials = inputs.gssapiDelegateCredentials as 'yes' | 'no';
+  if (inputs.knownHostsFile) cfg.knownHostsFile = inputs.knownHostsFile;
+  if (inputs.strictHostKeyChecking) cfg.strictHostKeyChecking = inputs.strictHostKeyChecking as 'yes' | 'no' | 'accept-new';
+
+  return cfg;
+}
+
 // =============================================================================
 // Transport registry — lazy init, single entry for legacy single-host mode.
 // =============================================================================
@@ -210,31 +298,26 @@ async function bootstrapRegistry(): Promise<void> {
     }
   } else {
     if (!HOST || !USER) return; // Test mode with no CLI — tools will error if called
-    const authMode: AuthMode | undefined = KERBEROS_FLAG ? 'kerberos'
-      : KEY ? 'key'
-      : PASSWORD ? 'password'
-      : undefined;
-    const resolvedTransport: 'ssh2' | 'openssh' =
-      (TRANSPORT_FLAG === 'openssh' || KERBEROS_FLAG) ? 'openssh' : 'ssh2';
-
-    const cfg: ServerConfig = {
-      name: 'default',
+    // Route the legacy single-host path through buildTransportConfig so it
+    // inherits the kerberos>password>key precedence and the gated key read
+    // (a password config carrying a stale --key must not ENOENT on a missing
+    // key file). buildTransportConfig already loads privateKey when key is the
+    // resolved auth mode, so no separate prepareKeyContents call is needed here.
+    const tcfg = await buildTransportConfig({
       host: HOST,
       port: PORT,
       username: USER,
-      transport: resolvedTransport,
-      authMode,
-    };
-    if (PASSWORD) cfg.password = PASSWORD;
-    if (KEY) cfg.keyPath = KEY;
-    if (SUPASSWORD !== null && SUPASSWORD !== undefined) cfg.suPassword = sanitizePassword(SUPASSWORD);
-    if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) cfg.sudoPassword = sanitizePassword(SUDOPASSWORD);
-    if (KERBEROS_FLAG) cfg.kerberos = true;
-    if (GSSAPI_DELEGATE) cfg.gssapiDelegateCredentials = GSSAPI_DELEGATE as 'yes' | 'no';
-    if (KNOWN_HOSTS_FILE) cfg.knownHostsFile = KNOWN_HOSTS_FILE;
-    if (STRICT_HOST_KEY) cfg.strictHostKeyChecking = STRICT_HOST_KEY as 'yes' | 'no' | 'accept-new';
-    await prepareKeyContents(cfg);
-    registry.register(cfg);
+      password: PASSWORD,
+      key: KEY,
+      suPassword: SUPASSWORD,
+      sudoPassword: SUDOPASSWORD,
+      kerberos: KERBEROS_FLAG,
+      transportFlag: TRANSPORT_FLAG,
+      gssapiDelegateCredentials: GSSAPI_DELEGATE,
+      knownHostsFile: KNOWN_HOSTS_FILE,
+      strictHostKeyChecking: STRICT_HOST_KEY,
+    });
+    registry.register({ ...tcfg, name: 'default' });
   }
 }
 
