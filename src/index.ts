@@ -54,7 +54,7 @@ function collectSshJsonArgs(): string[] {
     .map(a => a.slice('--ssh='.length));
 }
 
-function parseServerConfigJson(raw: string): ServerConfig {
+export function parseServerConfigJson(raw: string): ServerConfig {
   let obj: any;
   try {
     obj = JSON.parse(raw);
@@ -97,6 +97,16 @@ function parseServerConfigJson(raw: string): ServerConfig {
 
   if (obj.sudoPassword) cfg.sudoPassword = obj.sudoPassword;
   if (obj.suPassword) cfg.suPassword = obj.suPassword;
+  // knownHostsFile / strictHostKeyChecking are openssh-transport-only. The ssh2
+  // transport ignores both, so accepting them on an ssh2 config would silently
+  // drop the requested host-key enforcement — a security downgrade. Mirror the
+  // legacy single-host rule ("--knownHostsFile and --strictHostKeyChecking
+  // require --transport=openssh") and reject the combination here.
+  if ((obj.knownHostsFile || obj.strictHostKeyChecking) && cfg.transport !== 'openssh') {
+    throw new Error(
+      `--ssh "${obj.name}" knownHostsFile/strictHostKeyChecking require "transport": "openssh" (got ${cfg.transport})`
+    );
+  }
   if (obj.knownHostsFile) cfg.knownHostsFile = obj.knownHostsFile;
   if (obj.strictHostKeyChecking) cfg.strictHostKeyChecking = obj.strictHostKeyChecking;
   return cfg;
@@ -137,13 +147,20 @@ const KNOWN_HOSTS_FILE = argvConfig.knownHostsFile;
 const STRICT_HOST_KEY = argvConfig.strictHostKeyChecking;
 const CONFIG_PATH = argvConfig.config;
 
+// Flags that signal intent to use the legacy single-host CLI mode. NOTE:
+// `disableSudo` is deliberately excluded — it only controls whether the sudo
+// tool is registered and is valid across ALL modes (multi-host --ssh and TOML
+// --config included). Treating it as a legacy trigger made
+// `--config cfg.toml --disableSudo` route through validateConfig(false) and
+// wrongly demand --host/--user. `port` stays here because it is only
+// meaningful as part of a single-host source.
 const legacyFlagNames = [
   'host', 'user', 'password', 'key', 'kerberos', 'transport',
   'strictHostKeyChecking', 'knownHostsFile', 'gssapiDelegateCredentials',
-  'suPassword', 'sudoPassword', 'disableSudo', 'port',
+  'suPassword', 'sudoPassword', 'port',
 ] as const;
 
-function hasLegacyCliFlags(config: Record<string, string | null>): boolean {
+export function hasLegacyCliFlags(config: Record<string, string | null>): boolean {
   return legacyFlagNames.some(f => config[f] !== undefined);
 }
 
@@ -151,8 +168,13 @@ function validateConfig(config: Record<string, string | null>, multiHost: boolea
   const errors: string[] = [];
 
   if (multiHost) {
-    // Multi-host mode: legacy single-host flags are disallowed to avoid ambiguity
-    const legacyFlags = ['host', 'user', 'password', 'key', 'kerberos', 'transport',
+    // Multi-host mode: legacy single-host flags are disallowed to avoid ambiguity.
+    // bootstrapRegistry reads connection details ONLY from each --ssh JSON in
+    // this mode, so any legacy flag would be silently ignored — including
+    // --port (wrong port), --sudoPassword and --suPassword (elevation would run
+    // without the password). Reject the whole set rather than drop them quietly.
+    const legacyFlags = ['host', 'user', 'port', 'password', 'key', 'kerberos', 'transport',
+                         'sudoPassword', 'suPassword',
                          'strictHostKeyChecking', 'knownHostsFile', 'gssapiDelegateCredentials'];
     const set = legacyFlags.filter(f => config[f] !== undefined);
     if (set.length > 0) {
@@ -256,6 +278,94 @@ export function sanitizeCommand(command: string): string {
   return sanitizeCommandImpl(command, MAX_CHARS as number);
 }
 
+function resolveTransport(opts: { transportFlag?: string | null; kerberos?: boolean }): 'ssh2' | 'openssh' {
+  if (opts.transportFlag === 'openssh' || opts.kerberos) return 'openssh';
+  return 'ssh2';
+}
+
+/**
+ * Resolve the effective auth mode from the provided credential flags.
+ *
+ * Precedence: kerberos > password > key. Password is ranked above key to
+ * preserve the legacy ssh2 behaviour (base `main`): when both a password and a
+ * key path are supplied, the password wins and the key file is never read. This
+ * avoids an ENOENT crash for password configs that still carry a stale/sample
+ * `--key=path/to/key`.
+ */
+export function resolveAuthMode(opts: {
+  kerberos?: boolean;
+  key?: string | null;
+  password?: string | null;
+}): 'kerberos' | 'key' | 'password' | undefined {
+  if (opts.kerberos) return 'kerberos';
+  if (opts.password) return 'password';
+  if (opts.key) return 'key';
+  return undefined;
+}
+
+/**
+ * Inputs for {@link buildTransportConfig}. Mirrors the legacy CLI flags but is
+ * passed explicitly so the resolution logic is pure and unit-testable.
+ */
+export interface BuildTransportConfigInputs {
+  host?: string | null;
+  port: number;
+  username?: string | null;
+  password?: string | null;
+  key?: string | null;
+  suPassword?: string | null;
+  sudoPassword?: string | null;
+  kerberos?: boolean;
+  transportFlag?: string | null;
+  gssapiDelegateCredentials?: string | null;
+  knownHostsFile?: string | null;
+  strictHostKeyChecking?: string | null;
+}
+
+export async function buildTransportConfig(inputs: BuildTransportConfigInputs): Promise<TransportConfig> {
+  const { host, username } = inputs;
+  if (!host || !username) {
+    throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
+  }
+
+  const transport = resolveTransport({ transportFlag: inputs.transportFlag, kerberos: inputs.kerberos });
+  const authMode = resolveAuthMode({
+    kerberos: inputs.kerberos,
+    password: inputs.password,
+    key: inputs.key,
+  });
+
+  const cfg: TransportConfig = {
+    host,
+    port: inputs.port,
+    username,
+    transport,
+    authMode,
+  };
+
+  if (inputs.password) cfg.password = inputs.password;
+  if (inputs.key) {
+    cfg.keyPath = inputs.key;
+    // ssh2 transport needs the key contents, not the path — but only when the
+    // key is the resolved auth mode. A password config that also carries a
+    // stale/sample --key must NOT read the (possibly nonexistent) key file,
+    // which would otherwise throw ENOENT before connecting (regression vs base
+    // main, where password took precedence and the key was never read).
+    if (transport === 'ssh2' && authMode === 'key') {
+      const fs = await import('fs/promises');
+      cfg.privateKey = await fs.readFile(inputs.key, 'utf8');
+    }
+  }
+  if (inputs.suPassword !== null && inputs.suPassword !== undefined) cfg.suPassword = sanitizePassword(inputs.suPassword);
+  if (inputs.sudoPassword !== null && inputs.sudoPassword !== undefined) cfg.sudoPassword = sanitizePassword(inputs.sudoPassword);
+  if (inputs.kerberos) cfg.kerberos = true;
+  if (inputs.gssapiDelegateCredentials) cfg.gssapiDelegateCredentials = inputs.gssapiDelegateCredentials as 'yes' | 'no';
+  if (inputs.knownHostsFile) cfg.knownHostsFile = inputs.knownHostsFile;
+  if (inputs.strictHostKeyChecking) cfg.strictHostKeyChecking = inputs.strictHostKeyChecking as 'yes' | 'no' | 'accept-new';
+
+  return cfg;
+}
+
 // =============================================================================
 // Transport registry — lazy init, single entry for legacy single-host mode.
 // =============================================================================
@@ -271,6 +381,13 @@ async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
 }
 
 async function bootstrapRegistry(): Promise<void> {
+  // Unified bootstrap (toml-config design): resolvedConfig.sources already
+  // carries every registered host — multi-host --ssh JSON, the legacy
+  // single-host config, and any [[sources]] from a TOML — built by
+  // resolveConfig(). Iterate it as the single source of truth. The
+  // kerberos>password>key precedence and gated key read from PR #2/#3 are
+  // preserved here via buildLegacyServerConfig (uses resolveAuthMode) plus the
+  // authMode-gated prepareKeyContents below.
   for (const cfg of resolvedConfig.sources) {
     await prepareKeyContents(cfg);
     registry.register(cfg);

@@ -3,6 +3,9 @@
 # Equivalent CLI multi-host shape:
 #   --ssh='{"name":"prod-bastion","host":"bastion.example.com","port":22,"user":"aduser@EXAMPLE.INTERNAL","auth":"kerberos"}'
 #   --ssh='{"name":"lab","host":"lab.internal","user":"root","auth":"key","keyPath":"~/.ssh/lab_ed25519","sudoPassword":"..."}'
+#
+# Note: per-source `description` is reserved — it is validated on load but not
+# yet surfaced anywhere; a later web-UI task consumes it. Safe to set now.
 
 [server]
 audit_dir = "~/.ssh-mcp"

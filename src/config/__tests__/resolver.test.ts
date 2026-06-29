@@ -86,6 +86,40 @@ auth = "kerberos"
     expect(cfg.configPath).toBe(p);
   });
 
+  it('CLI source + a TOML with ONLY top-level sections (no [[sources]]) resolves', () => {
+    // R1 finding 1: the resolver doc-comment promises "legacy flags AND a TOML
+    // just for [webui]". A --config TOML carrying no [[sources]] must not throw
+    // when CLI sources are present; it should keep the CLI source and expose
+    // the top-level sections.
+    const p = writeToml(tmp, 'webui-only.toml', `
+[webui]
+enabled = true
+host = "127.0.0.1"
+port = 9099
+
+[server]
+audit_dir = "~/audit-only"
+`);
+    const cfg = resolveConfig({ cliSources: [cliSource('cli')], cliConfigPath: p, env: {} });
+    expect(cfg.sources.map(s => s.name)).toEqual(['cli']);
+    expect(cfg.defaultName).toBe('cli');
+    expect(cfg.webui?.enabled).toBe(true);
+    expect(cfg.webui?.port).toBe(9099);
+    expect(cfg.server?.audit_dir).toContain('audit-only');
+    expect(cfg.configPath).toBe(p);
+  });
+
+  it('still rejects a TOML with no [[sources]] when there are NO CLI sources', () => {
+    // Without CLI sources the empty-sources tolerance must NOT apply — an
+    // otherwise-empty config is a user error.
+    const p = writeToml(tmp, 'empty.toml', `
+[webui]
+enabled = true
+`);
+    expect(() => resolveConfig({ cliSources: [], cliConfigPath: p, env: {} }))
+      .toThrow(/at least one \[\[sources\]\]/);
+  });
+
   it('--config wins over SSH_MCP_CONFIG when no CLI sources exist', () => {
     const explicit = writeToml(tmp, 'explicit.toml', `
 [[sources]]
