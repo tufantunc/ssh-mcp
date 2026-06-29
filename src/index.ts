@@ -147,13 +147,20 @@ const KNOWN_HOSTS_FILE = argvConfig.knownHostsFile;
 const STRICT_HOST_KEY = argvConfig.strictHostKeyChecking;
 const CONFIG_PATH = argvConfig.config;
 
+// Flags that signal intent to use the legacy single-host CLI mode. NOTE:
+// `disableSudo` is deliberately excluded — it only controls whether the sudo
+// tool is registered and is valid across ALL modes (multi-host --ssh and TOML
+// --config included). Treating it as a legacy trigger made
+// `--config cfg.toml --disableSudo` route through validateConfig(false) and
+// wrongly demand --host/--user. `port` stays here because it is only
+// meaningful as part of a single-host source.
 const legacyFlagNames = [
   'host', 'user', 'password', 'key', 'kerberos', 'transport',
   'strictHostKeyChecking', 'knownHostsFile', 'gssapiDelegateCredentials',
-  'suPassword', 'sudoPassword', 'disableSudo', 'port',
+  'suPassword', 'sudoPassword', 'port',
 ] as const;
 
-function hasLegacyCliFlags(config: Record<string, string | null>): boolean {
+export function hasLegacyCliFlags(config: Record<string, string | null>): boolean {
   return legacyFlagNames.some(f => config[f] !== undefined);
 }
 

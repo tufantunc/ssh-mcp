@@ -7,6 +7,7 @@ import {
   resultToMcpContent,
   resolveAuthMode,
   buildTransportConfig,
+  hasLegacyCliFlags,
 } from '../src/index';
 import type { ExecResult } from '../src/transports/types';
 
@@ -121,5 +122,28 @@ describe('buildTransportConfig (finding 2: no unconditional key read for passwor
     expect(cfg.transport).toBe('openssh');
     expect(cfg.keyPath).toBe('/nonexistent/path/to/key');
     expect(cfg.privateKey).toBeUndefined();
+  });
+});
+
+describe('hasLegacyCliFlags (finding 2: --disableSudo is not a legacy trigger)', () => {
+  it('returns false for --disableSudo alone (valid in --config / --ssh modes)', () => {
+    // --disableSudo only controls sudo-tool registration and is allowed in
+    // every mode. It must NOT force the legacy single-host validation branch
+    // (which would demand --host/--user). Regression guard for
+    // `ssh-mcp --config cfg.toml --disableSudo`.
+    expect(hasLegacyCliFlags({ disableSudo: null })).toBe(false);
+  });
+
+  it('still returns true for a genuine legacy flag like --host', () => {
+    expect(hasLegacyCliFlags({ host: 'h' })).toBe(true);
+  });
+
+  it('still returns true for --port (single-host-only flag)', () => {
+    expect(hasLegacyCliFlags({ port: '2222' })).toBe(true);
+  });
+
+  it('returns false for an empty / config-only argv', () => {
+    expect(hasLegacyCliFlags({})).toBe(false);
+    expect(hasLegacyCliFlags({ config: '/etc/ssh-mcp/config.toml' })).toBe(false);
   });
 });
