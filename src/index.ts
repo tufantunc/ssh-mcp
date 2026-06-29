@@ -52,7 +52,7 @@ function collectSshJsonArgs(): string[] {
     .map(a => a.slice('--ssh='.length));
 }
 
-function parseServerConfigJson(raw: string): ServerConfig {
+export function parseServerConfigJson(raw: string): ServerConfig {
   let obj: any;
   try {
     obj = JSON.parse(raw);
@@ -95,6 +95,16 @@ function parseServerConfigJson(raw: string): ServerConfig {
 
   if (obj.sudoPassword) cfg.sudoPassword = obj.sudoPassword;
   if (obj.suPassword) cfg.suPassword = obj.suPassword;
+  // knownHostsFile / strictHostKeyChecking are openssh-transport-only. The ssh2
+  // transport ignores both, so accepting them on an ssh2 config would silently
+  // drop the requested host-key enforcement — a security downgrade. Mirror the
+  // legacy single-host rule ("--knownHostsFile and --strictHostKeyChecking
+  // require --transport=openssh") and reject the combination here.
+  if ((obj.knownHostsFile || obj.strictHostKeyChecking) && cfg.transport !== 'openssh') {
+    throw new Error(
+      `--ssh "${obj.name}" knownHostsFile/strictHostKeyChecking require "transport": "openssh" (got ${cfg.transport})`
+    );
+  }
   if (obj.knownHostsFile) cfg.knownHostsFile = obj.knownHostsFile;
   if (obj.strictHostKeyChecking) cfg.strictHostKeyChecking = obj.strictHostKeyChecking;
   return cfg;
@@ -138,8 +148,13 @@ function validateConfig(config: Record<string, string | null>, multiHost: boolea
   const errors: string[] = [];
 
   if (multiHost) {
-    // Multi-host mode: legacy single-host flags are disallowed to avoid ambiguity
-    const legacyFlags = ['host', 'user', 'password', 'key', 'kerberos', 'transport',
+    // Multi-host mode: legacy single-host flags are disallowed to avoid ambiguity.
+    // bootstrapRegistry reads connection details ONLY from each --ssh JSON in
+    // this mode, so any legacy flag would be silently ignored — including
+    // --port (wrong port), --sudoPassword and --suPassword (elevation would run
+    // without the password). Reject the whole set rather than drop them quietly.
+    const legacyFlags = ['host', 'user', 'port', 'password', 'key', 'kerberos', 'transport',
+                         'sudoPassword', 'suPassword',
                          'strictHostKeyChecking', 'knownHostsFile', 'gssapiDelegateCredentials'];
     const set = legacyFlags.filter(f => config[f] !== undefined);
     if (set.length > 0) {
