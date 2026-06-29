@@ -198,3 +198,48 @@ describe('TransportRegistry — preserved invariants (must NOT regress)', () => 
     expect(() => r.register(cfg('dup'))).toThrow(/Duplicate server name/);
   });
 });
+
+describe('TransportRegistry register() name normalization (R1-PR5 finding #2: whitespace-padded names)', () => {
+  it('trims a whitespace-padded source name so it stores and resolves under the canonical name', async () => {
+    const r = new TransportRegistry();
+    r.register(cfg('  prod  '));
+
+    // Stored/listed under the trimmed name — no padded key lingers.
+    expect(r.names()).toEqual(['prod']);
+    expect(r.getDefaultName()).toBe('prod');
+
+    // A padded explicit lookup resolves to the same source (single-source path).
+    const t = await r.get('prod ');
+    expect(t).toBeTruthy();
+    expect(t.name).toBe('openssh');
+  });
+
+  it('rejects a whitespace-only source name (must not occupy an unselectable slot)', () => {
+    const r = new TransportRegistry();
+    expect(() => r.register(cfg('   '))).toThrow(/name is required/);
+    expect(() => r.register(cfg('\t'))).toThrow(/name is required/);
+    expect(r.hasAny()).toBe(false);
+  });
+
+  it('duplicate-checks the NORMALIZED name so "prod" and "prod " cannot both register (no silent mis-route)', () => {
+    const r = new TransportRegistry();
+    r.register(cfg('prod'));
+    // 'prod ' normalizes to 'prod' -> duplicate, rather than registering a
+    // second, padded, unreachable source that resolveName('prod ') would
+    // mis-route to the first 'prod'.
+    expect(() => r.register(cfg('prod '))).toThrow(/Duplicate server name/);
+    expect(r.names()).toEqual(['prod']);
+  });
+
+  it('multi-source: a padded explicit name routes to the matching trimmed source, never the wrong host', async () => {
+    const r = new TransportRegistry();
+    r.register(cfg('alpha'));
+    r.register(cfg('beta'));
+
+    // 'beta ' must resolve to beta, not fall through to the require-name guard
+    // and not mis-route to alpha (the first-registered default).
+    const t = await r.get(' beta ');
+    expect(t).toBeTruthy();
+    expect(t.name).toBe('openssh');
+  });
+});

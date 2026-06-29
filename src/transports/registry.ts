@@ -57,25 +57,37 @@ export class TransportRegistry {
   }
 
   register(config: ServerConfig): void {
-    if (!config.name) {
+    // Normalize the source name at registration so storage and lookup agree.
+    // resolveName() trims the requested connectionName, so register() MUST trim
+    // too; otherwise a whitespace-padded registered name ('prod ') is
+    // unreachable (every lookup trims to 'prod') yet still occupies a slot, and
+    // a 'prod' + 'prod ' pair silently mis-routes to the wrong host. Trimming,
+    // rejecting a blank/whitespace-only name, and duplicate-checking the
+    // NORMALIZED value together close that gap (R1-PR5 finding #2).
+    const name = config.name?.trim();
+    if (!name) {
       throw new Error('ServerConfig.name is required');
     }
-    if (this.configs.has(config.name)) {
-      throw new Error(`Duplicate server name: ${config.name}`);
+    if (this.configs.has(name)) {
+      throw new Error(`Duplicate server name: ${name}`);
     }
-    this.configs.set(config.name, config);
+    // Store under the canonical (trimmed) name so the map key, the stored
+    // config.name, and every later resolveName() lookup are byte-identical.
+    this.configs.set(name, { ...config, name });
     // First registered becomes the default unless explicitly overridden.
     if (this.defaultName === null) {
-      this.defaultName = config.name;
+      this.defaultName = name;
     }
   }
 
   /** Override which name is used when tool calls omit connectionName. */
   setDefault(name: string): void {
-    if (!this.configs.has(name)) {
+    // Trim to stay consistent with register()/resolveName() normalization.
+    const normalized = name?.trim();
+    if (!normalized || !this.configs.has(normalized)) {
       throw new Error(`Cannot set default to unknown server: ${name}`);
     }
-    this.defaultName = name;
+    this.defaultName = normalized;
     this.defaultExplicit = true;
   }
 
