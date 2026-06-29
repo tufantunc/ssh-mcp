@@ -100,6 +100,13 @@ export function discoverConfigPath(env: NodeJS.ProcessEnv = process.env): string
 
 interface LoadOptions {
   env?: NodeJS.ProcessEnv;
+  /**
+   * Tolerate a TOML with zero [[sources]] entries. Used by the resolver when
+   * CLI sources are present and suppress the TOML source list, so a TOML that
+   * only supplies top-level sections (e.g. just [webui]) is a valid, supported
+   * combination instead of a hard error.
+   */
+  allowEmptySources?: boolean;
 }
 
 /**
@@ -118,7 +125,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
   }
 
   const sources = Array.isArray(parsed?.sources) ? parsed.sources : [];
-  if (sources.length === 0) {
+  if (sources.length === 0 && !opts.allowEmptySources) {
     throw new Error('Config: at least one [[sources]] entry is required');
   }
 
@@ -186,9 +193,48 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     const resolvedTransport: 'ssh2' | 'openssh' = src.transport
       ?? (src.auth === 'kerberos' ? 'openssh' : 'ssh2');
 
-    const password = resolveEnvRef(src.password, `sources.${src.id}.password`, env);
-    const sudoPassword = resolveEnvRef(src.sudo_password, `sources.${src.id}.sudo_password`, env);
-    const suPassword = resolveEnvRef(src.su_password, `sources.${src.id}.su_password`, env);
+    // Kerberos requires the openssh transport (GSSAPI is only wired there).
+    // An explicit transport="ssh2" on a kerberos source would start up and then
+    // fail authentication at runtime — mirror the legacy CLI rule and reject it
+    // at parse time. (index.ts validateConfig: "--kerberos requires
+    // --transport=openssh".)
+    if (src.auth === 'kerberos' && src.transport === 'ssh2') {
+      throw new Error(
+        `Config: sources.${src.id} auth="kerberos" requires transport="openssh" (remove transport="ssh2")`,
+      );
+    }
+
+    // Secret fields must be quoted strings. An unquoted numeric value (e.g.
+    // `password = 123456`) parses as a TOML number; resolveEnvRef returns
+    // non-strings unchanged, so a number would reach the SSH/sudo password
+    // paths and fail with an opaque runtime type error. Reject it here with a
+    // clear, redact-safe config error that names the field but not the value.
+    const requireSecretString = (
+      value: unknown,
+      field: string,
+    ): string | undefined => {
+      if (value === undefined) return undefined;
+      if (typeof value !== 'string') {
+        throw new Error(`Config: sources.${src.id}.${field} must be a quoted string`);
+      }
+      return value;
+    };
+
+    const password = resolveEnvRef(
+      requireSecretString(src.password, 'password'),
+      `sources.${src.id}.password`,
+      env,
+    );
+    const sudoPassword = resolveEnvRef(
+      requireSecretString(src.sudo_password, 'sudo_password'),
+      `sources.${src.id}.sudo_password`,
+      env,
+    );
+    const suPassword = resolveEnvRef(
+      requireSecretString(src.su_password, 'su_password'),
+      `sources.${src.id}.su_password`,
+      env,
+    );
 
     const out: ServerConfig = {
       name: src.id,
@@ -214,6 +260,18 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
             `Config: sources.${src.id} auth="key" requires key_path or private_key`,
           );
         }
+        // The openssh transport authenticates with `-i <keyPath>` and never
+        // materializes an inline private_key — supplying only private_key on
+        // openssh silently falls back to default-identity pubkey auth. Require
+        // an on-disk key_path for openssh key sources so the configured key is
+        // actually used. (ssh2 reads inline key contents in memory, so inline
+        // private_key remains valid there.)
+        if (resolvedTransport === 'openssh' && !out.keyPath) {
+          throw new Error(
+            `Config: sources.${src.id} auth="key" with transport="openssh" requires key_path ` +
+            `(inline private_key is not supported on the openssh transport)`,
+          );
+        }
         break;
       case 'password':
         if (!password) {
@@ -227,6 +285,20 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
 
     if (sudoPassword !== undefined) out.sudoPassword = sudoPassword;
     if (suPassword !== undefined) out.suPassword = suPassword;
+    // known_hosts_file / strict_host_key_checking are honored only by the
+    // openssh transport (openssh.ts). On ssh2 they are silently dropped, which
+    // would disable the requested host-key enforcement — a security downgrade.
+    // Mirror the legacy CLI rule ("--knownHostsFile and --strictHostKeyChecking
+    // require --transport=openssh") and reject the combination at parse time.
+    if (
+      resolvedTransport === 'ssh2' &&
+      (src.known_hosts_file || src.strict_host_key_checking)
+    ) {
+      throw new Error(
+        `Config: sources.${src.id} known_hosts_file/strict_host_key_checking require transport="openssh" ` +
+        `(the ssh2 transport does not enforce host keys)`,
+      );
+    }
     if (src.known_hosts_file) out.knownHostsFile = expandHome(src.known_hosts_file);
     if (src.strict_host_key_checking) out.strictHostKeyChecking = src.strict_host_key_checking;
 

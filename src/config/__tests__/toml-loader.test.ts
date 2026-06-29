@@ -313,6 +313,190 @@ mode = "yolo"
   });
 });
 
+describe('parseTomlConfig: transport/host-key/secret guards (R1 findings 3-6)', () => {
+  // Finding 3: kerberos requires openssh; explicit ssh2 must be rejected at parse.
+  it('rejects auth="kerberos" with explicit transport="ssh2"', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "kerberos"
+transport = "ssh2"
+`)).toThrow(/kerberos.*openssh|openssh.*kerberos/i);
+  });
+
+  it('still defaults a kerberos source (no transport) to openssh', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "kerberos"
+`);
+    expect(cfg.sources[0].transport).toBe('openssh');
+  });
+
+  // Finding 4: host-key fields require openssh (ssh2 silently ignores them).
+  it('rejects known_hosts_file on an ssh2 (default) key source', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "key"
+key_path = "/k"
+known_hosts_file = "/tmp/known"
+`)).toThrow(/known_hosts_file.*openssh|strict_host_key_checking.*openssh/i);
+  });
+
+  it('rejects strict_host_key_checking on an ssh2 (default) password source', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "p"
+host = "h"
+user = "u"
+auth = "password"
+password = "pw"
+strict_host_key_checking = "yes"
+`)).toThrow(/openssh/i);
+  });
+
+  it('accepts known_hosts_file / strict_host_key_checking on transport="openssh"', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "key"
+key_path = "/k"
+transport = "openssh"
+known_hosts_file = "/tmp/known"
+strict_host_key_checking = "accept-new"
+`);
+    expect(cfg.sources[0].knownHostsFile).toBe('/tmp/known');
+    expect(cfg.sources[0].strictHostKeyChecking).toBe('accept-new');
+  });
+
+  it('accepts host-key fields on a kerberos source (implies openssh)', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u@EX"
+auth = "kerberos"
+known_hosts_file = "/tmp/known"
+`);
+    expect(cfg.sources[0].transport).toBe('openssh');
+    expect(cfg.sources[0].knownHostsFile).toBe('/tmp/known');
+  });
+
+  // Finding 5: openssh key sources need an on-disk key_path (inline key unused).
+  it('rejects auth="key" transport="openssh" with only private_key', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "key"
+transport = "openssh"
+private_key = "-----BEGIN KEY-----"
+`)).toThrow(/key_path/);
+  });
+
+  it('accepts auth="key" transport="openssh" with key_path', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "key"
+transport = "openssh"
+key_path = "/k"
+`);
+    expect(cfg.sources[0].keyPath).toBe('/k');
+    expect(cfg.sources[0].transport).toBe('openssh');
+  });
+
+  it('still accepts inline private_key on the ssh2 transport', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "key"
+private_key = "-----BEGIN KEY-----"
+`);
+    expect(cfg.sources[0].transport).toBe('ssh2');
+    expect(cfg.sources[0].privateKey).toBe('-----BEGIN KEY-----');
+  });
+
+  // Finding 6: secret fields must be quoted strings (a TOML number is rejected).
+  it('rejects an unquoted numeric password', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "p"
+host = "h"
+user = "u"
+auth = "password"
+password = 123456
+`)).toThrow(/password must be a quoted string/);
+  });
+
+  it('rejects an unquoted numeric sudo_password', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "p"
+host = "h"
+user = "u"
+auth = "password"
+password = "pw"
+sudo_password = 123456
+`)).toThrow(/sudo_password must be a quoted string/);
+  });
+
+  it('rejects an unquoted numeric su_password', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "p"
+host = "h"
+user = "u"
+auth = "password"
+password = "pw"
+su_password = 42
+`)).toThrow(/su_password must be a quoted string/);
+  });
+
+  it('does not echo the secret value in the type-guard error', () => {
+    try {
+      parseTomlConfig(`
+[[sources]]
+id = "p"
+host = "h"
+user = "u"
+auth = "password"
+password = 987654
+`);
+      throw new Error('should have thrown');
+    } catch (e: any) {
+      expect(e.message).toContain('sources.p.password');
+      expect(e.message).not.toContain('987654');
+    }
+  });
+
+  it('allowEmptySources tolerates a TOML with only top-level sections', () => {
+    const cfg = parseTomlConfig(`
+[webui]
+enabled = true
+host = "127.0.0.1"
+port = 8088
+`, { allowEmptySources: true });
+    expect(cfg.sources).toEqual([]);
+    expect(cfg.webui?.enabled).toBe(true);
+    expect(cfg.webui?.port).toBe(8088);
+  });
+});
+
 describe('loadTomlFile', () => {
   it('reads from disk and stamps configPath', () => {
     const tmp = path.join(os.tmpdir(), `ssh-mcp-test-${process.pid}-${Date.now()}.toml`);
