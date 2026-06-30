@@ -64,6 +64,28 @@ describe('TransportRegistry.replaceAll', () => {
     r.replaceAll([cfg('alpha'), cfg('beta')]);
     expect(r.getDescriptionOverride('alpha')).toBeUndefined();
   });
+
+  it('an explicit default re-enables omit-name with multiple servers', () => {
+    const r = seed();
+    // Sanity: multi-server with no explicit default refuses omit-name.
+    expect(() => r.getEffectiveDescription()).toThrow(/connectionName is required/);
+    // A reload that names a default is the analog of a boot-time setDefault():
+    // omit-name resolves to that default instead of throwing.
+    r.replaceAll([cfg('gamma'), cfg('delta')], 'delta');
+    expect(() => r.getEffectiveDescription()).not.toThrow();
+    expect(r.getDefaultName()).toBe('delta');
+  });
+
+  it('a fallback default (no name given) keeps the multi-server omit-name guard armed', () => {
+    // Start from a registry whose default WAS explicit, then reload without a
+    // named default: the swap must reset to the first-registered fallback so
+    // the multi-server omit-name guard re-arms (defaultExplicit not sticky).
+    const r = seed();
+    r.setDefault('beta');
+    expect(() => r.getEffectiveDescription()).not.toThrow(); // explicit default active
+    r.replaceAll([cfg('gamma'), cfg('delta')]); // no explicit default
+    expect(() => r.getEffectiveDescription()).toThrow(/connectionName is required/);
+  });
 });
 
 describe('TransportRegistry snapshot/restore (rollback support)', () => {
@@ -82,6 +104,22 @@ describe('TransportRegistry snapshot/restore (rollback support)', () => {
     expect(r.names()).toEqual(['alpha', 'beta']);
     expect(r.getDefaultName()).toBe('alpha');
     expect(r.getDescriptionOverride('alpha')).toBe('live edit');
+  });
+
+  it('round-trips defaultExplicit so omit-name behavior survives a rolled-back swap', () => {
+    const r = seed();
+    r.setDefault('beta'); // explicit default → omit-name allowed despite 2 servers
+    const snap = r.snapshotState();
+
+    // A swap with no explicit default would re-arm the omit-name guard...
+    r.replaceAll([cfg('gamma'), cfg('delta')]);
+    expect(() => r.getEffectiveDescription()).toThrow(/connectionName is required/);
+
+    // ...but rollback must restore the explicit-default state, not leave the
+    // registry enforcing a stricter omit-name rule than before the failed swap.
+    r.restoreState(snap);
+    expect(r.getDefaultName()).toBe('beta');
+    expect(() => r.getEffectiveDescription()).not.toThrow();
   });
 
   it('getAllConfigs returns the registered configs in order', () => {

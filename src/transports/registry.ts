@@ -11,6 +11,13 @@ import { createTransport } from './factory.js';
 export interface RegistryStateSnapshot {
   configs: Map<string, ServerConfig>;
   defaultName: string | null;
+  /**
+   * Whether the captured default was set by a deliberate setDefault()/explicit
+   * reload default (true) vs. the first-registered fallback (false). Carried
+   * through rollback so a failed reload cannot flip the omit-name guard
+   * (resolveName) into a different multi-server behavior than before the swap.
+   */
+  defaultExplicit: boolean;
   descriptionOverrides: Map<string, string>;
 }
 
@@ -277,6 +284,7 @@ export class TransportRegistry {
     return {
       configs: new Map(this.configs),
       defaultName: this.defaultName,
+      defaultExplicit: this.defaultExplicit,
       descriptionOverrides: new Map(this.descriptionOverrides),
     };
   }
@@ -285,6 +293,7 @@ export class TransportRegistry {
   restoreState(snap: RegistryStateSnapshot): void {
     this.configs = new Map(snap.configs);
     this.defaultName = snap.defaultName;
+    this.defaultExplicit = snap.defaultExplicit;
     this.descriptionOverrides = new Map(snap.descriptionOverrides);
   }
 
@@ -317,17 +326,25 @@ export class TransportRegistry {
       next.set(cfg.name, cfg);
     }
     let nextDefault: string;
+    let nextExplicit: boolean;
     if (defaultName) {
       if (!next.has(defaultName)) {
         throw new Error(`Cannot set default to unknown server: ${defaultName}`);
       }
       nextDefault = defaultName;
+      // A reload that names a default is the analog of a boot-time setDefault():
+      // it re-enables the omit-name shortcut even with multiple servers.
+      nextExplicit = true;
     } else {
       nextDefault = sources[0].name;
+      // No explicit default → first-registered fallback, exactly like boot via
+      // register(). The multi-server omit-name guard in resolveName() stays armed.
+      nextExplicit = false;
     }
     // Commit — every check above passed, so this can't half-apply.
     this.configs = next;
     this.defaultName = nextDefault;
+    this.defaultExplicit = nextExplicit;
     this.descriptionOverrides = new Map();
   }
 }
