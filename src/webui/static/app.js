@@ -423,8 +423,9 @@
     sse.addEventListener('config-reloaded', (ev) => {
       // The TOML config file changed on disk and was hot-reloaded (PR-9). The
       // connection set / descriptions / approval policy may all have changed,
-      // so re-fetch every server-truth surface. (The MCP tool list is NOT part
-      // of a reload — Decision D4 — so nothing about the SSE stream changes.)
+      // so re-fetch the modes and profile snapshots (the two surfaces this
+      // dashboard renders). (The MCP tool list is NOT part of a reload —
+      // Decision D4 — so nothing about the SSE stream changes.)
       try { JSON.parse(ev.data); } catch (_) {}
       fetchModes().then(() => fetchProfiles());
     });

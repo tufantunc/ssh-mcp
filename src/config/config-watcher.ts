@@ -58,8 +58,17 @@ export function startConfigWatcher(options: ConfigWatcherOptions): (() => void) 
   let debounceTimer: NodeJS.Timeout | null = null;
   let isReloading = false;
   let reloadPending = false;
+  // Set by cleanup(). Once closed, no further reload may be scheduled OR run —
+  // this closes the race where a change arrives during an in-flight reload
+  // (reloadPending = true), cleanup() runs, and the in-flight reload's `finally`
+  // then re-schedules a reload that fires onChange() AFTER the watcher was
+  // closed. Both runReload() and scheduleReload() bail when closed.
+  let closed = false;
 
   const runReload = async () => {
+    // Never run a reload after cleanup, even if a debounce timer had already
+    // fired into the macrotask queue before close() cancelled it.
+    if (closed) return;
     // Re-entrancy guard: if a reload is already running, remember that another
     // change arrived and re-schedule a single trailing reload in `finally`.
     if (isReloading) {
@@ -83,6 +92,8 @@ export function startConfigWatcher(options: ConfigWatcherOptions): (() => void) 
   };
 
   const scheduleReload = () => {
+    // Don't arm a new debounce timer once the watcher has been cleaned up.
+    if (closed) return;
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
@@ -133,6 +144,9 @@ export function startConfigWatcher(options: ConfigWatcherOptions): (() => void) 
   log(`Watching ${configPath} for changes (hot reload enabled)`);
 
   return () => {
+    // Mark closed FIRST so any reload still in-flight won't re-schedule from its
+    // `finally`, and any debounce timer that already fired becomes a no-op.
+    closed = true;
     if (debounceTimer) {
       clearTimeout(debounceTimer);
       debounceTimer = null;

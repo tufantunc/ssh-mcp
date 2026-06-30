@@ -142,6 +142,60 @@ describe('startConfigWatcher', () => {
     expect(calls).toBe(0);
   });
 
+  it('does not fire onChange after cleanup runs during an in-flight reload', async () => {
+    // Race regression: a change arrives while a reload is in flight
+    // (reloadPending = true), cleanup() runs, and the in-flight reload's
+    // `finally` must NOT re-schedule a trailing reload that fires onChange()
+    // after the watcher was closed.
+    const order: string[] = [];
+    let resolveFirst!: () => void;
+    let signalStarted!: () => void;
+    const firstStarted = new Promise<void>(res => { signalStarted = res; });
+    let started = false;
+
+    const cleanup = startConfigWatcher({
+      configPath: cfgPath,
+      debounceMs: 40,
+      log: () => {},
+      onChange: async () => {
+        order.push('start');
+        if (!started) {
+          started = true;
+          signalStarted();
+          // Park the first reload so the second change lands while
+          // isReloading === true (sets reloadPending).
+          await new Promise<void>(res => { resolveFirst = res; });
+        }
+        order.push('end');
+      },
+    })!;
+    stop = null;
+
+    // Kick off the first reload and wait until it is parked in-flight.
+    writeFileSync(cfgPath, 'sources = []\n# a\n');
+    await firstStarted;
+
+    // A change arrives DURING the in-flight reload. Wait past the debounce
+    // window so its debounce timer FIRES runReload(), which sees isReloading
+    // and sets reloadPending = true (this is the state the finally-reschedule
+    // race depends on; clearing the timer too early would never reach it).
+    writeFileSync(cfgPath, 'sources = []\n# b\n');
+    await sleep(80);
+
+    // Tear the watcher down while the first reload is still parked and
+    // reloadPending is latched.
+    cleanup();
+
+    // Release the parked reload; its `finally` sees reloadPending but must
+    // bail because the watcher is now closed.
+    resolveFirst();
+    await sleep(200);
+
+    // Exactly ONE onChange ran (the first, already in flight at cleanup) and
+    // NO trailing reload fired after cleanup.
+    expect(order.filter(o => o === 'start').length).toBe(1);
+  });
+
   it('keeps firing after an atomic-rename save replaces the file inode', async () => {
     let calls = 0;
     stop = startConfigWatcher({

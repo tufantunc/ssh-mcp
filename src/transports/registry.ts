@@ -276,9 +276,12 @@ export class TransportRegistry {
 
   /**
    * Capture the mutable config state for rollback. Cheap (shallow Map copies);
-   * the ServerConfig objects themselves are never mutated in place, so sharing
-   * their references is safe. Live transports are intentionally NOT captured —
-   * they re-init lazily from whatever config is active on the next call.
+   * the ServerConfig objects are treated as immutable *after registration*
+   * (only boot-time prep like `prepareKeyContents()` mutates a cfg in place,
+   * before it is ever registered/snapshotted), so sharing their references in
+   * the snapshot is safe — a rollback restores the same objects. Live
+   * transports are intentionally NOT captured — they re-init lazily from
+   * whatever config is active on the next call.
    */
   snapshotState(): RegistryStateSnapshot {
     return {
