@@ -87,6 +87,22 @@ describe('OpenSshTransport.buildArgs', () => {
     expect(args).toContain('GSSAPIAuthentication=no');
   });
 
+  it('forces IdentitiesOnly=yes when an explicit key is supplied (no agent-key spray)', () => {
+    const t = new OpenSshTransport({ ...baseCfg, authMode: 'key', keyPath: '/home/user/.ssh/id_ed25519' });
+    const args = t.buildArgs({ timeoutMs: 60000 });
+    expect(args).toContain('IdentitiesOnly=yes');
+    // The -i path and IdentitiesOnly=yes must both be present so ssh uses only
+    // the chosen key instead of offering every ssh-agent identity first.
+    const iIdx = args.indexOf('-i');
+    expect(iIdx).toBeGreaterThanOrEqual(0);
+    expect(args[iIdx + 1]).toBe('/home/user/.ssh/id_ed25519');
+  });
+
+  it('does not emit IdentitiesOnly for non-key auth modes', () => {
+    const t = new OpenSshTransport({ ...baseCfg, authMode: 'kerberos' });
+    expect(t.buildArgs({ timeoutMs: 60000 })).not.toContain('IdentitiesOnly=yes');
+  });
+
   it('emits password-specific flags when authMode=password', () => {
     const t = new OpenSshTransport({ ...baseCfg, authMode: 'password', password: 'hunter2' });
     const args = t.buildArgs({ timeoutMs: 60000 });

@@ -227,7 +227,10 @@ async function getOrCreateTransport(): Promise<ISshTransport> {
  * Map ExecResult to MCP tool response. Preserves upstream semantics:
  *   - auth/host_key/connect/transport categories → reject with descriptive error
  *   - timeout → reject with timeout error
- *   - non-zero exit with stderr → reject (wraps as "Error (code N):\n<stderr>")
+ *   - non-zero exit → reject (wraps as "Error (code N):\n<stderr>"), even when
+ *     stderr is empty (e.g. `false`, `test -f missing`): the synthetic detail
+ *     "Command exited with status N" is used so a failed command never looks
+ *     like a success just because it printed nothing to stderr.
  *   - exit 0 → success, even if stderr is non-empty
  *
  * Exit 0 is treated as success regardless of stderr: the OpenSSH transport
@@ -254,8 +257,9 @@ export function resultToMcpContent(result: ExecResult) {
   if (result.category === 'transport') {
     throw new McpError(ErrorCode.InternalError, result.stderr || 'SSH transport error');
   }
-  if (result.stderr && result.exitCode !== 0) {
-    throw new McpError(ErrorCode.InternalError, `Error (code ${result.exitCode}):\n${result.stderr}`);
+  if (result.exitCode !== null && result.exitCode !== 0) {
+    const detail = result.stderr || `Command exited with status ${result.exitCode}`;
+    throw new McpError(ErrorCode.InternalError, `Error (code ${result.exitCode}):\n${detail}`);
   }
   return {
     content: [{

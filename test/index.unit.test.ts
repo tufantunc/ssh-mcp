@@ -44,6 +44,19 @@ describe('resultToMcpContent (finding 1: exit-0 stderr must not error)', () => {
     ).toThrow(/Error \(code 139\)/);
   });
 
+  it('throws for a non-zero exit with EMPTY stderr (e.g. `false`, `test -f missing`)', () => {
+    // Regression for the openssh transport: `false` / `test -f missing` exit
+    // non-zero with no stderr, and must NOT be reported as success.
+    expect(() =>
+      resultToMcpContent({ stdout: '', stderr: '', exitCode: 1, category: 'remote_exit' as any }),
+    ).toThrow(/Error \(code 1\)[\s\S]*Command exited with status 1/);
+  });
+
+  it('treats a null exit code with no error category as success (handshake-less success path)', () => {
+    const out = resultToMcpContent({ stdout: 'done', stderr: '', exitCode: null });
+    expect(out.content[0].text).toBe('done');
+  });
+
   it('throws on auth/host_key/connect/transport/timeout categories regardless of exit code', () => {
     for (const category of ['auth', 'host_key', 'connect', 'transport', 'timeout'] as const) {
       expect(() =>

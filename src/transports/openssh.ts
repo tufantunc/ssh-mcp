@@ -169,7 +169,15 @@ export class OpenSshTransport implements ISshTransport {
         );
         break;
       case 'key':
-        if (cfg.keyPath) a.push('-i', cfg.keyPath);
+        if (cfg.keyPath) {
+          a.push('-i', cfg.keyPath);
+          // Force OpenSSH to use ONLY the supplied key. Without
+          // IdentitiesOnly=yes, ssh still offers every ssh-agent identity
+          // first, which can exhaust the server's MaxAuthTries before the
+          // chosen `-i` key is ever tried. This matches the ssh2 path, which
+          // authenticates with exactly the configured key.
+          a.push('-o', 'IdentitiesOnly=yes');
+        }
         a.push(
           '-o', 'PreferredAuthentications=publickey',
           '-o', 'PasswordAuthentication=no',
@@ -209,6 +217,7 @@ export class OpenSshTransport implements ISshTransport {
     return new Promise((resolve) => {
       const args = [...this.buildArgs(opts), command];
       let timedOut = false;
+      let exited = false;
       let stdout = '';
       let stderr = '';
 
@@ -230,11 +239,16 @@ export class OpenSshTransport implements ISshTransport {
         timedOut = true;
         child.kill('SIGTERM');
         setTimeout(() => {
-          if (!child.killed) child.kill('SIGKILL');
+          // `child.killed` only reflects that a signal was *sent*, not that the
+          // process actually exited. Gate the SIGKILL fallback on the real
+          // `exited` flag (set from the close event) so a process ignoring
+          // SIGTERM is still force-killed instead of being left to hang.
+          if (!exited) child.kill('SIGKILL');
         }, 2000);
       }, opts.timeoutMs);
 
       child.on('error', (err: Error) => {
+        exited = true;
         clearTimeout(timer);
         resolve({
           stdout,
@@ -245,6 +259,7 @@ export class OpenSshTransport implements ISshTransport {
       });
 
       child.on('close', (code, signal) => {
+        exited = true;
         clearTimeout(timer);
         const category = timedOut ? 'timeout' : classifyError(code, stderr);
         resolve({
@@ -289,6 +304,7 @@ export class OpenSshTransport implements ISshTransport {
       let capturedStderr = '';
       let exitCode: number | null = null;
       let timedOut = false;
+      let exited = false;
       let stateTimer: NodeJS.Timeout | null = null;
 
       const child: ChildProcess = spawn('ssh', args, {
@@ -325,7 +341,11 @@ export class OpenSshTransport implements ISshTransport {
         timedOut = true;
         clearStateTimer();
         child.kill('SIGTERM');
-        setTimeout(() => { if (!child.killed) child.kill('SIGKILL'); }, 2000);
+        // Gate the SIGKILL fallback on the real `exited` flag, not
+        // `child.killed` (which is set the instant SIGTERM is *sent*, so the
+        // fallback would always be skipped and a process ignoring SIGTERM
+        // could hang past the deadline).
+        setTimeout(() => { if (!exited) child.kill('SIGKILL'); }, 2000);
       }, opts.timeoutMs);
 
       child.stdout?.on('data', (chunk: Buffer) => {
@@ -338,7 +358,16 @@ export class OpenSshTransport implements ISshTransport {
         // scan buffer so large command output is not lost (see execCapture decl).
         if (state === 'EXEC') execCapture += text;
 
-        if (failRe.test(stdoutTail)) {
+        // Auth-failure detection must run ONLY during the su/login phases.
+        // Once the state machine reaches EXEC, the stream carries the user
+        // command's own stdout, which may legitimately contain phrases like
+        // "incorrect password" or "authentication failure" (e.g. grepping auth
+        // logs). Matching there would kill the session and mis-report the
+        // command's output as an auth error, so gate the check on the pre-EXEC
+        // login states.
+        const inLoginPhase =
+          state === 'SU_PROMPT' || state === 'PASSWORD_SENT' || state === 'ROOT_SHELL';
+        if (inLoginPhase && failRe.test(stdoutTail)) {
           clearStateTimer();
           capturedStderr += stdoutTail;
           child.kill('SIGTERM');
@@ -389,7 +418,26 @@ export class OpenSshTransport implements ISshTransport {
             capturedStdout = execCapture.slice(0, endIdx).replace(/\r\n/g, '\n');
             // Strip the echoed PS1-sentinel leftovers if any
             capturedStdout = capturedStdout.replace(new RegExp(`${readyMark}\\$\\s*`, 'g'), '');
-            // Strip the echoed command lines (best effort)
+            // Strip the echoed command lines (best effort). With `ssh -tt` the
+            // remote PTY's line discipline echoes every line written to stdin
+            // back onto stdout, so the EXEC capture is polluted by the echoed
+            // user command and the echoed `echo <endMark>$?` sentinel-emit
+            // command. Remove both so the caller sees only the command's real
+            // stdout instead of its own input replayed back.
+            const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            // 1. Drop the echoed sentinel-emit command line wherever it appears.
+            capturedStdout = capturedStdout.replace(
+              new RegExp(`^echo ${escapeRe(endMark)}\\$\\?[ \\t]*\\n?`, 'm'),
+              '',
+            );
+            // 2. Drop the echoed user command line(s) at the head of the capture.
+            const cmdLines = command.split('\n');
+            const outLines = capturedStdout.split('\n');
+            while (cmdLines.length && outLines.length && outLines[0] === cmdLines[0]) {
+              outLines.shift();
+              cmdLines.shift();
+            }
+            capturedStdout = outLines.join('\n');
             state = 'DONE';
             writeLine('exit');
             writeLine('exit');
@@ -402,6 +450,7 @@ export class OpenSshTransport implements ISshTransport {
       });
 
       child.on('error', (err: Error) => {
+        exited = true;
         clearStateTimer();
         clearTimeout(overallTimer);
         resolve({
@@ -413,6 +462,7 @@ export class OpenSshTransport implements ISshTransport {
       });
 
       child.on('close', (code, signal) => {
+        exited = true;
         clearStateTimer();
         clearTimeout(overallTimer);
 
