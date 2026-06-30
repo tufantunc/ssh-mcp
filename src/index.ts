@@ -260,7 +260,7 @@ const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
       cliSources: cliSourceConfigs,
       cliConfigPath: typeof CONFIG_PATH === 'string' ? CONFIG_PATH : undefined,
     })
-  : { sources: [], perSourceApproval: {} };
+  : { sources: [], perSourceApproval: {}, defaultExplicit: false };
 
 if (isCliEnabled) {
   if (isMultiHost) {
@@ -392,8 +392,32 @@ async function bootstrapRegistry(): Promise<void> {
     await prepareKeyContents(cfg);
     registry.register(cfg);
   }
-  if (resolvedConfig.defaultName) {
-    registry.setDefault(resolvedConfig.defaultName);
+  applyRegistryConnectionPolicy(registry, resolvedConfig);
+}
+
+/**
+ * Wire the resolved connection policy onto a registry whose sources are already
+ * registered. Split out (and exported) so the explicit-default / fallback /
+ * require_connection opt-out matrix is unit-testable without booting the server.
+ *
+ * Two independent knobs:
+ *  - defaultExplicit: call setDefault() ONLY when the user explicitly chose a
+ *    default. Falling through to register()'s first-registered fallback leaves
+ *    the registry's defaultExplicit=false, so a multi-source config with no
+ *    explicit default still rejects an omitted connectionName (the headline
+ *    security fix) instead of silently routing to the first host.
+ *  - requireConnection: when false, opt out of that guard entirely. Absent the
+ *    field (older ResolvedConfig shape) it defaults to safe (guard ON).
+ */
+export function applyRegistryConnectionPolicy(
+  reg: Pick<TransportRegistry, 'setDefault' | 'setRequireConnectionWhenMulti'>,
+  config: ResolvedConfig,
+): void {
+  const requireConnection =
+    (config as { requireConnection?: boolean }).requireConnection ?? true;
+  reg.setRequireConnectionWhenMulti(requireConnection);
+  if (config.defaultExplicit && config.defaultName) {
+    reg.setDefault(config.defaultName);
   }
 }
 
