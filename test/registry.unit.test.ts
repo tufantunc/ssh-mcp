@@ -92,6 +92,54 @@ describe('TransportRegistry.resolveName (finding 3: omitted name in multi-host)'
   });
 });
 
+describe('TransportRegistry.setRequireConnectionWhenMulti (require_connection opt-out)', () => {
+  it('opts out of the multi-host omit-name guard when set false (routes to first-registered)', async () => {
+    const stub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValue(stub);
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    // Opt out: the guard must NOT fire, and an omitted name routes to the
+    // first-registered fallback ('a') without throwing.
+    r.setRequireConnectionWhenMulti(false);
+    await expect(r.get()).resolves.toBe(stub);
+  });
+
+  it('keeps the guard armed when set true explicitly (multi-host omit still throws)', async () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    r.setRequireConnectionWhenMulti(true);
+    await expect(r.get()).rejects.toThrow(/connectionName is required when multiple servers are configured: a, b/);
+  });
+
+  it('guard is ON by default (no setter call) for multi-host omit', async () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    await expect(r.get()).rejects.toThrow(/connectionName is required/);
+  });
+
+  it('opt-out does not affect single-source omit (always resolves the lone source)', async () => {
+    const stub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValue(stub);
+    const r = new TransportRegistry();
+    r.register(makeConfig('solo'));
+    r.setRequireConnectionWhenMulti(false);
+    await expect(r.get()).resolves.toBe(stub);
+  });
+
+  it('an explicit name still routes correctly even when the guard is opted out', async () => {
+    const stub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValue(stub);
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    r.setRequireConnectionWhenMulti(false);
+    await expect(r.get('b')).resolves.toBe(stub);
+  });
+});
+
 describe('TransportRegistry.get (finding 1: rejected init must not be cached)', () => {
   it('retries init on a later get() after the first init rejects', async () => {
     const init = vi

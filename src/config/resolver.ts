@@ -62,17 +62,33 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
     : (fromToml?.sources ?? []);
 
   // defaultName: when CLI is in charge, first registered wins (matches
-  // existing TransportRegistry behavior).
+  // existing TransportRegistry behavior). defaultExplicit tracks whether that
+  // default was a deliberate user choice (TOML `default = true`) versus a mere
+  // positional fallback — the boot path only calls registry.setDefault() for an
+  // explicit default, so a multi-source config without one keeps the omit-name
+  // guard armed instead of silently routing to the first host.
   let defaultName: string | undefined;
+  let defaultExplicit: boolean;
   if (hasCliSources) {
+    // A CLI invocation never carries an explicit-default marker; the first
+    // --ssh source is a positional fallback only.
     defaultName = inputs.cliSources[0]?.name;
+    defaultExplicit = false;
+  } else if (fromToml?.defaultName !== undefined) {
+    // The TOML loader sets defaultName ONLY from an explicit `default = true`.
+    defaultName = fromToml.defaultName;
+    defaultExplicit = true;
   } else {
-    defaultName = fromToml?.defaultName ?? fromToml?.sources?.[0]?.name;
+    // No explicit default anywhere: fall back to the first source positionally
+    // for routing, but mark it non-explicit so the guard still fires.
+    defaultName = fromToml?.sources?.[0]?.name;
+    defaultExplicit = false;
   }
 
   return {
     sources,
     defaultName,
+    defaultExplicit,
     perSourceApproval: hasCliSources ? {} : (fromToml?.perSourceApproval ?? {}),
     // require_connection is a top-level safety knob: honor a TOML [server]
     // value even when CLI sources are in charge (mirrors how [webui]/[approval]
