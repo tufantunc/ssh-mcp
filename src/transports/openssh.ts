@@ -11,7 +11,6 @@ import {
   ErrorCategory,
   TransportConfig,
 } from './types.js';
-import { buildSudoWrapper } from './ssh2.js';
 
 /**
  * OpenSshTransport — spawns the system `ssh` binary per command.
@@ -77,7 +76,18 @@ export class OpenSshTransport implements ISshTransport {
       if (pwd === undefined && this.cfg.suPassword) {
         return this.runSuViaPty(command, this.cfg.suPassword, opts);
       }
-      const wrapped = buildSudoWrapper(command, pwd);
+      if (pwd !== undefined) {
+        // OpenSSH receives the remote command as a local ssh argv element.
+        // Embedding the sudo password in that command (the ssh2 wrapper style)
+        // exposes it to local process inspection. Keep argv password-free and
+        // feed sudo -S via stdin instead.
+        const wrapped = buildOpenSshSudoWrapper(command, true);
+        return this.runSsh(wrapped, {
+          ...opts,
+          stdin: `${pwd}\n${opts.stdin ?? ''}`,
+        });
+      }
+      const wrapped = buildOpenSshSudoWrapper(command, false);
       return this.runSsh(wrapped, opts);
     }
     const suPwd = opts.password ?? this.cfg.suPassword;
@@ -480,7 +490,11 @@ export class OpenSshTransport implements ISshTransport {
         if (state === 'DONE' && exitCode !== null) {
           resolve({
             stdout: capturedStdout,
-            stderr: '',
+            // A PTY merges remote stdout and stderr into the captured stdout
+            // stream. Preserve that merged diagnostic text as stderr for
+            // non-zero exits so resultToMcpContent can surface `ls: cannot
+            // access ...` instead of only a generic exit status.
+            stderr: exitCode === 0 ? '' : capturedStdout,
             exitCode,
             category: exitCode === 0 ? undefined : 'remote_exit',
           });
@@ -501,6 +515,22 @@ export class OpenSshTransport implements ISshTransport {
       });
     });
   }
+}
+
+/**
+ * Build a sudo wrapper for the OpenSSH subprocess transport.
+ *
+ * Unlike the ssh2 wrapper, this must never embed the sudo password in the
+ * command string: OpenSSH receives the remote command as a local `ssh` argv
+ * element. When a password is needed, the caller supplies it through stdin for
+ * `sudo -S` instead.
+ */
+export function buildOpenSshSudoWrapper(command: string, expectsPassword: boolean): string {
+  const escaped = command.replace(/'/g, "'\\''");
+  if (expectsPassword) {
+    return `sudo -p "" -S sh -c '${escaped}'`;
+  }
+  return `sudo -n sh -c '${escaped}'`;
 }
 
 /**

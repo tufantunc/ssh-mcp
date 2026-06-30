@@ -178,6 +178,25 @@ describe('runSuViaPty auth-failure scoping (finding 5: limit failRe to login pha
     expect(res.stdout).toContain('authentication failure');
   });
 
+  it('preserves merged PTY diagnostics as stderr on non-zero command exit', async () => {
+    const fc = new FakeChild();
+    spawnMock.mockReturnValue(fc);
+    const t = new OpenSshTransport({ host: 'h', port: 22, username: 'u', suPassword: 'pw' });
+
+    const p = (t as any).runSuViaPty('ls /missing', 'pw', { timeoutMs: 60000 }) as Promise<any>;
+
+    const { endMark } = driveToExec(fc);
+    emit(fc, 'ls /missing\n');
+    emit(fc, "ls: cannot access '/missing': No such file or directory\n");
+    emit(fc, `${endMark}2\n`);
+    fc.emit('close', 0, null);
+
+    const res = await p;
+    expect(res.exitCode).toBe(2);
+    expect(res.category).toBe('remote_exit');
+    expect(res.stderr).toContain("ls: cannot access '/missing'");
+  });
+
   it('still detects an auth failure during the su login phase', async () => {
     const fc = new FakeChild();
     spawnMock.mockReturnValue(fc);

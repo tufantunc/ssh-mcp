@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -7,8 +7,9 @@ import {
   resultToMcpContent,
   resolveAuthMode,
   buildTransportConfig,
+  getOrCreateInitializedTransport,
 } from '../src/index';
-import type { ExecResult } from '../src/transports/types';
+import type { ExecResult, ISshTransport } from '../src/transports/types';
 
 // Pure-function unit tests for the CLI config/result mapping layer. These
 // import from src/index, which is safe because the test runner sets
@@ -128,5 +129,59 @@ describe('buildTransportConfig (finding 2: no unconditional key read for passwor
     expect(cfg.transport).toBe('openssh');
     expect(cfg.keyPath).toBe('/nonexistent/path/to/key');
     expect(cfg.privateKey).toBeUndefined();
+  });
+});
+
+describe('getOrCreateInitializedTransport (Codex P2: do not publish before init resolves)', () => {
+  function fakeTransport(): ISshTransport {
+    return {
+      name: 'openssh',
+      init: vi.fn(),
+      exec: vi.fn(),
+      execElevated: vi.fn(),
+      close: vi.fn(),
+    };
+  }
+
+  it('shares an in-flight initialization promise and publishes only after it resolves', async () => {
+    const cache = { activeTransport: null as ISshTransport | null, initPromise: null as Promise<ISshTransport> | null };
+    const transport = fakeTransport();
+    let resolveInit!: (value: ISshTransport) => void;
+    const createInitializedTransport = vi.fn(() => new Promise<ISshTransport>((resolve) => {
+      resolveInit = resolve;
+    }));
+
+    const p1 = getOrCreateInitializedTransport(cache, createInitializedTransport);
+    const p2 = getOrCreateInitializedTransport(cache, createInitializedTransport);
+
+    expect(createInitializedTransport).toHaveBeenCalledTimes(1);
+    expect(p2).toBe(p1);
+    // Critical regression guard: no half-initialized transport is visible while
+    // init is still pending, so concurrent OpenSSH/password calls cannot enter
+    // runSsh before SSH_ASKPASS exists.
+    expect(cache.activeTransport).toBeNull();
+    expect(cache.initPromise).toBe(p1);
+
+    resolveInit(transport);
+    await expect(p1).resolves.toBe(transport);
+    await expect(p2).resolves.toBe(transport);
+    expect(cache.activeTransport).toBe(transport);
+    expect(cache.initPromise).toBeNull();
+  });
+
+  it('clears the cached init promise after initialization failure so a retry can initialize', async () => {
+    const cache = { activeTransport: null as ISshTransport | null, initPromise: null as Promise<ISshTransport> | null };
+    const createInitializedTransport = vi
+      .fn<() => Promise<ISshTransport>>()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce(fakeTransport());
+
+    await expect(getOrCreateInitializedTransport(cache, createInitializedTransport)).rejects.toThrow('boom');
+    expect(cache.activeTransport).toBeNull();
+    expect(cache.initPromise).toBeNull();
+
+    await expect(getOrCreateInitializedTransport(cache, createInitializedTransport)).resolves.toMatchObject({ name: 'openssh' });
+    expect(createInitializedTransport).toHaveBeenCalledTimes(2);
+    expect(cache.activeTransport?.name).toBe('openssh');
   });
 });

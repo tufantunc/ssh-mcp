@@ -200,27 +200,64 @@ export async function buildTransportConfig(inputs: BuildTransportConfigInputs): 
   return cfg;
 }
 
-let activeTransport: ISshTransport | null = null;
+export interface TransportInitCache {
+  activeTransport: ISshTransport | null;
+  initPromise: Promise<ISshTransport> | null;
+}
+
+const activeTransportCache: TransportInitCache = {
+  activeTransport: null,
+  initPromise: null,
+};
+
+/**
+ * Return the active transport, or share one in-flight initialization.
+ *
+ * The transport must not be published before init() completes: OpenSSH password
+ * auth prepares SSH_ASKPASS asynchronously, and a concurrent tool call that sees
+ * a half-initialized transport can enter runSsh before the helper/env is ready.
+ */
+export function getOrCreateInitializedTransport(
+  cache: TransportInitCache,
+  createInitializedTransport: () => Promise<ISshTransport>,
+): Promise<ISshTransport> {
+  if (cache.activeTransport) return Promise.resolve(cache.activeTransport);
+  if (cache.initPromise) return cache.initPromise;
+
+  const initPromise = createInitializedTransport()
+    .then((transport) => {
+      cache.activeTransport = transport;
+      if (cache.initPromise === initPromise) cache.initPromise = null;
+      return transport;
+    })
+    .catch((err) => {
+      if (cache.initPromise === initPromise) cache.initPromise = null;
+      throw err;
+    });
+  cache.initPromise = initPromise;
+  return initPromise;
+}
 
 async function getOrCreateTransport(): Promise<ISshTransport> {
-  if (activeTransport) return activeTransport;
-  const cfg = await buildTransportConfig({
-    host: HOST,
-    port: PORT,
-    username: USER,
-    password: PASSWORD,
-    key: KEY,
-    suPassword: SUPASSWORD,
-    sudoPassword: SUDOPASSWORD,
-    kerberos: KERBEROS_FLAG,
-    transportFlag: TRANSPORT_FLAG,
-    gssapiDelegateCredentials: GSSAPI_DELEGATE,
-    knownHostsFile: KNOWN_HOSTS_FILE,
-    strictHostKeyChecking: STRICT_HOST_KEY,
+  return getOrCreateInitializedTransport(activeTransportCache, async () => {
+    const cfg = await buildTransportConfig({
+      host: HOST,
+      port: PORT,
+      username: USER,
+      password: PASSWORD,
+      key: KEY,
+      suPassword: SUPASSWORD,
+      sudoPassword: SUDOPASSWORD,
+      kerberos: KERBEROS_FLAG,
+      transportFlag: TRANSPORT_FLAG,
+      gssapiDelegateCredentials: GSSAPI_DELEGATE,
+      knownHostsFile: KNOWN_HOSTS_FILE,
+      strictHostKeyChecking: STRICT_HOST_KEY,
+    });
+    const transport = createTransport(cfg);
+    await transport.init();
+    return transport;
   });
-  activeTransport = createTransport(cfg);
-  await activeTransport.init();
-  return activeTransport;
 }
 
 /**
@@ -500,9 +537,10 @@ async function main() {
 
   const cleanup = () => {
     console.error('Shutting down SSH MCP Server...');
-    if (activeTransport) {
-      void activeTransport.close();
-      activeTransport = null;
+    if (activeTransportCache.activeTransport) {
+      void activeTransportCache.activeTransport.close();
+      activeTransportCache.activeTransport = null;
+      activeTransportCache.initPromise = null;
     }
     process.exit(0);
   };
@@ -510,8 +548,8 @@ async function main() {
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
   process.on('exit', () => {
-    if (activeTransport) {
-      void activeTransport.close();
+    if (activeTransportCache.activeTransport) {
+      void activeTransportCache.activeTransport.close();
     }
   });
 }
@@ -525,8 +563,8 @@ if (isTestMode) {
 } else if (isCliEnabled) {
   main().catch((error) => {
     console.error('Fatal error in main():', error);
-    if (activeTransport) {
-      void activeTransport.close();
+    if (activeTransportCache.activeTransport) {
+      void activeTransportCache.activeTransport.close();
     }
     process.exit(1);
   });
