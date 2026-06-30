@@ -42,9 +42,13 @@ describe('classifyError', () => {
       expect(classifyError(255, 'Network unreachable')).toBe('connect');
     });
 
-    it('falls back to transport for unknown 255 stderr', () => {
-      expect(classifyError(255, 'some unknown ssh error')).toBe('transport');
-      expect(classifyError(255, '')).toBe('transport');
+    it('falls back to remote_exit for unknown 255 stderr (ssh(1): 255 is also a valid remote command exit)', () => {
+      // When no SSH-layer signature matches, a 255 exit is surfaced as the
+      // remote command's own non-zero exit (Error (code 255)) rather than a
+      // generic SSH transport error, so legitimate remote `exit 255` is not
+      // masked. See classifyError + resultToMcpContent.
+      expect(classifyError(255, 'some unknown ssh error')).toBe('remote_exit');
+      expect(classifyError(255, '')).toBe('remote_exit');
     });
   });
 });

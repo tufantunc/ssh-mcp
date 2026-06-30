@@ -28,6 +28,28 @@ describe('resultToMcpContent (finding 1: exit-0 stderr must not error)', () => {
     expect(out.content[0]).toEqual({ type: 'text', text: 'ok' });
   });
 
+  it('appends genuine stderr diagnostics on success (exit 0), filtering only the benign host-key warning', () => {
+    // Tools like git clone / curl / build systems write progress + warnings to
+    // stderr while still exiting 0; that output must reach the caller.
+    const out = resultToMcpContent({
+      stdout: 'cloned',
+      stderr: "Warning: Permanently added 'h' (ED25519) to the list of known hosts.\nCloning into 'repo'...\nReceiving objects: 100%",
+      exitCode: 0,
+      category: undefined,
+    });
+    expect(out.content[0].text).toBe("cloned\nCloning into 'repo'...\nReceiving objects: 100%");
+  });
+
+  it('returns only stdout when stderr is nothing but the benign host-key warning', () => {
+    const out = resultToMcpContent({
+      stdout: 'done',
+      stderr: "Warning: Permanently added '[h]:2222' (RSA) to the list of known hosts.",
+      exitCode: 0,
+      category: undefined,
+    });
+    expect(out.content[0].text).toBe('done');
+  });
+
   it('returns content for a plain success (exit 0, no stderr)', () => {
     const out = resultToMcpContent({ stdout: 'hello', stderr: '', exitCode: 0 });
     expect(out.content[0].text).toBe('hello');

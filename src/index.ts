@@ -275,9 +275,26 @@ async function getOrCreateTransport(): Promise<ISshTransport> {
  * StrictHostKeyChecking=accept-new, the first connection to a host prints
  * "Warning: Permanently added '<host>' ... to the list of known hosts." while
  * exiting 0). Throwing on any stderr would turn every first-connect into an
- * error. stderr is only an error indicator when the command actually failed
- * (non-zero exit) and no more specific category applies.
+ * error. On success the benign OpenSSH host-key warning is filtered out, but
+ * any remaining stderr is appended to the text response so callers do not lose
+ * useful command diagnostics/progress from tools (git clone, curl, build
+ * tools) that write to stderr while succeeding.
  */
+/**
+ * Strip the benign OpenSSH first-connect host-key notice from a stderr stream,
+ * leaving genuine command diagnostics intact. With StrictHostKeyChecking=
+ * accept-new the client prints
+ *   "Warning: Permanently added '<host>' (<keytype>) to the list of known hosts."
+ * on the first connection to a host while still exiting 0; that line is noise,
+ * not output the caller asked for.
+ */
+function stripBenignSshWarnings(stderr: string): string {
+  return stderr
+    .split('\n')
+    .filter(line => !/^Warning: Permanently added .*to the list of known hosts\.?\s*$/.test(line))
+    .join('\n')
+    .trim();
+}
 export function resultToMcpContent(result: ExecResult) {
   if (result.category === 'timeout') {
     throw new McpError(ErrorCode.InternalError, result.stderr || `Command execution timed out after ${DEFAULT_TIMEOUT}ms`);
@@ -298,10 +315,14 @@ export function resultToMcpContent(result: ExecResult) {
     const detail = result.stderr || `Command exited with status ${result.exitCode}`;
     throw new McpError(ErrorCode.InternalError, `Error (code ${result.exitCode}):\n${detail}`);
   }
+  const diagnostics = stripBenignSshWarnings(result.stderr);
+  const text = diagnostics
+    ? `${result.stdout}${result.stdout && !result.stdout.endsWith('\n') ? '\n' : ''}${diagnostics}`
+    : result.stdout;
   return {
     content: [{
       type: 'text' as const,
-      text: result.stdout,
+      text,
     }],
   };
 }

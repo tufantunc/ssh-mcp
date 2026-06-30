@@ -1,5 +1,5 @@
 import { spawn, ChildProcess, execFile } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import { promises as fs, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -105,7 +105,12 @@ export class OpenSshTransport implements ISshTransport {
   async close(): Promise<void> {
     if (this.askpassDir) {
       try {
-        await fs.rm(this.askpassDir, { recursive: true, force: true });
+        // Synchronous removal: close() is invoked from process 'exit'/SIGINT/
+        // SIGTERM handlers (see init()), which cannot await. An async fs.rm()
+        // there would be discarded — the event loop is torn down by
+        // process.exit() before the removal runs, leaking the short-lived
+        // askpass temp dir. rmSync guarantees cleanup completes before exit.
+        rmSync(this.askpassDir, { recursive: true, force: true });
       } catch (e) {
         // best-effort cleanup
       }
@@ -564,7 +569,10 @@ export function renderAskpassHelper(envName: string, isWindows: boolean): string
  *
  *   exit 0                → undefined  (success)
  *   exit 1-254            → remote_exit (remote command's own non-zero exit)
- *   exit 255              → inspect stderr for SSH-layer failure type
+ *   exit 255              → inspect stderr for SSH-layer failure type;
+ *                           falls back to remote_exit when no SSH-layer
+ *                           signature matches (ssh(1) documents 255 as either
+ *                           an SSH error OR the remote command's own exit 255)
  *   exit null             → treated as transport failure
  */
 export function classifyError(code: number | null, stderr: string): ErrorCategory | undefined {
@@ -587,5 +595,9 @@ export function classifyError(code: number | null, stderr: string): ErrorCategor
   if (/connection reset/.test(s)) return 'connect';
   if (/could not resolve|name or service not known/.test(s)) return 'connect';
   if (/no route to host|network unreachable/.test(s)) return 'connect';
-  return 'transport';
+  // No SSH-layer signature matched. Per ssh(1), 255 is also the exit code a
+  // remote command can legitimately return, so surface it as the remote
+  // command's own non-zero exit (Error (code 255)) rather than masking it as
+  // a generic SSH transport error.
+  return 'remote_exit';
 }
