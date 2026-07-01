@@ -80,6 +80,14 @@ function validateConfig(config: Record<string, string | null>) {
 
   const transportExplicit = config.transport;
   const kerberos = config.kerberos !== undefined && config.kerberos !== 'false';
+  // A value-less `--transport` is recorded as `null` by parseArgv; the nullish
+  // fallback below would treat it as absent and silently run the default ssh2
+  // transport, so a mistyped OpenSSH selection would run the wrong transport.
+  // Reject a present-but-value-less --transport like the other value-requiring
+  // flags.
+  if ('transport' in config && transportExplicit == null) {
+    errors.push('--transport requires a value (ssh2 or openssh)');
+  }
   // --kerberos alone implies --transport=openssh
   const transport = transportExplicit ?? (kerberos ? 'openssh' : 'ssh2');
 
@@ -106,6 +114,14 @@ function validateConfig(config: Record<string, string | null>) {
   }
   if ('knownHostsFile' in config && !config.knownHostsFile) {
     errors.push('--knownHostsFile requires a file path');
+  }
+  // GSSAPIDelegateCredentials is only emitted by the OpenSSH transport in the
+  // Kerberos auth branch (see OpenSshTransport.buildArgs). Accepting the flag
+  // without --kerberos would let a user request credential delegation while the
+  // server silently omits it, breaking second-hop SSO with no error. Require
+  // Kerberos auth so the requested delegation is actually honored.
+  if ('gssapiDelegateCredentials' in config && !kerberos) {
+    errors.push('--gssapiDelegateCredentials requires --kerberos');
   }
 
   if (errors.length > 0) {

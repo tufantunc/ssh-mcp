@@ -252,7 +252,7 @@ describe('validateConfig (Codex P2: reject value-less OpenSSH option flags)', ()
 
   it('rejects a value-less --gssapiDelegateCredentials (parsed as null)', () => {
     expect(() =>
-      validateConfig({ ...baseCfg, gssapiDelegateCredentials: null }),
+      validateConfig({ ...baseCfg, kerberos: null, gssapiDelegateCredentials: null }),
     ).toThrow(/--gssapiDelegateCredentials must be yes or no/);
   });
 
@@ -272,6 +272,7 @@ describe('validateConfig (Codex P2: reject value-less OpenSSH option flags)', ()
     expect(() =>
       validateConfig({
         ...baseCfg,
+        kerberos: null, // --kerberos alone; required for gssapiDelegateCredentials
         strictHostKeyChecking: 'yes',
         gssapiDelegateCredentials: 'no',
         knownHostsFile: '/etc/ssh/known_hosts',
@@ -281,5 +282,29 @@ describe('validateConfig (Codex P2: reject value-less OpenSSH option flags)', ()
 
   it('does not require OpenSSH option values when the flags are absent', () => {
     expect(() => validateConfig({ ...baseCfg })).not.toThrow();
+  });
+
+  it('rejects a value-less --transport (parsed as null) instead of silently defaulting to ssh2', () => {
+    // parseArgv records `null` for `--transport` with no `=value`; the nullish
+    // fallback would treat it as absent and run the default ssh2 transport,
+    // silently ignoring a mistyped OpenSSH selection.
+    expect(() =>
+      validateConfig({ host: 'h', user: 'u', transport: null }),
+    ).toThrow(/--transport requires a value/);
+  });
+
+  it('rejects --gssapiDelegateCredentials without --kerberos (delegation would be silently dropped)', () => {
+    // buildArgs only emits GSSAPIDelegateCredentials in the kerberos auth
+    // branch, so accepting it without --kerberos would silently omit it and
+    // break second-hop SSO.
+    expect(() =>
+      validateConfig({ ...baseCfg, gssapiDelegateCredentials: 'yes' }),
+    ).toThrow(/--gssapiDelegateCredentials requires --kerberos/);
+  });
+
+  it('accepts --gssapiDelegateCredentials when --kerberos is present', () => {
+    expect(() =>
+      validateConfig({ host: 'h', user: 'u', kerberos: null, gssapiDelegateCredentials: 'yes' }),
+    ).not.toThrow();
   });
 });

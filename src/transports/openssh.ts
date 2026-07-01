@@ -316,6 +316,10 @@ export class OpenSshTransport implements ISshTransport {
       // command emitting more than ~8KB (inconsistent with runSsh, which
       // returns the full stream). Keep the full EXEC output here.
       let execCapture = '';
+      // The exact input line written to the root shell in the EXEC state. With
+      // `ssh -tt` the remote PTY echoes it back onto stdout, so it is stored
+      // here to strip that single echoed line from the captured output.
+      let execInput = '';
       let capturedStderr = '';
       let exitCode: number | null = null;
       let timedOut = false;
@@ -401,7 +405,11 @@ export class OpenSshTransport implements ISshTransport {
           // Send sentinel PS1 once we see a non-prompt line (typical: post-auth motd)
           // Trigger: any newline after password sent.
           if (/\r?\n/.test(text)) {
-            writeLine(`export PS1='${readyMark}$ '`);
+            // Set a sentinel PS1 so the root-shell prompt is machine-detectable,
+            // and clear PS2 to '' so the multiline subshell wrapper written in
+            // the EXEC state (see below) does not emit `> ` continuation prompts
+            // into the captured PTY stream.
+            writeLine(`export PS1='${readyMark}$ '; export PS2=''`);
             state = 'ROOT_SHELL';
             setStateTimer(5000, 'awaiting sentinel prompt');
             buffer = '';
@@ -415,9 +423,20 @@ export class OpenSshTransport implements ISshTransport {
           state = 'EXEC';
           buffer = '';
           stdoutTail = '';
-          // Execute user command, then echo sentinel+exitcode
-          writeLine(`${command}`);
-          writeLine(`echo ${endMark}$?`);
+          // Run the user command inside a subshell, then echo the sentinel and
+          // its exit status on the SAME input line.
+          //
+          //  - Subshell isolation: a command that exits or exec-replaces its
+          //    shell (e.g. `echo ok; exit 0`, `exec true`) only terminates the
+          //    subshell. The root control shell survives to run the sentinel, so
+          //    the real exit status is reported instead of the close path
+          //    mistaking a clean exit for a transport failure and dropping the
+          //    output. `$?` after `( ... )` is the subshell's exit status.
+          //  - Same-line sentinel: with `ssh -tt` the sentinel-emit is echoed as
+          //    part of this one input line, so it can never glue onto command
+          //    output that lacks a trailing newline (e.g. `printf foo`).
+          execInput = `( ${command} ); echo ${endMark}$?`;
+          writeLine(execInput);
           return;
         }
 
@@ -428,31 +447,24 @@ export class OpenSshTransport implements ISshTransport {
             // Derive output from the unbounded EXEC capture (not the truncated
             // scan buffer) so large command output is preserved in full. Locate
             // the end-marker within the full capture for the slice boundary.
+            // endRe requires a digit after the marker, so the echoed
+            // `echo <endMark>$?` (literal `$?`) never matches — only the real
+            // sentinel output does.
             const em = execCapture.match(endRe);
             const endIdx = em ? em.index! : execCapture.length;
             capturedStdout = execCapture.slice(0, endIdx).replace(/\r\n/g, '\n');
             // Strip the echoed PS1-sentinel leftovers if any
             capturedStdout = capturedStdout.replace(new RegExp(`${readyMark}\\$\\s*`, 'g'), '');
-            // Strip the echoed command lines (best effort). With `ssh -tt` the
-            // remote PTY's line discipline echoes every line written to stdin
-            // back onto stdout, so the EXEC capture is polluted by the echoed
-            // user command and the echoed `echo <endMark>$?` sentinel-emit
-            // command. Remove both so the caller sees only the command's real
-            // stdout instead of its own input replayed back.
+            // Strip the single echoed input line the remote PTY replayed at the
+            // head of the capture (present with `ssh -tt`). Because the command
+            // and sentinel-emit are combined into one known `execInput` line,
+            // removing exactly that line (and its trailing newline) yields the
+            // command's real stdout — even when the output is unterminated.
             const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            // 1. Drop the echoed sentinel-emit command line wherever it appears.
             capturedStdout = capturedStdout.replace(
-              new RegExp(`^echo ${escapeRe(endMark)}\\$\\?[ \\t]*\\n?`, 'm'),
+              new RegExp(`^${escapeRe(execInput)}\\r?\\n?`),
               '',
             );
-            // 2. Drop the echoed user command line(s) at the head of the capture.
-            const cmdLines = command.split('\n');
-            const outLines = capturedStdout.split('\n');
-            while (cmdLines.length && outLines.length && outLines[0] === cmdLines[0]) {
-              outLines.shift();
-              cmdLines.shift();
-            }
-            capturedStdout = outLines.join('\n');
             state = 'DONE';
             writeLine('exit');
             writeLine('exit');
