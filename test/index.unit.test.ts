@@ -9,6 +9,7 @@ import {
   buildTransportConfig,
   hasLegacyCliFlags,
   validateConfig,
+  resolveCliConfigPath,
 } from '../src/index';
 import type { ExecResult } from '../src/transports/types';
 
@@ -278,5 +279,25 @@ describe('validateConfig (Codex P2: reject value-less OpenSSH option flags)', ()
     expect(() =>
       validateConfig({ host: 'h', user: 'u', kerberos: null, gssapiDelegateCredentials: 'yes' }),
     ).not.toThrow();
+  });
+});
+
+describe('resolveCliConfigPath (Codex R2 P2: reject value-less --config)', () => {
+  it('returns undefined when --config is absent', () => {
+    expect(resolveCliConfigPath({})).toBeUndefined();
+    expect(resolveCliConfigPath({ host: 'h', user: 'u' })).toBeUndefined();
+  });
+
+  it('returns the path for --config=<path>', () => {
+    expect(resolveCliConfigPath({ config: '/etc/ssh-mcp/config.toml' }))
+      .toBe('/etc/ssh-mcp/config.toml');
+  });
+
+  it('rejects a present-but-value-less --config (parsed as null) instead of silently ignoring it', () => {
+    // parseArgv records `null` for `--config` with no `=path`. Coercing that to
+    // undefined would fall back to SSH_MCP_CONFIG/default discovery, so a
+    // mistyped explicit flag could start against the wrong configured source.
+    expect(() => resolveCliConfigPath({ config: null }))
+      .toThrow(/--config requires a value/);
   });
 });

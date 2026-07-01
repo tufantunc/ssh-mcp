@@ -50,11 +50,19 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
   // When CLI sources are present they win and suppress the TOML source list
   // (see "CLI wins" semantics above). In that case a TOML that exists only to
   // supply top-level sections (e.g. just [webui]) is legitimate and must not be
-  // rejected for having zero [[sources]]. Tolerate empty sources accordingly.
+  // rejected for having zero [[sources]]. Beyond tolerating empty sources, we
+  // must also SKIP parsing/validating any [[sources]] that ARE present but
+  // suppressed: a suppressed source with an unset `password = "env:PROD_PASS"`
+  // or another source-only error would otherwise abort startup even though only
+  // the top-level sections survive. ignoreSources handles both.
   const hasCliSources = inputs.cliSources.length > 0;
 
   const fromToml: ResolvedConfig | undefined = tomlPath
-    ? loadTomlFile(tomlPath, { env, allowEmptySources: hasCliSources })
+    ? loadTomlFile(tomlPath, {
+        env,
+        allowEmptySources: hasCliSources,
+        ignoreSources: hasCliSources,
+      })
     : undefined;
 
   // --- assemble final ResolvedConfig -------------------------------------
