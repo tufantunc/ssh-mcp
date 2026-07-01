@@ -1,4 +1,4 @@
-import type { SourceController, SourceUpdatedEvent } from '../types.js';
+import type { SourceController } from '../types.js';
 
 /** Max accepted description length. Keeps a runaway paste from bloating the
  * in-memory store / SSE payloads; the smart-mode LLM prompt is the consumer and
@@ -23,7 +23,7 @@ export function handleSetSourceDescription(
   controller: SourceController | undefined,
   sourceId: string,
   body: any,
-): { status: number; body: unknown; event?: SourceUpdatedEvent } {
+): { status: number; body: unknown } {
   if (!controller) {
     return { status: 503, body: { error: 'source description controller not configured' } };
   }
@@ -55,7 +55,6 @@ export function handleSetSourceDescription(
     return {
       status: 200,
       body: { ok: true, id: event.id, description: event.description },
-      event,
     };
   } catch (err: any) {
     return { status: 400, body: { error: err?.message ?? 'description edit failed' } };

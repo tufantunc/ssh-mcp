@@ -213,7 +213,7 @@
   let globalMode = null;
 
   // Whether the server exposes the live description-edit surface (PR-8).
-  // Detected at bootstrap from /api/approval-modes' sibling capability probe;
+  // Detected at bootstrap from /api/profiles' `source_edit_enabled` flag;
   // false => read-only description cells (the read-only WebUI case).
   let sourceEditEnabled = false;
 
