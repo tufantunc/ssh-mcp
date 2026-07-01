@@ -447,14 +447,19 @@ export async function executeAuditedTransportCommand(input: {
   sudoPassword?: string;
   store: AuditStore;
 }) {
-  const sanitizedCommand = sanitizeCommand(input.command);
-  const commandWithDescription = input.description
-    ? `${sanitizedCommand} # ${input.description.replace(/#/g, '\\#')}`
-    : sanitizedCommand;
   const startedAt = Date.now();
   const profile = input.profile ?? 'default';
   let audited = false;
+  // Record the raw attempted command if sanitization rejects it below. A
+  // command rejected by validation (empty / over --maxChars) still leaves an
+  // audit record — the contract covers failures, and sanitizeCommand throws.
+  let auditCommand = String(input.command ?? '');
   try {
+    const sanitizedCommand = sanitizeCommand(input.command);
+    const commandWithDescription = input.description
+      ? `${sanitizedCommand} # ${input.description.replace(/#/g, '\\#')}`
+      : sanitizedCommand;
+    auditCommand = commandWithDescription;
     const result = input.tool === 'sudo-exec'
       ? await input.transport.execElevated(commandWithDescription, {
           timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT,
@@ -474,15 +479,16 @@ export async function executeAuditedTransportCommand(input: {
     audited = true;
     return resultToMcpContent(result);
   } catch (err) {
-    // Transport rejection (spawn failure, unexpected exception) still gets an
-    // audit record — the contract is "audit success AND failure", matching the
+    // Transport rejection (spawn failure, unexpected exception) OR a
+    // sanitization rejection (empty/too-long command) still gets an audit
+    // record — the contract is "audit success AND failure", matching the
     // exec/sudo-exec MCP handlers. `audited` guards the resultToMcpContent
     // throw path (result already audited above) from double-writing.
     if (!audited) {
       auditExecution({
         tool: input.tool,
         profile,
-        command: commandWithDescription,
+        command: auditCommand,
         description: input.description,
         startedAt,
         error: err,
@@ -585,15 +591,20 @@ server.tool(
     connectionName: connectionNameSchema,
   },
   async ({ command, description, connectionName }) => {
-    const sanitizedCommand = sanitizeCommand(command);
     const profile = resolvedProfileName(connectionName);
     const startedAt = Date.now();
     let audited = false;
+    // Record the raw attempted command if sanitization rejects it below. A
+    // command rejected by validation (empty / over --maxChars) still leaves an
+    // audit record — the contract covers failures, and sanitizeCommand throws.
+    let auditCommand = String(command ?? '');
     try {
+      const sanitizedCommand = sanitizeCommand(command);
       const t = await registry.get(connectionName);
       const commandWithDescription = description
         ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
         : sanitizedCommand;
+      auditCommand = commandWithDescription;
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
       auditExecution({
         tool: 'exec',
@@ -606,7 +617,7 @@ server.tool(
       audited = true;
       return resultToMcpContent(result);
     } catch (err: any) {
-      if (!audited) auditExecution({ tool: 'exec', profile, command: sanitizedCommand, description, startedAt, error: err });
+      if (!audited) auditExecution({ tool: 'exec', profile, command: auditCommand, description, startedAt, error: err });
       if (err instanceof McpError) throw err;
       throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
     }
@@ -623,15 +634,21 @@ if (!DISABLE_SUDO) {
       connectionName: connectionNameSchema,
     },
     async ({ command, description, connectionName }) => {
-      const sanitizedCommand = sanitizeCommand(command);
       const profile = resolvedProfileName(connectionName);
       const startedAt = Date.now();
       let audited = false;
+      // Record the raw attempted command if sanitization rejects it below. A
+      // command rejected by validation (empty / over --maxChars) still leaves
+      // an audit record — the contract covers failures, and sanitizeCommand
+      // throws.
+      let auditCommand = String(command ?? '');
       try {
+        const sanitizedCommand = sanitizeCommand(command);
         const t = await registry.get(connectionName);
         const commandWithDescription = description
           ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
           : sanitizedCommand;
+        auditCommand = commandWithDescription;
         // Legacy single-host mode may still pass --sudoPassword on CLI; in
         // multi-host mode each ServerConfig carries its own sudoPassword.
         const legacySudo = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined && !isMultiHost)
@@ -653,7 +670,7 @@ if (!DISABLE_SUDO) {
         audited = true;
         return resultToMcpContent(result);
       } catch (err: any) {
-        if (!audited) auditExecution({ tool: 'sudo-exec', profile, command: sanitizedCommand, description, startedAt, error: err });
+        if (!audited) auditExecution({ tool: 'sudo-exec', profile, command: auditCommand, description, startedAt, error: err });
         if (err instanceof McpError) throw err;
         throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
       }

@@ -29,7 +29,7 @@ import {
   DEFAULT_MAX_FILE_BYTES,
   DEFAULT_RETAIN,
 } from './types.js';
-import { redact } from './redactor.js';
+import { redact, redactPemBlocks } from './redactor.js';
 import { rotateIfNeeded, pruneOldDays } from './rotator.js';
 
 /** Resolve audit directory, expanding `~` and honoring env override. */
@@ -111,12 +111,22 @@ export function capThenRedact(
   cap: number,
 ): { text: string; truncated: boolean } {
   if (cap <= 0) return { text: '', truncated: s.length > 0 };
-  // 1. Bound the bytes the redactor scans.
-  const scan = capUtf8(s, cap + REDACT_SCAN_HEADROOM_BYTES);
+  // 0. Redact PEM private-key blocks over the FULL text first. PEM_RE is
+  //    terminator-anchored, so a key whose `END` marker falls past the bounded
+  //    scan window below would otherwise never match and its raw prefix could
+  //    survive into the capped output. This full-scan is cheap when no key is
+  //    present and is the only rule that must see the un-capped string.
+  const pemSafe = redactPemBlocks(s);
+  // 1. Bound the bytes the remaining redaction rules scan.
+  const scan = capUtf8(pemSafe, cap + REDACT_SCAN_HEADROOM_BYTES);
   // 2. Redact within the bounded window.
   const redacted = redact(scan.text);
   // 3. Cap the redacted text to the final size.
   const final = capUtf8(redacted, cap);
+  // `truncated` is measured on the PEM-safe text: it reports whether real
+  // *content* bytes were dropped by the cap, not the raw pre-redaction length.
+  // A key that was fully replaced with `<redacted>` lost nothing to the cap, so
+  // it is not "truncated"; genuine oversized output past the window still is.
   return { text: final.text, truncated: scan.truncated || final.truncated };
 }
 
