@@ -85,6 +85,23 @@ export class TransportRegistry {
     };
   }
 
+  /**
+   * True when resolveName() would REJECT an omitted/blank connectionName:
+   * multiple sources are registered, no explicit default was set, and the
+   * multi-source guard is on. Callers that compute gating/audit attribution
+   * BEFORE calling get() use this to avoid misattributing a guard-rejected
+   * call to the first-registered host — the call never actually lands on a
+   * host, so attributing it to one corrupts audit profile for exactly the
+   * guard case.
+   */
+  wouldRejectOmittedName(): boolean {
+    return (
+      this.requireConnectionWhenMulti &&
+      this.configs.size > 1 &&
+      !this.defaultExplicit
+    );
+  }
+
   /** Resolve name argument → canonical name. Falls back to default. */
   private resolveName(name?: string): string {
     if (name && this.configs.has(name)) return name;
@@ -102,12 +119,7 @@ export class TransportRegistry {
     // optional only for the single-server case (see connectionNameSchema in
     // index.ts). A deliberate setDefault() re-enables the omit-name shortcut,
     // and setRequireConnectionWhenMulti(false) opts out of the guard entirely.
-    if (
-      this.requireConnectionWhenMulti &&
-      !name &&
-      this.configs.size > 1 &&
-      !this.defaultExplicit
-    ) {
+    if (!name && this.wouldRejectOmittedName()) {
       throw new Error(
         `connectionName is required when multiple servers are configured: ${this.names().join(', ')}`
       );

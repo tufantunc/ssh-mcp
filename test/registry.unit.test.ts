@@ -140,6 +140,62 @@ describe('TransportRegistry.setRequireConnectionWhenMulti (require_connection op
   });
 });
 
+describe('TransportRegistry.wouldRejectOmittedName (Codex R2: audit/gating attribution guard mirror)', () => {
+  // index.ts resolvedProfileName() calls this BEFORE registry.get() to decide
+  // how to attribute an omitted/blank connectionName for gating + audit. It
+  // must return exactly the condition under which resolveName() rejects an
+  // omitted name, so a guard-rejected call is never attributed to (nor gated
+  // as) the first-registered host.
+  it('true for multi-source, no explicit default, guard ON (the reject case)', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    expect(r.wouldRejectOmittedName()).toBe(true);
+  });
+
+  it('false for a single source (omitted name always resolves the lone host)', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('solo'));
+    expect(r.wouldRejectOmittedName()).toBe(false);
+  });
+
+  it('false after an explicit setDefault() (omit-name shortcut re-enabled)', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    r.setDefault('b');
+    expect(r.wouldRejectOmittedName()).toBe(false);
+  });
+
+  it('false when the guard is opted out via setRequireConnectionWhenMulti(false)', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    r.setRequireConnectionWhenMulti(false);
+    expect(r.wouldRejectOmittedName()).toBe(false);
+  });
+
+  it('false for an empty registry', () => {
+    const r = new TransportRegistry();
+    expect(r.wouldRejectOmittedName()).toBe(false);
+  });
+
+  it('matches resolveName(): predicate true <=> get() rejects an omitted name', async () => {
+    const stub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValue(stub);
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    // Guard armed: predicate true AND get() rejects.
+    expect(r.wouldRejectOmittedName()).toBe(true);
+    await expect(r.get()).rejects.toThrow(/connectionName is required/);
+    // Explicit default flips both to the resolve path.
+    r.setDefault('a');
+    expect(r.wouldRejectOmittedName()).toBe(false);
+    await expect(r.get()).resolves.toBe(stub);
+  });
+});
+
 describe('TransportRegistry.get (finding 1: rejected init must not be cached)', () => {
   it('retries init on a later get() after the first init rejects', async () => {
     const init = vi

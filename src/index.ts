@@ -508,16 +508,27 @@ function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher
     return null;
   }
   const input: BuildEngineFromConfigInput = {
-    // When there is NO top-level [approval] block (only per-source overrides),
-    // the global default stays 'yolo' (unrestricted) rather than inheriting
-    // buildApprovalEngineFromConfig's [approval]-present 'manual' fallback.
-    // This mirrors the `return null` (legacy unrestricted) branch one level up
-    // for the no-config case: adding per-source gates should gate only those
-    // sources, not silently flip the global default to manual — which would
-    // gate every ungated host and, without WebUI, throw at boot.
-    // A present [approval] block with an unspecified mode still defaults to
-    // manual (the documented TOML default), preserving that contract.
-    defaultMode: approvalCfg === undefined ? 'yolo' : approvalCfg.mode,
+    // Resolve the GLOBAL default mode:
+    //  - explicit [approval].mode set        -> honor it.
+    //  - no global mode, per-source overrides -> the [approval] block (when
+    //    present at all) exists only to host [approval.llm] for a per-source
+    //    smart override; keep the global default 'yolo' (unrestricted) so only
+    //    the overridden sources are gated. Defining [approval.llm] for a
+    //    per-source `mode = "smart"` makes resolvedConfig.approval non-undefined
+    //    even though no global mode was requested, so keying solely on
+    //    `approvalCfg === undefined` would wrongly fall through to manual here
+    //    and gate every ungated host (or throw at boot with WebUI off). This
+    //    also covers the no-[approval]-block case (per-source overrides only).
+    //  - no global mode and no per-source overrides -> a bare [approval] block
+    //    (e.g. `fail_closed = true`, or `[approval.llm]` alone) was added
+    //    deliberately to enable approval; leave defaultMode undefined so
+    //    buildApprovalEngineFromConfig applies the documented 'manual' default.
+    defaultMode:
+      approvalCfg?.mode !== undefined
+        ? approvalCfg.mode
+        : perSourceModes.length > 0
+          ? 'yolo'
+          : undefined,
     fail_closed: approvalCfg?.fail_closed,
     llm: approvalCfg?.llm,
     perSourceModes,
@@ -656,7 +667,11 @@ server.tool(
     // blank/whitespace name is treated as omitted, mirroring
     // TransportRegistry.resolveName().
     let profile = connectionName && connectionName.trim() !== '' ? connectionName : '(unresolved)';
-    const startedAt = Date.now();
+    // Fallback timestamp for errors raised before the transport call (registry
+    // init failure, approval deny). Re-captured immediately before t.exec below
+    // so a SUCCESSFUL command's audit durationMs measures command runtime only,
+    // not SSH init + approval wait time.
+    let startedAt = Date.now();
     let audited = false;
     let approvalDecision: ApprovalDecision | undefined;
     try {
@@ -669,6 +684,7 @@ server.tool(
         command: commandWithDescription,
         description,
       });
+      startedAt = Date.now();
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
       auditSink.record({
         tool: 'exec',
@@ -722,7 +738,11 @@ if (!DISABLE_SUDO) {
       // blank/whitespace name is treated as omitted, mirroring
       // TransportRegistry.resolveName().
       let profile = connectionName && connectionName.trim() !== '' ? connectionName : '(unresolved)';
-      const startedAt = Date.now();
+      // Fallback timestamp for errors raised before the transport call (registry
+      // init failure, approval deny). Re-captured immediately before
+      // t.execElevated below so a SUCCESSFUL command's audit durationMs measures
+      // command runtime only, not SSH init + approval wait time.
+      let startedAt = Date.now();
       let audited = false;
       let approvalDecision: ApprovalDecision | undefined;
       try {
@@ -740,6 +760,7 @@ if (!DISABLE_SUDO) {
         const legacySudo = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined && !isMultiHost)
           ? sanitizePassword(SUDOPASSWORD)
           : undefined;
+        startedAt = Date.now();
         const result = await t.execElevated(commandWithDescription, {
           timeoutMs: DEFAULT_TIMEOUT,
           mode: 'sudo',
