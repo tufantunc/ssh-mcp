@@ -408,11 +408,6 @@ async function bootstrapRegistry(): Promise<void> {
   }
 }
 
-/** Effective profile/connection name for gating + audit attribution. */
-function resolvedProfileName(connectionName?: string): string {
-  return connectionName ?? registry.getDefaultName() ?? 'default';
-}
-
 export function buildApprovalProfile(
   id: string,
   perSourceApproval: Record<string, ApprovalMode> = {},
@@ -553,14 +548,20 @@ server.tool(
   async ({ command, description, connectionName }) => {
     const sanitizedCommand = sanitizeCommand(command);
     const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
-    const profile = resolvedProfileName(connectionName);
+    // Audit attribution starts as unresolved and is pinned to the canonical
+    // host name only after registry.get() confirms a host resolved. This keeps
+    // a rejected/ambiguous call (e.g. omitted connectionName in multi-host mode)
+    // from being misattributed to the first-registered server.
+    let profile = connectionName ?? '(unresolved)';
     const startedAt = Date.now();
     let audited = false;
     let approvalDecision: ApprovalDecision | undefined;
     try {
       const t = await registry.get(connectionName);
+      const resolvedProfile = registry.profile(connectionName);
+      profile = resolvedProfile.id;
       approvalDecision = await gateApproval({
-        profile: registry.profile(connectionName),
+        profile: resolvedProfile,
         tool: 'exec',
         command: commandWithDescription,
         description,
@@ -606,14 +607,20 @@ if (!DISABLE_SUDO) {
     async ({ command, description, connectionName }) => {
       const sanitizedCommand = sanitizeCommand(command);
       const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
-      const profile = resolvedProfileName(connectionName);
+      // Audit attribution starts as unresolved and is pinned to the canonical
+      // host name only after registry.get() confirms a host resolved. This keeps
+      // a rejected/ambiguous call (e.g. omitted connectionName in multi-host mode)
+      // from being misattributed to the first-registered server.
+      let profile = connectionName ?? '(unresolved)';
       const startedAt = Date.now();
       let audited = false;
       let approvalDecision: ApprovalDecision | undefined;
       try {
         const t = await registry.get(connectionName);
+        const resolvedProfile = registry.profile(connectionName);
+        profile = resolvedProfile.id;
         approvalDecision = await gateApproval({
-          profile: registry.profile(connectionName),
+          profile: resolvedProfile,
           tool: 'sudo-exec',
           command: commandWithDescription,
           description,

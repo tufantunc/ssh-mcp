@@ -30,8 +30,8 @@ auth = "kerberos"
 
 [[sources]]
 id = "dc03"
-host = "dc03.css.com.tw"
-user = "css\\\\c19087"
+host = "dc03.example.com"
+user = "corp\\\\svcuser"
 auth = "kerberos"
 description = '''allow only NTDS\\My thumbprint 8A00772D4491E2E71218405BDDE5A5FE3E9C7DBE certificate-object writes; deny PFX, private key reads, restart, reboot'''
 approval = { mode = "smart" }
