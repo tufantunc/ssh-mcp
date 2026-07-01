@@ -22,6 +22,7 @@ import {
   getApprovalDecisionFromError,
   setApprovalEngine,
   buildApprovalEngineFromConfig,
+  manualWithoutResolverWarning,
   type ApprovalDecision,
   type BuildEngineFromConfigInput,
   type ApprovalDispatcher,
@@ -517,21 +518,20 @@ export function appendDescriptionComment(command: string, description?: string):
 let auditSink: AuditSink = { record() { /* no-op until wired (or audit absent) */ } };
 
 /**
- * Build the production approval engine from resolvedConfig. Returns null for
- * the legacy CLI path (no [approval] section and no per-source overrides) so
- * the gate keeps its backward-compatible `legacy:no-engine` allow.
- *
- * Throws (fatal at boot):
- *   - manual mode requested but WebUI disabled (gate-12 invariant)
- *   - smart mode requested but [approval.llm] missing endpoint or model
+ * Resolve the [approval]/per-source config into the concrete engine input.
+ * Returns null for the legacy CLI path (no [approval] section and no per-source
+ * overrides). Shared by buildProductionApprovalEngine (which builds the engine)
+ * and wireApprovalAndAudit (which reuses the SAME resolved defaultMode +
+ * perSourceModes for the manual-without-resolver boot warning) so the warning
+ * can never disagree with the mode the engine actually runs.
  */
-function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
+function resolveApprovalEngineInput(): BuildEngineFromConfigInput | null {
   const approvalCfg = resolvedConfig.approval;
   const perSourceModes: ApprovalMode[] = Object.values(resolvedConfig.perSourceApproval ?? {});
   if (approvalCfg === undefined && perSourceModes.length === 0) {
     return null;
   }
-  const input: BuildEngineFromConfigInput = {
+  return {
     // Resolve the GLOBAL default mode:
     //  - explicit [approval].mode set        -> honor it.
     //  - no global mode, per-source overrides -> the [approval] block (when
@@ -557,6 +557,22 @@ function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher
     llm: approvalCfg?.llm,
     perSourceModes,
   };
+}
+
+/**
+ * Build the production approval engine from resolvedConfig. Returns null for
+ * the legacy CLI path (no [approval] section and no per-source overrides) so
+ * the gate keeps its backward-compatible `legacy:no-engine` allow.
+ *
+ * Throws (fatal at boot):
+ *   - manual mode requested but WebUI disabled (gate-12 invariant)
+ *   - smart mode requested but [approval.llm] missing endpoint or model
+ */
+function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
+  const input = resolveApprovalEngineInput();
+  if (input === null) {
+    return null;
+  }
   return buildApprovalEngineFromConfig(input, {
     manualOpts: { webuiEnabled: webuiActive },
   });
@@ -572,11 +588,40 @@ function isWebUIActive(): boolean {
 }
 
 /**
+ * True when a driver that settles the manual-approval queue is wired into this
+ * build. The queue resolver — the WebUI manual-approval server — lands in the
+ * child lane `pr/webui-manual-approval`; the approval-engine lane ships only the
+ * queue primitive, so no resolver is wired here. Kept as an explicit predicate
+ * (rather than inlining `false`) so the child lane can flip it to a real
+ * detection — e.g. `return isWebUIServerWired();` — without touching the warning
+ * call site.
+ */
+function isApprovalResolverWired(): boolean {
+  return false;
+}
+
+/**
  * Wire the approval engine into the gate and load the optional audit sink.
  * Safe to call before the MCP transport connects so the first exec is gated.
  */
 async function wireApprovalAndAudit(): Promise<void> {
-  const engine = buildProductionApprovalEngine(isWebUIActive());
+  const webuiActive = isWebUIActive();
+  const engine = buildProductionApprovalEngine(webuiActive);
+
+  // Non-fatal boot advisory: manual mode boots a queue with no driver when the
+  // approval-engine lane runs standalone, ahead of its child WebUI lane. Boot
+  // still succeeds (the queue exists, it just times out until a resolver lands);
+  // warn so the operator is not left wondering why every command hangs.
+  const input = resolveApprovalEngineInput();
+  const warning = manualWithoutResolverWarning({
+    webuiEnabled: webuiActive,
+    defaultMode: input?.defaultMode,
+    perSourceModes: input?.perSourceModes,
+    resolverWired: isApprovalResolverWired(),
+  });
+  if (warning) {
+    console.error(`WARN: ${warning}`);
+  }
   setApprovalEngine(engine);
   auditSink = await loadAuditSink({
     auditDir: resolvedConfig.server?.audit_dir,

@@ -22,6 +22,7 @@ export {
   ApprovalDispatcher,
   buildApprovalEngine,
   buildApprovalEngineFromConfig,
+  manualWithoutResolverWarning,
   type BuildApprovalEngineOptions,
   type BuildEngineFromConfigInput,
   type BuildEngineFromConfigOptions,
