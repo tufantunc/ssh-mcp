@@ -145,6 +145,49 @@ describe('TransportRegistry.get (finding 1: rejected init must not be cached)', 
     expect(t2).toBe(stub);
     expect(init).toHaveBeenCalledTimes(1);
   });
+
+  // Migrated from the dropped index.unit.test `getOrCreateInitializedTransport`
+  // suite (base pr/kerberos-transport, Codex-P2). The single-host init-race
+  // primitive (getOrCreateInitializedTransport + activeTransportCache) was
+  // dropped in favor of TransportRegistry.get as the sole lifecycle owner, so
+  // its concurrency-PUBLISH guarantee must survive as a registry-level guard:
+  // two concurrent get(name) calls share one in-flight init and NO live
+  // transport is published (observable via list().connected) until init
+  // resolves — otherwise a concurrent OpenSSH/password caller could enter
+  // runSsh before SSH_ASKPASS exists.
+  it('does not publish a live transport until the shared in-flight init resolves', async () => {
+    let resolveInit!: () => void;
+    const init = vi.fn<() => Promise<void>>().mockImplementation(
+      () => new Promise<void>((res) => { resolveInit = res; }),
+    );
+    const stub = makeStub(init);
+    createTransportMock.mockReturnValue(stub);
+
+    const r = new TransportRegistry();
+    r.register(makeConfig('race'));
+
+    const p1 = r.get('race');
+    const p2 = r.get('race');
+
+    // Both concurrent callers share ONE in-flight init.
+    expect(createTransportMock).toHaveBeenCalledTimes(1);
+    expect(init).toHaveBeenCalledTimes(1);
+    // Critical regression guard: while init is still pending, no half-initialized
+    // transport is observable — list() reports the connection as not-connected.
+    expect(r.list().find((x) => x.name === 'race')!.connected).toBe(false);
+
+    resolveInit();
+    const [t1, t2] = await Promise.all([p1, p2]);
+
+    // Only after init resolves is the single live transport published to both
+    // callers and reflected as connected.
+    expect(t1).toBe(stub);
+    expect(t2).toBe(stub);
+    expect(r.list().find((x) => x.name === 'race')!.connected).toBe(true);
+    // A subsequent get() reuses the published transport without re-initializing.
+    await expect(r.get('race')).resolves.toBe(stub);
+    expect(init).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('TransportRegistry.list / closeAll', () => {
