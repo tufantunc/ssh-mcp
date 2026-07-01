@@ -137,7 +137,8 @@ export class TransportRegistry {
 
     // R1 landmine fix: with multiple sources, refuse to silently pick the
     // default. Branch on the ACTUAL registered source count (configs.size), not
-    // the CLI isMultiHost flag (which is false for a 9-source TOML deployment).
+    // the CLI isMultiHost flag, which reflects how sources were supplied rather
+    // than how many are registered and can diverge from the real count.
     // Two independent escape hatches re-enable omission:
     //   - requireConnectionWhenMulti === false (global opt-out, D-A2 config seam)
     //   - a deliberate setDefault() call (defaultExplicit): the operator picked
