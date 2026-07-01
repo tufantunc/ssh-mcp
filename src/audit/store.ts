@@ -253,7 +253,7 @@ export class AuditStore {
     if (this.lastPruneStamp !== stamp) {
       this.lastPruneStamp = stamp;
       try {
-        pruneOldDays(this.auditDir, this.retain);
+        pruneOldDays(this.auditDir, this.retain, now);
       } catch {
         // best-effort
       }

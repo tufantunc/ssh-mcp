@@ -386,7 +386,11 @@ async function bootstrapRegistry(): Promise<void> {
 }
 
 function resolvedProfileName(connectionName?: string): string {
-  return connectionName ?? registry.getDefaultName() ?? 'default';
+  // Delegate to the registry's non-throwing resolver so an ambiguous
+  // multi-host call (name omitted, >1 server, no explicit default) is recorded
+  // as '(unresolved)' instead of being misattributed to the first server on the
+  // failure-audit path.
+  return registry.resolveProfileName(connectionName);
 }
 
 function auditExecution(params: {

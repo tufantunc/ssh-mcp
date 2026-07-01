@@ -221,3 +221,41 @@ describe('TransportRegistry.list / closeAll', () => {
     expect(r.list().find((x) => x.name === 'a')!.connected).toBe(false);
   });
 });
+
+describe('TransportRegistry.resolveProfileName (audit attribution, non-throwing)', () => {
+  it('returns the single registered name when connectionName is omitted', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('only'));
+    expect(r.resolveProfileName()).toBe('only');
+  });
+
+  it('returns (unresolved) for an ambiguous multi-host call (omitted name, >1 server, no explicit default)', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    // This is exactly the case registry.get() rejects as ambiguous — the audit
+    // record must NOT be attributed to the first server ('a').
+    expect(r.resolveProfileName()).toBe('(unresolved)');
+  });
+
+  it('returns the explicit default when setDefault() re-enabled the omit-name shortcut', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    r.setDefault('b');
+    expect(r.resolveProfileName()).toBe('b');
+  });
+
+  it('echoes an explicitly-requested name even if unknown (accurate caller intent)', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    expect(r.resolveProfileName('b')).toBe('b');
+    expect(r.resolveProfileName('nope')).toBe('nope');
+  });
+
+  it('falls back to "default" when no servers are registered', () => {
+    const r = new TransportRegistry();
+    expect(r.resolveProfileName()).toBe('default');
+  });
+});
