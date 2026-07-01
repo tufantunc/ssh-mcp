@@ -561,3 +561,152 @@ auth = "kerberos"
     expect(() => loadTomlFile('/nonexistent/ssh-mcp-test.toml')).toThrow(/cannot read/);
   });
 });
+
+describe('parseTomlConfig: R2 Codex findings (port range, gssapi-delegate scope, deferred LLM key, ignored sources)', () => {
+  const kerbSource = (extra = '') => `
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "kerberos"
+${extra}`;
+
+  // Finding: TOML ports must be usable TCP ports (integer 1..65535).
+  it('rejects a non-integer port (22.5)', () => {
+    expect(() => parseTomlConfig(kerbSource('port = 22.5')))
+      .toThrow(/port must be an integer between 1 and 65535/);
+  });
+
+  it('rejects a negative port (-1)', () => {
+    expect(() => parseTomlConfig(kerbSource('port = -1')))
+      .toThrow(/port must be an integer between 1 and 65535/);
+  });
+
+  it('rejects an out-of-range port (70000)', () => {
+    expect(() => parseTomlConfig(kerbSource('port = 70000')))
+      .toThrow(/port must be an integer between 1 and 65535/);
+  });
+
+  it('rejects port 0 (not a usable TCP port)', () => {
+    expect(() => parseTomlConfig(kerbSource('port = 0')))
+      .toThrow(/port must be an integer between 1 and 65535/);
+  });
+
+  it('accepts a valid integer port and the boundary values 1 and 65535', () => {
+    expect(parseTomlConfig(kerbSource('port = 2222')).sources[0].port).toBe(2222);
+    expect(parseTomlConfig(kerbSource('port = 1')).sources[0].port).toBe(1);
+    expect(parseTomlConfig(kerbSource('port = 65535')).sources[0].port).toBe(65535);
+  });
+
+  // Finding: gssapi_delegate_credentials is only wired for kerberos auth.
+  it('rejects gssapi_delegate_credentials on a password source', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "p"
+host = "h"
+user = "u"
+auth = "password"
+password = "pw"
+gssapi_delegate_credentials = "yes"
+`)).toThrow(/gssapi_delegate_credentials requires auth="kerberos"/);
+  });
+
+  it('rejects gssapi_delegate_credentials on a key source', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "kk"
+host = "h"
+user = "u"
+auth = "key"
+key_path = "/tmp/id"
+gssapi_delegate_credentials = "yes"
+`)).toThrow(/gssapi_delegate_credentials requires auth="kerberos"/);
+  });
+
+  it('still accepts gssapi_delegate_credentials on a kerberos source', () => {
+    const cfg = parseTomlConfig(kerbSource('gssapi_delegate_credentials = "yes"'));
+    expect(cfg.sources[0].gssapiDelegateCredentials).toBe('yes');
+  });
+
+  // Finding: [approval.llm].api_key resolution is deferred unless smart mode.
+  it('does NOT resolve api_key when approval mode is manual/default (avoids startup failure on missing env)', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[approval]
+mode = "manual"
+
+[approval.llm]
+api_key = "env:MISSING_KEY"
+`, { env: {} });
+    // No throw despite MISSING_KEY being unset, and api_key stays unresolved.
+    expect(cfg.approval?.llm?.api_key).toBeUndefined();
+  });
+
+  it('does NOT resolve api_key when [approval] omits mode entirely', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[approval.llm]
+api_key = "env:MISSING_KEY"
+`, { env: {} });
+    expect(cfg.approval?.llm?.api_key).toBeUndefined();
+  });
+
+  it('still resolves api_key when smart mode is enabled', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[approval]
+mode = "smart"
+
+[approval.llm]
+api_key = "env:KEY"
+`, { env: { KEY: 'sk-xyz' } });
+    expect(cfg.approval?.llm?.api_key).toBe('sk-xyz');
+  });
+
+  // Finding: ignoreSources skips validating suppressed [[sources]] entirely.
+  it('ignoreSources skips validation + secret resolution of [[sources]] and keeps top-level sections', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "prod"
+host = "prod.example"
+user = "u"
+auth = "password"
+password = "env:PROD_PASS_UNSET"
+
+[webui]
+enabled = true
+host = "127.0.0.1"
+port = 8099
+`, { ignoreSources: true, env: {} });
+    // The suppressed source's unset env: secret must NOT abort parsing.
+    expect(cfg.sources).toEqual([]);
+    expect(cfg.webui?.enabled).toBe(true);
+    expect(cfg.webui?.port).toBe(8099);
+  });
+
+  it('without ignoreSources, the same unset-secret source still throws', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "prod"
+host = "prod.example"
+user = "u"
+auth = "password"
+password = "env:PROD_PASS_UNSET"
+`, { env: {} })).toThrow(/PROD_PASS_UNSET|not set or empty/);
+  });
+});

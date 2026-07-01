@@ -157,7 +157,8 @@ const KERBEROS_FLAG = argvConfig.kerberos !== undefined && argvConfig.kerberos !
 const GSSAPI_DELEGATE = argvConfig.gssapiDelegateCredentials;
 const KNOWN_HOSTS_FILE = argvConfig.knownHostsFile;
 const STRICT_HOST_KEY = argvConfig.strictHostKeyChecking;
-const CONFIG_PATH = argvConfig.config;
+// The explicit `--config` path is resolved (and value-less `--config` rejected)
+// via resolveCliConfigPath at the resolveConfig call site below.
 
 // Flags that signal intent to use the legacy single-host CLI mode. NOTE:
 // `disableSudo` is deliberately excluded — it only controls whether the sudo
@@ -256,10 +257,17 @@ const hasLegacyCli = hasLegacyCliFlags(argvConfig);
 function buildLegacyServerConfig(): ServerConfig | undefined {
   if (!HOST || !USER) return undefined;
 
-  const authMode: AuthMode | undefined = KERBEROS_FLAG ? 'kerberos'
-    : KEY ? 'key'
-    : PASSWORD ? 'password'
-    : undefined;
+  // Precedence must match resolveAuthMode (kerberos > password > key), NOT a
+  // key-before-password order. When a legacy invocation supplies both
+  // --password and --key, password wins: classifying it as key auth would make
+  // prepareKeyContents read the (possibly stale/sample) key file → ENOENT, and
+  // could let the ssh2 transport prefer the key over the intended password
+  // (regression vs base `main`). See resolveAuthMode's doc-comment.
+  const authMode: AuthMode | undefined = resolveAuthMode({
+    kerberos: KERBEROS_FLAG,
+    password: PASSWORD,
+    key: KEY,
+  });
   const resolvedTransport: 'ssh2' | 'openssh' =
     (TRANSPORT_FLAG === 'openssh' || KERBEROS_FLAG) ? 'openssh' : 'ssh2';
 
@@ -272,7 +280,11 @@ function buildLegacyServerConfig(): ServerConfig | undefined {
     authMode,
   };
   if (PASSWORD) cfg.password = PASSWORD;
-  if (KEY) cfg.keyPath = KEY;
+  // Only attach the key path when key auth actually wins. Attaching a stale
+  // --key on a password/kerberos source would make prepareKeyContents (ssh2)
+  // read the possibly-nonexistent file, and openssh's password/kerberos
+  // branches never use keyPath anyway.
+  if (KEY && authMode === 'key') cfg.keyPath = KEY;
   if (SUPASSWORD !== null && SUPASSWORD !== undefined) cfg.suPassword = sanitizePassword(SUPASSWORD);
   if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) cfg.sudoPassword = sanitizePassword(SUDOPASSWORD);
   if (KERBEROS_FLAG) cfg.kerberos = true;
@@ -293,10 +305,31 @@ const cliSourceConfigs: ServerConfig[] = (() => {
   return [];
 })();
 
+/**
+ * Resolve the explicit `--config` path from parsed argv.
+ *
+ * `parseArgv` records a value-less `--config` (no `=path`) as `null`. Silently
+ * coercing that to `undefined` would drop the explicit flag and fall back to
+ * `SSH_MCP_CONFIG`/default discovery, so a mistyped `--config` could start the
+ * process against the wrong configured source instead of failing fast. Reject a
+ * present-but-value-less `--config` like the other value-requiring flags.
+ * Returns the path when supplied, or `undefined` when the flag is absent.
+ */
+export function resolveCliConfigPath(
+  config: Record<string, string | null>,
+): string | undefined {
+  if (!('config' in config)) return undefined;
+  const value = config.config;
+  if (typeof value !== 'string') {
+    throw new Error('Configuration error:\n--config requires a value (--config=<path>)');
+  }
+  return value;
+}
+
 const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
   ? resolveConfig({
       cliSources: cliSourceConfigs,
-      cliConfigPath: typeof CONFIG_PATH === 'string' ? CONFIG_PATH : undefined,
+      cliConfigPath: resolveCliConfigPath(argvConfig),
     })
   : { sources: [], perSourceApproval: {}, defaultExplicit: false };
 

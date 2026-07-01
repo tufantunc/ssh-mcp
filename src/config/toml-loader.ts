@@ -107,6 +107,16 @@ interface LoadOptions {
    * combination instead of a hard error.
    */
   allowEmptySources?: boolean;
+  /**
+   * Skip [[sources]] parsing, validation, and secret env-ref resolution
+   * entirely, projecting only the top-level sections. Used by the resolver
+   * when CLI sources are present and SUPPRESS the TOML source list: the
+   * suppressed [[sources]] are discarded downstream, so validating them here
+   * (and resolving their `env:` secrets) would abort startup on a source-only
+   * error even though only the top-level sections are meant to survive.
+   * Implies allowEmptySources.
+   */
+  ignoreSources?: boolean;
 }
 
 /**
@@ -124,8 +134,12 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     throw new Error(`Config: TOML parse failed: ${e?.message || e}`);
   }
 
-  const sources = Array.isArray(parsed?.sources) ? parsed.sources : [];
-  if (sources.length === 0 && !opts.allowEmptySources) {
+  const rawSources = Array.isArray(parsed?.sources) ? parsed.sources : [];
+  // When ignoreSources is set the CLI sources win and suppress the entire TOML
+  // source list downstream, so skip parsing/validating them here (an env: ref
+  // or other source-only error in a suppressed source must not abort startup).
+  const sources = opts.ignoreSources ? [] : rawSources;
+  if (sources.length === 0 && !opts.allowEmptySources && !opts.ignoreSources) {
     throw new Error('Config: at least one [[sources]] entry is required');
   }
 
@@ -160,8 +174,21 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
         `Config: sources.${src.id}.auth must be one of: ${VALID_AUTH.join(', ')}`,
       );
     }
-    if (src.port !== undefined && (typeof src.port !== 'number' || !Number.isFinite(src.port))) {
-      throw new Error(`Config: sources.${src.id}.port must be a number`);
+    if (src.port !== undefined) {
+      // This loader is the validation boundary for TOML sources, so reject a
+      // port that is not a usable TCP port here rather than letting a value
+      // like 22.5 / -1 / 70000 register and fail later with an opaque
+      // transport-level error from ssh2/OpenSSH.
+      if (
+        typeof src.port !== 'number' ||
+        !Number.isInteger(src.port) ||
+        src.port < 1 ||
+        src.port > 65535
+      ) {
+        throw new Error(
+          `Config: sources.${src.id}.port must be an integer between 1 and 65535`,
+        );
+      }
     }
     if (
       src.transport !== undefined &&
@@ -186,6 +213,17 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     ) {
       throw new Error(
         `Config: sources.${src.id}.gssapi_delegate_credentials must be yes|no`,
+      );
+    }
+    // GSSAPIDelegateCredentials is only wired in the Kerberos auth branch (see
+    // the `case 'kerberos'` below and OpenSshTransport.buildArgs); for key or
+    // password auth the option is silently dropped, so a user requesting
+    // credential delegation would get none with no error. Mirror the legacy CLI
+    // rule ("--gssapiDelegateCredentials requires --kerberos") and reject the
+    // combination at parse time.
+    if (src.gssapi_delegate_credentials !== undefined && src.auth !== 'kerberos') {
+      throw new Error(
+        `Config: sources.${src.id}.gssapi_delegate_credentials requires auth="kerberos"`,
       );
     }
 
@@ -421,7 +459,14 @@ function validateApproval(raw: any, env: NodeJS.ProcessEnv): ApprovalSection {
       resolved.endpoint = llm.endpoint;
     }
     if (llm.api_key !== undefined) {
-      resolved.api_key = resolveEnvRef(String(llm.api_key), '[approval.llm].api_key', env);
+      // Only resolve the api_key env ref when smart approval is actually
+      // enabled. [approval.llm] settings are irrelevant in the default/manual
+      // mode, so resolving here would fail startup on a missing OPENAI_API_KEY
+      // for a user who copied the example config without enabling smart mode.
+      // Defer resolution to smart mode; leave api_key unresolved otherwise.
+      if (out.mode === 'smart') {
+        resolved.api_key = resolveEnvRef(String(llm.api_key), '[approval.llm].api_key', env);
+      }
     }
     if (llm.model !== undefined) {
       if (typeof llm.model !== 'string') throw new Error('Config: [approval.llm].model must be a string');

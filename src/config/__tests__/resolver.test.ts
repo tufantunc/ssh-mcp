@@ -244,6 +244,42 @@ auth = "kerberos"
     const bad = writeToml(tmp, 'bad.toml', `not valid =`);
     expect(() => resolveConfig({ cliSources: [], cliConfigPath: bad, env: {} })).toThrow(/parse failed/);
   });
+
+  it('CLI sources suppress a TOML [[sources]] whose secret env ref is unset, without aborting startup (R2)', () => {
+    // R2 Codex finding: when CLI sources win, the resolver discards
+    // fromToml.sources downstream, so it must NOT fully validate/resolve the
+    // suppressed [[sources]]. A suppressed source with an unset
+    // `password = "env:PROD_PASS"` must not fail startup — only the top-level
+    // sections survive.
+    const p = writeToml(tmp, 'suppressed-secret.toml', `
+[[sources]]
+id = "prod"
+host = "prod.example"
+user = "u"
+auth = "password"
+password = "env:PROD_PASS_UNSET"
+
+[server]
+audit_dir = "~/audit-suppressed"
+`);
+    const cfg = resolveConfig({ cliSources: [cliSource('cli')], cliConfigPath: p, env: {} });
+    expect(cfg.sources.map(s => s.name)).toEqual(['cli']);
+    expect(cfg.server?.audit_dir).toContain('audit-suppressed');
+    expect(cfg.configPath).toBe(p);
+  });
+
+  it('still validates TOML [[sources]] secrets when there are NO CLI sources (R2 negative)', () => {
+    const p = writeToml(tmp, 'active-secret.toml', `
+[[sources]]
+id = "prod"
+host = "prod.example"
+user = "u"
+auth = "password"
+password = "env:PROD_PASS_UNSET"
+`);
+    expect(() => resolveConfig({ cliSources: [], cliConfigPath: p, env: {} }))
+      .toThrow(/PROD_PASS_UNSET|not set or empty/);
+  });
 });
 
 describe('resolveConfig: defaultExplicit (explicit-default vs first-registered fallback)', () => {
