@@ -35,8 +35,9 @@ describe('resultToMcpContent', () => {
     });
     const text = (r.content[0] as any).text as string;
     expect(text).toContain('apt output');
-    expect(text).toContain('[stderr]');
+    // Substantive stderr is appended directly to stdout (no [stderr] label).
     expect(text).toContain('stable CLI interface');
+    expect(text).toBe('apt output\nWARNING: apt does not have a stable CLI interface.');
   });
 
   it('returns stderr-only output when stdout is empty and exit 0', () => {
@@ -45,7 +46,7 @@ describe('resultToMcpContent', () => {
       stderr: 'progress info on stderr\n',
       exitCode: 0,
     });
-    expect((r.content[0] as any).text).toBe('progress info on stderr\n');
+    expect((r.content[0] as any).text).toBe('progress info on stderr');
   });
 
   it('throws on non-zero exit with stderr', () => {
