@@ -321,11 +321,52 @@ auth = "kerberos"
 [sources.approval]
 mode = "yolo"
 `);
-    // @iarna/toml flattens `[sources.approval]` as a sibling key; this
-    // assertion encodes the actual TOML semantics we expect.
-    // (When users want per-source overrides they use the inline-table form
-    // shown in the example file.)
-    expect(cfg.perSourceApproval).toBeDefined();
+    // @iarna/toml attaches `[sources.approval]` to the immediately preceding
+    // `[[sources]]` entry (verified: identical to the inline `approval = { ...
+    // }` form documented in ssh-mcp.toml.example). Assert on the resolved
+    // record so this guards the intended semantics — the override actually
+    // lands on source "x" with the captured mode — not merely that the map
+    // object exists (it is always initialized to `{}`).
+    expect(cfg.perSourceApproval).toEqual({ x: 'yolo' });
+  });
+});
+
+describe('parseTomlConfig: [server].require_connection wiring', () => {
+  const oneSource = `
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+`;
+
+  it('projects require_connection = false onto ResolvedConfig.requireConnection', () => {
+    const cfg = parseTomlConfig(`
+[server]
+require_connection = false
+${oneSource}`);
+    expect(cfg.requireConnection).toBe(false);
+    expect(cfg.server?.require_connection).toBe(false);
+  });
+
+  it('projects require_connection = true onto ResolvedConfig.requireConnection', () => {
+    const cfg = parseTomlConfig(`
+[server]
+require_connection = true
+${oneSource}`);
+    expect(cfg.requireConnection).toBe(true);
+  });
+
+  it('leaves requireConnection undefined when the field is absent (safe default applied downstream)', () => {
+    const cfg = parseTomlConfig(oneSource);
+    expect(cfg.requireConnection).toBeUndefined();
+  });
+
+  it('rejects a non-boolean require_connection', () => {
+    expect(() => parseTomlConfig(`
+[server]
+require_connection = "no"
+${oneSource}`)).toThrow(/require_connection.*boolean/);
   });
 });
 

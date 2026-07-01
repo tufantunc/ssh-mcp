@@ -18,6 +18,13 @@ export interface ServerSection {
   audit_dir?: string;
   /** Per-record stdout/stderr cap. Default 10000. */
   audit_max_bytes?: number;
+  /**
+   * Opt out of the multi-source omit-name connection guard (restore the legacy
+   * silent first-source default). Absent or `true` keeps the guard ON (safe);
+   * `false` disables it. Projected onto ResolvedConfig.requireConnection and
+   * consumed by applyRegistryConnectionPolicy at boot.
+   */
+  require_connection?: boolean;
 }
 
 /** Top-level [webui] block — optional. WebUI is OFF unless enabled or --webui passed. */
@@ -104,6 +111,13 @@ export interface ResolvedConfig {
   defaultExplicit: boolean;
   /** Per-source approval override, keyed by source name. */
   perSourceApproval: Record<string, ApprovalMode>;
+  /**
+   * Boot-time value of [server].require_connection. When `false` the
+   * multi-source omit-name guard is disabled (legacy first-source default);
+   * `undefined`/`true` keeps it ON. applyRegistryConnectionPolicy applies the
+   * safe default, so a config that predates this field stays guarded.
+   */
+  requireConnection?: boolean;
   server?: ServerSection;
   webui?: WebUISection;
   approval?: ApprovalSection;

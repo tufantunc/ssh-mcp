@@ -38,9 +38,14 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
   const env = inputs.env ?? process.env;
 
   // --- locate a TOML, if any ---------------------------------------------
-  let tomlPath: string | undefined = inputs.cliConfigPath;
-  if (!tomlPath && env.SSH_MCP_CONFIG) tomlPath = env.SSH_MCP_CONFIG;
-  if (!tomlPath) tomlPath = discoverConfigPath(env);
+  // Precedence: explicit --config wins outright. Otherwise defer to
+  // discoverConfigPath(env), which probes SSH_MCP_CONFIG first and then the
+  // XDG/home candidates, returning the first that actually EXISTS. Reading
+  // env.SSH_MCP_CONFIG directly here would diverge from that discovery
+  // contract: a set-but-missing SSH_MCP_CONFIG would hard-fail in loadTomlFile
+  // instead of falling through to the XDG/home paths the way an unset var does.
+  const tomlPath: string | undefined =
+    inputs.cliConfigPath ?? discoverConfigPath(env);
 
   // When CLI sources are present they win and suppress the TOML source list
   // (see "CLI wins" semantics above). In that case a TOML that exists only to
@@ -90,6 +95,9 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
     defaultName,
     defaultExplicit,
     perSourceApproval: hasCliSources ? {} : (fromToml?.perSourceApproval ?? {}),
+    // require_connection is a top-level [server] knob, so it survives even when
+    // CLI sources suppress the TOML source list (like server/webui/approval).
+    requireConnection: fromToml?.requireConnection,
     server: fromToml?.server,
     webui: fromToml?.webui,
     approval: fromToml?.approval,
