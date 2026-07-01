@@ -340,6 +340,10 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
   return {
     sources: resolvedSources,
     defaultName,
+    // In a TOML, defaultName is set ONLY by an explicit `default = true` on a
+    // source (see the loop above) — never a positional fallback. So a defined
+    // defaultName here is, by construction, a user-chosen explicit default.
+    defaultExplicit: defaultName !== undefined,
     perSourceApproval,
     server,
     webui,

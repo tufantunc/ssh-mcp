@@ -49,6 +49,10 @@ describe('resolveConfig precedence', () => {
     const cfg = resolveConfig({ cliSources: [cliSource('a'), cliSource('b')], env: {} });
     expect(cfg.sources.map(s => s.name)).toEqual(['a', 'b']);
     expect(cfg.defaultName).toBe('a');
+    // The first --ssh source is a positional fallback, NOT a user-chosen
+    // default: defaultExplicit must be false so the multi-source omit-name
+    // guard still fires (the security fix).
+    expect(cfg.defaultExplicit).toBe(false);
     expect(cfg.configPath).toBeUndefined();
   });
 
@@ -63,6 +67,8 @@ describe('resolveConfig precedence', () => {
       transport: 'openssh',
     });
     expect(cfg.defaultName).toBe('toml');
+    // basicToml marks the source `default = true` → an explicit user choice.
+    expect(cfg.defaultExplicit).toBe(true);
     expect(cfg.configPath).toBe(p);
   });
 
@@ -82,6 +88,10 @@ auth = "kerberos"
     expect(cfg.sources[0].name).toBe('cli');
     expect(cfg.sources[0].host).toBe('cli.example');
     expect(cfg.defaultName).toBe('cli');
+    // CLI sources suppress the TOML source list; the surviving default is a
+    // positional CLI fallback, so the explicit-default marker (even if the
+    // suppressed TOML had `default = true`) does NOT carry over.
+    expect(cfg.defaultExplicit).toBe(false);
     expect(cfg.server?.audit_dir).toContain('audit-test');
     expect(cfg.configPath).toBe(p);
   });
@@ -103,6 +113,7 @@ audit_dir = "~/audit-only"
     const cfg = resolveConfig({ cliSources: [cliSource('cli')], cliConfigPath: p, env: {} });
     expect(cfg.sources.map(s => s.name)).toEqual(['cli']);
     expect(cfg.defaultName).toBe('cli');
+    expect(cfg.defaultExplicit).toBe(false);
     expect(cfg.webui?.enabled).toBe(true);
     expect(cfg.webui?.port).toBe(9099);
     expect(cfg.server?.audit_dir).toContain('audit-only');
@@ -174,11 +185,87 @@ auth = "kerberos"
     const cfg = resolveConfig({ cliSources: [], env: { XDG_CONFIG_HOME: path.join(tmp, 'none') } });
     expect(cfg.sources).toEqual([]);
     expect(cfg.defaultName).toBeUndefined();
+    expect(cfg.defaultExplicit).toBe(false);
     expect(cfg.configPath).toBeUndefined();
   });
 
   it('propagates TOML validation errors', () => {
     const bad = writeToml(tmp, 'bad.toml', `not valid =`);
     expect(() => resolveConfig({ cliSources: [], cliConfigPath: bad, env: {} })).toThrow(/parse failed/);
+  });
+});
+
+describe('resolveConfig: defaultExplicit (explicit-default vs first-registered fallback)', () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-mcp-resolver-de-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const multiNoDefault = `
+[[sources]]
+id = "a"
+host = "a.example"
+user = "u"
+auth = "kerberos"
+
+[[sources]]
+id = "b"
+host = "b.example"
+user = "u"
+auth = "kerberos"
+`;
+
+  const multiWithDefault = `
+[[sources]]
+id = "a"
+host = "a.example"
+user = "u"
+auth = "kerberos"
+
+[[sources]]
+id = "b"
+host = "b.example"
+user = "u"
+auth = "kerberos"
+default = true
+`;
+
+  it('multi-source TOML with NO `default = true`: defaultName falls back to the first source but defaultExplicit is FALSE', () => {
+    // This is the security-critical case. Pre-fix the resolver collapsed an
+    // explicit default with this positional fallback, so the registry was
+    // always told it had an explicit default and the omit-name guard never
+    // fired. The fix keeps routing-fallback defaultName but reports
+    // defaultExplicit=false so bootstrapRegistry does NOT call setDefault().
+    const p = writeToml(tmp, 'multi-nodefault.toml', multiNoDefault);
+    const cfg = resolveConfig({ cliSources: [], cliConfigPath: p, env: {} });
+    expect(cfg.sources.map(s => s.name)).toEqual(['a', 'b']);
+    expect(cfg.defaultName).toBe('a');
+    expect(cfg.defaultExplicit).toBe(false);
+  });
+
+  it('multi-source TOML WITH `default = true`: defaultName is the chosen source and defaultExplicit is TRUE', () => {
+    const p = writeToml(tmp, 'multi-default.toml', multiWithDefault);
+    const cfg = resolveConfig({ cliSources: [], cliConfigPath: p, env: {} });
+    expect(cfg.sources.map(s => s.name)).toEqual(['a', 'b']);
+    expect(cfg.defaultName).toBe('b');
+    expect(cfg.defaultExplicit).toBe(true);
+  });
+
+  it('single-source TOML with no `default = true`: defaultName falls back but defaultExplicit is FALSE', () => {
+    const p = writeToml(tmp, 'single.toml', `
+[[sources]]
+id = "solo"
+host = "solo.example"
+user = "u"
+auth = "kerberos"
+`);
+    const cfg = resolveConfig({ cliSources: [], cliConfigPath: p, env: {} });
+    expect(cfg.defaultName).toBe('solo');
+    expect(cfg.defaultExplicit).toBe(false);
   });
 });

@@ -271,7 +271,7 @@ const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
       cliSources: cliSourceConfigs,
       cliConfigPath: typeof CONFIG_PATH === 'string' ? CONFIG_PATH : undefined,
     })
-  : { sources: [], perSourceApproval: {} };
+  : { sources: [], perSourceApproval: {}, defaultExplicit: false };
 
 if (isCliEnabled) {
   if (isMultiHost) {
@@ -403,8 +403,32 @@ async function bootstrapRegistry(): Promise<void> {
     await prepareKeyContents(cfg);
     registry.register(cfg);
   }
-  if (resolvedConfig.defaultName) {
-    registry.setDefault(resolvedConfig.defaultName);
+  applyRegistryConnectionPolicy(registry, resolvedConfig);
+}
+
+/**
+ * Wire the resolved connection policy onto a registry whose sources are already
+ * registered. Split out (and exported) so the explicit-default / fallback /
+ * require_connection opt-out matrix is unit-testable without booting the server.
+ *
+ * Two independent knobs:
+ *  - defaultExplicit: call setDefault() ONLY when the user explicitly chose a
+ *    default. Falling through to register()'s first-registered fallback leaves
+ *    the registry's defaultExplicit=false, so a multi-source config with no
+ *    explicit default still rejects an omitted connectionName (the headline
+ *    security fix) instead of silently routing to the first host.
+ *  - requireConnection: when false, opt out of that guard entirely. Absent the
+ *    field (older ResolvedConfig shape) it defaults to safe (guard ON).
+ */
+export function applyRegistryConnectionPolicy(
+  reg: Pick<TransportRegistry, 'setDefault' | 'setRequireConnectionWhenMulti'>,
+  config: ResolvedConfig,
+): void {
+  const requireConnection =
+    (config as { requireConnection?: boolean }).requireConnection ?? true;
+  reg.setRequireConnectionWhenMulti(requireConnection);
+  if (config.defaultExplicit && config.defaultName) {
+    reg.setDefault(config.defaultName);
   }
 }
 
@@ -458,7 +482,16 @@ function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher
     return null;
   }
   const input: BuildEngineFromConfigInput = {
-    defaultMode: approvalCfg?.mode,
+    // When there is NO top-level [approval] block (only per-source overrides),
+    // the global default stays 'yolo' (unrestricted) rather than inheriting
+    // buildApprovalEngineFromConfig's [approval]-present 'manual' fallback.
+    // This mirrors the `return null` (legacy unrestricted) branch one level up
+    // for the no-config case: adding per-source gates should gate only those
+    // sources, not silently flip the global default to manual — which would
+    // gate every ungated host and, without WebUI, throw at boot.
+    // A present [approval] block with an unspecified mode still defaults to
+    // manual (the documented TOML default), preserving that contract.
+    defaultMode: approvalCfg === undefined ? 'yolo' : approvalCfg.mode,
     fail_closed: approvalCfg?.fail_closed,
     llm: approvalCfg?.llm,
     perSourceModes,
@@ -551,8 +584,9 @@ server.tool(
     // Audit attribution starts as unresolved and is pinned to the canonical
     // host name only after registry.get() confirms a host resolved. This keeps
     // a rejected/ambiguous call (e.g. omitted connectionName in multi-host mode)
-    // from being misattributed to the first-registered server.
-    let profile = connectionName ?? '(unresolved)';
+    // from being misattributed to the first-registered server. A blank/whitespace
+    // name is treated as omitted, mirroring TransportRegistry.resolveName().
+    let profile = connectionName && connectionName.trim() !== '' ? connectionName : '(unresolved)';
     const startedAt = Date.now();
     let audited = false;
     let approvalDecision: ApprovalDecision | undefined;
@@ -610,8 +644,9 @@ if (!DISABLE_SUDO) {
       // Audit attribution starts as unresolved and is pinned to the canonical
       // host name only after registry.get() confirms a host resolved. This keeps
       // a rejected/ambiguous call (e.g. omitted connectionName in multi-host mode)
-      // from being misattributed to the first-registered server.
-      let profile = connectionName ?? '(unresolved)';
+      // from being misattributed to the first-registered server. A blank/whitespace
+      // name is treated as omitted, mirroring TransportRegistry.resolveName().
+      let profile = connectionName && connectionName.trim() !== '' ? connectionName : '(unresolved)';
       const startedAt = Date.now();
       let audited = false;
       let approvalDecision: ApprovalDecision | undefined;

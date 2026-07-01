@@ -91,6 +91,17 @@ export interface ResolvedConfig {
   sources: ServerConfig[];
   /** Name of the source TransportRegistry should treat as default, if any. */
   defaultName?: string;
+  /**
+   * True ONLY when the user explicitly chose a default (a TOML source with
+   * `default = true`). False when `defaultName` is merely the first-registered
+   * fallback. The boot path keys the multi-source omit-name guard on this:
+   * `setDefault()` (which re-enables the omit-name shortcut) is called only for
+   * an explicit default, so a multi-source config with no explicit default
+   * still rejects an omitted connectionName instead of silently routing to the
+   * first host. Required (not optional) so every construction site states its
+   * intent and the compiler catches omissions.
+   */
+  defaultExplicit: boolean;
   /** Per-source approval override, keyed by source name. */
   perSourceApproval: Record<string, ApprovalMode>;
   server?: ServerSection;
