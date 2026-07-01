@@ -407,14 +407,14 @@ async function bootstrapRegistry(): Promise<void> {
  *    explicit default still rejects an omitted connectionName (the headline
  *    security fix) instead of silently routing to the first host.
  *  - requireConnection: when false, opt out of that guard entirely. Absent the
- *    field (older ResolvedConfig shape) it defaults to safe (guard ON).
+ *    field (older ResolvedConfig shape / no [server].require_connection) it
+ *    defaults to safe (guard ON).
  */
 export function applyRegistryConnectionPolicy(
   reg: Pick<TransportRegistry, 'setDefault' | 'setRequireConnectionWhenMulti'>,
   config: ResolvedConfig,
 ): void {
-  const requireConnection =
-    (config as { requireConnection?: boolean }).requireConnection ?? true;
+  const requireConnection = config.requireConnection ?? true;
   reg.setRequireConnectionWhenMulti(requireConnection);
   if (config.defaultExplicit && config.defaultName) {
     reg.setDefault(config.defaultName);

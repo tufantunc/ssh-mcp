@@ -335,6 +335,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     // defaultName here is, by construction, a user-chosen explicit default.
     defaultExplicit: defaultName !== undefined,
     perSourceApproval,
+    // Surface [server].require_connection so the boot path can wire the
+    // omit-name guard opt-out. Undefined (field absent) keeps the guard ON.
+    requireConnection: server?.require_connection,
     server,
     webui,
     approval,
@@ -352,6 +355,12 @@ function validateServerSection(raw: any) {
       throw new Error('Config: [server].audit_max_bytes must be a positive number');
     }
     out.audit_max_bytes = raw.audit_max_bytes;
+  }
+  if (raw.require_connection !== undefined) {
+    if (typeof raw.require_connection !== 'boolean') {
+      throw new Error('Config: [server].require_connection must be a boolean');
+    }
+    out.require_connection = raw.require_connection;
   }
   return out;
 }
