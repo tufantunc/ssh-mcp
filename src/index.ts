@@ -582,18 +582,24 @@ server.tool(
     const sanitizedCommand = sanitizeCommand(command);
     const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
     // Audit attribution starts as unresolved and is pinned to the canonical
-    // host name only after registry.get() confirms a host resolved. This keeps
-    // a rejected/ambiguous call (e.g. omitted connectionName in multi-host mode)
-    // from being misattributed to the first-registered server. A blank/whitespace
-    // name is treated as omitted, mirroring TransportRegistry.resolveName().
+    // host name via registry.profile() — a pure name resolution that does NOT
+    // connect. Pinning it BEFORE registry.get() (which lazily inits the
+    // transport and can reject on bad credentials, host-key rejection, or an
+    // unreachable host) keeps pre-command init failures audited under the real
+    // host identity when the target is unambiguous. When the name is genuinely
+    // ambiguous/unknown (omitted connectionName in multi-host mode without an
+    // explicit default, or an unregistered name) registry.profile() throws and
+    // the audit keeps the raw '(unresolved)'/bad-name attribution. A
+    // blank/whitespace name is treated as omitted, mirroring
+    // TransportRegistry.resolveName().
     let profile = connectionName && connectionName.trim() !== '' ? connectionName : '(unresolved)';
     const startedAt = Date.now();
     let audited = false;
     let approvalDecision: ApprovalDecision | undefined;
     try {
-      const t = await registry.get(connectionName);
       const resolvedProfile = registry.profile(connectionName);
       profile = resolvedProfile.id;
+      const t = await registry.get(connectionName);
       approvalDecision = await gateApproval({
         profile: resolvedProfile,
         tool: 'exec',
@@ -642,18 +648,24 @@ if (!DISABLE_SUDO) {
       const sanitizedCommand = sanitizeCommand(command);
       const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
       // Audit attribution starts as unresolved and is pinned to the canonical
-      // host name only after registry.get() confirms a host resolved. This keeps
-      // a rejected/ambiguous call (e.g. omitted connectionName in multi-host mode)
-      // from being misattributed to the first-registered server. A blank/whitespace
-      // name is treated as omitted, mirroring TransportRegistry.resolveName().
+      // host name via registry.profile() — a pure name resolution that does NOT
+      // connect. Pinning it BEFORE registry.get() (which lazily inits the
+      // transport and can reject on bad credentials, host-key rejection, or an
+      // unreachable host) keeps pre-command init failures audited under the real
+      // host identity when the target is unambiguous. When the name is genuinely
+      // ambiguous/unknown (omitted connectionName in multi-host mode without an
+      // explicit default, or an unregistered name) registry.profile() throws and
+      // the audit keeps the raw '(unresolved)'/bad-name attribution. A
+      // blank/whitespace name is treated as omitted, mirroring
+      // TransportRegistry.resolveName().
       let profile = connectionName && connectionName.trim() !== '' ? connectionName : '(unresolved)';
       const startedAt = Date.now();
       let audited = false;
       let approvalDecision: ApprovalDecision | undefined;
       try {
-        const t = await registry.get(connectionName);
         const resolvedProfile = registry.profile(connectionName);
         profile = resolvedProfile.id;
+        const t = await registry.get(connectionName);
         approvalDecision = await gateApproval({
           profile: resolvedProfile,
           tool: 'sudo-exec',
