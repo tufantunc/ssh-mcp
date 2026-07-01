@@ -92,11 +92,20 @@ function validateConfig(config: Record<string, string | null>) {
   if (transport === 'ssh2' && (config.knownHostsFile || config.strictHostKeyChecking)) {
     errors.push('--knownHostsFile and --strictHostKeyChecking require --transport=openssh');
   }
-  if (STRICT_HOST_KEY && !['yes', 'no', 'accept-new'].includes(config.strictHostKeyChecking!)) {
+  // OpenSSH options that require an explicit value. A value-less flag (e.g.
+  // `--strictHostKeyChecking` with no `=value`) is recorded as `null` by
+  // parseArgv; guarding on truthiness would silently skip validation and let
+  // buildTransportConfig drop the option, falling back to the default and (for
+  // strictHostKeyChecking) weakening the requested host-key policy. Detect the
+  // flag by property presence so a missing value is rejected with a clear error.
+  if ('strictHostKeyChecking' in config && !['yes', 'no', 'accept-new'].includes(config.strictHostKeyChecking!)) {
     errors.push('--strictHostKeyChecking must be one of: yes, no, accept-new');
   }
-  if (GSSAPI_DELEGATE && !['yes', 'no'].includes(config.gssapiDelegateCredentials!)) {
+  if ('gssapiDelegateCredentials' in config && !['yes', 'no'].includes(config.gssapiDelegateCredentials!)) {
     errors.push('--gssapiDelegateCredentials must be yes or no');
+  }
+  if ('knownHostsFile' in config && !config.knownHostsFile) {
+    errors.push('--knownHostsFile requires a file path');
   }
 
   if (errors.length > 0) {
@@ -297,7 +306,14 @@ function stripBenignSshWarnings(stderr: string): string {
 }
 export function resultToMcpContent(result: ExecResult) {
   if (result.category === 'timeout') {
-    throw new McpError(ErrorCode.InternalError, result.stderr || `Command execution timed out after ${DEFAULT_TIMEOUT}ms`);
+    // Always surface that the command timed out, even when the process wrote to
+    // stderr before the deadline. A build/tool that prints progress or
+    // diagnostics to stderr and then hangs would otherwise be reported as an
+    // ordinary error, hiding the timeout. Keep any captured stderr as trailing
+    // context so its diagnostics are not lost.
+    const timeoutMsg = `Command execution timed out after ${DEFAULT_TIMEOUT}ms`;
+    const detail = result.stderr ? `${timeoutMsg}\n${result.stderr}` : timeoutMsg;
+    throw new McpError(ErrorCode.InternalError, detail);
   }
   if (result.category === 'auth') {
     throw new McpError(ErrorCode.InternalError, `SSH authentication error: ${result.stderr}`);

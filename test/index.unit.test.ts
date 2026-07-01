@@ -8,6 +8,7 @@ import {
   resolveAuthMode,
   buildTransportConfig,
   getOrCreateInitializedTransport,
+  validateConfig,
 } from '../src/index';
 import type { ExecResult, ISshTransport } from '../src/transports/types';
 
@@ -86,6 +87,35 @@ describe('resultToMcpContent (finding 1: exit-0 stderr must not error)', () => {
         resultToMcpContent({ stdout: '', stderr: 'x', exitCode: 0, category }),
       ).toThrow(McpError);
     }
+  });
+
+  it('preserves the timeout context even when stderr was written before the deadline', () => {
+    // A build/tool that prints progress or diagnostics to stderr and then hangs
+    // must NOT be reported as an ordinary error that hides the timeout; the
+    // timeout message stays, with stderr kept as trailing context.
+    let caught: unknown;
+    try {
+      resultToMcpContent({
+        stdout: '',
+        stderr: 'Building... step 3/9\nlinking objects',
+        exitCode: null,
+        category: 'timeout',
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const msg = (caught as McpError).message;
+    expect(msg).toMatch(/timed out after \d+ms/);
+    // stderr diagnostics are retained as context, not dropped.
+    expect(msg).toContain('Building... step 3/9');
+    expect(msg).toContain('linking objects');
+  });
+
+  it('reports a bare timeout message when no stderr was captured', () => {
+    expect(() =>
+      resultToMcpContent({ stdout: '', stderr: '', exitCode: null, category: 'timeout' }),
+    ).toThrow(/timed out after \d+ms/);
   });
 });
 
@@ -205,5 +235,51 @@ describe('getOrCreateInitializedTransport (Codex P2: do not publish before init 
     await expect(getOrCreateInitializedTransport(cache, createInitializedTransport)).resolves.toMatchObject({ name: 'openssh' });
     expect(createInitializedTransport).toHaveBeenCalledTimes(2);
     expect(cache.activeTransport?.name).toBe('openssh');
+  });
+});
+
+describe('validateConfig (Codex P2: reject value-less OpenSSH option flags)', () => {
+  const baseCfg = { host: 'h', user: 'u', transport: 'openssh' };
+
+  it('rejects a value-less --strictHostKeyChecking (parsed as null) instead of silently defaulting', () => {
+    // parseArgv records `null` for `--strictHostKeyChecking` with no `=value`.
+    // A truthiness guard would skip validation and let the option be dropped,
+    // silently weakening the host-key policy to the default.
+    expect(() =>
+      validateConfig({ ...baseCfg, strictHostKeyChecking: null }),
+    ).toThrow(/--strictHostKeyChecking must be one of: yes, no, accept-new/);
+  });
+
+  it('rejects a value-less --gssapiDelegateCredentials (parsed as null)', () => {
+    expect(() =>
+      validateConfig({ ...baseCfg, gssapiDelegateCredentials: null }),
+    ).toThrow(/--gssapiDelegateCredentials must be yes or no/);
+  });
+
+  it('rejects a value-less --knownHostsFile (parsed as null)', () => {
+    expect(() =>
+      validateConfig({ ...baseCfg, knownHostsFile: null }),
+    ).toThrow(/--knownHostsFile requires a file path/);
+  });
+
+  it('rejects an invalid explicit --strictHostKeyChecking value', () => {
+    expect(() =>
+      validateConfig({ ...baseCfg, strictHostKeyChecking: 'maybe' }),
+    ).toThrow(/--strictHostKeyChecking must be one of/);
+  });
+
+  it('accepts valid explicit OpenSSH option values', () => {
+    expect(() =>
+      validateConfig({
+        ...baseCfg,
+        strictHostKeyChecking: 'yes',
+        gssapiDelegateCredentials: 'no',
+        knownHostsFile: '/etc/ssh/known_hosts',
+      }),
+    ).not.toThrow();
+  });
+
+  it('does not require OpenSSH option values when the flags are absent', () => {
+    expect(() => validateConfig({ ...baseCfg })).not.toThrow();
   });
 });
