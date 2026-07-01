@@ -472,19 +472,27 @@ let auditSink: AuditSink = { record() { /* no-op until wired (or audit absent) *
  *   - manual mode requested but WebUI disabled (gate-12 invariant)
  *   - smart mode requested but [approval.llm] missing endpoint or model
  */
-function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
+export function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
   const approvalCfg = resolvedConfig.approval;
   const perSourceApproval = resolvedConfig.perSourceApproval ?? {};
   const perSourceModes: ApprovalMode[] = Object.values(perSourceApproval);
-  // When the WebUI is active we still want a live-switchable engine even if no
-  // [approval] section and no per-source overrides exist — otherwise the gate
-  // keeps the legacy no-engine allow and there's nothing to switch. A bare
-  // yolo-default engine is the right baseline in that case.
-  if (approvalCfg === undefined && perSourceModes.length === 0 && !webuiActive) {
+  // A "bare" engine has no [approval] section and no per-source overrides — the
+  // only reason it exists at all is that the WebUI is active and wants a
+  // live-switchable engine (otherwise the gate keeps its legacy no-engine allow
+  // and there's nothing to switch).
+  const isBareWebUIEngine = approvalCfg === undefined && perSourceModes.length === 0;
+  if (isBareWebUIEngine && !webuiActive) {
     return null;
   }
   const input: BuildEngineFromConfigInput = {
-    defaultMode: approvalCfg?.mode,
+    // For the bare WebUI-only engine, pass an explicit `yolo` baseline. Leaving
+    // this undefined makes buildApprovalEngineFromConfig coerce it to `manual`,
+    // which would enqueue/block every exec even though no approval was
+    // configured — regressing the legacy read-only WebUI/status case and
+    // contradicting the yolo baseline that makeApprovalModeLookup already
+    // reports for an unconfigured global default. Per-source-only and explicit
+    // [approval].mode configs keep their existing resolution.
+    defaultMode: approvalCfg?.mode ?? (isBareWebUIEngine ? 'yolo' : undefined),
     fail_closed: approvalCfg?.fail_closed,
     llm: approvalCfg?.llm,
     perSourceModes,
