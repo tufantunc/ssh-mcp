@@ -22,6 +22,7 @@ import {
   getApprovalDecisionFromError,
   setApprovalEngine,
   buildApprovalEngineFromConfig,
+  manualWithoutResolverWarning,
   type ApprovalDecision,
   type BuildEngineFromConfigInput,
   type ApprovalDispatcher,
@@ -156,7 +157,8 @@ const KERBEROS_FLAG = argvConfig.kerberos !== undefined && argvConfig.kerberos !
 const GSSAPI_DELEGATE = argvConfig.gssapiDelegateCredentials;
 const KNOWN_HOSTS_FILE = argvConfig.knownHostsFile;
 const STRICT_HOST_KEY = argvConfig.strictHostKeyChecking;
-const CONFIG_PATH = argvConfig.config;
+// The explicit `--config` path is resolved (and value-less `--config` rejected)
+// via resolveCliConfigPath at the resolveConfig call site below.
 
 // Flags that signal intent to use the legacy single-host CLI mode. NOTE:
 // `disableSudo` is deliberately excluded — it only controls whether the sudo
@@ -255,10 +257,17 @@ const hasLegacyCli = hasLegacyCliFlags(argvConfig);
 function buildLegacyServerConfig(): ServerConfig | undefined {
   if (!HOST || !USER) return undefined;
 
-  const authMode: AuthMode | undefined = KERBEROS_FLAG ? 'kerberos'
-    : KEY ? 'key'
-    : PASSWORD ? 'password'
-    : undefined;
+  // Precedence must match resolveAuthMode (kerberos > password > key), NOT a
+  // key-before-password order. When a legacy invocation supplies both
+  // --password and --key, password wins: classifying it as key auth would make
+  // prepareKeyContents read the (possibly stale/sample) key file → ENOENT, and
+  // could let the ssh2 transport prefer the key over the intended password
+  // (regression vs base `main`). See resolveAuthMode's doc-comment.
+  const authMode: AuthMode | undefined = resolveAuthMode({
+    kerberos: KERBEROS_FLAG,
+    password: PASSWORD,
+    key: KEY,
+  });
   const resolvedTransport: 'ssh2' | 'openssh' =
     (TRANSPORT_FLAG === 'openssh' || KERBEROS_FLAG) ? 'openssh' : 'ssh2';
 
@@ -271,7 +280,11 @@ function buildLegacyServerConfig(): ServerConfig | undefined {
     authMode,
   };
   if (PASSWORD) cfg.password = PASSWORD;
-  if (KEY) cfg.keyPath = KEY;
+  // Only attach the key path when key auth actually wins. Attaching a stale
+  // --key on a password/kerberos source would make prepareKeyContents (ssh2)
+  // read the possibly-nonexistent file, and openssh's password/kerberos
+  // branches never use keyPath anyway.
+  if (KEY && authMode === 'key') cfg.keyPath = KEY;
   if (SUPASSWORD !== null && SUPASSWORD !== undefined) cfg.suPassword = sanitizePassword(SUPASSWORD);
   if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) cfg.sudoPassword = sanitizePassword(SUDOPASSWORD);
   if (KERBEROS_FLAG) cfg.kerberos = true;
@@ -292,10 +305,31 @@ const cliSourceConfigs: ServerConfig[] = (() => {
   return [];
 })();
 
+/**
+ * Resolve the explicit `--config` path from parsed argv.
+ *
+ * `parseArgv` records a value-less `--config` (no `=path`) as `null`. Silently
+ * coercing that to `undefined` would drop the explicit flag and fall back to
+ * `SSH_MCP_CONFIG`/default discovery, so a mistyped `--config` could start the
+ * process against the wrong configured source instead of failing fast. Reject a
+ * present-but-value-less `--config` like the other value-requiring flags.
+ * Returns the path when supplied, or `undefined` when the flag is absent.
+ */
+export function resolveCliConfigPath(
+  config: Record<string, string | null>,
+): string | undefined {
+  if (!('config' in config)) return undefined;
+  const value = config.config;
+  if (typeof value !== 'string') {
+    throw new Error('Configuration error:\n--config requires a value (--config=<path>)');
+  }
+  return value;
+}
+
 const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
   ? resolveConfig({
       cliSources: cliSourceConfigs,
-      cliConfigPath: typeof CONFIG_PATH === 'string' ? CONFIG_PATH : undefined,
+      cliConfigPath: resolveCliConfigPath(argvConfig),
     })
   : { sources: [], perSourceApproval: {}, defaultExplicit: false };
 
@@ -493,21 +527,20 @@ export function appendDescriptionComment(command: string, description?: string):
 let auditSink: AuditSink = { record() { /* no-op until wired (or audit absent) */ } };
 
 /**
- * Build the production approval engine from resolvedConfig. Returns null for
- * the legacy CLI path (no [approval] section and no per-source overrides) so
- * the gate keeps its backward-compatible `legacy:no-engine` allow.
- *
- * Throws (fatal at boot):
- *   - manual mode requested but WebUI disabled (gate-12 invariant)
- *   - smart mode requested but [approval.llm] missing endpoint or model
+ * Resolve the [approval]/per-source config into the concrete engine input.
+ * Returns null for the legacy CLI path (no [approval] section and no per-source
+ * overrides). Shared by buildProductionApprovalEngine (which builds the engine)
+ * and wireApprovalAndAudit (which reuses the SAME resolved defaultMode +
+ * perSourceModes for the manual-without-resolver boot warning) so the warning
+ * can never disagree with the mode the engine actually runs.
  */
-function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
+function resolveApprovalEngineInput(): BuildEngineFromConfigInput | null {
   const approvalCfg = resolvedConfig.approval;
   const perSourceModes: ApprovalMode[] = Object.values(resolvedConfig.perSourceApproval ?? {});
   if (approvalCfg === undefined && perSourceModes.length === 0) {
     return null;
   }
-  const input: BuildEngineFromConfigInput = {
+  return {
     // Resolve the GLOBAL default mode:
     //  - explicit [approval].mode set        -> honor it.
     //  - no global mode, per-source overrides -> the [approval] block (when
@@ -533,6 +566,22 @@ function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher
     llm: approvalCfg?.llm,
     perSourceModes,
   };
+}
+
+/**
+ * Build the production approval engine from resolvedConfig. Returns null for
+ * the legacy CLI path (no [approval] section and no per-source overrides) so
+ * the gate keeps its backward-compatible `legacy:no-engine` allow.
+ *
+ * Throws (fatal at boot):
+ *   - manual mode requested but WebUI disabled (gate-12 invariant)
+ *   - smart mode requested but [approval.llm] missing endpoint or model
+ */
+function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
+  const input = resolveApprovalEngineInput();
+  if (input === null) {
+    return null;
+  }
   return buildApprovalEngineFromConfig(input, {
     manualOpts: { webuiEnabled: webuiActive },
   });
@@ -548,11 +597,40 @@ function isWebUIActive(): boolean {
 }
 
 /**
+ * True when a driver that settles the manual-approval queue is wired into this
+ * build. The queue resolver — the WebUI manual-approval server — lands in the
+ * child lane `pr/webui-manual-approval`; the approval-engine lane ships only the
+ * queue primitive, so no resolver is wired here. Kept as an explicit predicate
+ * (rather than inlining `false`) so the child lane can flip it to a real
+ * detection — e.g. `return isWebUIServerWired();` — without touching the warning
+ * call site.
+ */
+function isApprovalResolverWired(): boolean {
+  return false;
+}
+
+/**
  * Wire the approval engine into the gate and load the optional audit sink.
  * Safe to call before the MCP transport connects so the first exec is gated.
  */
 async function wireApprovalAndAudit(): Promise<void> {
-  const engine = buildProductionApprovalEngine(isWebUIActive());
+  const webuiActive = isWebUIActive();
+  const engine = buildProductionApprovalEngine(webuiActive);
+
+  // Non-fatal boot advisory: manual mode boots a queue with no driver when the
+  // approval-engine lane runs standalone, ahead of its child WebUI lane. Boot
+  // still succeeds (the queue exists, it just times out until a resolver lands);
+  // warn so the operator is not left wondering why every command hangs.
+  const input = resolveApprovalEngineInput();
+  const warning = manualWithoutResolverWarning({
+    webuiEnabled: webuiActive,
+    defaultMode: input?.defaultMode,
+    perSourceModes: input?.perSourceModes,
+    resolverWired: isApprovalResolverWired(),
+  });
+  if (warning) {
+    console.error(`WARN: ${warning}`);
+  }
   setApprovalEngine(engine);
   auditSink = await loadAuditSink({
     auditDir: resolvedConfig.server?.audit_dir,
