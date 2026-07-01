@@ -8,6 +8,7 @@ import {
   activeFilePath,
   buildRecord,
   capThenRedact,
+  clampInt,
   yoloApproval,
   REDACT_SCAN_HEADROOM_BYTES,
 } from '../store.js';
@@ -167,5 +168,50 @@ describe('audit store', () => {
     expect(out.text).not.toContain(secret);
     expect(Buffer.byteLength(out.text, 'utf8')).toBeLessThanOrEqual(cap);
     expect(out.truncated).toBe(true);
+  });
+
+  it('clamps negative / non-finite config to safe values (no empty output, no per-append rotation, retain >= 1)', () => {
+    // clampInt unit behavior across the surprising inputs Copilot flagged.
+    expect(clampInt(NaN, 10, 1)).toBe(10);
+    expect(clampInt(Infinity, 10, 1)).toBe(10);
+    expect(clampInt(-Infinity, 10, 1)).toBe(10);
+    expect(clampInt(undefined, 10, 1)).toBe(10);
+    expect(clampInt(null, 10, 1)).toBe(10);
+    expect(clampInt(-5, 99, 1)).toBe(99); // negative < minValid -> fallback (not floored to min)
+    expect(clampInt(-5, 99, 0)).toBe(99); // negative < 0 -> fallback
+    expect(clampInt(0, 99, 0)).toBe(0); // explicit 0 honored when minValid is 0
+    expect(clampInt(0, 99, 1)).toBe(99); // 0 below minValid 1 -> fallback
+    expect(clampInt(3.9, 99, 1)).toBe(3); // floored to integer
+
+    // End-to-end: a store built with garbage config still writes a non-empty,
+    // single record (negative auditMaxBytes would otherwise empty stdout, NaN
+    // maxFileBytes would rotate on every append).
+    const dir = tmpAuditDir();
+    try {
+      const store = new AuditStore({
+        auditDir: dir,
+        auditMaxBytes: -100,
+        maxFileBytes: NaN,
+        retain: -3,
+      });
+      const now = new Date('2026-05-25T12:00:00.000Z');
+      store.append({
+        now,
+        profile: 'default',
+        tool: 'exec',
+        command: 'echo hello',
+        approval: yoloApproval(now),
+        exec: { stdout: 'output-visible', stderr: '', exitCode: 0, durationMs: 1 },
+      });
+      const file = activeFilePath(dir, now);
+      // Only the active file exists — no spurious rotation from NaN maxFileBytes.
+      const rotated = readdirSync(dir).filter((f) => /\.jsonl\.\d+$/.test(f));
+      expect(rotated).toHaveLength(0);
+      const parsed = JSON.parse(readFileSync(file, 'utf8').trim());
+      // auditMaxBytes clamped to >= 0 default, so stdout is retained, not emptied.
+      expect(parsed.exec.stdout.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

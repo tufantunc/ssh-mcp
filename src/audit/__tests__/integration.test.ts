@@ -54,4 +54,44 @@ describe('audit integration with exec wrapper', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('writes a failure audit record when the transport throws (audit contract covers failure)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ssh-mcp-audit-wrapper-fail-'));
+    try {
+      process.env.SSH_MCP_AUDIT_DIR = dir;
+      process.env.SSH_MCP_DISABLE_MAIN = '1';
+      const { executeAuditedTransportCommand } = await import('../../index.js');
+
+      const transport: Pick<ISshTransport, 'exec' | 'execElevated'> = {
+        exec: async (): Promise<ExecResult> => {
+          throw new Error('spawn ENOENT');
+        },
+        execElevated: async (): Promise<ExecResult> => {
+          throw new Error('not used');
+        },
+      };
+      const store = new AuditStore({ auditDir: dir, auditMaxBytes: 1000 });
+
+      await expect(
+        executeAuditedTransportCommand({
+          transport,
+          store,
+          tool: 'exec',
+          command: 'echo boom',
+        }),
+      ).rejects.toThrow('spawn ENOENT');
+
+      const file = activeFilePath(dir);
+      const records = readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+      expect(records).toHaveLength(1);
+      // Omitted profile defaults to 'default' (not the misleading 'stub').
+      expect(records[0].profile).toBe('default');
+      expect(records[0].tool).toBe('exec');
+      expect(records[0].exec.exit_code).toBeNull();
+      expect(records[0].exec.stderr).toContain('spawn ENOENT');
+    } finally {
+      delete process.env.SSH_MCP_AUDIT_DIR;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

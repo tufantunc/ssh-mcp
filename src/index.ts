@@ -375,8 +375,11 @@ function auditExecution(params: {
 }): void {
   const now = new Date();
   const durationMs = Math.max(0, Date.now() - params.startedAt);
-  const store = params.store ?? getAuditStore();
   try {
+    // Resolve the store inside the try: lazily constructing it can throw when
+    // the audit directory is unwritable, and audit logging is best-effort —
+    // a store-construction failure must not surface to the caller either.
+    const store = params.store ?? getAuditStore();
     store.append({
       profile: params.profile,
       tool: params.tool,
@@ -419,23 +422,45 @@ export async function executeAuditedTransportCommand(input: {
     ? `${sanitizedCommand} # ${input.description.replace(/#/g, '\\#')}`
     : sanitizedCommand;
   const startedAt = Date.now();
-  const result = input.tool === 'sudo-exec'
-    ? await input.transport.execElevated(commandWithDescription, {
-        timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT,
-        mode: 'sudo',
-        password: input.sudoPassword,
-      })
-    : await input.transport.exec(commandWithDescription, { timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT });
-  auditExecution({
-    tool: input.tool,
-    profile: input.profile ?? 'stub',
-    command: commandWithDescription,
-    description: input.description,
-    startedAt,
-    result,
-    store: input.store,
-  });
-  return resultToMcpContent(result);
+  const profile = input.profile ?? 'default';
+  let audited = false;
+  try {
+    const result = input.tool === 'sudo-exec'
+      ? await input.transport.execElevated(commandWithDescription, {
+          timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT,
+          mode: 'sudo',
+          password: input.sudoPassword,
+        })
+      : await input.transport.exec(commandWithDescription, { timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT });
+    auditExecution({
+      tool: input.tool,
+      profile,
+      command: commandWithDescription,
+      description: input.description,
+      startedAt,
+      result,
+      store: input.store,
+    });
+    audited = true;
+    return resultToMcpContent(result);
+  } catch (err) {
+    // Transport rejection (spawn failure, unexpected exception) still gets an
+    // audit record — the contract is "audit success AND failure", matching the
+    // exec/sudo-exec MCP handlers. `audited` guards the resultToMcpContent
+    // throw path (result already audited above) from double-writing.
+    if (!audited) {
+      auditExecution({
+        tool: input.tool,
+        profile,
+        command: commandWithDescription,
+        description: input.description,
+        startedAt,
+        error: err,
+        store: input.store,
+      });
+    }
+    throw err;
+  }
 }
 
 export function resultToMcpContent(result: ExecResult) {
