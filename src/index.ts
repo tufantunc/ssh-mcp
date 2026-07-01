@@ -434,7 +434,13 @@ export function applyRegistryConnectionPolicy(
 
 /** Effective profile/connection name for gating + audit attribution. */
 function resolvedProfileName(connectionName?: string): string {
-  return connectionName ?? registry.getDefaultName() ?? 'default';
+  // Treat an empty/blank connectionName as "omitted", mirroring
+  // TransportRegistry.resolveName() (which routes `''` to the default host).
+  // Otherwise gating + audit attribution would be computed for the literal
+  // profile id '' while the command actually ran against the default host,
+  // silently bypassing that host's per-source approval policy.
+  const name = connectionName && connectionName.trim() !== '' ? connectionName : undefined;
+  return name ?? registry.getDefaultName() ?? 'default';
 }
 
 export function buildApprovalProfile(
@@ -493,7 +499,16 @@ function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher
     return null;
   }
   const input: BuildEngineFromConfigInput = {
-    defaultMode: approvalCfg?.mode,
+    // When there is NO top-level [approval] block (only per-source overrides),
+    // the global default stays 'yolo' (unrestricted) rather than inheriting
+    // buildApprovalEngineFromConfig's [approval]-present 'manual' fallback.
+    // This mirrors the `return null` (legacy unrestricted) branch one level up
+    // for the no-config case: adding per-source gates should gate only those
+    // sources, not silently flip the global default to manual — which would
+    // gate every ungated host and, without WebUI, throw at boot.
+    // A present [approval] block with an unspecified mode still defaults to
+    // manual (the documented TOML default), preserving that contract.
+    defaultMode: approvalCfg === undefined ? 'yolo' : approvalCfg.mode,
     fail_closed: approvalCfg?.fail_closed,
     llm: approvalCfg?.llm,
     perSourceModes,

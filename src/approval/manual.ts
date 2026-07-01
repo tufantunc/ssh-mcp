@@ -11,6 +11,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { randomInt } from 'node:crypto';
 import {
   ApprovalContext,
   ApprovalDecision,
@@ -27,8 +28,10 @@ const ULID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 /**
  * Generate a 26-character ULID-like identifier without pulling in a dep.
  * The 10-char timestamp prefix is genuine ULID; the 16-char random tail uses
- * Math.random which is fine for in-process uniqueness (these ids only need
- * to be unique within one server lifetime).
+ * a cryptographically strong CSPRNG (node:crypto randomInt). These ids gate
+ * the WebUI resolve endpoint, so a predictable tail (e.g. Math.random) would
+ * let an attacker who can reach that endpoint guess pending ids and
+ * approve/deny commands — hence CSPRNG rather than Math.random.
  */
 function generateUlid(): string {
   let now = Date.now();
@@ -39,7 +42,7 @@ function generateUlid(): string {
   }
   let rand = '';
   for (let i = 0; i < 16; i++) {
-    rand += ULID_ALPHABET[Math.floor(Math.random() * 32)];
+    rand += ULID_ALPHABET[randomInt(32)];
   }
   return ts + rand;
 }
