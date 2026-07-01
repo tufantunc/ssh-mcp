@@ -8,6 +8,7 @@ import {
   resolveAuthMode,
   buildTransportConfig,
   hasLegacyCliFlags,
+  validateConfig,
 } from '../src/index';
 import type { ExecResult } from '../src/transports/types';
 
@@ -24,14 +25,33 @@ describe('resultToMcpContent (finding 1: exit-0 stderr must not error)', () => {
       exitCode: 0,
       category: undefined,
     };
-    // Must not throw (exit 0 is success). Since pr/multi-host, substantive
-    // stderr is surfaced alongside stdout in a [stderr] block rather than
-    // dropped — see test/result-mapper.test.ts for the success-path contract.
+    // Must not throw (exit 0 is success). The benign OpenSSH first-connect
+    // host-key warning is filtered out of the success-path stderr, so only
+    // stdout is returned — see test/result-mapper.test.ts for the contract.
     const out = resultToMcpContent(result);
-    expect(out.content[0].type).toBe('text');
-    expect(out.content[0].text).toBe(
-      "ok\n[stderr]\nWarning: Permanently added 'h' (ED25519) to the list of known hosts.",
-    );
+    expect(out.content[0]).toEqual({ type: 'text', text: 'ok' });
+  });
+
+  it('appends genuine stderr diagnostics on success (exit 0), filtering only the benign host-key warning', () => {
+    // Tools like git clone / curl / build systems write progress + warnings to
+    // stderr while still exiting 0; that output must reach the caller.
+    const out = resultToMcpContent({
+      stdout: 'cloned',
+      stderr: "Warning: Permanently added 'h' (ED25519) to the list of known hosts.\nCloning into 'repo'...\nReceiving objects: 100%",
+      exitCode: 0,
+      category: undefined,
+    });
+    expect(out.content[0].text).toBe("cloned\nCloning into 'repo'...\nReceiving objects: 100%");
+  });
+
+  it('returns only stdout when stderr is nothing but the benign host-key warning', () => {
+    const out = resultToMcpContent({
+      stdout: 'done',
+      stderr: "Warning: Permanently added '[h]:2222' (RSA) to the list of known hosts.",
+      exitCode: 0,
+      category: undefined,
+    });
+    expect(out.content[0].text).toBe('done');
   });
 
   it('returns content for a plain success (exit 0, no stderr)', () => {
@@ -51,12 +71,54 @@ describe('resultToMcpContent (finding 1: exit-0 stderr must not error)', () => {
     ).toThrow(/Error \(code 139\)/);
   });
 
+  it('throws for a non-zero exit with EMPTY stderr (e.g. `false`, `test -f missing`)', () => {
+    // Regression for the openssh transport: `false` / `test -f missing` exit
+    // non-zero with no stderr, and must NOT be reported as success.
+    expect(() =>
+      resultToMcpContent({ stdout: '', stderr: '', exitCode: 1, category: 'remote_exit' as any }),
+    ).toThrow(/Error \(code 1\)[\s\S]*Command exited with status 1/);
+  });
+
+  it('treats a null exit code with no error category as success (handshake-less success path)', () => {
+    const out = resultToMcpContent({ stdout: 'done', stderr: '', exitCode: null });
+    expect(out.content[0].text).toBe('done');
+  });
+
   it('throws on auth/host_key/connect/transport/timeout categories regardless of exit code', () => {
     for (const category of ['auth', 'host_key', 'connect', 'transport', 'timeout'] as const) {
       expect(() =>
         resultToMcpContent({ stdout: '', stderr: 'x', exitCode: 0, category }),
       ).toThrow(McpError);
     }
+  });
+
+  it('preserves the timeout context even when stderr was written before the deadline', () => {
+    // A build/tool that prints progress or diagnostics to stderr and then hangs
+    // must NOT be reported as an ordinary error that hides the timeout; the
+    // timeout message stays, with stderr kept as trailing context.
+    let caught: unknown;
+    try {
+      resultToMcpContent({
+        stdout: '',
+        stderr: 'Building... step 3/9\nlinking objects',
+        exitCode: null,
+        category: 'timeout',
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(McpError);
+    const msg = (caught as McpError).message;
+    expect(msg).toMatch(/timed out after \d+ms/);
+    // stderr diagnostics are retained as context, not dropped.
+    expect(msg).toContain('Building... step 3/9');
+    expect(msg).toContain('linking objects');
+  });
+
+  it('reports a bare timeout message when no stderr was captured', () => {
+    expect(() =>
+      resultToMcpContent({ stdout: '', stderr: '', exitCode: null, category: 'timeout' }),
+    ).toThrow(/timed out after \d+ms/);
   });
 });
 
@@ -145,5 +207,76 @@ describe('hasLegacyCliFlags (finding 2: --disableSudo is not a legacy trigger)',
   it('returns false for an empty / config-only argv', () => {
     expect(hasLegacyCliFlags({})).toBe(false);
     expect(hasLegacyCliFlags({ config: '/etc/ssh-mcp/config.toml' })).toBe(false);
+  });
+});
+
+describe('validateConfig (Codex P2: reject value-less OpenSSH option flags)', () => {
+  const baseCfg = { host: 'h', user: 'u', transport: 'openssh' };
+
+  it('rejects a value-less --strictHostKeyChecking (parsed as null) instead of silently defaulting', () => {
+    // parseArgv records `null` for `--strictHostKeyChecking` with no `=value`.
+    // A truthiness guard would skip validation and let the option be dropped,
+    // silently weakening the host-key policy to the default.
+    expect(() =>
+      validateConfig({ ...baseCfg, strictHostKeyChecking: null }),
+    ).toThrow(/--strictHostKeyChecking must be one of: yes, no, accept-new/);
+  });
+
+  it('rejects a value-less --gssapiDelegateCredentials (parsed as null)', () => {
+    expect(() =>
+      validateConfig({ ...baseCfg, kerberos: null, gssapiDelegateCredentials: null }),
+    ).toThrow(/--gssapiDelegateCredentials must be yes or no/);
+  });
+
+  it('rejects a value-less --knownHostsFile (parsed as null)', () => {
+    expect(() =>
+      validateConfig({ ...baseCfg, knownHostsFile: null }),
+    ).toThrow(/--knownHostsFile requires a file path/);
+  });
+
+  it('rejects an invalid explicit --strictHostKeyChecking value', () => {
+    expect(() =>
+      validateConfig({ ...baseCfg, strictHostKeyChecking: 'maybe' }),
+    ).toThrow(/--strictHostKeyChecking must be one of/);
+  });
+
+  it('accepts valid explicit OpenSSH option values', () => {
+    expect(() =>
+      validateConfig({
+        ...baseCfg,
+        kerberos: null, // --kerberos alone; required for gssapiDelegateCredentials
+        strictHostKeyChecking: 'yes',
+        gssapiDelegateCredentials: 'no',
+        knownHostsFile: '/etc/ssh/known_hosts',
+      }),
+    ).not.toThrow();
+  });
+
+  it('does not require OpenSSH option values when the flags are absent', () => {
+    expect(() => validateConfig({ ...baseCfg })).not.toThrow();
+  });
+
+  it('rejects a value-less --transport (parsed as null) instead of silently defaulting to ssh2', () => {
+    // parseArgv records `null` for `--transport` with no `=value`; the nullish
+    // fallback would treat it as absent and run the default ssh2 transport,
+    // silently ignoring a mistyped OpenSSH selection.
+    expect(() =>
+      validateConfig({ host: 'h', user: 'u', transport: null }),
+    ).toThrow(/--transport requires a value/);
+  });
+
+  it('rejects --gssapiDelegateCredentials without --kerberos (delegation would be silently dropped)', () => {
+    // buildArgs only emits GSSAPIDelegateCredentials in the kerberos auth
+    // branch, so accepting it without --kerberos would silently omit it and
+    // break second-hop SSO.
+    expect(() =>
+      validateConfig({ ...baseCfg, gssapiDelegateCredentials: 'yes' }),
+    ).toThrow(/--gssapiDelegateCredentials requires --kerberos/);
+  });
+
+  it('accepts --gssapiDelegateCredentials when --kerberos is present', () => {
+    expect(() =>
+      validateConfig({ host: 'h', user: 'u', kerberos: null, gssapiDelegateCredentials: 'yes' }),
+    ).not.toThrow();
   });
 });

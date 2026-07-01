@@ -164,7 +164,7 @@ export function hasLegacyCliFlags(config: Record<string, string | null>): boolea
   return legacyFlagNames.some(f => config[f] !== undefined);
 }
 
-function validateConfig(config: Record<string, string | null>, multiHost: boolean) {
+function validateConfig(config: Record<string, string | null>, multiHost = false) {
   const errors: string[] = [];
 
   if (multiHost) {
@@ -188,6 +188,15 @@ function validateConfig(config: Record<string, string | null>, multiHost: boolea
 
     const transportExplicit = config.transport;
     const kerberos = config.kerberos !== undefined && config.kerberos !== 'false';
+    // A value-less `--transport` is recorded as `null` by parseArgv; the nullish
+    // fallback below would treat it as absent and silently run the default ssh2
+    // transport, so a mistyped OpenSSH selection would run the wrong transport.
+    // Reject a present-but-value-less --transport like the other value-requiring
+    // flags.
+    if ('transport' in config && transportExplicit == null) {
+      errors.push('--transport requires a value (ssh2 or openssh)');
+    }
+    // --kerberos alone implies --transport=openssh
     const transport = transportExplicit ?? (kerberos ? 'openssh' : 'ssh2');
 
     if (transport !== 'ssh2' && transport !== 'openssh') {
@@ -199,11 +208,28 @@ function validateConfig(config: Record<string, string | null>, multiHost: boolea
     if (transport === 'ssh2' && (config.knownHostsFile || config.strictHostKeyChecking)) {
       errors.push('--knownHostsFile and --strictHostKeyChecking require --transport=openssh');
     }
-    if (STRICT_HOST_KEY && !['yes', 'no', 'accept-new'].includes(config.strictHostKeyChecking!)) {
+    // OpenSSH options that require an explicit value. A value-less flag (e.g.
+    // `--strictHostKeyChecking` with no `=value`) is recorded as `null` by
+    // parseArgv; guarding on truthiness would silently skip validation and let
+    // buildTransportConfig drop the option, falling back to the default and (for
+    // strictHostKeyChecking) weakening the requested host-key policy. Detect the
+    // flag by property presence so a missing value is rejected with a clear error.
+    if ('strictHostKeyChecking' in config && !['yes', 'no', 'accept-new'].includes(config.strictHostKeyChecking!)) {
       errors.push('--strictHostKeyChecking must be one of: yes, no, accept-new');
     }
-    if (GSSAPI_DELEGATE && !['yes', 'no'].includes(config.gssapiDelegateCredentials!)) {
+    if ('gssapiDelegateCredentials' in config && !['yes', 'no'].includes(config.gssapiDelegateCredentials!)) {
       errors.push('--gssapiDelegateCredentials must be yes or no');
+    }
+    if ('knownHostsFile' in config && !config.knownHostsFile) {
+      errors.push('--knownHostsFile requires a file path');
+    }
+    // GSSAPIDelegateCredentials is only emitted by the OpenSSH transport in the
+    // Kerberos auth branch (see OpenSshTransport.buildArgs). Accepting the flag
+    // without --kerberos would let a user request credential delegation while the
+    // server silently omits it, breaking second-hop SSO with no error. Require
+    // Kerberos auth so the requested delegation is actually honored.
+    if ('gssapiDelegateCredentials' in config && !kerberos) {
+      errors.push('--gssapiDelegateCredentials requires --kerberos');
     }
   }
 
@@ -421,9 +447,51 @@ export function applyRegistryConnectionPolicy(
   }
 }
 
+/**
+ * Map ExecResult to MCP tool response. Preserves upstream semantics:
+ *   - auth/host_key/connect/transport categories → reject with descriptive error
+ *   - timeout → reject with timeout error
+ *   - non-zero exit → reject (wraps as "Error (code N):\n<stderr>"), even when
+ *     stderr is empty (e.g. `false`, `test -f missing`): the synthetic detail
+ *     "Command exited with status N" is used so a failed command never looks
+ *     like a success just because it printed nothing to stderr.
+ *   - exit 0 → success, even if stderr is non-empty
+ *
+ * Exit 0 is treated as success regardless of stderr: the OpenSSH transport
+ * surfaces benign diagnostics on stderr (e.g. with the default
+ * StrictHostKeyChecking=accept-new, the first connection to a host prints
+ * "Warning: Permanently added '<host>' ... to the list of known hosts." while
+ * exiting 0). Throwing on any stderr would turn every first-connect into an
+ * error. On success the benign OpenSSH host-key warning is filtered out, but
+ * any remaining stderr is appended to the text response so callers do not lose
+ * useful command diagnostics/progress from tools (git clone, curl, build
+ * tools) that write to stderr while succeeding.
+ */
+/**
+ * Strip the benign OpenSSH first-connect host-key notice from a stderr stream,
+ * leaving genuine command diagnostics intact. With StrictHostKeyChecking=
+ * accept-new the client prints
+ *   "Warning: Permanently added '<host>' (<keytype>) to the list of known hosts."
+ * on the first connection to a host while still exiting 0; that line is noise,
+ * not output the caller asked for.
+ */
+function stripBenignSshWarnings(stderr: string): string {
+  return stderr
+    .split('\n')
+    .filter(line => !/^Warning: Permanently added .*to the list of known hosts\.?\s*$/.test(line))
+    .join('\n')
+    .trim();
+}
 export function resultToMcpContent(result: ExecResult) {
   if (result.category === 'timeout') {
-    throw new McpError(ErrorCode.InternalError, result.stderr || `Command execution timed out after ${DEFAULT_TIMEOUT}ms`);
+    // Always surface that the command timed out, even when the process wrote to
+    // stderr before the deadline. A build/tool that prints progress or
+    // diagnostics to stderr and then hangs would otherwise be reported as an
+    // ordinary error, hiding the timeout. Keep any captured stderr as trailing
+    // context so its diagnostics are not lost.
+    const timeoutMsg = `Command execution timed out after ${DEFAULT_TIMEOUT}ms`;
+    const detail = result.stderr ? `${timeoutMsg}\n${result.stderr}` : timeoutMsg;
+    throw new McpError(ErrorCode.InternalError, detail);
   }
   if (result.category === 'auth') {
     throw new McpError(ErrorCode.InternalError, `SSH authentication error: ${result.stderr}`);
@@ -437,18 +505,13 @@ export function resultToMcpContent(result: ExecResult) {
   if (result.category === 'transport') {
     throw new McpError(ErrorCode.InternalError, result.stderr || 'SSH transport error');
   }
-  // Only treat stderr as a hard failure when the command actually failed (non-zero exit).
-  // Many tools (sudo with -S, curl, git, apt) write progress/info to stderr on success.
-  const exitCode = result.exitCode ?? 0;
-  if (exitCode !== 0 && result.stderr) {
-    throw new McpError(ErrorCode.InternalError, `Error (code ${exitCode}):\n${result.stderr}`);
+  if (result.exitCode !== null && result.exitCode !== 0) {
+    const detail = result.stderr || `Command exited with status ${result.exitCode}`;
+    throw new McpError(ErrorCode.InternalError, `Error (code ${result.exitCode}):\n${detail}`);
   }
-  // Success path: include stderr alongside stdout when it has substantive content.
-  const trimmedStderr = result.stderr.trim();
-  const text = trimmedStderr
-    ? (result.stdout
-        ? `${result.stdout.replace(/\n+$/, '')}\n[stderr]\n${result.stderr}`
-        : result.stderr)
+  const diagnostics = stripBenignSshWarnings(result.stderr);
+  const text = diagnostics
+    ? `${result.stdout}${result.stdout && !result.stdout.endsWith('\n') ? '\n' : ''}${diagnostics}`
     : result.stdout;
   return {
     content: [{
