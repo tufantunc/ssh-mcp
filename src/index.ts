@@ -586,7 +586,11 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
         if (!isResolved) {
           isResolved = true;
           clearTimeout(timeoutId);
-          if (stderr) {
+          // Only treat this as a failure when the remote command actually exited
+          // non-zero. sudo/sh can write benign bytes to stderr (e.g. an empty
+          // "-p ''" prompt) even on success, so stderr content alone is not a
+          // reliable failure signal.
+          if (code !== 0) {
             reject(new McpError(ErrorCode.InternalError, `Error (code ${code}):\n${stderr}`));
           } else {
             resolve({
@@ -661,7 +665,10 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
             isResolved = true;
             clearTimeout(timeoutId);
             conn.end();
-            if (stderr) {
+            // Only treat this as a failure when the remote command actually exited
+            // non-zero. sudo/sh can write benign bytes to stderr even on success,
+            // so stderr content alone is not a reliable failure signal.
+            if (code !== 0) {
               reject(new McpError(ErrorCode.InternalError, `Error (code ${code}):\n${stderr}`));
             } else {
               resolve({
