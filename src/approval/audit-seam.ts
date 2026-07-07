@@ -101,8 +101,18 @@ export async function loadAuditSink(config: AuditSeamConfig = {}): Promise<Audit
   let mod: AuditModuleLike;
   try {
     mod = (await import(specifier)) as unknown as AuditModuleLike;
-  } catch {
-    return NO_OP_SINK; // ERR_MODULE_NOT_FOUND → audit module absent → no-op
+  } catch (err) {
+    // Only ERR_MODULE_NOT_FOUND is the expected "audit module absent" case
+    // (Decision D2 optional seam). Any other import failure — a syntax or
+    // runtime error inside a *present* audit module — is a real
+    // misconfiguration that would otherwise be silently indistinguishable
+    // from "not installed". Surface it before degrading to the no-op sink.
+    const code = (err as { code?: string })?.code;
+    if (code !== 'ERR_MODULE_NOT_FOUND') {
+      const message = (err as { message?: string })?.message ?? String(err);
+      console.error(`[ssh-mcp][audit-seam] audit module present but failed to load; auditing disabled: ${message}`);
+    }
+    return NO_OP_SINK; // audit module absent (or unusable) → no-op
   }
   if (!mod || typeof mod.AuditStore !== 'function') {
     return NO_OP_SINK;
