@@ -8,6 +8,7 @@ import {
   activeFilePath,
   buildRecord,
   capThenRedact,
+  clampInt,
   yoloApproval,
   REDACT_SCAN_HEADROOM_BYTES,
 } from '../store.js';
@@ -167,5 +168,106 @@ describe('audit store', () => {
     expect(out.text).not.toContain(secret);
     expect(Buffer.byteLength(out.text, 'utf8')).toBeLessThanOrEqual(cap);
     expect(out.truncated).toBe(true);
+  });
+
+  it('redacts a PEM private key whose END marker falls past the scan window', () => {
+    const cap = 64;
+    // Body large enough that the END terminator sits well beyond cap + headroom.
+    // Under the old cap-before-redact ordering the terminator-anchored PEM_RE
+    // could not match, leaving raw key material in the persisted slice.
+    const begin = '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----';
+    const end = '-----END ' + 'OPENSSH PRIVATE KEY-----';
+    const body = 'A'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 2000);
+    const pem = `${begin}\n${body}\n${end}`;
+    const out = capThenRedact(`prefix ${pem} suffix`, cap);
+    expect(out.text).not.toContain('AAAA');
+    expect(out.text).not.toContain('PRIVATE KEY');
+    expect(out.text).toContain('<redacted>');
+  });
+
+  it('redacts a truncated PEM key with no END terminator (dangling BEGIN)', () => {
+    const cap = 64;
+    // A key whose END marker was truncated away entirely. The dangling-BEGIN
+    // fallback must redact from the header to end-of-string so no raw key
+    // material persists even without a reachable terminator.
+    const begin = '-----BEGIN ' + 'RSA PRIVATE KEY-----';
+    const body = 'K'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 500);
+    const out = capThenRedact(`log ${begin}\n${body}`, cap);
+    expect(out.text).not.toContain('KKKK');
+    expect(out.text).not.toContain('PRIVATE KEY');
+    expect(out.text).toContain('<redacted>');
+  });
+
+  it('persists a redacted PEM key end-to-end through append (large key past window)', () => {
+    const dir = tmpAuditDir();
+    try {
+      const cap = 128;
+      const store = new AuditStore({ auditDir: dir, auditMaxBytes: cap });
+      const now = new Date('2026-05-25T12:00:00Z');
+      const begin = '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----';
+      const end = '-----END ' + 'OPENSSH PRIVATE KEY-----';
+      const body = 'Z'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 3000);
+      const pem = `${begin}\n${body}\n${end}`;
+      const rec = store.append({
+        now,
+        profile: 'p',
+        tool: 'exec',
+        command: 'cat id_ed25519',
+        approval: yoloApproval(now),
+        exec: { stdout: pem, stderr: '', exitCode: 0, durationMs: 1 },
+      });
+      const persisted = readFileSync(activeFilePath(dir, now), 'utf8');
+      expect(persisted).not.toContain('ZZZZ');
+      expect(persisted).not.toContain('PRIVATE KEY');
+      expect(rec.exec?.stdout).toContain('<redacted>');
+      expect(rec.exec?.stdout).not.toContain('ZZZZ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('clamps negative / non-finite config to safe values (no empty output, no per-append rotation, retain >= 1)', () => {
+    // clampInt unit behavior across the surprising inputs Copilot flagged.
+    expect(clampInt(NaN, 10, 1)).toBe(10);
+    expect(clampInt(Infinity, 10, 1)).toBe(10);
+    expect(clampInt(-Infinity, 10, 1)).toBe(10);
+    expect(clampInt(undefined, 10, 1)).toBe(10);
+    expect(clampInt(null, 10, 1)).toBe(10);
+    expect(clampInt(-5, 99, 1)).toBe(99); // negative < minValid -> fallback (not floored to min)
+    expect(clampInt(-5, 99, 0)).toBe(99); // negative < 0 -> fallback
+    expect(clampInt(0, 99, 0)).toBe(0); // explicit 0 honored when minValid is 0
+    expect(clampInt(0, 99, 1)).toBe(99); // 0 below minValid 1 -> fallback
+    expect(clampInt(3.9, 99, 1)).toBe(3); // floored to integer
+
+    // End-to-end: a store built with garbage config still writes a non-empty,
+    // single record (negative auditMaxBytes would otherwise empty stdout, NaN
+    // maxFileBytes would rotate on every append).
+    const dir = tmpAuditDir();
+    try {
+      const store = new AuditStore({
+        auditDir: dir,
+        auditMaxBytes: -100,
+        maxFileBytes: NaN,
+        retain: -3,
+      });
+      const now = new Date('2026-05-25T12:00:00.000Z');
+      store.append({
+        now,
+        profile: 'default',
+        tool: 'exec',
+        command: 'echo hello',
+        approval: yoloApproval(now),
+        exec: { stdout: 'output-visible', stderr: '', exitCode: 0, durationMs: 1 },
+      });
+      const file = activeFilePath(dir, now);
+      // Only the active file exists — no spurious rotation from NaN maxFileBytes.
+      const rotated = readdirSync(dir).filter((f) => /\.jsonl\.\d+$/.test(f));
+      expect(rotated).toHaveLength(0);
+      const parsed = JSON.parse(readFileSync(file, 'utf8').trim());
+      // auditMaxBytes clamped to >= 0 default, so stdout is retained, not emptied.
+      expect(parsed.exec.stdout.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

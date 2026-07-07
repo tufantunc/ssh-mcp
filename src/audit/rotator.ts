@@ -74,11 +74,24 @@ export function rotate(filePath: string, retain: number = DEFAULT_RETAIN): void 
 
 /**
  * Prune day-rolled files older than `retainDays` from the audit directory.
- * Returns paths removed.
+ *
+ * Retention is by AGE, not by count of distinct dates: a file is removed when
+ * its embedded date is strictly older than the cutoff (`asOf` minus
+ * `retainDays - 1` days, so the cutoff window always includes today plus the
+ * previous `retainDays - 1` calendar days). This guarantees data never lives
+ * past the advertised window even when usage has gaps — e.g. with retain=10, an
+ * `executions-20260501.jsonl` file is pruned once "today" is 2026-07-01 even
+ * though only two distinct dates exist on disk. Rotated siblings
+ * (`.jsonl.1`, `.jsonl.2`, ...) share the active file's date and are pruned
+ * with it.
+ *
+ * `asOf` defaults to the current date; callers pass the append date so pruning
+ * is anchored to the write that triggered it. Returns paths removed.
  */
 export function pruneOldDays(
   auditDir: string,
   retainDays: number = DEFAULT_RETAIN,
+  asOf: Date = new Date(),
 ): string[] {
   let entries: string[];
   try {
@@ -87,23 +100,25 @@ export function pruneOldDays(
     return [];
   }
   const re = /^executions-(\d{8})\.jsonl(?:\.\d+)?$/;
-  const dates: { date: string; file: string }[] = [];
+  // Cutoff = asOf - (retainDays - 1) days, as a YYYYMMDD stamp. Files whose
+  // date stamp is lexicographically < cutoff are outside the window. String
+  // comparison is valid because YYYYMMDD is zero-padded and monotonic.
+  const keep = Math.max(1, Math.floor(retainDays));
+  const cutoffDate = new Date(
+    Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth(), asOf.getUTCDate()) -
+      (keep - 1) * 24 * 60 * 60 * 1000,
+  );
+  const cy = cutoffDate.getUTCFullYear().toString().padStart(4, '0');
+  const cm = (cutoffDate.getUTCMonth() + 1).toString().padStart(2, '0');
+  const cd = cutoffDate.getUTCDate().toString().padStart(2, '0');
+  const cutoffStamp = `${cy}${cm}${cd}`;
+
+  const removed: string[] = [];
   for (const name of entries) {
     const m = re.exec(name);
-    if (m) dates.push({ date: m[1], file: name });
-  }
-  if (dates.length === 0) return [];
-  dates.sort((a, b) => b.date.localeCompare(a.date)); // newest first
-  // Keep distinct dates up to retainDays; remove anything older.
-  const keepDates = new Set<string>();
-  for (const d of dates) {
-    keepDates.add(d.date);
-    if (keepDates.size >= retainDays) break;
-  }
-  const removed: string[] = [];
-  for (const d of dates) {
-    if (!keepDates.has(d.date)) {
-      const p = path.join(auditDir, d.file);
+    if (!m) continue;
+    if (m[1] < cutoffStamp) {
+      const p = path.join(auditDir, name);
       try {
         fs.unlinkSync(p);
         removed.push(p);

@@ -41,6 +41,32 @@ describe('audit redactor', () => {
     expect(redact('mysql -p')).toBe('mysql -p');
   });
 
+  it('redacts quoted attached -p passwords that contain whitespace', () => {
+    // Quote *after* -p: `mysql -p"secret with space"` / `-p'secret with space'`.
+    const afterDouble = redact('mysql -p"secret with space"');
+    expect(afterDouble).toContain(`-p"${R}"`);
+    expect(afterDouble).not.toContain('secret with space');
+
+    const afterSingle = redact("mysql -p'secret with space'");
+    expect(afterSingle).toContain(`-p'${R}'`);
+    expect(afterSingle).not.toContain('secret with space');
+
+    // Whole arg quoted (quote *before* -p): `'-psecret with space'`.
+    const wholeSingle = redact("mysql '-psecret with space'");
+    expect(wholeSingle).toContain(`'-p${R}'`);
+    expect(wholeSingle).not.toContain('secret with space');
+
+    const wholeDouble = redact('mysql "-psecret with space"');
+    expect(wholeDouble).toContain(`"-p${R}"`);
+    expect(wholeDouble).not.toContain('secret with space');
+
+    // A later plain attached form on the same line still redacts too.
+    const mixed = redact('mysql -p"a b" && mysqldump -pplain');
+    expect(mixed).not.toContain('a b');
+    expect(mixed).not.toContain('plain');
+    expect(mixed).toContain(`mysqldump -p${R}`);
+  });
+
   it('redacts JSON/TOML-ish secret values', () => {
     const out = redact('{"password":"pw","nested_token":"tok","safe":"ok"}\napi_key = "abc"\ntoken abc');
     expect(out).toContain(`"password":"${R}"`);
