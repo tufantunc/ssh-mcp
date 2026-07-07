@@ -41,7 +41,22 @@ export class TransportRegistry {
   /** True only when setDefault() was called; first-registered fallback leaves this false. */
   private defaultExplicit = false;
 
-  constructor(options: TransportRegistryOptions = {}) {
+  /**
+   * @param prepareConfig Optional per-host preparation run lazily on first
+   *   get(name), inside the init path — NOT at register() time. Used to defer
+   *   expensive/failure-prone work (e.g. reading an ssh2 key file from disk)
+   *   until the host is actually selected, so one secondary host with a
+   *   missing/unmounted key path does not break startup or block list-servers
+   *   and commands against otherwise-healthy hosts.
+   * @param options Construction-time behavior flags — currently the
+   *   require-connection-when-multi guard (see {@link TransportRegistryOptions}).
+   *   Kept as a second positional arg so the existing `new
+   *   TransportRegistry(prepareKeyContents)` call sites and tests stay valid.
+   */
+  constructor(
+    private prepareConfig?: (cfg: ServerConfig) => Promise<void>,
+    options: TransportRegistryOptions = {}
+  ) {
     // Safe default: require an explicit name when multiple sources exist unless
     // an operator explicitly opts out (D-A2 escape hatch).
     this.requireConnectionWhenMulti = options.requireConnectionWhenMulti ?? true;
@@ -166,18 +181,24 @@ export class TransportRegistry {
 
     const cfg = this.configs.get(resolved)!;
     const initPromise = (async () => {
-      const t = createTransport(cfg);
       try {
+        // Lazy per-host prep (e.g. reading the ssh2 key file). Deferred to here
+        // so a missing key on this host fails only when the host is used, not at
+        // startup. Kept inside the try so the finally below clears the in-flight
+        // entry on a prep failure too — a later get() retries instead of
+        // replaying the cached rejection (same contract as a rejected init).
+        if (this.prepareConfig) await this.prepareConfig(cfg);
+        const t = createTransport(cfg);
         await t.init();
         // Cache the live transport only on successful init.
         this.transports.set(resolved, t);
         return t;
       } finally {
-        // Always clear the in-flight entry so a rejected init (e.g. a transient
-        // connect timeout to a temporarily-unreachable host) is NOT cached.
-        // Otherwise every later get() would replay the same rejection via the
-        // pending-promise return above, and the connection could never retry
-        // without a process restart.
+        // Always clear the in-flight entry so a rejected prep/init (e.g. a
+        // missing key file, or a transient connect timeout to a temporarily-
+        // unreachable host) is NOT cached. Otherwise every later get() would
+        // replay the same rejection via the pending-promise return above, and
+        // the connection could never retry without a process restart.
         this.initPromises.delete(resolved);
       }
     })();
@@ -196,6 +217,12 @@ export class TransportRegistry {
     connected: boolean;
     isDefault: boolean;
   }> {
+    // A name is only a *usable* default when it can actually be selected with an
+    // omitted connectionName: either it's the lone server, or setDefault() was
+    // called. In the normal multi-host case (>1 server, no explicit default)
+    // resolveName() rejects an omitted name, so advertising the first-registered
+    // host as "(default)" would be misleading — report isDefault=false there.
+    const defaultUsable = this.defaultExplicit || this.configs.size === 1;
     const out = [];
     for (const [name, cfg] of this.configs) {
       out.push({
@@ -206,7 +233,7 @@ export class TransportRegistry {
         transport: (cfg.transport ?? (cfg.kerberos ? 'openssh' : 'ssh2')) as 'ssh2' | 'openssh',
         authMode: cfg.authMode ?? (cfg.kerberos ? 'kerberos' : cfg.keyPath || cfg.privateKey ? 'key' : cfg.password ? 'password' : 'unspecified'),
         connected: this.transports.has(name),
-        isDefault: this.defaultName === name,
+        isDefault: defaultUsable && this.defaultName === name,
       });
     }
     return out;

@@ -1,5 +1,5 @@
 import { spawn, ChildProcess, execFile } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import { promises as fs, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -11,7 +11,6 @@ import {
   ErrorCategory,
   TransportConfig,
 } from './types.js';
-import { buildSudoWrapper } from './ssh2.js';
 
 /**
  * OpenSshTransport — spawns the system `ssh` binary per command.
@@ -77,7 +76,18 @@ export class OpenSshTransport implements ISshTransport {
       if (pwd === undefined && this.cfg.suPassword) {
         return this.runSuViaPty(command, this.cfg.suPassword, opts);
       }
-      const wrapped = buildSudoWrapper(command, pwd);
+      if (pwd !== undefined) {
+        // OpenSSH receives the remote command as a local ssh argv element.
+        // Embedding the sudo password in that command (the ssh2 wrapper style)
+        // exposes it to local process inspection. Keep argv password-free and
+        // feed sudo -S via stdin instead.
+        const wrapped = buildOpenSshSudoWrapper(command, true);
+        return this.runSsh(wrapped, {
+          ...opts,
+          stdin: `${pwd}\n${opts.stdin ?? ''}`,
+        });
+      }
+      const wrapped = buildOpenSshSudoWrapper(command, false);
       return this.runSsh(wrapped, opts);
     }
     const suPwd = opts.password ?? this.cfg.suPassword;
@@ -95,7 +105,12 @@ export class OpenSshTransport implements ISshTransport {
   async close(): Promise<void> {
     if (this.askpassDir) {
       try {
-        await fs.rm(this.askpassDir, { recursive: true, force: true });
+        // Synchronous removal: close() is invoked from process 'exit'/SIGINT/
+        // SIGTERM handlers (see init()), which cannot await. An async fs.rm()
+        // there would be discarded — the event loop is torn down by
+        // process.exit() before the removal runs, leaking the short-lived
+        // askpass temp dir. rmSync guarantees cleanup completes before exit.
+        rmSync(this.askpassDir, { recursive: true, force: true });
       } catch (e) {
         // best-effort cleanup
       }
@@ -169,7 +184,15 @@ export class OpenSshTransport implements ISshTransport {
         );
         break;
       case 'key':
-        if (cfg.keyPath) a.push('-i', cfg.keyPath);
+        if (cfg.keyPath) {
+          a.push('-i', cfg.keyPath);
+          // Force OpenSSH to use ONLY the supplied key. Without
+          // IdentitiesOnly=yes, ssh still offers every ssh-agent identity
+          // first, which can exhaust the server's MaxAuthTries before the
+          // chosen `-i` key is ever tried. This matches the ssh2 path, which
+          // authenticates with exactly the configured key.
+          a.push('-o', 'IdentitiesOnly=yes');
+        }
         a.push(
           '-o', 'PreferredAuthentications=publickey',
           '-o', 'PasswordAuthentication=no',
@@ -209,6 +232,7 @@ export class OpenSshTransport implements ISshTransport {
     return new Promise((resolve) => {
       const args = [...this.buildArgs(opts), command];
       let timedOut = false;
+      let exited = false;
       let stdout = '';
       let stderr = '';
 
@@ -230,11 +254,16 @@ export class OpenSshTransport implements ISshTransport {
         timedOut = true;
         child.kill('SIGTERM');
         setTimeout(() => {
-          if (!child.killed) child.kill('SIGKILL');
+          // `child.killed` only reflects that a signal was *sent*, not that the
+          // process actually exited. Gate the SIGKILL fallback on the real
+          // `exited` flag (set from the close event) so a process ignoring
+          // SIGTERM is still force-killed instead of being left to hang.
+          if (!exited) child.kill('SIGKILL');
         }, 2000);
       }, opts.timeoutMs);
 
       child.on('error', (err: Error) => {
+        exited = true;
         clearTimeout(timer);
         resolve({
           stdout,
@@ -245,6 +274,7 @@ export class OpenSshTransport implements ISshTransport {
       });
 
       child.on('close', (code, signal) => {
+        exited = true;
         clearTimeout(timer);
         const category = timedOut ? 'timeout' : classifyError(code, stderr);
         resolve({
@@ -286,9 +316,14 @@ export class OpenSshTransport implements ISshTransport {
       // command emitting more than ~8KB (inconsistent with runSsh, which
       // returns the full stream). Keep the full EXEC output here.
       let execCapture = '';
+      // The exact input line written to the root shell in the EXEC state. With
+      // `ssh -tt` the remote PTY echoes it back onto stdout, so it is stored
+      // here to strip that single echoed line from the captured output.
+      let execInput = '';
       let capturedStderr = '';
       let exitCode: number | null = null;
       let timedOut = false;
+      let exited = false;
       let stateTimer: NodeJS.Timeout | null = null;
 
       const child: ChildProcess = spawn('ssh', args, {
@@ -325,7 +360,11 @@ export class OpenSshTransport implements ISshTransport {
         timedOut = true;
         clearStateTimer();
         child.kill('SIGTERM');
-        setTimeout(() => { if (!child.killed) child.kill('SIGKILL'); }, 2000);
+        // Gate the SIGKILL fallback on the real `exited` flag, not
+        // `child.killed` (which is set the instant SIGTERM is *sent*, so the
+        // fallback would always be skipped and a process ignoring SIGTERM
+        // could hang past the deadline).
+        setTimeout(() => { if (!exited) child.kill('SIGKILL'); }, 2000);
       }, opts.timeoutMs);
 
       child.stdout?.on('data', (chunk: Buffer) => {
@@ -338,7 +377,16 @@ export class OpenSshTransport implements ISshTransport {
         // scan buffer so large command output is not lost (see execCapture decl).
         if (state === 'EXEC') execCapture += text;
 
-        if (failRe.test(stdoutTail)) {
+        // Auth-failure detection must run ONLY during the su/login phases.
+        // Once the state machine reaches EXEC, the stream carries the user
+        // command's own stdout, which may legitimately contain phrases like
+        // "incorrect password" or "authentication failure" (e.g. grepping auth
+        // logs). Matching there would kill the session and mis-report the
+        // command's output as an auth error, so gate the check on the pre-EXEC
+        // login states.
+        const inLoginPhase =
+          state === 'SU_PROMPT' || state === 'PASSWORD_SENT' || state === 'ROOT_SHELL';
+        if (inLoginPhase && failRe.test(stdoutTail)) {
           clearStateTimer();
           capturedStderr += stdoutTail;
           child.kill('SIGTERM');
@@ -357,7 +405,11 @@ export class OpenSshTransport implements ISshTransport {
           // Send sentinel PS1 once we see a non-prompt line (typical: post-auth motd)
           // Trigger: any newline after password sent.
           if (/\r?\n/.test(text)) {
-            writeLine(`export PS1='${readyMark}$ '`);
+            // Set a sentinel PS1 so the root-shell prompt is machine-detectable,
+            // and clear PS2 to '' so the multiline subshell wrapper written in
+            // the EXEC state (see below) does not emit `> ` continuation prompts
+            // into the captured PTY stream.
+            writeLine(`export PS1='${readyMark}$ '; export PS2=''`);
             state = 'ROOT_SHELL';
             setStateTimer(5000, 'awaiting sentinel prompt');
             buffer = '';
@@ -371,9 +423,20 @@ export class OpenSshTransport implements ISshTransport {
           state = 'EXEC';
           buffer = '';
           stdoutTail = '';
-          // Execute user command, then echo sentinel+exitcode
-          writeLine(`${command}`);
-          writeLine(`echo ${endMark}$?`);
+          // Run the user command inside a subshell, then echo the sentinel and
+          // its exit status on the SAME input line.
+          //
+          //  - Subshell isolation: a command that exits or exec-replaces its
+          //    shell (e.g. `echo ok; exit 0`, `exec true`) only terminates the
+          //    subshell. The root control shell survives to run the sentinel, so
+          //    the real exit status is reported instead of the close path
+          //    mistaking a clean exit for a transport failure and dropping the
+          //    output. `$?` after `( ... )` is the subshell's exit status.
+          //  - Same-line sentinel: with `ssh -tt` the sentinel-emit is echoed as
+          //    part of this one input line, so it can never glue onto command
+          //    output that lacks a trailing newline (e.g. `printf foo`).
+          execInput = `( ${command} ); echo ${endMark}$?`;
+          writeLine(execInput);
           return;
         }
 
@@ -384,12 +447,24 @@ export class OpenSshTransport implements ISshTransport {
             // Derive output from the unbounded EXEC capture (not the truncated
             // scan buffer) so large command output is preserved in full. Locate
             // the end-marker within the full capture for the slice boundary.
+            // endRe requires a digit after the marker, so the echoed
+            // `echo <endMark>$?` (literal `$?`) never matches — only the real
+            // sentinel output does.
             const em = execCapture.match(endRe);
             const endIdx = em ? em.index! : execCapture.length;
             capturedStdout = execCapture.slice(0, endIdx).replace(/\r\n/g, '\n');
             // Strip the echoed PS1-sentinel leftovers if any
             capturedStdout = capturedStdout.replace(new RegExp(`${readyMark}\\$\\s*`, 'g'), '');
-            // Strip the echoed command lines (best effort)
+            // Strip the single echoed input line the remote PTY replayed at the
+            // head of the capture (present with `ssh -tt`). Because the command
+            // and sentinel-emit are combined into one known `execInput` line,
+            // removing exactly that line (and its trailing newline) yields the
+            // command's real stdout — even when the output is unterminated.
+            const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            capturedStdout = capturedStdout.replace(
+              new RegExp(`^${escapeRe(execInput)}\\r?\\n?`),
+              '',
+            );
             state = 'DONE';
             writeLine('exit');
             writeLine('exit');
@@ -402,6 +477,7 @@ export class OpenSshTransport implements ISshTransport {
       });
 
       child.on('error', (err: Error) => {
+        exited = true;
         clearStateTimer();
         clearTimeout(overallTimer);
         resolve({
@@ -413,6 +489,7 @@ export class OpenSshTransport implements ISshTransport {
       });
 
       child.on('close', (code, signal) => {
+        exited = true;
         clearStateTimer();
         clearTimeout(overallTimer);
 
@@ -430,7 +507,11 @@ export class OpenSshTransport implements ISshTransport {
         if (state === 'DONE' && exitCode !== null) {
           resolve({
             stdout: capturedStdout,
-            stderr: '',
+            // A PTY merges remote stdout and stderr into the captured stdout
+            // stream. Preserve that merged diagnostic text as stderr for
+            // non-zero exits so resultToMcpContent can surface `ls: cannot
+            // access ...` instead of only a generic exit status.
+            stderr: exitCode === 0 ? '' : capturedStdout,
             exitCode,
             category: exitCode === 0 ? undefined : 'remote_exit',
           });
@@ -451,6 +532,22 @@ export class OpenSshTransport implements ISshTransport {
       });
     });
   }
+}
+
+/**
+ * Build a sudo wrapper for the OpenSSH subprocess transport.
+ *
+ * Unlike the ssh2 wrapper, this must never embed the sudo password in the
+ * command string: OpenSSH receives the remote command as a local `ssh` argv
+ * element. When a password is needed, the caller supplies it through stdin for
+ * `sudo -S` instead.
+ */
+export function buildOpenSshSudoWrapper(command: string, expectsPassword: boolean): string {
+  const escaped = command.replace(/'/g, "'\\''");
+  if (expectsPassword) {
+    return `sudo -p "" -S sh -c '${escaped}'`;
+  }
+  return `sudo -n sh -c '${escaped}'`;
 }
 
 /**
@@ -484,7 +581,10 @@ export function renderAskpassHelper(envName: string, isWindows: boolean): string
  *
  *   exit 0                → undefined  (success)
  *   exit 1-254            → remote_exit (remote command's own non-zero exit)
- *   exit 255              → inspect stderr for SSH-layer failure type
+ *   exit 255              → inspect stderr for SSH-layer failure type;
+ *                           falls back to remote_exit when no SSH-layer
+ *                           signature matches (ssh(1) documents 255 as either
+ *                           an SSH error OR the remote command's own exit 255)
  *   exit null             → treated as transport failure
  */
 export function classifyError(code: number | null, stderr: string): ErrorCategory | undefined {
@@ -507,5 +607,9 @@ export function classifyError(code: number | null, stderr: string): ErrorCategor
   if (/connection reset/.test(s)) return 'connect';
   if (/could not resolve|name or service not known/.test(s)) return 'connect';
   if (/no route to host|network unreachable/.test(s)) return 'connect';
-  return 'transport';
+  // No SSH-layer signature matched. Per ssh(1), 255 is also the exit code a
+  // remote command can legitimately return, so surface it as the remote
+  // command's own non-zero exit (Error (code 255)) rather than masking it as
+  // a generic SSH transport error.
+  return 'remote_exit';
 }

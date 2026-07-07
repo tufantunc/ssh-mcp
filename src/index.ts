@@ -52,14 +52,38 @@ function collectSshJsonArgs(): string[] {
     .map(a => a.slice('--ssh='.length));
 }
 
+/**
+ * Resolve and validate the transport for a multi-host --ssh JSON config.
+ * Defaults to 'ssh2'; rejects any value that is not exactly 'ssh2' or 'openssh'
+ * so a typo like "opnssh" fails at parse time instead of silently running the
+ * default ssh2 transport. (createTransport treats any non-'openssh' value as
+ * ssh2, while prepareKeyContents only loads a key when transport === 'ssh2',
+ * so an unchecked typo would connect over ssh2 without the configured key.)
+ * Mirrors the legacy CLI's `Invalid --transport` rejection.
+ */
+function resolveJsonTransport(obj: any): 'ssh2' | 'openssh' {
+  const t = obj.transport ?? 'ssh2';
+  if (t !== 'ssh2' && t !== 'openssh') {
+    throw new Error(`--ssh "${obj.name}" invalid "transport": ${JSON.stringify(obj.transport)} (expected "ssh2" or "openssh")`);
+  }
+  return t;
+}
+
 export function parseServerConfigJson(raw: string): ServerConfig {
   let obj: any;
   try {
     obj = JSON.parse(raw);
   } catch (e: any) {
-    throw new Error(`--ssh JSON parse error: ${e?.message || e}\nRaw: ${raw}`);
+    // Do NOT echo the raw argument: a malformed --ssh config can still carry a
+    // password or private key alongside the syntax error, and main() prints the
+    // thrown error to stderr. Surface only the parser message, never the config.
+    throw new Error(`--ssh JSON parse error: ${e?.message || e}`);
   }
-  if (!obj.name) throw new Error('--ssh JSON missing required "name"');
+  // name must be a non-empty string: a numeric key (e.g. `"name": 1`) registers
+  // under a Map key the MCP tools' string connectionName can never resolve.
+  if (typeof obj.name !== 'string' || obj.name.length === 0) {
+    throw new Error('--ssh JSON requires a non-empty string "name"');
+  }
   if (!obj.host) throw new Error(`--ssh "${obj.name}" missing required "host"`);
   const user = obj.user ?? obj.username;
   if (!user) throw new Error(`--ssh "${obj.name}" missing required "user" (or "username")`);
@@ -68,10 +92,23 @@ export function parseServerConfigJson(raw: string): ServerConfig {
     throw new Error(`--ssh "${obj.name}" requires "auth": "kerberos" | "key" | "password"`);
   }
 
+  // port: mirror the legacy --port numeric validation. An unchecked value fails
+  // only at first use (openssh `ssh -G -p abc` -> "Bad port", exit 255; ssh2
+  // receives a non-numeric port), advertised by list-servers as if healthy.
+  // Reject a non-integer / out-of-range port at parse time.
+  let port = 22;
+  if (obj.port !== undefined) {
+    const p = typeof obj.port === 'number' ? obj.port : Number(obj.port);
+    if (!Number.isInteger(p) || p < 1 || p > 65535) {
+      throw new Error(`--ssh "${obj.name}" invalid "port": ${JSON.stringify(obj.port)} (expected integer 1-65535)`);
+    }
+    port = p;
+  }
+
   const cfg: ServerConfig = {
     name: obj.name,
     host: obj.host,
-    port: obj.port ?? 22,
+    port,
     username: user,
     authMode: auth,
   };
@@ -80,21 +117,56 @@ export function parseServerConfigJson(raw: string): ServerConfig {
     case 'kerberos':
       cfg.kerberos = true;
       cfg.transport = 'openssh';
-      if (obj.gssapiDelegateCredentials) cfg.gssapiDelegateCredentials = obj.gssapiDelegateCredentials;
+      // Kerberos implies openssh; reject an explicit conflicting transport
+      // rather than silently overriding it (mirrors the legacy --kerberos rule).
+      if (obj.transport !== undefined && obj.transport !== 'openssh') {
+        throw new Error(`--ssh "${obj.name}" auth "kerberos" implies transport "openssh" (got ${JSON.stringify(obj.transport)})`);
+      }
       break;
     case 'key':
-      cfg.transport = obj.transport ?? 'ssh2';
+      cfg.transport = resolveJsonTransport(obj);
+      // OpenSshTransport.buildArgs only passes cfg.keyPath via `-i`; an inline
+      // privateKey would be silently ignored and ssh would fall back to
+      // agent/default identities. Reject the combination so the configured
+      // credential is actually used (or the user switches to keyPath).
+      if (cfg.transport === 'openssh' && obj.privateKey) {
+        throw new Error(`--ssh "${obj.name}" inline "privateKey" is not supported for transport "openssh"; use "keyPath"`);
+      }
       if (obj.keyPath) cfg.keyPath = obj.keyPath;
       if (obj.privateKey) cfg.privateKey = obj.privateKey;
       break;
     case 'password':
-      cfg.transport = obj.transport ?? 'ssh2';
+      cfg.transport = resolveJsonTransport(obj);
       if (obj.password) cfg.password = obj.password;
       break;
   }
 
   if (obj.sudoPassword) cfg.sudoPassword = obj.sudoPassword;
   if (obj.suPassword) cfg.suPassword = obj.suPassword;
+
+  // gssapiDelegateCredentials: enum-validate and require kerberos auth (the only
+  // path that emits GSSAPIDelegateCredentials). An unchecked typo like "maybe"
+  // registers but fails every command (openssh `ssh -G -o
+  // GSSAPIDelegateCredentials=maybe` -> "unsupported option", exit 255).
+  // Mirrors the legacy rules "must be yes or no" + "requires --kerberos".
+  if (obj.gssapiDelegateCredentials !== undefined) {
+    if (!['yes', 'no'].includes(obj.gssapiDelegateCredentials)) {
+      throw new Error(`--ssh "${obj.name}" gssapiDelegateCredentials must be "yes" or "no" (got ${JSON.stringify(obj.gssapiDelegateCredentials)})`);
+    }
+    if (auth !== 'kerberos') {
+      throw new Error(`--ssh "${obj.name}" gssapiDelegateCredentials requires auth "kerberos"`);
+    }
+    cfg.gssapiDelegateCredentials = obj.gssapiDelegateCredentials;
+  }
+
+  // strictHostKeyChecking: enum-validate. An unchecked value fails every command
+  // (openssh `ssh -G -o StrictHostKeyChecking=maybe` -> "unsupported option",
+  // exit 255). Mirrors the legacy enum check.
+  if (obj.strictHostKeyChecking !== undefined &&
+      !['yes', 'no', 'accept-new'].includes(obj.strictHostKeyChecking)) {
+    throw new Error(`--ssh "${obj.name}" strictHostKeyChecking must be one of: yes, no, accept-new (got ${JSON.stringify(obj.strictHostKeyChecking)})`);
+  }
+
   // knownHostsFile / strictHostKeyChecking are openssh-transport-only. The ssh2
   // transport ignores both, so accepting them on an ssh2 config would silently
   // drop the requested host-key enforcement — a security downgrade. Mirror the
@@ -144,7 +216,7 @@ const GSSAPI_DELEGATE = argvConfig.gssapiDelegateCredentials;
 const KNOWN_HOSTS_FILE = argvConfig.knownHostsFile;
 const STRICT_HOST_KEY = argvConfig.strictHostKeyChecking;
 
-function validateConfig(config: Record<string, string | null>, multiHost: boolean) {
+function validateConfig(config: Record<string, string | null>, multiHost = false) {
   const errors: string[] = [];
 
   if (multiHost) {
@@ -168,6 +240,15 @@ function validateConfig(config: Record<string, string | null>, multiHost: boolea
 
     const transportExplicit = config.transport;
     const kerberos = config.kerberos !== undefined && config.kerberos !== 'false';
+    // A value-less `--transport` is recorded as `null` by parseArgv; the nullish
+    // fallback below would treat it as absent and silently run the default ssh2
+    // transport, so a mistyped OpenSSH selection would run the wrong transport.
+    // Reject a present-but-value-less --transport like the other value-requiring
+    // flags.
+    if ('transport' in config && transportExplicit == null) {
+      errors.push('--transport requires a value (ssh2 or openssh)');
+    }
+    // --kerberos alone implies --transport=openssh
     const transport = transportExplicit ?? (kerberos ? 'openssh' : 'ssh2');
 
     if (transport !== 'ssh2' && transport !== 'openssh') {
@@ -179,11 +260,28 @@ function validateConfig(config: Record<string, string | null>, multiHost: boolea
     if (transport === 'ssh2' && (config.knownHostsFile || config.strictHostKeyChecking)) {
       errors.push('--knownHostsFile and --strictHostKeyChecking require --transport=openssh');
     }
-    if (STRICT_HOST_KEY && !['yes', 'no', 'accept-new'].includes(config.strictHostKeyChecking!)) {
+    // OpenSSH options that require an explicit value. A value-less flag (e.g.
+    // `--strictHostKeyChecking` with no `=value`) is recorded as `null` by
+    // parseArgv; guarding on truthiness would silently skip validation and let
+    // buildTransportConfig drop the option, falling back to the default and (for
+    // strictHostKeyChecking) weakening the requested host-key policy. Detect the
+    // flag by property presence so a missing value is rejected with a clear error.
+    if ('strictHostKeyChecking' in config && !['yes', 'no', 'accept-new'].includes(config.strictHostKeyChecking!)) {
       errors.push('--strictHostKeyChecking must be one of: yes, no, accept-new');
     }
-    if (GSSAPI_DELEGATE && !['yes', 'no'].includes(config.gssapiDelegateCredentials!)) {
+    if ('gssapiDelegateCredentials' in config && !['yes', 'no'].includes(config.gssapiDelegateCredentials!)) {
       errors.push('--gssapiDelegateCredentials must be yes or no');
+    }
+    if ('knownHostsFile' in config && !config.knownHostsFile) {
+      errors.push('--knownHostsFile requires a file path');
+    }
+    // GSSAPIDelegateCredentials is only emitted by the OpenSSH transport in the
+    // Kerberos auth branch (see OpenSshTransport.buildArgs). Accepting the flag
+    // without --kerberos would let a user request credential delegation while the
+    // server silently omits it, breaking second-hop SSO with no error. Require
+    // Kerberos auth so the requested delegation is actually honored.
+    if ('gssapiDelegateCredentials' in config && !kerberos) {
+      errors.push('--gssapiDelegateCredentials requires --kerberos');
     }
   }
 
@@ -294,7 +392,7 @@ export async function buildTransportConfig(inputs: BuildTransportConfigInputs): 
 // Transport registry — lazy init, single entry for legacy single-host mode.
 // =============================================================================
 
-const registry = new TransportRegistry();
+const registry = new TransportRegistry(prepareKeyContents);
 
 async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
   // ssh2 transport reads key contents in memory; openssh uses -i path.
@@ -308,7 +406,10 @@ async function bootstrapRegistry(): Promise<void> {
   if (isMultiHost) {
     for (const raw of sshJsonArgs) {
       const cfg = parseServerConfigJson(raw);
-      await prepareKeyContents(cfg);
+      // Do NOT read key files here — prepareKeyContents is deferred to the
+      // registry's lazy get(name) path (passed as the registry's prepareConfig
+      // hook), so one host with a missing/unmounted key path can't break
+      // startup or list-servers for the other, healthy hosts.
       registry.register(cfg);
     }
   } else {
@@ -336,9 +437,51 @@ async function bootstrapRegistry(): Promise<void> {
   }
 }
 
+/**
+ * Map ExecResult to MCP tool response. Preserves upstream semantics:
+ *   - auth/host_key/connect/transport categories → reject with descriptive error
+ *   - timeout → reject with timeout error
+ *   - non-zero exit → reject (wraps as "Error (code N):\n<stderr>"), even when
+ *     stderr is empty (e.g. `false`, `test -f missing`): the synthetic detail
+ *     "Command exited with status N" is used so a failed command never looks
+ *     like a success just because it printed nothing to stderr.
+ *   - exit 0 → success, even if stderr is non-empty
+ *
+ * Exit 0 is treated as success regardless of stderr: the OpenSSH transport
+ * surfaces benign diagnostics on stderr (e.g. with the default
+ * StrictHostKeyChecking=accept-new, the first connection to a host prints
+ * "Warning: Permanently added '<host>' ... to the list of known hosts." while
+ * exiting 0). Throwing on any stderr would turn every first-connect into an
+ * error. On success the benign OpenSSH host-key warning is filtered out, but
+ * any remaining stderr is appended to the text response so callers do not lose
+ * useful command diagnostics/progress from tools (git clone, curl, build
+ * tools) that write to stderr while succeeding.
+ */
+/**
+ * Strip the benign OpenSSH first-connect host-key notice from a stderr stream,
+ * leaving genuine command diagnostics intact. With StrictHostKeyChecking=
+ * accept-new the client prints
+ *   "Warning: Permanently added '<host>' (<keytype>) to the list of known hosts."
+ * on the first connection to a host while still exiting 0; that line is noise,
+ * not output the caller asked for.
+ */
+function stripBenignSshWarnings(stderr: string): string {
+  return stderr
+    .split('\n')
+    .filter(line => !/^Warning: Permanently added .*to the list of known hosts\.?\s*$/.test(line))
+    .join('\n')
+    .trim();
+}
 export function resultToMcpContent(result: ExecResult) {
   if (result.category === 'timeout') {
-    throw new McpError(ErrorCode.InternalError, result.stderr || `Command execution timed out after ${DEFAULT_TIMEOUT}ms`);
+    // Always surface that the command timed out, even when the process wrote to
+    // stderr before the deadline. A build/tool that prints progress or
+    // diagnostics to stderr and then hangs would otherwise be reported as an
+    // ordinary error, hiding the timeout. Keep any captured stderr as trailing
+    // context so its diagnostics are not lost.
+    const timeoutMsg = `Command execution timed out after ${DEFAULT_TIMEOUT}ms`;
+    const detail = result.stderr ? `${timeoutMsg}\n${result.stderr}` : timeoutMsg;
+    throw new McpError(ErrorCode.InternalError, detail);
   }
   if (result.category === 'auth') {
     throw new McpError(ErrorCode.InternalError, `SSH authentication error: ${result.stderr}`);
@@ -352,18 +495,13 @@ export function resultToMcpContent(result: ExecResult) {
   if (result.category === 'transport') {
     throw new McpError(ErrorCode.InternalError, result.stderr || 'SSH transport error');
   }
-  // Only treat stderr as a hard failure when the command actually failed (non-zero exit).
-  // Many tools (sudo with -S, curl, git, apt) write progress/info to stderr on success.
-  const exitCode = result.exitCode ?? 0;
-  if (exitCode !== 0 && result.stderr) {
-    throw new McpError(ErrorCode.InternalError, `Error (code ${exitCode}):\n${result.stderr}`);
+  if (result.exitCode !== null && result.exitCode !== 0) {
+    const detail = result.stderr || `Command exited with status ${result.exitCode}`;
+    throw new McpError(ErrorCode.InternalError, `Error (code ${result.exitCode}):\n${detail}`);
   }
-  // Success path: include stderr alongside stdout when it has substantive content.
-  const trimmedStderr = result.stderr.trim();
-  const text = trimmedStderr
-    ? (result.stdout
-        ? `${result.stdout.replace(/\n+$/, '')}\n[stderr]\n${result.stderr}`
-        : result.stderr)
+  const diagnostics = stripBenignSshWarnings(result.stderr);
+  const text = diagnostics
+    ? `${result.stdout}${result.stdout && !result.stdout.endsWith('\n') ? '\n' : ''}${diagnostics}`
     : result.stdout;
   return {
     content: [{
