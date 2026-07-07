@@ -176,3 +176,44 @@ export function buildApprovalEngineFromConfig(
 
   return new ApprovalDispatcher(built);
 }
+
+/**
+ * Boot-time advisory for the manual-mode-without-a-resolver case.
+ *
+ * `manual` mode enqueues each command and waits for something to settle the
+ * queue (`resolvePending`) — in practice the WebUI manual-approval server. That
+ * server lands in the child lane `pr/webui-manual-approval`; the approval-engine
+ * lane ships the engine + queue primitive but wires no resolver. When this build
+ * boots `manual` mode with the WebUI enabled but no resolver present (i.e. the
+ * approval-engine lane merged standalone, ahead of its child lane), every
+ * pending approval sits in the queue until it times out and is denied.
+ *
+ * That is a legitimate stacked-PR state, NOT a fatal error (keep boot
+ * succeeding — do not throw). But it is otherwise silent, so surface a
+ * non-fatal warning. Returns the warning text when it should fire, or `null`
+ * when it should not:
+ *   - WebUI disabled: `manual` mode is already fatal-at-boot (gate-12
+ *     invariant, ManualApprovalDisabledError) — no warning needed here.
+ *   - resolver wired (child lane present): the queue is driven — no warning.
+ *   - `manual` mode not in use (yolo/smart only): nothing enqueues — no warning.
+ *
+ * `defaultMode` mirrors buildApprovalEngineFromConfig: an omitted default
+ * resolves to `manual`, so the bare-[approval] case is covered.
+ */
+export function manualWithoutResolverWarning(params: {
+  webuiEnabled: boolean;
+  defaultMode?: ApprovalMode;
+  perSourceModes?: ApprovalMode[];
+  resolverWired: boolean;
+}): string | null {
+  if (!params.webuiEnabled || params.resolverWired) return null;
+  const defaultMode: ApprovalMode = params.defaultMode ?? 'manual';
+  const usedModes = new Set<ApprovalMode>([defaultMode, ...(params.perSourceModes ?? [])]);
+  if (!usedModes.has('manual')) return null;
+  return (
+    'approval mode "manual" is active but no approval resolver is wired in this ' +
+    'build; pending approvals will time out until the WebUI manual-approval ' +
+    'server (pr/webui-manual-approval) is present. This is expected when the ' +
+    'approval-engine lane is used standalone ahead of its child lane.'
+  );
+}

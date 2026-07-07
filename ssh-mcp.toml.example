@@ -10,6 +10,11 @@
 [server]
 audit_dir = "~/.ssh-mcp"
 audit_max_bytes = 10000
+# Multi-source safety guard: when more than one [[sources]] is configured and
+# no source is marked `default = true`, a tool call that omits connectionName is
+# rejected (it could land on the wrong host). Set to false to opt out and
+# restore the legacy "first source wins" behavior. Defaults to true (guard ON).
+# require_connection = true
 
 [webui]
 enabled = false
