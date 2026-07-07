@@ -230,6 +230,47 @@ describe('TransportRegistry.get (finding 1: rejected init must not be cached)', 
     expect(init).toHaveBeenCalledTimes(1);
   });
 
+  // finding: per-host key reads must be deferred to get(name), not run at
+  // register()/bootstrap time, so a missing key on one host cannot break
+  // startup or list-servers for the other healthy hosts.
+  it('runs prepareConfig lazily on first get(name), never at register()', async () => {
+    const prepare = vi.fn<[ServerConfig], Promise<void>>().mockResolvedValue(undefined);
+    const stub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValue(stub);
+
+    const r = new TransportRegistry(prepare);
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    // Not called at register / list time.
+    expect(prepare).not.toHaveBeenCalled();
+    r.list();
+    expect(prepare).not.toHaveBeenCalled();
+
+    // Called exactly once, only for the selected host, on first get.
+    await r.get('a');
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(prepare.mock.calls[0][0].name).toBe('a');
+  });
+
+  it('a prepareConfig failure for one host is not cached and does not affect other hosts', async () => {
+    const prepare = vi.fn<[ServerConfig], Promise<void>>()
+      .mockRejectedValueOnce(new Error('ENOENT: missing key'))
+      .mockResolvedValue(undefined);
+    const stub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValue(stub);
+
+    const r = new TransportRegistry(prepare);
+    r.register(makeConfig('broken'));
+    r.register(makeConfig('healthy'));
+
+    // First get('broken'): prepare rejects -> get rejects, nothing cached.
+    await expect(r.get('broken')).rejects.toThrow(/missing key/);
+    // The other host is unaffected.
+    await expect(r.get('healthy')).resolves.toBe(stub);
+    // A later get('broken') retries prepare (now resolves).
+    await expect(r.get('broken')).resolves.toBe(stub);
+  });
+
   it('serializes concurrent gets so init runs once for parallel callers', async () => {
     let resolveInit: () => void = () => {};
     const init = vi.fn<() => Promise<void>>().mockImplementation(
@@ -304,13 +345,31 @@ describe('TransportRegistry.list / closeAll', () => {
 
     let rows = r.list();
     expect(rows.map((x) => x.name)).toEqual(['a', 'b']);
-    expect(rows.find((x) => x.name === 'a')!.isDefault).toBe(true);
+    // finding 6: with >1 server and no explicit setDefault(), get() rejects an
+    // omitted connectionName, so NO host is advertised as a usable default.
+    expect(rows.every((x) => x.isDefault === false)).toBe(true);
     expect(rows.every((x) => x.connected === false)).toBe(true);
 
     await r.get('a');
     rows = r.list();
     expect(rows.find((x) => x.name === 'a')!.connected).toBe(true);
     expect(rows.find((x) => x.name === 'b')!.connected).toBe(false);
+  });
+
+  it('marks the lone server as the default (single-server case)', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('solo'));
+    expect(r.list().find((x) => x.name === 'solo')!.isDefault).toBe(true);
+  });
+
+  it('marks only the explicitly-set default when multiple servers are configured', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    r.setDefault('b');
+    const rows = r.list();
+    expect(rows.find((x) => x.name === 'a')!.isDefault).toBe(false);
+    expect(rows.find((x) => x.name === 'b')!.isDefault).toBe(true);
   });
 
   it('closeAll closes connected transports and clears state', async () => {
