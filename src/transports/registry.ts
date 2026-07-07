@@ -40,8 +40,12 @@ export class TransportRegistry {
   private requireConnectionWhenMulti: boolean;
   /** True only when setDefault() was called; first-registered fallback leaves this false. */
   private defaultExplicit = false;
+  /** Lazy per-host prep callback (see constructor doc). Set only for the function-first-arg form. */
+  private prepareConfig?: (cfg: ServerConfig) => Promise<void>;
 
   /**
+   * Multi-host form: lazy per-host prep callback first, options second.
+   *
    * @param prepareConfig Optional per-host preparation run lazily on first
    *   get(name), inside the init path — NOT at register() time. Used to defer
    *   expensive/failure-prone work (e.g. reading an ssh2 key file from disk)
@@ -50,13 +54,26 @@ export class TransportRegistry {
    *   and commands against otherwise-healthy hosts.
    * @param options Construction-time behavior flags — currently the
    *   require-connection-when-multi guard (see {@link TransportRegistryOptions}).
-   *   Kept as a second positional arg so the existing `new
-   *   TransportRegistry(prepareKeyContents)` call sites and tests stay valid.
    */
+  constructor(prepareConfig?: (cfg: ServerConfig) => Promise<void>, options?: TransportRegistryOptions);
+  /**
+   * Options-first form: no prep callback, just the behavior flags. Keeps the
+   * guard-branch convention `new TransportRegistry({ requireConnectionWhenMulti: false })`
+   * valid alongside the multi-host convention `new TransportRegistry(prepareKeyContents)`.
+   */
+  constructor(options?: TransportRegistryOptions);
   constructor(
-    private prepareConfig?: (cfg: ServerConfig) => Promise<void>,
+    prepareConfigOrOptions?: ((cfg: ServerConfig) => Promise<void>) | TransportRegistryOptions,
     options: TransportRegistryOptions = {}
   ) {
+    // Shape-detect the first arg: a function is the lazy prepareConfig
+    // callback (multi-host convention); an object is the options bag (guard
+    // convention). No caller mixes both today, but (fn, options) stays valid.
+    if (typeof prepareConfigOrOptions === 'function') {
+      this.prepareConfig = prepareConfigOrOptions;
+    } else if (prepareConfigOrOptions) {
+      options = prepareConfigOrOptions;
+    }
     // Safe default: require an explicit name when multiple sources exist unless
     // an operator explicitly opts out (D-A2 escape hatch).
     this.requireConnectionWhenMulti = options.requireConnectionWhenMulti ?? true;
