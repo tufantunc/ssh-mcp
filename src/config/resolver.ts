@@ -38,18 +38,31 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
   const env = inputs.env ?? process.env;
 
   // --- locate a TOML, if any ---------------------------------------------
-  let tomlPath: string | undefined = inputs.cliConfigPath;
-  if (!tomlPath && env.SSH_MCP_CONFIG) tomlPath = env.SSH_MCP_CONFIG;
-  if (!tomlPath) tomlPath = discoverConfigPath(env);
+  // Precedence: explicit --config wins outright. Otherwise defer to
+  // discoverConfigPath(env), which probes SSH_MCP_CONFIG first and then the
+  // XDG/home candidates, returning the first that actually EXISTS. Reading
+  // env.SSH_MCP_CONFIG directly here would diverge from that discovery
+  // contract: a set-but-missing SSH_MCP_CONFIG would hard-fail in loadTomlFile
+  // instead of falling through to the XDG/home paths the way an unset var does.
+  const tomlPath: string | undefined =
+    inputs.cliConfigPath ?? discoverConfigPath(env);
 
   // When CLI sources are present they win and suppress the TOML source list
   // (see "CLI wins" semantics above). In that case a TOML that exists only to
   // supply top-level sections (e.g. just [webui]) is legitimate and must not be
-  // rejected for having zero [[sources]]. Tolerate empty sources accordingly.
+  // rejected for having zero [[sources]]. Beyond tolerating empty sources, we
+  // must also SKIP parsing/validating any [[sources]] that ARE present but
+  // suppressed: a suppressed source with an unset `password = "env:PROD_PASS"`
+  // or another source-only error would otherwise abort startup even though only
+  // the top-level sections survive. ignoreSources handles both.
   const hasCliSources = inputs.cliSources.length > 0;
 
   const fromToml: ResolvedConfig | undefined = tomlPath
-    ? loadTomlFile(tomlPath, { env, allowEmptySources: hasCliSources })
+    ? loadTomlFile(tomlPath, {
+        env,
+        allowEmptySources: hasCliSources,
+        ignoreSources: hasCliSources,
+      })
     : undefined;
 
   // --- assemble final ResolvedConfig -------------------------------------

@@ -164,6 +164,57 @@ auth = "kerberos"
     expect(cfg.configPath).toBe(envPath);
   });
 
+  it('a set-but-missing SSH_MCP_CONFIG falls through to XDG discovery instead of hard-failing', () => {
+    // R2 Copilot finding: resolveConfig must honor the discovery contract from
+    // toml-loader (SSH_MCP_CONFIG is the highest-precedence *candidate*, and a
+    // missing candidate falls through). Reading env.SSH_MCP_CONFIG directly
+    // made a missing path throw in loadTomlFile; the fix routes env handling
+    // through discoverConfigPath so a missing SSH_MCP_CONFIG cleanly falls back.
+    const xdgRoot = path.join(tmp, 'xdg');
+    const xdgPath = writeToml(xdgRoot, 'ssh-mcp/config.toml', `
+[[sources]]
+id = "xdg"
+host = "xdg.example"
+user = "u"
+auth = "kerberos"
+`);
+    const cfg = resolveConfig({
+      cliSources: [],
+      env: {
+        SSH_MCP_CONFIG: path.join(tmp, 'does-not-exist.toml'),
+        XDG_CONFIG_HOME: xdgRoot,
+      },
+    });
+    expect(cfg.sources[0].name).toBe('xdg');
+    expect(cfg.configPath).toBe(xdgPath);
+  });
+
+  it('SSH_MCP_CONFIG still wins over XDG when the env path exists', () => {
+    // Precedence within discovery is preserved: an existing SSH_MCP_CONFIG is
+    // probed before the XDG/home candidates.
+    const envPath = writeToml(tmp, 'env-win.toml', `
+[[sources]]
+id = "env"
+host = "env.example"
+user = "u"
+auth = "kerberos"
+`);
+    const xdgRoot = path.join(tmp, 'xdg-lose');
+    writeToml(xdgRoot, 'ssh-mcp/config.toml', `
+[[sources]]
+id = "xdg"
+host = "xdg.example"
+user = "u"
+auth = "kerberos"
+`);
+    const cfg = resolveConfig({
+      cliSources: [],
+      env: { SSH_MCP_CONFIG: envPath, XDG_CONFIG_HOME: xdgRoot },
+    });
+    expect(cfg.sources[0].name).toBe('env');
+    expect(cfg.configPath).toBe(envPath);
+  });
+
   it('discovers $XDG_CONFIG_HOME/ssh-mcp/config.toml before ~/.ssh-mcp/config.toml', () => {
     const xdgRoot = path.join(tmp, 'xdg');
     const xdgPath = writeToml(xdgRoot, 'ssh-mcp/config.toml', `
@@ -192,6 +243,42 @@ auth = "kerberos"
   it('propagates TOML validation errors', () => {
     const bad = writeToml(tmp, 'bad.toml', `not valid =`);
     expect(() => resolveConfig({ cliSources: [], cliConfigPath: bad, env: {} })).toThrow(/parse failed/);
+  });
+
+  it('CLI sources suppress a TOML [[sources]] whose secret env ref is unset, without aborting startup (R2)', () => {
+    // R2 Codex finding: when CLI sources win, the resolver discards
+    // fromToml.sources downstream, so it must NOT fully validate/resolve the
+    // suppressed [[sources]]. A suppressed source with an unset
+    // `password = "env:PROD_PASS"` must not fail startup — only the top-level
+    // sections survive.
+    const p = writeToml(tmp, 'suppressed-secret.toml', `
+[[sources]]
+id = "prod"
+host = "prod.example"
+user = "u"
+auth = "password"
+password = "env:PROD_PASS_UNSET"
+
+[server]
+audit_dir = "~/audit-suppressed"
+`);
+    const cfg = resolveConfig({ cliSources: [cliSource('cli')], cliConfigPath: p, env: {} });
+    expect(cfg.sources.map(s => s.name)).toEqual(['cli']);
+    expect(cfg.server?.audit_dir).toContain('audit-suppressed');
+    expect(cfg.configPath).toBe(p);
+  });
+
+  it('still validates TOML [[sources]] secrets when there are NO CLI sources (R2 negative)', () => {
+    const p = writeToml(tmp, 'active-secret.toml', `
+[[sources]]
+id = "prod"
+host = "prod.example"
+user = "u"
+auth = "password"
+password = "env:PROD_PASS_UNSET"
+`);
+    expect(() => resolveConfig({ cliSources: [], cliConfigPath: p, env: {} }))
+      .toThrow(/PROD_PASS_UNSET|not set or empty/);
   });
 });
 

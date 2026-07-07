@@ -28,6 +28,9 @@ export interface ServerSection {
    * Set `false` ONLY as a temporary emergency rollback: it re-enables the
    * dangerous legacy silent-default fallback. Single-source deployments are
    * unaffected either way — omission always resolves the lone source.
+   *
+   * Projected onto ResolvedConfig.requireConnection and consumed by
+   * applyRegistryConnectionPolicy at boot.
    */
   require_connection?: boolean;
 }

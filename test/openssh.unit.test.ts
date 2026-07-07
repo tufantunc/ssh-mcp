@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { classifyError, OpenSshTransport, renderAskpassHelper } from '../src/transports/openssh';
+import { buildOpenSshSudoWrapper, classifyError, OpenSshTransport, renderAskpassHelper } from '../src/transports/openssh';
 
 describe('classifyError', () => {
   it('returns undefined for success (exit 0)', () => {
@@ -42,9 +42,13 @@ describe('classifyError', () => {
       expect(classifyError(255, 'Network unreachable')).toBe('connect');
     });
 
-    it('falls back to transport for unknown 255 stderr', () => {
-      expect(classifyError(255, 'some unknown ssh error')).toBe('transport');
-      expect(classifyError(255, '')).toBe('transport');
+    it('falls back to remote_exit for unknown 255 stderr (ssh(1): 255 is also a valid remote command exit)', () => {
+      // When no SSH-layer signature matches, a 255 exit is surfaced as the
+      // remote command's own non-zero exit (Error (code 255)) rather than a
+      // generic SSH transport error, so legitimate remote `exit 255` is not
+      // masked. See classifyError + resultToMcpContent.
+      expect(classifyError(255, 'some unknown ssh error')).toBe('remote_exit');
+      expect(classifyError(255, '')).toBe('remote_exit');
     });
   });
 });
@@ -85,6 +89,22 @@ describe('OpenSshTransport.buildArgs', () => {
     expect(args).toContain('PreferredAuthentications=publickey');
     expect(args).toContain('PasswordAuthentication=no');
     expect(args).toContain('GSSAPIAuthentication=no');
+  });
+
+  it('forces IdentitiesOnly=yes when an explicit key is supplied (no agent-key spray)', () => {
+    const t = new OpenSshTransport({ ...baseCfg, authMode: 'key', keyPath: '/home/user/.ssh/id_ed25519' });
+    const args = t.buildArgs({ timeoutMs: 60000 });
+    expect(args).toContain('IdentitiesOnly=yes');
+    // The -i path and IdentitiesOnly=yes must both be present so ssh uses only
+    // the chosen key instead of offering every ssh-agent identity first.
+    const iIdx = args.indexOf('-i');
+    expect(iIdx).toBeGreaterThanOrEqual(0);
+    expect(args[iIdx + 1]).toBe('/home/user/.ssh/id_ed25519');
+  });
+
+  it('does not emit IdentitiesOnly for non-key auth modes', () => {
+    const t = new OpenSshTransport({ ...baseCfg, authMode: 'kerberos' });
+    expect(t.buildArgs({ timeoutMs: 60000 })).not.toContain('IdentitiesOnly=yes');
   });
 
   it('emits password-specific flags when authMode=password', () => {
@@ -166,6 +186,19 @@ describe('renderAskpassHelper (finding 5: Windows metachar-safe password echo)',
   });
 });
 
+describe('buildOpenSshSudoWrapper (Codex P1: keep sudo password out of local ssh argv)', () => {
+  it('builds a passwordless sudo command without sudo -S', () => {
+    expect(buildOpenSshSudoWrapper('id -u', false)).toBe("sudo -n sh -c 'id -u'");
+  });
+
+  it('builds a sudo -S command but never embeds the password value', () => {
+    const cmd = buildOpenSshSudoWrapper("printf '%s' ok", true);
+    expect(cmd).toContain('sudo -p "" -S');
+    expect(cmd).toContain("sh -c 'printf '\\''%s'\\'' ok'");
+    expect(cmd).not.toContain('sudopw');
+  });
+});
+
 describe('OpenSshTransport.execElevated sudo mode (finding 6: route via su when only suPassword set)', () => {
   function makeTransport(cfg: any) {
     const t = new OpenSshTransport({
@@ -186,11 +219,15 @@ describe('OpenSshTransport.execElevated sudo mode (finding 6: route via su when 
     expect(runSsh).not.toHaveBeenCalled();
   });
 
-  it('uses the normal sudo wrapper when a sudo password is available', async () => {
+  it('uses a stdin-fed sudo wrapper when a sudo password is available (password never in argv)', async () => {
     const { t, runSuViaPty, runSsh } = makeTransport({ suPassword: 'supw', sudoPassword: 'sudopw' });
     await t.execElevated('whoami', { timeoutMs: 60000, mode: 'sudo' });
     expect(runSsh).toHaveBeenCalledTimes(1);
     expect(runSuViaPty).not.toHaveBeenCalled();
+    const [wrapped, runOpts] = runSsh.mock.calls[0];
+    expect(wrapped).toContain('sudo -p "" -S');
+    expect(wrapped).not.toContain('sudopw');
+    expect(runOpts.stdin).toBe('sudopw\n');
   });
 
   it('uses the normal sudo wrapper (passwordless) when neither su nor sudo password is set', async () => {
@@ -198,6 +235,9 @@ describe('OpenSshTransport.execElevated sudo mode (finding 6: route via su when 
     await t.execElevated('whoami', { timeoutMs: 60000, mode: 'sudo' });
     expect(runSsh).toHaveBeenCalledTimes(1);
     expect(runSuViaPty).not.toHaveBeenCalled();
+    const [wrapped, runOpts] = runSsh.mock.calls[0];
+    expect(wrapped).toBe("sudo -n sh -c 'whoami'");
+    expect(runOpts.stdin).toBeUndefined();
   });
 
   it('prefers an explicit per-call sudo password over the su fallback', async () => {
@@ -205,5 +245,9 @@ describe('OpenSshTransport.execElevated sudo mode (finding 6: route via su when 
     await t.execElevated('whoami', { timeoutMs: 60000, mode: 'sudo', password: 'callpw' });
     expect(runSsh).toHaveBeenCalledTimes(1);
     expect(runSuViaPty).not.toHaveBeenCalled();
+    const [wrapped, runOpts] = runSsh.mock.calls[0];
+    expect(wrapped).toContain('sudo -p "" -S');
+    expect(wrapped).not.toContain('callpw');
+    expect(runOpts.stdin).toBe('callpw\n');
   });
 });
