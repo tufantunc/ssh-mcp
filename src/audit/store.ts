@@ -30,7 +30,7 @@ import {
   DEFAULT_MAX_FILE_BYTES,
   DEFAULT_RETAIN,
 } from './types.js';
-import { redact } from './redactor.js';
+import { redact, redactPemBlocks } from './redactor.js';
 import { rotateIfNeeded, pruneOldDays } from './rotator.js';
 
 /** Resolve audit directory, expanding `~` and honoring env override. */
@@ -112,13 +112,42 @@ export function capThenRedact(
   cap: number,
 ): { text: string; truncated: boolean } {
   if (cap <= 0) return { text: '', truncated: s.length > 0 };
-  // 1. Bound the bytes the redactor scans.
-  const scan = capUtf8(s, cap + REDACT_SCAN_HEADROOM_BYTES);
+  // 0. Redact PEM private-key blocks over the FULL text first. PEM_RE is
+  //    terminator-anchored, so a key whose `END` marker falls past the bounded
+  //    scan window below would otherwise never match and its raw prefix could
+  //    survive into the capped output. This full-scan is cheap when no key is
+  //    present and is the only rule that must see the un-capped string.
+  const pemSafe = redactPemBlocks(s);
+  // 1. Bound the bytes the remaining redaction rules scan.
+  const scan = capUtf8(pemSafe, cap + REDACT_SCAN_HEADROOM_BYTES);
   // 2. Redact within the bounded window.
   const redacted = redact(scan.text);
   // 3. Cap the redacted text to the final size.
   const final = capUtf8(redacted, cap);
+  // `truncated` is measured on the PEM-safe text: it reports whether real
+  // *content* bytes were dropped by the cap, not the raw pre-redaction length.
+  // A key that was fully replaced with `<redacted>` lost nothing to the cap, so
+  // it is not "truncated"; genuine oversized output past the window still is.
   return { text: final.text, truncated: scan.truncated || final.truncated };
+}
+
+/**
+ * Clamp a numeric config value to a safe integer.
+ *
+ * Returns `fallback` when `v` is undefined/null, non-finite (NaN, Infinity,
+ * -Infinity), or below `minValid`; otherwise floors `v` to an integer. Guards
+ * the store against surprising behavior from bad config — a negative
+ * auditMaxBytes that empties output, a NaN/negative maxFileBytes that rotates
+ * on every append, or retain <= 0 that breaks rotation/prune all collapse to
+ * the documented default instead. `minValid` is the smallest *explicitly
+ * honored* value (0 for auditMaxBytes so "capture nothing" is respected; 1 for
+ * maxFileBytes/retain).
+ */
+export function clampInt(v: number | undefined | null, fallback: number, minValid: number): number {
+  if (v === undefined || v === null || !Number.isFinite(v)) return fallback;
+  const i = Math.floor(v);
+  if (i < minValid) return fallback;
+  return i;
 }
 
 export interface BuildRecordInput {
@@ -191,9 +220,14 @@ export class AuditStore extends EventEmitter {
   constructor(cfg: AuditStoreConfig & { tailBufferSize?: number }) {
     super();
     this.auditDir = cfg.auditDir;
-    this.auditMaxBytes = cfg.auditMaxBytes ?? DEFAULT_AUDIT_MAX_BYTES;
-    this.maxFileBytes = cfg.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
-    this.retain = cfg.retain ?? DEFAULT_RETAIN;
+    // Clamp config against negative / non-finite (NaN, Infinity) values so a
+    // bad caller cannot produce surprising behavior: negative auditMaxBytes
+    // silently empties output, NaN maxFileBytes rotates on every append, and
+    // retain <= 0 breaks rotation/prune. Fall back to the documented default
+    // for anything non-finite, and floor to a safe minimum otherwise.
+    this.auditMaxBytes = clampInt(cfg.auditMaxBytes, DEFAULT_AUDIT_MAX_BYTES, 0);
+    this.maxFileBytes = clampInt(cfg.maxFileBytes, DEFAULT_MAX_FILE_BYTES, 1);
+    this.retain = clampInt(cfg.retain, DEFAULT_RETAIN, 1);
     this.tailBufferSize = cfg.tailBufferSize ?? DEFAULT_TAIL_BUFFER;
     // Audit logs contain command lines + captured output; keep them
     // owner-only. mkdir mode is masked by umask, so chmod afterwards to
@@ -242,7 +276,7 @@ export class AuditStore extends EventEmitter {
     if (this.lastPruneStamp !== stamp) {
       this.lastPruneStamp = stamp;
       try {
-        pruneOldDays(this.auditDir, this.retain);
+        pruneOldDays(this.auditDir, this.retain, now);
       } catch {
         // best-effort
       }

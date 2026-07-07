@@ -100,6 +100,27 @@ export class TransportRegistry {
     );
   }
 
+  /**
+   * Resolve the profile/attribution name for an audit record WITHOUT throwing.
+   *
+   * Mirrors resolveName()'s ambiguity rules but is side-effect free and never
+   * rejects, so it is safe to call on the failure/catch path. Critically, for
+   * the ambiguous multi-host case (connectionName omitted, more than one server
+   * registered, no explicit default) it returns the '(unresolved)' sentinel
+   * rather than getDefaultName()'s first-registered server — that call is
+   * rejected by resolveName() before any command runs, so attributing its
+   * failure audit record to the first host would corrupt attribution.
+   */
+  resolveProfileName(name?: string): string {
+    // An explicitly-requested name is the accurate attribution even if it is
+    // unknown (registry.get throws later; the record should still name what the
+    // caller asked for, not a sentinel).
+    if (name) return name;
+    if (this.defaultName === null) return 'default';
+    if (this.configs.size > 1 && !this.defaultExplicit) return '(unresolved)';
+    return this.defaultName;
+  }
+
   /** Resolve name argument → canonical name. Falls back to default. */
   private resolveName(name?: string): string {
     if (name && this.configs.has(name)) return name;

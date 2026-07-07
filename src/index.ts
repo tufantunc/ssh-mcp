@@ -607,6 +607,54 @@ export function buildApprovalProfile(
   };
 }
 
+function auditExecution(params: {
+  tool: 'exec' | 'sudo-exec';
+  profile: string;
+  command: string;
+  description?: string;
+  startedAt: number;
+  result?: ExecResult;
+  error?: unknown;
+  store: { append(record: unknown): unknown };
+}): void {
+  const now = new Date();
+  const durationMs = Math.max(0, Date.now() - params.startedAt);
+  try {
+    // Append inside the try: audit logging is best-effort — a store failure
+    // must be visible but should not hide the real SSH result.
+    params.store.append({
+      profile: params.profile,
+      tool: params.tool,
+      command: params.command,
+      description: params.description,
+      approval: {
+        mode: 'yolo',
+        decision: 'allow',
+        reason: 'approval engine not yet wired (yolo placeholder)',
+        decided_at: now.toISOString(),
+        decided_by: 'yolo',
+      },
+      exec: params.result
+        ? {
+            stdout: params.result.stdout ?? '',
+            stderr: params.result.stderr ?? '',
+            exitCode: params.result.exitCode ?? null,
+            durationMs,
+          }
+        : {
+            stdout: '',
+            stderr: params.error instanceof Error ? params.error.message : String(params.error ?? 'unknown error'),
+            exitCode: null,
+            durationMs,
+          },
+      now,
+    });
+  } catch (auditErr: any) {
+    // Audit failure must be visible but should not hide the real SSH result.
+    console.error(`audit log append failed: ${auditErr?.message || auditErr}`);
+  }
+}
+
 function approvalProfileForConnection(connectionName?: string): ResolvedSource {
   const id = resolvedProfileName(connectionName);
   const source = resolvedConfig.sources.find(s => s.name === id);
@@ -894,47 +942,56 @@ export async function executeAuditedTransportCommand(input: {
   sudoPassword?: string;
   store: { append(record: unknown): unknown };
 }) {
-  const sanitizedCommand = sanitizeCommand(input.command);
-  const commandWithDescription = input.description
-    ? `${sanitizedCommand} # ${input.description.replace(/#/g, '\\#')}`
-    : sanitizedCommand;
   const startedAt = Date.now();
-  const result = input.tool === 'sudo-exec'
-    ? await input.transport.execElevated(commandWithDescription, {
-        timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT,
-        mode: 'sudo',
-        password: input.sudoPassword,
-      })
-    : await input.transport.exec(commandWithDescription, { timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT });
-
-  const now = new Date();
-  const durationMs = Math.max(0, Date.now() - startedAt);
+  const profile = input.profile ?? 'default';
+  let audited = false;
+  // Record the raw attempted command if sanitization rejects it below. A
+  // command rejected by validation (empty / over --maxChars) still leaves an
+  // audit record — the contract covers failures, and sanitizeCommand throws.
+  let auditCommand = String(input.command ?? '');
   try {
-    input.store.append({
-      profile: input.profile ?? 'stub',
+    const sanitizedCommand = sanitizeCommand(input.command);
+    const commandWithDescription = input.description
+      ? `${sanitizedCommand} # ${input.description.replace(/#/g, '\\#')}`
+      : sanitizedCommand;
+    auditCommand = commandWithDescription;
+    const result = input.tool === 'sudo-exec'
+      ? await input.transport.execElevated(commandWithDescription, {
+          timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT,
+          mode: 'sudo',
+          password: input.sudoPassword,
+        })
+      : await input.transport.exec(commandWithDescription, { timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT });
+    auditExecution({
       tool: input.tool,
+      profile,
       command: commandWithDescription,
       description: input.description,
-      approval: {
-        mode: 'yolo',
-        decision: 'allow',
-        reason: 'approval engine not yet wired (yolo placeholder)',
-        decided_at: now.toISOString(),
-        decided_by: 'yolo',
-      },
-      exec: {
-        stdout: result.stdout ?? '',
-        stderr: result.stderr ?? '',
-        exitCode: result.exitCode ?? null,
-        durationMs,
-      },
-      now,
+      startedAt,
+      result,
+      store: input.store,
     });
-  } catch (auditErr: any) {
-    console.error(`audit log append failed: ${auditErr?.message || auditErr}`);
+    audited = true;
+    return resultToMcpContent(result);
+  } catch (err) {
+    // Transport rejection (spawn failure, unexpected exception) OR a
+    // sanitization rejection (empty/too-long command) still gets an audit
+    // record — the contract is "audit success AND failure", matching the
+    // exec/sudo-exec MCP handlers. `audited` guards the resultToMcpContent
+    // throw path (result already audited above) from double-writing.
+    if (!audited) {
+      auditExecution({
+        tool: input.tool,
+        profile,
+        command: auditCommand,
+        description: input.description,
+        startedAt,
+        error: err,
+        store: input.store,
+      });
+    }
+    throw err;
   }
-
-  return resultToMcpContent(result);
 }
 
 /**
