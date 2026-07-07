@@ -24,6 +24,7 @@ import {
   getApprovalDecisionFromError,
   setApprovalEngine,
   buildApprovalEngineFromConfig,
+  manualWithoutResolverWarning,
   type ApprovalDecision,
   type BuildEngineFromConfigInput,
   type ApprovalDispatcher,
@@ -170,7 +171,8 @@ const KERBEROS_FLAG = argvConfig.kerberos !== undefined && argvConfig.kerberos !
 const GSSAPI_DELEGATE = argvConfig.gssapiDelegateCredentials;
 const KNOWN_HOSTS_FILE = argvConfig.knownHostsFile;
 const STRICT_HOST_KEY = argvConfig.strictHostKeyChecking;
-const CONFIG_PATH = argvConfig.config;
+// The explicit `--config` path is resolved (and value-less `--config` rejected)
+// via resolveCliConfigPath at the resolveConfig call site below.
 
 // Flags that signal intent to use the legacy single-host CLI mode. NOTE:
 // `disableSudo` is deliberately excluded — it only controls whether the sudo
@@ -189,7 +191,7 @@ export function hasLegacyCliFlags(config: Record<string, string | null>): boolea
   return legacyFlagNames.some(f => config[f] !== undefined);
 }
 
-function validateConfig(config: Record<string, string | null>, multiHost: boolean) {
+function validateConfig(config: Record<string, string | null>, multiHost = false) {
   const errors: string[] = [];
 
   if (multiHost) {
@@ -213,6 +215,15 @@ function validateConfig(config: Record<string, string | null>, multiHost: boolea
 
     const transportExplicit = config.transport;
     const kerberos = config.kerberos !== undefined && config.kerberos !== 'false';
+    // A value-less `--transport` is recorded as `null` by parseArgv; the nullish
+    // fallback below would treat it as absent and silently run the default ssh2
+    // transport, so a mistyped OpenSSH selection would run the wrong transport.
+    // Reject a present-but-value-less --transport like the other value-requiring
+    // flags.
+    if ('transport' in config && transportExplicit == null) {
+      errors.push('--transport requires a value (ssh2 or openssh)');
+    }
+    // --kerberos alone implies --transport=openssh
     const transport = transportExplicit ?? (kerberos ? 'openssh' : 'ssh2');
 
     if (transport !== 'ssh2' && transport !== 'openssh') {
@@ -224,11 +235,28 @@ function validateConfig(config: Record<string, string | null>, multiHost: boolea
     if (transport === 'ssh2' && (config.knownHostsFile || config.strictHostKeyChecking)) {
       errors.push('--knownHostsFile and --strictHostKeyChecking require --transport=openssh');
     }
-    if (STRICT_HOST_KEY && !['yes', 'no', 'accept-new'].includes(config.strictHostKeyChecking!)) {
+    // OpenSSH options that require an explicit value. A value-less flag (e.g.
+    // `--strictHostKeyChecking` with no `=value`) is recorded as `null` by
+    // parseArgv; guarding on truthiness would silently skip validation and let
+    // buildTransportConfig drop the option, falling back to the default and (for
+    // strictHostKeyChecking) weakening the requested host-key policy. Detect the
+    // flag by property presence so a missing value is rejected with a clear error.
+    if ('strictHostKeyChecking' in config && !['yes', 'no', 'accept-new'].includes(config.strictHostKeyChecking!)) {
       errors.push('--strictHostKeyChecking must be one of: yes, no, accept-new');
     }
-    if (GSSAPI_DELEGATE && !['yes', 'no'].includes(config.gssapiDelegateCredentials!)) {
+    if ('gssapiDelegateCredentials' in config && !['yes', 'no'].includes(config.gssapiDelegateCredentials!)) {
       errors.push('--gssapiDelegateCredentials must be yes or no');
+    }
+    if ('knownHostsFile' in config && !config.knownHostsFile) {
+      errors.push('--knownHostsFile requires a file path');
+    }
+    // GSSAPIDelegateCredentials is only emitted by the OpenSSH transport in the
+    // Kerberos auth branch (see OpenSshTransport.buildArgs). Accepting the flag
+    // without --kerberos would let a user request credential delegation while the
+    // server silently omits it, breaking second-hop SSO with no error. Require
+    // Kerberos auth so the requested delegation is actually honored.
+    if ('gssapiDelegateCredentials' in config && !kerberos) {
+      errors.push('--gssapiDelegateCredentials requires --kerberos');
     }
   }
 
@@ -243,10 +271,17 @@ const hasLegacyCli = hasLegacyCliFlags(argvConfig);
 function buildLegacyServerConfig(): ServerConfig | undefined {
   if (!HOST || !USER) return undefined;
 
-  const authMode: AuthMode | undefined = KERBEROS_FLAG ? 'kerberos'
-    : KEY ? 'key'
-    : PASSWORD ? 'password'
-    : undefined;
+  // Precedence must match resolveAuthMode (kerberos > password > key), NOT a
+  // key-before-password order. When a legacy invocation supplies both
+  // --password and --key, password wins: classifying it as key auth would make
+  // prepareKeyContents read the (possibly stale/sample) key file → ENOENT, and
+  // could let the ssh2 transport prefer the key over the intended password
+  // (regression vs base `main`). See resolveAuthMode's doc-comment.
+  const authMode: AuthMode | undefined = resolveAuthMode({
+    kerberos: KERBEROS_FLAG,
+    password: PASSWORD,
+    key: KEY,
+  });
   const resolvedTransport: 'ssh2' | 'openssh' =
     (TRANSPORT_FLAG === 'openssh' || KERBEROS_FLAG) ? 'openssh' : 'ssh2';
 
@@ -259,7 +294,11 @@ function buildLegacyServerConfig(): ServerConfig | undefined {
     authMode,
   };
   if (PASSWORD) cfg.password = PASSWORD;
-  if (KEY) cfg.keyPath = KEY;
+  // Only attach the key path when key auth actually wins. Attaching a stale
+  // --key on a password/kerberos source would make prepareKeyContents (ssh2)
+  // read the possibly-nonexistent file, and openssh's password/kerberos
+  // branches never use keyPath anyway.
+  if (KEY && authMode === 'key') cfg.keyPath = KEY;
   if (SUPASSWORD !== null && SUPASSWORD !== undefined) cfg.suPassword = sanitizePassword(SUPASSWORD);
   if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) cfg.sudoPassword = sanitizePassword(SUDOPASSWORD);
   if (KERBEROS_FLAG) cfg.kerberos = true;
@@ -280,12 +319,33 @@ const cliSourceConfigs: ServerConfig[] = (() => {
   return [];
 })();
 
+/**
+ * Resolve the explicit `--config` path from parsed argv.
+ *
+ * `parseArgv` records a value-less `--config` (no `=path`) as `null`. Silently
+ * coercing that to `undefined` would drop the explicit flag and fall back to
+ * `SSH_MCP_CONFIG`/default discovery, so a mistyped `--config` could start the
+ * process against the wrong configured source instead of failing fast. Reject a
+ * present-but-value-less `--config` like the other value-requiring flags.
+ * Returns the path when supplied, or `undefined` when the flag is absent.
+ */
+export function resolveCliConfigPath(
+  config: Record<string, string | null>,
+): string | undefined {
+  if (!('config' in config)) return undefined;
+  const value = config.config;
+  if (typeof value !== 'string') {
+    throw new Error('Configuration error:\n--config requires a value (--config=<path>)');
+  }
+  return value;
+}
+
 const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
   ? resolveConfig({
       cliSources: cliSourceConfigs,
-      cliConfigPath: typeof CONFIG_PATH === 'string' ? CONFIG_PATH : undefined,
+      cliConfigPath: resolveCliConfigPath(argvConfig),
     })
-  : { sources: [], perSourceApproval: {} };
+  : { sources: [], perSourceApproval: {}, defaultExplicit: false };
 
 if (isCliEnabled) {
   if (isMultiHost) {
@@ -417,14 +477,51 @@ async function bootstrapRegistry(): Promise<void> {
     await prepareKeyContents(cfg);
     registry.register(cfg);
   }
-  if (resolvedConfig.defaultName) {
-    registry.setDefault(resolvedConfig.defaultName);
+  applyRegistryConnectionPolicy(registry, resolvedConfig);
+}
+
+/**
+ * Wire the resolved connection policy onto a registry whose sources are already
+ * registered. Split out (and exported) so the explicit-default / fallback /
+ * require_connection opt-out matrix is unit-testable without booting the server.
+ *
+ * Two independent knobs:
+ *  - defaultExplicit: call setDefault() ONLY when the user explicitly chose a
+ *    default. Falling through to register()'s first-registered fallback leaves
+ *    the registry's defaultExplicit=false, so a multi-source config with no
+ *    explicit default still rejects an omitted connectionName (the headline
+ *    security fix) instead of silently routing to the first host.
+ *  - requireConnection: when false, opt out of that guard entirely. Absent the
+ *    field (older ResolvedConfig shape / no [server].require_connection) it
+ *    defaults to safe (guard ON).
+ */
+export function applyRegistryConnectionPolicy(
+  reg: Pick<TransportRegistry, 'setDefault' | 'setRequireConnectionWhenMulti'>,
+  config: ResolvedConfig,
+): void {
+  const requireConnection = config.requireConnection ?? true;
+  reg.setRequireConnectionWhenMulti(requireConnection);
+  if (config.defaultExplicit && config.defaultName) {
+    reg.setDefault(config.defaultName);
   }
 }
 
 /** Effective profile/connection name for gating + audit attribution. */
 function resolvedProfileName(connectionName?: string): string {
-  return connectionName ?? registry.getDefaultName() ?? 'default';
+  // Treat an empty/blank connectionName as "omitted", mirroring
+  // TransportRegistry.resolveName() (which routes `''` to the default host).
+  // Otherwise gating + audit attribution would be computed for the literal
+  // profile id '' while the command actually ran against the default host,
+  // silently bypassing that host's per-source approval policy.
+  const name = connectionName && connectionName.trim() !== '' ? connectionName : undefined;
+  if (name) return name;
+  // An omitted/blank name that the registry would REJECT (multi-source, no
+  // explicit default, guard on) never lands on a host: resolveName() throws
+  // before selection. Attributing that rejected call to getDefaultName() (the
+  // first-registered host) would corrupt audit profile for exactly the guard
+  // case. Mirror the guard and label it unresolved instead of a real host.
+  if (registry.wouldRejectOmittedName()) return '(unresolved)';
+  return registry.getDefaultName() ?? 'default';
 }
 
 export function buildApprovalProfile(
@@ -463,6 +560,48 @@ let approvalEngine: ApprovalDispatcher | null = null;
 let auditSink: AuditSink = { record() { /* no-op until wired (or audit absent) */ } };
 
 /**
+ * Resolve the [approval]/per-source config into the concrete engine input.
+ * Returns null for the legacy CLI path (no [approval] section and no per-source
+ * overrides). Shared by buildProductionApprovalEngine (which builds the engine)
+ * and wireApprovalAndAudit (which reuses the SAME resolved defaultMode +
+ * perSourceModes for the manual-without-resolver boot warning) so the warning
+ * can never disagree with the mode the engine actually runs.
+ */
+function resolveApprovalEngineInput(): BuildEngineFromConfigInput | null {
+  const approvalCfg = resolvedConfig.approval;
+  const perSourceModes: ApprovalMode[] = Object.values(resolvedConfig.perSourceApproval ?? {});
+  if (approvalCfg === undefined && perSourceModes.length === 0) {
+    return null;
+  }
+  return {
+    // Resolve the GLOBAL default mode:
+    //  - explicit [approval].mode set        -> honor it.
+    //  - no global mode, per-source overrides -> the [approval] block (when
+    //    present at all) exists only to host [approval.llm] for a per-source
+    //    smart override; keep the global default 'yolo' (unrestricted) so only
+    //    the overridden sources are gated. Defining [approval.llm] for a
+    //    per-source `mode = "smart"` makes resolvedConfig.approval non-undefined
+    //    even though no global mode was requested, so keying solely on
+    //    `approvalCfg === undefined` would wrongly fall through to manual here
+    //    and gate every ungated host (or throw at boot with WebUI off). This
+    //    also covers the no-[approval]-block case (per-source overrides only).
+    //  - no global mode and no per-source overrides -> a bare [approval] block
+    //    (e.g. `fail_closed = true`, or `[approval.llm]` alone) was added
+    //    deliberately to enable approval; leave defaultMode undefined so
+    //    buildApprovalEngineFromConfig applies the documented 'manual' default.
+    defaultMode:
+      approvalCfg?.mode !== undefined
+        ? approvalCfg.mode
+        : perSourceModes.length > 0
+          ? 'yolo'
+          : undefined,
+    fail_closed: approvalCfg?.fail_closed,
+    llm: approvalCfg?.llm,
+    perSourceModes,
+  };
+}
+
+/**
  * Build the production approval engine from resolvedConfig. Returns null for
  * the legacy CLI path (no [approval] section and no per-source overrides) so
  * the gate keeps its backward-compatible `legacy:no-engine` allow.
@@ -471,22 +610,38 @@ let auditSink: AuditSink = { record() { /* no-op until wired (or audit absent) *
  *   - manual mode requested but WebUI disabled (gate-12 invariant)
  *   - smart mode requested but [approval.llm] missing endpoint or model
  */
-function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
+export function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
   const approvalCfg = resolvedConfig.approval;
   const perSourceApproval = resolvedConfig.perSourceApproval ?? {};
   const perSourceModes: ApprovalMode[] = Object.values(perSourceApproval);
-  // When the WebUI is active we still want a live-switchable engine even if no
-  // [approval] section and no per-source overrides exist — otherwise the gate
-  // keeps the legacy no-engine allow and there's nothing to switch. A bare
-  // yolo-default engine is the right baseline in that case.
-  if (approvalCfg === undefined && perSourceModes.length === 0 && !webuiActive) {
+  // A "bare" engine has no [approval] section and no per-source overrides — the
+  // only reason it exists at all is that the WebUI is active and wants a
+  // live-switchable engine (otherwise the gate keeps its legacy no-engine allow
+  // and there's nothing to switch).
+  const isBareWebUIEngine = approvalCfg === undefined && perSourceModes.length === 0;
+
+  // Resolve config through the SHARED helper so the engine we build and the
+  // manual-without-resolver boot warning (wireApprovalAndAudit) can never
+  // disagree about the effective default/per-source modes. It returns null on
+  // the legacy CLI path (no [approval], no per-source overrides); keep that
+  // no-engine allow UNLESS the WebUI is active and wants a live-switchable
+  // bare engine.
+  const resolved = resolveApprovalEngineInput();
+  if (resolved === null && !(isBareWebUIEngine && webuiActive)) {
     return null;
   }
   const input: BuildEngineFromConfigInput = {
-    defaultMode: approvalCfg?.mode,
-    fail_closed: approvalCfg?.fail_closed,
-    llm: approvalCfg?.llm,
-    perSourceModes,
+    ...(resolved ?? {}),
+    // For the bare WebUI-only engine, pass an explicit `yolo` baseline. Leaving
+    // this undefined makes buildApprovalEngineFromConfig coerce it to `manual`,
+    // which would enqueue/block every exec even though no approval was
+    // configured — regressing the legacy read-only WebUI/status case and
+    // contradicting the yolo baseline that makeApprovalModeLookup already
+    // reports for an unconfigured global default. Per-source-only and explicit
+    // [approval].mode configs keep the resolved default from the shared helper.
+    defaultMode: resolved?.defaultMode ?? (isBareWebUIEngine ? 'yolo' : undefined),
+    // Seed per-source static overrides into the live mode store so a live mode
+    // switch starts from the operator's configured baseline (mode-switch lane).
     staticOverrides: perSourceApproval,
   };
   return buildApprovalEngineFromConfig(input, {
@@ -504,11 +659,43 @@ function isWebUIActive(): boolean {
 }
 
 /**
+ * True when a driver that settles the manual-approval queue is wired into this
+ * build. The queue resolver — the WebUI manual-approval server — lands in the
+ * child lane `pr/webui-manual-approval`; the approval-engine lane ships only the
+ * queue primitive, so no resolver is wired here. Kept as an explicit predicate
+ * (rather than inlining `false`) so the child lane can flip it to a real
+ * detection — e.g. `return isWebUIServerWired();` — without touching the warning
+ * call site.
+ */
+function isApprovalResolverWired(): boolean {
+  return false;
+}
+
+/**
  * Wire the approval engine into the gate and load the optional audit sink.
  * Safe to call before the MCP transport connects so the first exec is gated.
  */
 async function wireApprovalAndAudit(): Promise<void> {
-  approvalEngine = buildProductionApprovalEngine(isWebUIActive());
+  // Keep the module-level `approvalEngine` binding: the read-only WebUI wiring
+  // downstream (makeApprovalModeLookup + buildWebUIApprovalQueueAdapter) reads
+  // it to surface the live engine to the dashboard.
+  const webuiActive = isWebUIActive();
+  approvalEngine = buildProductionApprovalEngine(webuiActive);
+
+  // Non-fatal boot advisory: manual mode boots a queue with no driver when the
+  // approval-engine lane runs standalone, ahead of its child WebUI lane. Boot
+  // still succeeds (the queue exists, it just times out until a resolver lands);
+  // warn so the operator is not left wondering why every command hangs.
+  const input = resolveApprovalEngineInput();
+  const warning = manualWithoutResolverWarning({
+    webuiEnabled: webuiActive,
+    defaultMode: input?.defaultMode,
+    perSourceModes: input?.perSourceModes,
+    resolverWired: isApprovalResolverWired(),
+  });
+  if (warning) {
+    console.error(`WARN: ${warning}`);
+  }
   setApprovalEngine(approvalEngine);
   auditSink = await loadAuditSink({
     auditDir: resolvedConfig.server?.audit_dir,
@@ -839,9 +1026,51 @@ export async function executeAuditedTransportCommand(input: {
   return resultToMcpContent(result);
 }
 
+/**
+ * Map ExecResult to MCP tool response. Preserves upstream semantics:
+ *   - auth/host_key/connect/transport categories → reject with descriptive error
+ *   - timeout → reject with timeout error
+ *   - non-zero exit → reject (wraps as "Error (code N):\n<stderr>"), even when
+ *     stderr is empty (e.g. `false`, `test -f missing`): the synthetic detail
+ *     "Command exited with status N" is used so a failed command never looks
+ *     like a success just because it printed nothing to stderr.
+ *   - exit 0 → success, even if stderr is non-empty
+ *
+ * Exit 0 is treated as success regardless of stderr: the OpenSSH transport
+ * surfaces benign diagnostics on stderr (e.g. with the default
+ * StrictHostKeyChecking=accept-new, the first connection to a host prints
+ * "Warning: Permanently added '<host>' ... to the list of known hosts." while
+ * exiting 0). Throwing on any stderr would turn every first-connect into an
+ * error. On success the benign OpenSSH host-key warning is filtered out, but
+ * any remaining stderr is appended to the text response so callers do not lose
+ * useful command diagnostics/progress from tools (git clone, curl, build
+ * tools) that write to stderr while succeeding.
+ */
+/**
+ * Strip the benign OpenSSH first-connect host-key notice from a stderr stream,
+ * leaving genuine command diagnostics intact. With StrictHostKeyChecking=
+ * accept-new the client prints
+ *   "Warning: Permanently added '<host>' (<keytype>) to the list of known hosts."
+ * on the first connection to a host while still exiting 0; that line is noise,
+ * not output the caller asked for.
+ */
+function stripBenignSshWarnings(stderr: string): string {
+  return stderr
+    .split('\n')
+    .filter(line => !/^Warning: Permanently added .*to the list of known hosts\.?\s*$/.test(line))
+    .join('\n')
+    .trim();
+}
 export function resultToMcpContent(result: ExecResult) {
   if (result.category === 'timeout') {
-    throw new McpError(ErrorCode.InternalError, result.stderr || `Command execution timed out after ${DEFAULT_TIMEOUT}ms`);
+    // Always surface that the command timed out, even when the process wrote to
+    // stderr before the deadline. A build/tool that prints progress or
+    // diagnostics to stderr and then hangs would otherwise be reported as an
+    // ordinary error, hiding the timeout. Keep any captured stderr as trailing
+    // context so its diagnostics are not lost.
+    const timeoutMsg = `Command execution timed out after ${DEFAULT_TIMEOUT}ms`;
+    const detail = result.stderr ? `${timeoutMsg}\n${result.stderr}` : timeoutMsg;
+    throw new McpError(ErrorCode.InternalError, detail);
   }
   if (result.category === 'auth') {
     throw new McpError(ErrorCode.InternalError, `SSH authentication error: ${result.stderr}`);
@@ -855,18 +1084,13 @@ export function resultToMcpContent(result: ExecResult) {
   if (result.category === 'transport') {
     throw new McpError(ErrorCode.InternalError, result.stderr || 'SSH transport error');
   }
-  // Only treat stderr as a hard failure when the command actually failed (non-zero exit).
-  // Many tools (sudo with -S, curl, git, apt) write progress/info to stderr on success.
-  const exitCode = result.exitCode ?? 0;
-  if (exitCode !== 0 && result.stderr) {
-    throw new McpError(ErrorCode.InternalError, `Error (code ${exitCode}):\n${result.stderr}`);
+  if (result.exitCode !== null && result.exitCode !== 0) {
+    const detail = result.stderr || `Command exited with status ${result.exitCode}`;
+    throw new McpError(ErrorCode.InternalError, `Error (code ${result.exitCode}):\n${detail}`);
   }
-  // Success path: include stderr alongside stdout when it has substantive content.
-  const trimmedStderr = result.stderr.trim();
-  const text = trimmedStderr
-    ? (result.stdout
-        ? `${result.stdout.replace(/\n+$/, '')}\n[stderr]\n${result.stderr}`
-        : result.stderr)
+  const diagnostics = stripBenignSshWarnings(result.stderr);
+  const text = diagnostics
+    ? `${result.stdout}${result.stdout && !result.stdout.endsWith('\n') ? '\n' : ''}${diagnostics}`
     : result.stdout;
   return {
     content: [{
@@ -897,7 +1121,11 @@ server.tool(
     const sanitizedCommand = sanitizeCommand(command);
     const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
     const profile = resolvedProfileName(connectionName);
-    const startedAt = Date.now();
+    // Fallback timestamp for errors raised before the transport call (registry
+    // init failure, approval deny). Re-captured immediately before t.exec below
+    // so a SUCCESSFUL command's audit durationMs measures command runtime only,
+    // not SSH init + approval wait time.
+    let startedAt = Date.now();
     let audited = false;
     let approvalDecision: ApprovalDecision | undefined;
     try {
@@ -908,6 +1136,7 @@ server.tool(
         command: commandWithDescription,
         description,
       });
+      startedAt = Date.now();
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
       auditSink.record({
         tool: 'exec',
@@ -950,7 +1179,11 @@ if (!DISABLE_SUDO) {
       const sanitizedCommand = sanitizeCommand(command);
       const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
       const profile = resolvedProfileName(connectionName);
-      const startedAt = Date.now();
+      // Fallback timestamp for errors raised before the transport call (registry
+      // init failure, approval deny). Re-captured immediately before
+      // t.execElevated below so a SUCCESSFUL command's audit durationMs measures
+      // command runtime only, not SSH init + approval wait time.
+      let startedAt = Date.now();
       let audited = false;
       let approvalDecision: ApprovalDecision | undefined;
       try {
@@ -966,6 +1199,7 @@ if (!DISABLE_SUDO) {
         const legacySudo = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined && !isMultiHost)
           ? sanitizePassword(SUDOPASSWORD)
           : undefined;
+        startedAt = Date.now();
         const result = await t.execElevated(commandWithDescription, {
           timeoutMs: DEFAULT_TIMEOUT,
           mode: 'sudo',

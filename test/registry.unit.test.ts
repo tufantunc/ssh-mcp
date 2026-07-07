@@ -92,6 +92,110 @@ describe('TransportRegistry.resolveName (finding 3: omitted name in multi-host)'
   });
 });
 
+describe('TransportRegistry.setRequireConnectionWhenMulti (require_connection opt-out)', () => {
+  it('opts out of the multi-host omit-name guard when set false (routes to first-registered)', async () => {
+    const stub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValue(stub);
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    // Opt out: the guard must NOT fire, and an omitted name routes to the
+    // first-registered fallback ('a') without throwing.
+    r.setRequireConnectionWhenMulti(false);
+    await expect(r.get()).resolves.toBe(stub);
+  });
+
+  it('keeps the guard armed when set true explicitly (multi-host omit still throws)', async () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    r.setRequireConnectionWhenMulti(true);
+    await expect(r.get()).rejects.toThrow(/connectionName is required when multiple servers are configured: a, b/);
+  });
+
+  it('guard is ON by default (no setter call) for multi-host omit', async () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    await expect(r.get()).rejects.toThrow(/connectionName is required/);
+  });
+
+  it('opt-out does not affect single-source omit (always resolves the lone source)', async () => {
+    const stub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValue(stub);
+    const r = new TransportRegistry();
+    r.register(makeConfig('solo'));
+    r.setRequireConnectionWhenMulti(false);
+    await expect(r.get()).resolves.toBe(stub);
+  });
+
+  it('an explicit name still routes correctly even when the guard is opted out', async () => {
+    const stub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValue(stub);
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    r.setRequireConnectionWhenMulti(false);
+    await expect(r.get('b')).resolves.toBe(stub);
+  });
+});
+
+describe('TransportRegistry.wouldRejectOmittedName (Codex R2: audit/gating attribution guard mirror)', () => {
+  // index.ts resolvedProfileName() calls this BEFORE registry.get() to decide
+  // how to attribute an omitted/blank connectionName for gating + audit. It
+  // must return exactly the condition under which resolveName() rejects an
+  // omitted name, so a guard-rejected call is never attributed to (nor gated
+  // as) the first-registered host.
+  it('true for multi-source, no explicit default, guard ON (the reject case)', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    expect(r.wouldRejectOmittedName()).toBe(true);
+  });
+
+  it('false for a single source (omitted name always resolves the lone host)', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('solo'));
+    expect(r.wouldRejectOmittedName()).toBe(false);
+  });
+
+  it('false after an explicit setDefault() (omit-name shortcut re-enabled)', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    r.setDefault('b');
+    expect(r.wouldRejectOmittedName()).toBe(false);
+  });
+
+  it('false when the guard is opted out via setRequireConnectionWhenMulti(false)', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    r.setRequireConnectionWhenMulti(false);
+    expect(r.wouldRejectOmittedName()).toBe(false);
+  });
+
+  it('false for an empty registry', () => {
+    const r = new TransportRegistry();
+    expect(r.wouldRejectOmittedName()).toBe(false);
+  });
+
+  it('matches resolveName(): predicate true <=> get() rejects an omitted name', async () => {
+    const stub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValue(stub);
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    // Guard armed: predicate true AND get() rejects.
+    expect(r.wouldRejectOmittedName()).toBe(true);
+    await expect(r.get()).rejects.toThrow(/connectionName is required/);
+    // Explicit default flips both to the resolve path.
+    r.setDefault('a');
+    expect(r.wouldRejectOmittedName()).toBe(false);
+    await expect(r.get()).resolves.toBe(stub);
+  });
+});
+
 describe('TransportRegistry.get (finding 1: rejected init must not be cached)', () => {
   it('retries init on a later get() after the first init rejects', async () => {
     const init = vi
@@ -143,6 +247,49 @@ describe('TransportRegistry.get (finding 1: rejected init must not be cached)', 
     const [t1, t2] = await Promise.all([p1, p2]);
     expect(t1).toBe(stub);
     expect(t2).toBe(stub);
+    expect(init).toHaveBeenCalledTimes(1);
+  });
+
+  // Migrated from the dropped index.unit.test `getOrCreateInitializedTransport`
+  // suite (base pr/kerberos-transport, Codex-P2). The single-host init-race
+  // primitive (getOrCreateInitializedTransport + activeTransportCache) was
+  // dropped in favor of TransportRegistry.get as the sole lifecycle owner, so
+  // its concurrency-PUBLISH guarantee must survive as a registry-level guard:
+  // two concurrent get(name) calls share one in-flight init and NO live
+  // transport is published (observable via list().connected) until init
+  // resolves — otherwise a concurrent OpenSSH/password caller could enter
+  // runSsh before SSH_ASKPASS exists.
+  it('does not publish a live transport until the shared in-flight init resolves', async () => {
+    let resolveInit!: () => void;
+    const init = vi.fn<() => Promise<void>>().mockImplementation(
+      () => new Promise<void>((res) => { resolveInit = res; }),
+    );
+    const stub = makeStub(init);
+    createTransportMock.mockReturnValue(stub);
+
+    const r = new TransportRegistry();
+    r.register(makeConfig('race'));
+
+    const p1 = r.get('race');
+    const p2 = r.get('race');
+
+    // Both concurrent callers share ONE in-flight init.
+    expect(createTransportMock).toHaveBeenCalledTimes(1);
+    expect(init).toHaveBeenCalledTimes(1);
+    // Critical regression guard: while init is still pending, no half-initialized
+    // transport is observable — list() reports the connection as not-connected.
+    expect(r.list().find((x) => x.name === 'race')!.connected).toBe(false);
+
+    resolveInit();
+    const [t1, t2] = await Promise.all([p1, p2]);
+
+    // Only after init resolves is the single live transport published to both
+    // callers and reflected as connected.
+    expect(t1).toBe(stub);
+    expect(t2).toBe(stub);
+    expect(r.list().find((x) => x.name === 'race')!.connected).toBe(true);
+    // A subsequent get() reuses the published transport without re-initializing.
+    await expect(r.get('race')).resolves.toBe(stub);
     expect(init).toHaveBeenCalledTimes(1);
   });
 });

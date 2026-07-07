@@ -26,6 +26,7 @@ export {
   ModeUnavailableError,
   buildApprovalEngine,
   buildApprovalEngineFromConfig,
+  manualWithoutResolverWarning,
   type BuildApprovalEngineOptions,
   type BuildEngineFromConfigInput,
   type BuildEngineFromConfigOptions,

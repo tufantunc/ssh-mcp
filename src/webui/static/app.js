@@ -200,6 +200,19 @@
       if (m === effective) opt.selected = true;
       sel.appendChild(opt);
     }
+    // If the server reports an effective mode we can't switch to (missing, or
+    // not in availableModes — e.g. modeController wired without getApprovalMode,
+    // so /api/profiles returns 'unknown'), the <select> would otherwise default
+    // to the first option ("inherit") and misrepresent the live state. Surface
+    // the real value as a disabled, pre-selected placeholder instead of lying.
+    if (effective && !availableModes.includes(effective)) {
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = effective + ' (current)';
+      placeholder.disabled = true;
+      placeholder.selected = true;
+      sel.insertBefore(placeholder, sel.firstChild);
+    }
     sel.addEventListener('change', () => switchMode(profileId, sel.value, sel));
     return sel;
   }
@@ -213,7 +226,7 @@
   let globalMode = null;
 
   // Whether the server exposes the live description-edit surface (PR-8).
-  // Detected at bootstrap from /api/approval-modes' sibling capability probe;
+  // Detected at bootstrap from /api/profiles' `source_edit_enabled` flag;
   // false => read-only description cells (the read-only WebUI case).
   let sourceEditEnabled = false;
 

@@ -247,6 +247,25 @@ describe('WebUI app.js per-profile mode control (FINDING 1: inherit/clear)', () 
     const put = calls.find(c => c.method === 'PUT' && c.url.includes('/api/profiles/prod/approval-mode'));
     expect(put!.body).toEqual({ mode: 'manual' });
   });
+
+  it('surfaces an unswitchable effective mode as a disabled placeholder, not "inherit"', async () => {
+    // modeController is armed (availableModes non-empty) but the server reports
+    // an effective mode outside that set ('unknown'). The select must not
+    // silently fall back to the leading "inherit" option and misrepresent state.
+    const { created } = await boot({
+      modes: { modes: ['yolo', 'manual'], global: 'yolo' },
+      profiles: [{ ...PROFILE, approval_mode_effective: 'unknown' }],
+    });
+    const sel = created.find(e => e.tagName === 'select' && e.dataset.profile === 'prod')!;
+    const selected = sel.children.find(o => o.selected)!;
+    expect(selected).toBeDefined();
+    expect(selected.value).toBe('');
+    expect(selected.disabled).toBe(true);
+    expect(selected.textContent).toBe('unknown (current)');
+    // the real "inherit" option is not the selected one
+    const inheritOpts = sel.children.filter(o => o.textContent === 'inherit');
+    expect(inheritOpts.every(o => !o.selected)).toBe(true);
+  });
 });
 
 describe('WebUI app.js global mode control (FINDING 2: global switch + SSE)', () => {
