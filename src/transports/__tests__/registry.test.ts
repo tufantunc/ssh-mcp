@@ -30,8 +30,8 @@ auth = "kerberos"
 
 [[sources]]
 id = "dc03"
-host = "dc03.css.com.tw"
-user = "css\\\\c19087"
+host = "dc03.example.com"
+user = "corp\\\\svcuser"
 auth = "kerberos"
 description = '''allow only NTDS\\My thumbprint 8A00772D4491E2E71218405BDDE5A5FE3E9C7DBE certificate-object writes; deny PFX, private key reads, restart, reboot'''
 approval = { mode = "smart" }
@@ -66,12 +66,23 @@ describe('TransportRegistry.profile() — read path', () => {
     expect(lab.approval).toBeUndefined();
   });
 
-  it('falls back to the registry default when no name is given (after an explicit default is set)', () => {
+  it('refuses an omitted name when multiple sources lack an explicit default', () => {
     const { registry } = registryFrom(TWO_SOURCE_TOML);
 
-    // With multiple sources the omit-name shortcut is enabled only by a
-    // deliberate setDefault() (PR #3 R1 fix: never silently pick a host).
+    // This fixture marks no source as default, so registryFrom() never calls
+    // setDefault(). profile() delegates to the same resolveName() guard as
+    // get(): with >1 source and no explicit default it must refuse to silently
+    // pick the first-registered host (the merged multi-host hardening), rather
+    // than land an approval decision against the wrong machine.
+    expect(() => registry.profile()).toThrow(
+      /connectionName is required when multiple servers are configured: lab, dc03/,
+    );
+  });
+
+  it('resolves an omitted name to the explicit default after setDefault()', () => {
+    const { registry } = registryFrom(TWO_SOURCE_TOML);
     registry.setDefault('lab');
+
     const def = registry.profile();
     expect(def.id).toBe('lab');
     expect(def.approval).toBeUndefined();

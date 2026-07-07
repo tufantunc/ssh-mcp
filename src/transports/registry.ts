@@ -70,6 +70,16 @@ export class TransportRegistry {
    */
   private requireConnectionWhenMulti = true;
 
+  /**
+   * @param prepareConfig Optional per-host preparation run lazily on first
+   *   get(name), inside the init path — NOT at register() time. Used to defer
+   *   expensive/failure-prone work (e.g. reading an ssh2 key file from disk)
+   *   until the host is actually selected, so one secondary host with a
+   *   missing/unmounted key path does not break startup or block list-servers
+   *   and commands against otherwise-healthy hosts.
+   */
+  constructor(private prepareConfig?: (cfg: ServerConfig) => Promise<void>) {}
+
   register(config: ServerConfig): void {
     if (!config.name) {
       throw new Error('ServerConfig.name is required');
@@ -186,6 +196,27 @@ export class TransportRegistry {
     );
   }
 
+  /**
+   * Resolve the profile/attribution name for an audit record WITHOUT throwing.
+   *
+   * Mirrors resolveName()'s ambiguity rules but is side-effect free and never
+   * rejects, so it is safe to call on the failure/catch path. Critically, for
+   * the ambiguous multi-host case (connectionName omitted, more than one server
+   * registered, no explicit default) it returns the '(unresolved)' sentinel
+   * rather than getDefaultName()'s first-registered server — that call is
+   * rejected by resolveName() before any command runs, so attributing its
+   * failure audit record to the first host would corrupt attribution.
+   */
+  resolveProfileName(name?: string): string {
+    // An explicitly-requested name is the accurate attribution even if it is
+    // unknown (registry.get throws later; the record should still name what the
+    // caller asked for, not a sentinel).
+    if (name) return name;
+    if (this.defaultName === null) return 'default';
+    if (this.configs.size > 1 && !this.defaultExplicit) return '(unresolved)';
+    return this.defaultName;
+  }
+
   /** Resolve name argument → canonical name. Falls back to default. */
   private resolveName(name?: string): string {
     if (name && this.configs.has(name)) return name;
@@ -224,18 +255,28 @@ export class TransportRegistry {
     const cfg = this.configs.get(resolved)!;
     const gen = this.reloadGeneration;
     const initPromise = (async () => {
-      const t = createTransport(cfg);
+      let t: ISshTransport | undefined;
       try {
+        // Lazy per-host prep (e.g. reading the ssh2 key file). Deferred to here
+        // so a missing key on this host fails only when the host is used, not at
+        // startup. Kept inside the try so the finally below clears the in-flight
+        // entry on a prep failure too — a later get() retries instead of
+        // replaying the cached rejection (same contract as a rejected init).
+        if (this.prepareConfig) await this.prepareConfig(cfg);
+        t = createTransport(cfg);
         await t.init();
       } finally {
-        // Always clear the in-flight entry so a rejected init (e.g. a transient
-        // connect timeout to a temporarily-unreachable host) is NOT cached.
-        // Otherwise every later get() would replay the same rejection via the
-        // pending-promise return above, and the connection could never retry
-        // without a process restart. Cleared BEFORE the generation re-check
-        // below so the recursive re-get on a mid-init reload can't deadlock on
-        // this very promise.
+        // Always clear the in-flight entry so a rejected prep/init (e.g. a
+        // missing key file, or a transient connect timeout to a temporarily-
+        // unreachable host) is NOT cached. Otherwise every later get() would
+        // replay the same rejection via the pending-promise return above, and
+        // the connection could never retry without a process restart. Cleared
+        // BEFORE the generation re-check below so the recursive re-get on a
+        // mid-init reload can't deadlock on this very promise.
         this.initPromises.delete(resolved);
+      }
+      if (!t) {
+        throw new Error(`Transport initialization aborted before transport creation: ${resolved}`);
       }
       // A config hot-reload (replaceAll + closeAll) may have completed while we
       // were awaiting init(). If so, `t` was dialed against the pre-reload
@@ -267,6 +308,12 @@ export class TransportRegistry {
     connected: boolean;
     isDefault: boolean;
   }> {
+    // A name is only a *usable* default when it can actually be selected with an
+    // omitted connectionName: either it's the lone server, or setDefault() was
+    // called. In the normal multi-host case (>1 server, no explicit default)
+    // resolveName() rejects an omitted name, so advertising the first-registered
+    // host as "(default)" would be misleading — report isDefault=false there.
+    const defaultUsable = this.defaultExplicit || this.configs.size === 1;
     const out = [];
     for (const [name, cfg] of this.configs) {
       out.push({
@@ -278,7 +325,7 @@ export class TransportRegistry {
         transport: (cfg.transport ?? (cfg.kerberos ? 'openssh' : 'ssh2')) as 'ssh2' | 'openssh',
         authMode: cfg.authMode ?? (cfg.kerberos ? 'kerberos' : cfg.keyPath || cfg.privateKey ? 'key' : cfg.password ? 'password' : 'unspecified'),
         connected: this.transports.has(name),
-        isDefault: this.defaultName === name,
+        isDefault: defaultUsable && this.defaultName === name,
       });
     }
     return out;
