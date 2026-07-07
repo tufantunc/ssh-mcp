@@ -27,7 +27,7 @@ describe('parseServerConfigJson (happy path)', () => {
   });
 
   it('throws on missing name / host / user / auth', () => {
-    expect(() => parseServerConfigJson('{}')).toThrow(/missing required "name"/);
+    expect(() => parseServerConfigJson('{}')).toThrow(/non-empty string "name"/);
     expect(() => parseServerConfigJson(JSON.stringify({ name: 'a' }))).toThrow(/missing required "host"/);
     expect(() => parseServerConfigJson(JSON.stringify({ name: 'a', host: 'h' }))).toThrow(/missing required "user"/);
     expect(() => parseServerConfigJson(JSON.stringify({ name: 'a', host: 'h', user: 'u' }))).toThrow(/requires "auth"/);
@@ -65,6 +65,100 @@ describe('parseServerConfigJson (finding 4: ssh2 must not silently drop host-key
     }));
     expect(cfg.transport).toBe('openssh');
     expect(cfg.knownHostsFile).toBe('/tmp/known');
+  });
+});
+
+describe('parseServerConfigJson (round-2: input validation hardening)', () => {
+  it('does not echo the raw config in a JSON parse error (no secret leak)', () => {
+    const raw = '{"name":"x","password":"s3cret",}'; // trailing comma -> parse error
+    try {
+      parseServerConfigJson(raw);
+      throw new Error('expected parse to throw');
+    } catch (e: any) {
+      expect(e.message).toMatch(/--ssh JSON parse error/);
+      expect(e.message).not.toMatch(/s3cret/);
+    }
+  });
+
+  it('requires name to be a non-empty string (rejects numeric name)', () => {
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 1, host: 'h', user: 'u', auth: 'password', password: 'pw',
+    }))).toThrow(/non-empty string "name"/);
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: '', host: 'h', user: 'u', auth: 'password', password: 'pw',
+    }))).toThrow(/non-empty string "name"/);
+  });
+
+  it('rejects a non-integer / out-of-range port', () => {
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'password', password: 'pw', port: 'abc',
+    }))).toThrow(/invalid "port"/);
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'password', password: 'pw', port: 70000,
+    }))).toThrow(/invalid "port"/);
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'password', password: 'pw', port: 0,
+    }))).toThrow(/invalid "port"/);
+  });
+
+  it('accepts a valid numeric port (and a numeric-string port)', () => {
+    expect(parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'password', password: 'pw', port: 2222,
+    })).port).toBe(2222);
+    expect(parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'password', password: 'pw', port: '2200',
+    })).port).toBe(2200);
+  });
+
+  it('rejects an invalid transport value (typo)', () => {
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'key', keyPath: '/k', transport: 'opnssh',
+    }))).toThrow(/invalid "transport"/);
+  });
+
+  it('rejects a kerberos config whose explicit transport is not openssh', () => {
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'kerberos', transport: 'ssh2',
+    }))).toThrow(/implies transport "openssh"/);
+  });
+
+  it('rejects an inline privateKey for an openssh key config (buildArgs ignores it)', () => {
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'key', transport: 'openssh', privateKey: '-----BEGIN...',
+    }))).toThrow(/inline "privateKey" is not supported for transport "openssh"/);
+  });
+
+  it('still accepts an inline privateKey for an ssh2 key config', () => {
+    const cfg = parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'key', privateKey: '-----BEGIN...',
+    }));
+    expect(cfg.transport).toBe('ssh2');
+    expect(cfg.privateKey).toBe('-----BEGIN...');
+  });
+
+  it('rejects an invalid gssapiDelegateCredentials value', () => {
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'kerberos', gssapiDelegateCredentials: 'maybe',
+    }))).toThrow(/gssapiDelegateCredentials must be "yes" or "no"/);
+  });
+
+  it('rejects gssapiDelegateCredentials on a non-kerberos config', () => {
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'password', password: 'pw', gssapiDelegateCredentials: 'yes',
+    }))).toThrow(/gssapiDelegateCredentials requires auth "kerberos"/);
+  });
+
+  it('accepts a valid gssapiDelegateCredentials on a kerberos config', () => {
+    const cfg = parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'kerberos', gssapiDelegateCredentials: 'yes',
+    }));
+    expect(cfg.gssapiDelegateCredentials).toBe('yes');
+  });
+
+  it('rejects an invalid strictHostKeyChecking value (on an openssh config)', () => {
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'key', keyPath: '/k', transport: 'openssh', strictHostKeyChecking: 'maybe',
+    }))).toThrow(/strictHostKeyChecking must be one of: yes, no, accept-new/);
   });
 });
 

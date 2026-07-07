@@ -24,16 +24,50 @@ describe('audit rotator', () => {
     }
   });
 
-  it('prunes old day-rolled files but retains newest distinct days', () => {
+  it('prunes files older than the retention window by age (not by count of distinct days)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ssh-mcp-prune-'));
     try {
       for (const day of ['20260520', '20260521', '20260522']) {
         writeFileSync(join(dir, `executions-${day}.jsonl`), day);
       }
-      const removed = pruneOldDays(dir, 2);
+      // asOf = 2026-05-22, retain=2 → window is [05-21, 05-22]; 05-20 is out.
+      const removed = pruneOldDays(dir, 2, new Date('2026-05-22T00:00:00Z'));
       expect(removed.some(p => p.endsWith('executions-20260520.jsonl'))).toBe(true);
       expect(existsSync(join(dir, 'executions-20260521.jsonl'))).toBe(true);
       expect(existsSync(join(dir, 'executions-20260522.jsonl'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('prunes an old file past the window even when few distinct dates exist (gap in usage)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ssh-mcp-prune-gap-'));
+    try {
+      // Only two distinct dates on disk, far apart. The count-based prune kept
+      // the old May file (2 distinct <= retain=10); age-based prune removes it.
+      writeFileSync(join(dir, 'executions-20260501.jsonl'), 'old');
+      writeFileSync(join(dir, 'executions-20260701.jsonl'), 'today');
+      const removed = pruneOldDays(dir, 10, new Date('2026-07-01T00:00:00Z'));
+      expect(removed.some(p => p.endsWith('executions-20260501.jsonl'))).toBe(true);
+      expect(existsSync(join(dir, 'executions-20260501.jsonl'))).toBe(false);
+      expect(existsSync(join(dir, 'executions-20260701.jsonl'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('prunes rotated siblings (.jsonl.N) sharing an out-of-window date', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ssh-mcp-prune-sib-'));
+    try {
+      writeFileSync(join(dir, 'executions-20260501.jsonl'), 'a');
+      writeFileSync(join(dir, 'executions-20260501.jsonl.1'), 'b');
+      writeFileSync(join(dir, 'executions-20260501.jsonl.2'), 'c');
+      writeFileSync(join(dir, 'executions-20260701.jsonl'), 'today');
+      const removed = pruneOldDays(dir, 5, new Date('2026-07-01T00:00:00Z'));
+      expect(removed.filter(p => /executions-20260501\.jsonl(\.\d+)?$/.test(p))).toHaveLength(3);
+      expect(existsSync(join(dir, 'executions-20260501.jsonl.1'))).toBe(false);
+      expect(existsSync(join(dir, 'executions-20260501.jsonl.2'))).toBe(false);
+      expect(existsSync(join(dir, 'executions-20260701.jsonl'))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

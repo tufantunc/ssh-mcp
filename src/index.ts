@@ -74,14 +74,38 @@ function collectSshJsonArgs(): string[] {
     .map(a => a.slice('--ssh='.length));
 }
 
+/**
+ * Resolve and validate the transport for a multi-host --ssh JSON config.
+ * Defaults to 'ssh2'; rejects any value that is not exactly 'ssh2' or 'openssh'
+ * so a typo like "opnssh" fails at parse time instead of silently running the
+ * default ssh2 transport. (createTransport treats any non-'openssh' value as
+ * ssh2, while prepareKeyContents only loads a key when transport === 'ssh2',
+ * so an unchecked typo would connect over ssh2 without the configured key.)
+ * Mirrors the legacy CLI's `Invalid --transport` rejection.
+ */
+function resolveJsonTransport(obj: any): 'ssh2' | 'openssh' {
+  const t = obj.transport ?? 'ssh2';
+  if (t !== 'ssh2' && t !== 'openssh') {
+    throw new Error(`--ssh "${obj.name}" invalid "transport": ${JSON.stringify(obj.transport)} (expected "ssh2" or "openssh")`);
+  }
+  return t;
+}
+
 export function parseServerConfigJson(raw: string): ServerConfig {
   let obj: any;
   try {
     obj = JSON.parse(raw);
   } catch (e: any) {
+    // Do NOT echo the raw argument: a malformed --ssh config can still carry a
+    // password or private key alongside the syntax error, and main() prints the
+    // thrown error to stderr. Surface only the parser message, never the config.
     throw new Error(`--ssh JSON parse error: ${e?.message || e}`);
   }
-  if (!obj.name) throw new Error('--ssh JSON missing required "name"');
+  // name must be a non-empty string: a numeric key (e.g. `"name": 1`) registers
+  // under a Map key the MCP tools' string connectionName can never resolve.
+  if (typeof obj.name !== 'string' || obj.name.length === 0) {
+    throw new Error('--ssh JSON requires a non-empty string "name"');
+  }
   if (!obj.host) throw new Error(`--ssh "${obj.name}" missing required "host"`);
   const user = obj.user ?? obj.username;
   if (!user) throw new Error(`--ssh "${obj.name}" missing required "user" (or "username")`);
@@ -90,10 +114,23 @@ export function parseServerConfigJson(raw: string): ServerConfig {
     throw new Error(`--ssh "${obj.name}" requires "auth": "kerberos" | "key" | "password"`);
   }
 
+  // port: mirror the legacy --port numeric validation. An unchecked value fails
+  // only at first use (openssh `ssh -G -p abc` -> "Bad port", exit 255; ssh2
+  // receives a non-numeric port), advertised by list-servers as if healthy.
+  // Reject a non-integer / out-of-range port at parse time.
+  let port = 22;
+  if (obj.port !== undefined) {
+    const p = typeof obj.port === 'number' ? obj.port : Number(obj.port);
+    if (!Number.isInteger(p) || p < 1 || p > 65535) {
+      throw new Error(`--ssh "${obj.name}" invalid "port": ${JSON.stringify(obj.port)} (expected integer 1-65535)`);
+    }
+    port = p;
+  }
+
   const cfg: ServerConfig = {
     name: obj.name,
     host: obj.host,
-    port: obj.port ?? 22,
+    port,
     username: user,
     authMode: auth,
   };
@@ -103,21 +140,56 @@ export function parseServerConfigJson(raw: string): ServerConfig {
     case 'kerberos':
       cfg.kerberos = true;
       cfg.transport = 'openssh';
-      if (obj.gssapiDelegateCredentials) cfg.gssapiDelegateCredentials = obj.gssapiDelegateCredentials;
+      // Kerberos implies openssh; reject an explicit conflicting transport
+      // rather than silently overriding it (mirrors the legacy --kerberos rule).
+      if (obj.transport !== undefined && obj.transport !== 'openssh') {
+        throw new Error(`--ssh "${obj.name}" auth "kerberos" implies transport "openssh" (got ${JSON.stringify(obj.transport)})`);
+      }
       break;
     case 'key':
-      cfg.transport = obj.transport ?? 'ssh2';
+      cfg.transport = resolveJsonTransport(obj);
+      // OpenSshTransport.buildArgs only passes cfg.keyPath via `-i`; an inline
+      // privateKey would be silently ignored and ssh would fall back to
+      // agent/default identities. Reject the combination so the configured
+      // credential is actually used (or the user switches to keyPath).
+      if (cfg.transport === 'openssh' && obj.privateKey) {
+        throw new Error(`--ssh "${obj.name}" inline "privateKey" is not supported for transport "openssh"; use "keyPath"`);
+      }
       if (obj.keyPath) cfg.keyPath = obj.keyPath;
       if (obj.privateKey) cfg.privateKey = obj.privateKey;
       break;
     case 'password':
-      cfg.transport = obj.transport ?? 'ssh2';
+      cfg.transport = resolveJsonTransport(obj);
       if (obj.password) cfg.password = obj.password;
       break;
   }
 
   if (obj.sudoPassword) cfg.sudoPassword = obj.sudoPassword;
   if (obj.suPassword) cfg.suPassword = obj.suPassword;
+
+  // gssapiDelegateCredentials: enum-validate and require kerberos auth (the only
+  // path that emits GSSAPIDelegateCredentials). An unchecked typo like "maybe"
+  // registers but fails every command (openssh `ssh -G -o
+  // GSSAPIDelegateCredentials=maybe` -> "unsupported option", exit 255).
+  // Mirrors the legacy rules "must be yes or no" + "requires --kerberos".
+  if (obj.gssapiDelegateCredentials !== undefined) {
+    if (!['yes', 'no'].includes(obj.gssapiDelegateCredentials)) {
+      throw new Error(`--ssh "${obj.name}" gssapiDelegateCredentials must be "yes" or "no" (got ${JSON.stringify(obj.gssapiDelegateCredentials)})`);
+    }
+    if (auth !== 'kerberos') {
+      throw new Error(`--ssh "${obj.name}" gssapiDelegateCredentials requires auth "kerberos"`);
+    }
+    cfg.gssapiDelegateCredentials = obj.gssapiDelegateCredentials;
+  }
+
+  // strictHostKeyChecking: enum-validate. An unchecked value fails every command
+  // (openssh `ssh -G -o StrictHostKeyChecking=maybe` -> "unsupported option",
+  // exit 255). Mirrors the legacy enum check.
+  if (obj.strictHostKeyChecking !== undefined &&
+      !['yes', 'no', 'accept-new'].includes(obj.strictHostKeyChecking)) {
+    throw new Error(`--ssh "${obj.name}" strictHostKeyChecking must be one of: yes, no, accept-new (got ${JSON.stringify(obj.strictHostKeyChecking)})`);
+  }
+
   // knownHostsFile / strictHostKeyChecking are openssh-transport-only. The ssh2
   // transport ignores both, so accepting them on an ssh2 config would silently
   // drop the requested host-key enforcement — a security downgrade. Mirror the
@@ -450,7 +522,7 @@ export async function buildTransportConfig(inputs: BuildTransportConfigInputs): 
 // Transport registry — lazy init, single entry for legacy single-host mode.
 // =============================================================================
 
-const registry = new TransportRegistry();
+const registry = new TransportRegistry(prepareKeyContents);
 
 async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
   // ssh2 transport reads key contents in memory; openssh uses -i path.
@@ -466,10 +538,14 @@ async function bootstrapRegistry(): Promise<void> {
   // single-host config, and any [[sources]] from a TOML — built by
   // resolveConfig(). Iterate it as the single source of truth. The
   // kerberos>password>key precedence and gated key read from PR #2/#3 are
-  // preserved here via buildLegacyServerConfig (uses resolveAuthMode) plus the
-  // authMode-gated prepareKeyContents below.
+  // preserved via buildLegacyServerConfig (uses resolveAuthMode).
+  //
+  // Key reads are DEFERRED: prepareKeyContents is passed as the registry's
+  // lazy prepareConfig hook (see `new TransportRegistry(prepareKeyContents)`)
+  // and runs inside get(name), not here — so one host with a missing/unmounted
+  // key path can't break startup or list-servers for the other healthy hosts
+  // (multi-host R2 hardening carried forward from pr/multi-host).
   for (const cfg of resolvedConfig.sources) {
-    await prepareKeyContents(cfg);
     registry.register(cfg);
   }
   applyRegistryConnectionPolicy(registry, resolvedConfig);
@@ -530,6 +606,54 @@ export function buildApprovalProfile(
     ...(source?.description ? { description: source.description } : {}),
     ...(mode ? { approval: { mode } } : {}),
   };
+}
+
+function auditExecution(params: {
+  tool: 'exec' | 'sudo-exec';
+  profile: string;
+  command: string;
+  description?: string;
+  startedAt: number;
+  result?: ExecResult;
+  error?: unknown;
+  store: { append(record: unknown): unknown };
+}): void {
+  const now = new Date();
+  const durationMs = Math.max(0, Date.now() - params.startedAt);
+  try {
+    // Append inside the try: audit logging is best-effort — a store failure
+    // must be visible but should not hide the real SSH result.
+    params.store.append({
+      profile: params.profile,
+      tool: params.tool,
+      command: params.command,
+      description: params.description,
+      approval: {
+        mode: 'yolo',
+        decision: 'allow',
+        reason: 'approval engine not yet wired (yolo placeholder)',
+        decided_at: now.toISOString(),
+        decided_by: 'yolo',
+      },
+      exec: params.result
+        ? {
+            stdout: params.result.stdout ?? '',
+            stderr: params.result.stderr ?? '',
+            exitCode: params.result.exitCode ?? null,
+            durationMs,
+          }
+        : {
+            stdout: '',
+            stderr: params.error instanceof Error ? params.error.message : String(params.error ?? 'unknown error'),
+            exitCode: null,
+            durationMs,
+          },
+      now,
+    });
+  } catch (auditErr: any) {
+    // Audit failure must be visible but should not hide the real SSH result.
+    console.error(`audit log append failed: ${auditErr?.message || auditErr}`);
+  }
 }
 
 function approvalProfileForConnection(connectionName?: string): ResolvedSource {
@@ -874,47 +998,56 @@ export async function executeAuditedTransportCommand(input: {
   sudoPassword?: string;
   store: { append(record: unknown): unknown };
 }) {
-  const sanitizedCommand = sanitizeCommand(input.command);
-  const commandWithDescription = input.description
-    ? `${sanitizedCommand} # ${input.description.replace(/#/g, '\\#')}`
-    : sanitizedCommand;
   const startedAt = Date.now();
-  const result = input.tool === 'sudo-exec'
-    ? await input.transport.execElevated(commandWithDescription, {
-        timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT,
-        mode: 'sudo',
-        password: input.sudoPassword,
-      })
-    : await input.transport.exec(commandWithDescription, { timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT });
-
-  const now = new Date();
-  const durationMs = Math.max(0, Date.now() - startedAt);
+  const profile = input.profile ?? 'default';
+  let audited = false;
+  // Record the raw attempted command if sanitization rejects it below. A
+  // command rejected by validation (empty / over --maxChars) still leaves an
+  // audit record — the contract covers failures, and sanitizeCommand throws.
+  let auditCommand = String(input.command ?? '');
   try {
-    input.store.append({
-      profile: input.profile ?? 'stub',
+    const sanitizedCommand = sanitizeCommand(input.command);
+    const commandWithDescription = input.description
+      ? `${sanitizedCommand} # ${input.description.replace(/#/g, '\\#')}`
+      : sanitizedCommand;
+    auditCommand = commandWithDescription;
+    const result = input.tool === 'sudo-exec'
+      ? await input.transport.execElevated(commandWithDescription, {
+          timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT,
+          mode: 'sudo',
+          password: input.sudoPassword,
+        })
+      : await input.transport.exec(commandWithDescription, { timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT });
+    auditExecution({
       tool: input.tool,
+      profile,
       command: commandWithDescription,
       description: input.description,
-      approval: {
-        mode: 'yolo',
-        decision: 'allow',
-        reason: 'approval engine not yet wired (yolo placeholder)',
-        decided_at: now.toISOString(),
-        decided_by: 'yolo',
-      },
-      exec: {
-        stdout: result.stdout ?? '',
-        stderr: result.stderr ?? '',
-        exitCode: result.exitCode ?? null,
-        durationMs,
-      },
-      now,
+      startedAt,
+      result,
+      store: input.store,
     });
-  } catch (auditErr: any) {
-    console.error(`audit log append failed: ${auditErr?.message || auditErr}`);
+    audited = true;
+    return resultToMcpContent(result);
+  } catch (err) {
+    // Transport rejection (spawn failure, unexpected exception) OR a
+    // sanitization rejection (empty/too-long command) still gets an audit
+    // record — the contract is "audit success AND failure", matching the
+    // exec/sudo-exec MCP handlers. `audited` guards the resultToMcpContent
+    // throw path (result already audited above) from double-writing.
+    if (!audited) {
+      auditExecution({
+        tool: input.tool,
+        profile,
+        command: auditCommand,
+        description: input.description,
+        startedAt,
+        error: err,
+        store: input.store,
+      });
+    }
+    throw err;
   }
-
-  return resultToMcpContent(result);
 }
 
 /**
