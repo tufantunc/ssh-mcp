@@ -33,10 +33,21 @@ const CLI_LONG_SPACE_RE =
 // 1c. -p VALUE  (MySQL-style short flag).
 const CLI_SHORT_P_RE = /(^|\s)(-p)\s+(?:"[^"]*"|'[^']*'|[^\s]+)/g;
 
-// 1d. -pVALUE / "-pVALUE" / '-pVALUE' (MySQL attached password form).
+// 1d. -p"VALUE" / -p'VALUE' — quote *after* -p, value may contain whitespace.
+//     `mysql -p"secret with space"` / `mysql -p'secret with space'`. The
+//     attached rule below only accepts non-space chars, so quoted attached
+//     values with spaces would otherwise bypass redaction.
+const CLI_SHORT_P_ATTACHED_QUOTED_VALUE_RE =
+  /(^|\s)-p("(?:[^"\\]|\\.)*"|'[^']*')/g;
+
+// 1e. "-pVALUE" / '-pVALUE' — whole arg quoted (quote *before* -p), value may
+//     contain whitespace. `mysql '-psecret with space'` / `"-psecret with space"`.
+const CLI_SHORT_P_QUOTED_ARG_RE = /(^|\s)(["'])-p[^"']*\2/g;
+
+// 1f. -pVALUE / "-pVALUE" / '-pVALUE' (MySQL attached password form, no space).
 const CLI_SHORT_P_ATTACHED_RE = /(^|\s)(["']?)-p([^\s"']+)(\2)/g;
 
-// 1e. Authorization: Bearer ***  / Authorization: Basic ***
+// 1g. Authorization: Bearer ***  / Authorization: Basic ***
 const AUTH_HEADER_RE =
   /(Authorization\s*:\s*)(Bearer|Basic|Token)\s+([A-Za-z0-9_\-\.=+\/]+)/gi;
 
@@ -59,6 +70,12 @@ const SIMPLE_SECRET_WORD_RE =
 // 4. PEM private-key blocks.
 const PEM_RE =
   /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
+
+// 4b. Dangling PEM private-key header with no matching END terminator — e.g. a
+//     key whose `END` marker was truncated away or falls past a bounded scan
+//     window. Redact from the BEGIN marker to end-of-string so raw key material
+//     can never persist when the terminator is unreachable.
+const PEM_OPEN_RE = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*$/g;
 
 // 5. AWS access-key-id
 const AWS_ACCESS_KEY_RE = /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g;
@@ -90,6 +107,10 @@ const RULES: Rule[] = [
   { re: CLI_LONG_EQ_RE, replace: (_m, key) => `${key}${REDACTED}` },
   { re: CLI_LONG_SPACE_RE, replace: (_m, key) => `${key} ${REDACTED}` },
   { re: CLI_SHORT_P_RE, replace: (_m, lead, flag) => `${lead}${flag} ${REDACTED}` },
+  // Quoted attached -p forms (value may contain whitespace) must run before the
+  // plain attached rule, which only consumes non-space chars.
+  { re: CLI_SHORT_P_ATTACHED_QUOTED_VALUE_RE, replace: (_m, lead, val) => `${lead}-p${val[0]}${REDACTED}${val[0]}` },
+  { re: CLI_SHORT_P_QUOTED_ARG_RE, replace: (_m, lead, quote) => `${lead}${quote}-p${REDACTED}${quote}` },
   { re: CLI_SHORT_P_ATTACHED_RE, replace: (_m, lead, quote) => `${lead}${quote}-p${REDACTED}${quote}` },
   { re: AUTH_HEADER_RE, replace: (_m, hdr, scheme) => `${hdr}${scheme} ${REDACTED}` },
   { re: SHELL_ASSIGN_RE, replace: (_m, key) => `${key}=${REDACTED}` },
@@ -112,6 +133,28 @@ export function redact(input: string | undefined | null): string {
     out = out.replace(rule.re as RegExp, rule.replace as any);
   }
   return out;
+}
+
+/**
+ * Redact PEM private-key blocks over the FULL input, independent of any
+ * downstream byte cap.
+ *
+ * `PEM_RE` is terminator-anchored (`BEGIN...END`), so a key whose `END` marker
+ * falls past a bounded pre-redaction scan window would never match and its raw
+ * prefix could persist in the capped audit output. Callers that cap before
+ * redacting (see `capThenRedact`) must run this on the un-capped text first:
+ *   1. Redact every complete `BEGIN...END` block.
+ *   2. Redact any remaining dangling `BEGIN` with no reachable `END` (truncated
+ *      key / terminator beyond the buffer) all the way to end-of-string.
+ *
+ * Scanning the full output with a single BEGIN-anchored regex is cheap when no
+ * key is present (fast literal prefix scan, no backtracking); the cost is only
+ * paid when key material actually exists — which is exactly when it must be
+ * redacted.
+ */
+export function redactPemBlocks(input: string | undefined | null): string {
+  if (!input) return '';
+  return input.replace(PEM_RE, REDACTED).replace(PEM_OPEN_RE, REDACTED);
 }
 
 export const REDACTED_PLACEHOLDER = REDACTED;
