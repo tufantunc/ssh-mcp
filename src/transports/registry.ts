@@ -18,6 +18,14 @@ export class TransportRegistry {
   private defaultName: string | null = null;
   /** True only when setDefault() was called; first-registered fallback leaves this false. */
   private defaultExplicit = false;
+  /**
+   * Multi-source connection guard toggle. When true (default, safe), a tool
+   * call that omits/blanks connectionName against a multi-source registry with
+   * no explicit default is rejected. Set false to opt out and restore the
+   * legacy silent-default fallback (the `[server].require_connection = false`
+   * escape hatch — wired from the resolver via setRequireConnectionWhenMulti).
+   */
+  private requireConnectionWhenMulti = true;
 
   register(config: ServerConfig): void {
     if (!config.name) {
@@ -42,6 +50,16 @@ export class TransportRegistry {
     this.defaultExplicit = true;
   }
 
+  /**
+   * Toggle the multi-source omit-name guard. Pass `false` to opt out (restore
+   * the legacy silent-default fallback) or `true` to keep it enforced. The boot
+   * path injects this from the resolved `[server].require_connection` value;
+   * absent any config the registry stays safe (guard ON).
+   */
+  setRequireConnectionWhenMulti(required: boolean): void {
+    this.requireConnectionWhenMulti = required;
+  }
+
   /** Returns names of all registered servers in registration order. */
   names(): string[] {
     return Array.from(this.configs.keys());
@@ -53,6 +71,23 @@ export class TransportRegistry {
 
   getDefaultName(): string | null {
     return this.defaultName;
+  }
+
+  /**
+   * True when resolveName() would REJECT an omitted/blank connectionName:
+   * multiple sources are registered, no explicit default was set, and the
+   * multi-source guard is on. Callers that compute gating/audit attribution
+   * BEFORE calling get() use this to avoid misattributing a guard-rejected
+   * call to the first-registered host — the call never actually lands on a
+   * host, so attributing it to one corrupts audit profile for exactly the
+   * guard case.
+   */
+  wouldRejectOmittedName(): boolean {
+    return (
+      this.requireConnectionWhenMulti &&
+      this.configs.size > 1 &&
+      !this.defaultExplicit
+    );
   }
 
   /** Resolve name argument → canonical name. Falls back to default. */
@@ -70,8 +105,9 @@ export class TransportRegistry {
     // refuse to silently pick the first-registered host — the command could
     // land on the wrong machine. The connectionName tool arg is advertised as
     // optional only for the single-server case (see connectionNameSchema in
-    // index.ts). A deliberate setDefault() re-enables the omit-name shortcut.
-    if (!name && this.configs.size > 1 && !this.defaultExplicit) {
+    // index.ts). A deliberate setDefault() re-enables the omit-name shortcut,
+    // and setRequireConnectionWhenMulti(false) opts out of the guard entirely.
+    if (!name && this.wouldRejectOmittedName()) {
       throw new Error(
         `connectionName is required when multiple servers are configured: ${this.names().join(', ')}`
       );
