@@ -51,7 +51,7 @@ export interface ModeController {
   /** Replace the global default. Throws if `mode` names an unarmed engine. */
   setGlobalMode(mode: string): ModeChangedEvent;
   on(event: 'mode-changed', listener: (e: ModeChangedEvent) => void): void;
-  off?(event: 'mode-changed', listener: (...args: any[]) => void): void;
+  off?(event: 'mode-changed', listener: (e: ModeChangedEvent) => void): void;
 }
 
 /**

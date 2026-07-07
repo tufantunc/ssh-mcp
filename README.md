@@ -232,10 +232,17 @@ Equivalent expanded form:
 ```bash
 npx -y ssh-mcp -- \
   --transport=openssh \
+  --kerberos \
   --host=ubuntu-dev.example.internal \
   --user=aduser@EXAMPLE.INTERNAL \
   --strictHostKeyChecking=accept-new
 ```
+
+> `--kerberos` is what selects Kerberos/GSSAPI auth (it sets
+> `-o GSSAPIAuthentication=yes` and implies `--transport=openssh`). Passing
+> only `--transport=openssh` selects the OpenSSH transport but leaves auth in
+> its default mode — it does **not** enable GSSAPI on its own, so keep
+> `--kerberos` here for the example to be equivalent to the compact form above.
 
 ### CLI flags added by this mode
 
