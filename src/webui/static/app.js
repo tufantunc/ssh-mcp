@@ -7,6 +7,7 @@
   'use strict';
 
   const $ = (sel) => document.querySelector(sel);
+  const MAX_EXECUTION_ROWS = 50;
 
   function getToken() {
     if (location.hash && location.hash.startsWith('#token=')) {
@@ -65,7 +66,7 @@
 
   async function fetchExecutions() {
     try {
-      const r = await fetch('/api/executions?limit=50', { headers: authHeaders() });
+      const r = await fetch('/api/executions?limit=' + MAX_EXECUTION_ROWS, { headers: authHeaders() });
       if (!r.ok) return;
       const data = await r.json();
       renderExecutions(data.executions || []);
@@ -120,9 +121,10 @@
 
   function renderExecutions(rows) {
     const list = $('#exec-list');
-    $('#exec-count').textContent = String(rows.length);
+    const visibleRows = rows.slice(0, MAX_EXECUTION_ROWS);
+    $('#exec-count').textContent = String(visibleRows.length);
     list.innerHTML = '';
-    for (const r of rows) {
+    for (const r of visibleRows) {
       const li = document.createElement('li');
       const dec = r.approval && r.approval.decision;
       li.innerHTML = `
@@ -134,6 +136,12 @@
         </div>
         <code>${escapeHtml(r.command)}</code>`;
       list.appendChild(li);
+    }
+  }
+
+  function trimExecutionList(list) {
+    while (list.children.length > MAX_EXECUTION_ROWS) {
+      list.removeChild(list.children[list.children.length - 1]);
     }
   }
 
@@ -150,7 +158,8 @@
       </div>
       <code>${escapeHtml(rec.command)}</code>`;
     list.insertBefore(li, list.firstChild);
-    const count = parseInt($('#exec-count').textContent || '0', 10) + 1;
+    trimExecutionList(list);
+    const count = Math.min(parseInt($('#exec-count').textContent || '0', 10) + 1, MAX_EXECUTION_ROWS);
     $('#exec-count').textContent = String(count);
   }
 

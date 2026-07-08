@@ -35,7 +35,12 @@ interface FakeEl {
   children: FakeEl[];
   appendChild(c: FakeEl): void;
   insertBefore(c: FakeEl, _ref: FakeEl | null): void;
+  removeChild(c: FakeEl): void;
   addEventListener(): void;
+}
+
+interface FakeEventSourceHandle {
+  emit(event: string, data: unknown): void;
 }
 
 function makeEl(): FakeEl {
@@ -55,6 +60,10 @@ function makeEl(): FakeEl {
       this.children.unshift(c);
       this.firstChild = this.children[0] ?? null;
     },
+    removeChild(c: FakeEl) {
+      this.children = this.children.filter(child => child !== c);
+      this.firstChild = this.children[0] ?? null;
+    },
     addEventListener() {},
   };
   return el;
@@ -65,9 +74,10 @@ async function renderWith(payload: {
   profiles?: unknown[];
   executions?: unknown[];
   approvals?: unknown[];
-}): Promise<{ created: FakeEl[]; byId: Map<string, FakeEl> }> {
+}): Promise<{ created: FakeEl[]; byId: Map<string, FakeEl>; eventSources: FakeEventSourceHandle[] }> {
   const created: FakeEl[] = [];
   const byId = new Map<string, FakeEl>();
+  const eventSources: FakeEventSourceHandle[] = [];
   const getById = (sel: string) => {
     let el = byId.get(sel);
     if (!el) {
@@ -102,7 +112,18 @@ async function renderWith(payload: {
   class FakeEventSource {
     onopen: (() => void) | null = null;
     onerror: (() => void) | null = null;
-    addEventListener() {}
+    private readonly listeners = new Map<string, ((ev: { data: string }) => void)[]>();
+    constructor() { eventSources.push(this); }
+    addEventListener(event: string, fn: (ev: { data: string }) => void) {
+      const list = this.listeners.get(event) ?? [];
+      list.push(fn);
+      this.listeners.set(event, list);
+    }
+    emit(event: string, data: unknown) {
+      for (const fn of this.listeners.get(event) ?? []) {
+        fn({ data: JSON.stringify(data) });
+      }
+    }
     close() {}
   }
 
@@ -134,7 +155,7 @@ async function renderWith(payload: {
   await new Promise(r => setTimeout(r, 0));
   for (let i = 0; i < 10; i++) await Promise.resolve();
 
-  return { created, byId };
+  return { created, byId, eventSources };
 }
 
 describe('WebUI app.js XSS escaping', () => {
@@ -195,5 +216,27 @@ describe('WebUI app.js XSS escaping', () => {
     expect(html).not.toContain('<img src=x onerror');
     // escapeAttr keeps only the allowlisted [A-Za-z0-9_-] characters.
     expect(html).toContain('class="pill allowimgsrcxonerroralert1"');
+  });
+
+  it('caps the live SSE execution list', async () => {
+    const { byId, eventSources } = await renderWith({ executions: [] });
+    const source = eventSources[0];
+    expect(source).toBeTruthy();
+
+    for (let i = 0; i < 55; i++) {
+      source.emit('execution', {
+        ts: new Date().toISOString(),
+        profile: 'p',
+        tool: 'exec',
+        command: `uptime ${i}`,
+        approval: { decision: 'allow' },
+      });
+    }
+
+    const list = byId.get('#exec-list')!;
+    expect(list.children).toHaveLength(50);
+    expect(byId.get('#exec-count')!.textContent).toBe('50');
+    expect(list.children[0].innerHTML).toContain('uptime 54');
+    expect(list.children[list.children.length - 1].innerHTML).toContain('uptime 5');
   });
 });
