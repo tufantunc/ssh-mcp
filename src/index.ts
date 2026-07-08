@@ -645,6 +645,38 @@ export async function reacquireTransportIfReloaded(
   return { transport, profile: reg.profile(connectionName).id };
 }
 
+export async function approveTransportForCurrentConfig(params: {
+  reg: Pick<TransportRegistry, 'getReloadGeneration' | 'get' | 'profile'>;
+  connectionName: string | undefined;
+  transport: ISshTransport;
+  profile: ResolvedSource;
+  gate: (profile: ResolvedSource) => Promise<ApprovalDecision>;
+  maxAttempts?: number;
+}): Promise<{ transport: ISshTransport; profile: string; approval: ApprovalDecision }> {
+  let transport = params.transport;
+  let effectiveProfile = params.profile;
+  const maxAttempts = params.maxAttempts ?? 10;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    // Capture immediately before the awaited manual/smart gate. If a reload
+    // completes while the gate is pending, the decision belongs to the OLD
+    // profile/config and must not authorize the freshly re-acquired transport.
+    const generationBeforeApproval = params.reg.getReloadGeneration();
+    const approval = await params.gate(effectiveProfile);
+    if (params.reg.getReloadGeneration() === generationBeforeApproval) {
+      return { transport, profile: effectiveProfile.id, approval };
+    }
+
+    // A reload invalidated the decision we just received. Re-acquire the
+    // transport/profile from the CURRENT config, then loop so approval is run
+    // again against the current profile before anything executes.
+    transport = await params.reg.get(params.connectionName);
+    effectiveProfile = params.reg.profile(params.connectionName);
+  }
+
+  throw new Error(`config reloaded ${maxAttempts} times during approval; retry command after reloads settle`);
+}
+
 function auditExecution(params: {
   tool: 'exec' | 'sudo-exec';
   profile: string;
@@ -1328,29 +1360,26 @@ server.tool(
       // gating + audit to the same config the transport was dialed against.
       const effectiveProfile = registry.profile(connectionName);
       profile = effectiveProfile.id;
-      // Capture the reload generation BEFORE the awaited approval. A manual/
-      // smart approval can block for a long time, during which a config
-      // hot-reload (closeAll bumps the generation) may remove or re-parameterize
-      // this source. `t` above was dialed against the PRE-approval config;
-      // executing on it after such a reload would run the command on a stale
-      // transport for a host that may no longer exist or now has different
-      // params — bypassing the swap. See the post-approval re-check below.
-      const genBeforeApproval = registry.getReloadGeneration();
-      approvalDecision = await gateApproval({
+      // Approval can block for a long time. If a config hot-reload lands while
+      // manual/smart approval is in flight, a decision for the PRE-reload
+      // profile must not authorize the POST-reload transport. The helper loops:
+      // gate current profile, compare generation, and when changed re-acquire
+      // transport/profile then re-run approval against the current profile.
+      const approved = await approveTransportForCurrentConfig({
+        reg: registry,
+        connectionName,
+        transport: t,
         profile: effectiveProfile,
-        tool: 'exec',
-        command: commandWithDescription,
-        description,
+        gate: (currentProfile) => gateApproval({
+          profile: currentProfile,
+          tool: 'exec',
+          command: commandWithDescription,
+          description,
+        }),
       });
-      // A config hot-reload landed WHILE we were awaiting approval. Re-acquire
-      // the transport against the CURRENT config so the approved command runs
-      // on the live source (or fails cleanly if the source was removed) rather
-      // than on the captured pre-reload transport, and re-sample the profile so
-      // audit attribution matches the transport actually used. No await between
-      // the re-sample and t.exec below, so no further reload can interleave.
-      ({ transport: t, profile } = await reacquireTransportIfReloaded(
-        registry, connectionName, t, genBeforeApproval,
-      ));
+      t = approved.transport;
+      profile = approved.profile;
+      approvalDecision = approved.approval;
       startedAt = Date.now();
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
       auditSink.record({
@@ -1426,23 +1455,26 @@ if (!DISABLE_SUDO) {
         // See the matching comment in the `exec` handler for the full rationale.
         const effectiveProfile = registry.profile(connectionName);
         profile = effectiveProfile.id;
-        // Capture the reload generation BEFORE the awaited approval so a
-        // hot-reload landing DURING a long manual/smart approval is detected
-        // below. See the matching comment + rationale in the `exec` handler.
-        const genBeforeApproval = registry.getReloadGeneration();
-        approvalDecision = await gateApproval({
+        // Approval can block for a long time. If a config hot-reload lands while
+        // manual/smart approval is in flight, a decision for the PRE-reload
+        // profile must not authorize the POST-reload transport. The helper loops:
+        // gate current profile, compare generation, and when changed re-acquire
+        // transport/profile then re-run approval against the current profile.
+        const approved = await approveTransportForCurrentConfig({
+          reg: registry,
+          connectionName,
+          transport: t,
           profile: effectiveProfile,
-          tool: 'sudo-exec',
-          command: commandWithDescription,
-          description,
+          gate: (currentProfile) => gateApproval({
+            profile: currentProfile,
+            tool: 'sudo-exec',
+            command: commandWithDescription,
+            description,
+          }),
         });
-        // A config hot-reload landed while awaiting approval: re-acquire the
-        // transport against the CURRENT config (or fail cleanly if the source
-        // was removed) instead of running on the captured pre-reload transport,
-        // and re-sample the profile so audit attribution matches.
-        ({ transport: t, profile } = await reacquireTransportIfReloaded(
-          registry, connectionName, t, genBeforeApproval,
-        ));
+        t = approved.transport;
+        profile = approved.profile;
+        approvalDecision = approved.approval;
         // Legacy single-host mode may still pass --sudoPassword on CLI; in
         // multi-host mode each ServerConfig carries its own sudoPassword.
         const legacySudo = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined && !isMultiHost)

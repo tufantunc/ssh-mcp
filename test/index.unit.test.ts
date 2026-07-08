@@ -15,6 +15,7 @@ import {
   validateConfig,
   resolveCliConfigPath,
   reacquireTransportIfReloaded,
+  approveTransportForCurrentConfig,
 } from '../src/index';
 import type { ExecResult, ISshTransport } from '../src/transports/types';
 import type { ResolvedConfig } from '../src/config/types';
@@ -448,6 +449,59 @@ describe('reacquireTransportIfReloaded (Codex R4 finding 4: revalidate after awa
     await expect(
       reacquireTransportIfReloaded(reg as any, 'gone', original, captured),
     ).rejects.toThrow(/Unknown connection name: gone/);
+  });
+});
+
+describe('approveTransportForCurrentConfig (Codex V4 finding: re-run approval after reload)', () => {
+  const stub = (name = 'ssh2'): ISshTransport => ({
+    name,
+    init: async () => {},
+    exec: async () => ({ stdout: '', stderr: '', exitCode: 0 }) as ExecResult,
+    execElevated: async () => ({ stdout: '', stderr: '', exitCode: 0 }) as ExecResult,
+    close: async () => {},
+  } as unknown as ISshTransport);
+
+  const allow = (reason: string) => ({
+    decision: 'allow' as const,
+    reason,
+    decided_by: 'test',
+    decided_at: new Date(0).toISOString(),
+    mode: 'manual' as const,
+  });
+
+  it('reruns approval against the CURRENT profile after a reload invalidates the first decision', async () => {
+    let generation = 1;
+    const original = stub('pre-reload');
+    const fresh = stub('post-reload');
+    const approvedProfiles: string[] = [];
+    const reg = {
+      getReloadGeneration: () => generation,
+      get: async (_name?: string) => fresh,
+      profile: (_name?: string) => ({ id: generation === 1 ? 'old-profile' : 'new-profile' } as any),
+    };
+
+    const result = await approveTransportForCurrentConfig({
+      reg: reg as any,
+      connectionName: 'alpha',
+      transport: original,
+      profile: reg.profile('alpha') as any,
+      gate: async (profile) => {
+        approvedProfiles.push(profile.id);
+        if (approvedProfiles.length === 1) {
+          // Simulate the config reload landing while the first manual/smart
+          // approval was in flight. That stale approval MUST NOT authorize the
+          // post-reload transport/profile.
+          generation = 2;
+          return allow('stale decision');
+        }
+        return allow('current decision');
+      },
+    });
+
+    expect(approvedProfiles).toEqual(['old-profile', 'new-profile']);
+    expect(result.transport).toBe(fresh);
+    expect(result.profile).toBe('new-profile');
+    expect(result.approval.reason).toBe('current decision');
   });
 });
 

@@ -280,6 +280,7 @@ export class TransportRegistry {
     const token = {};
     const initPromise = (async () => {
       let t: ISshTransport | undefined;
+      let initError: unknown;
       try {
         // Lazy per-host prep (e.g. reading the ssh2 key file). Deferred to here
         // so a missing key on this host fails only when the host is used, not at
@@ -289,6 +290,8 @@ export class TransportRegistry {
         if (this.prepareConfig) await this.prepareConfig(cfg);
         t = createTransport(cfg);
         await t.init();
+      } catch (err) {
+        initError = err;
       } finally {
         // Clear the in-flight entry so a rejected prep/init (e.g. a missing key
         // file, or a transient connect timeout to a temporarily-unreachable
@@ -308,6 +311,16 @@ export class TransportRegistry {
           this.initPromises.delete(resolved);
           this.initTokens.delete(resolved);
         }
+      }
+      if (initError) {
+        // If the config changed while prepareConfig()/init() was in flight, the
+        // error belongs to an obsolete source/params set. Retry against the
+        // CURRENT registry instead of surfacing a stale key-read/connect error.
+        if (this.reloadGeneration !== gen) {
+          await t?.close().catch(() => { /* best effort */ });
+          return this.get(name);
+        }
+        throw initError;
       }
       if (!t) {
         throw new Error(`Transport initialization aborted before transport creation: ${resolved}`);

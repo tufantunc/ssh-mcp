@@ -400,6 +400,52 @@ describe('TransportRegistry.get (finding 1: stale in-flight init must not surviv
     expect(oldStub.close).toHaveBeenCalledTimes(1);
     expect(r.list().map((x) => x.name)).toEqual(['beta']);
   });
+
+  it('retries the current config when a stale in-flight init REJECTS after a reload', async () => {
+    let rejectOldInit: (err: Error) => void = () => {};
+    const oldInit = vi.fn<() => Promise<void>>().mockImplementation(
+      () => new Promise<void>((_res, rej) => { rejectOldInit = rej; }),
+    );
+    const oldStub = makeStub(oldInit);
+    oldStub.close = vi.fn().mockResolvedValue(undefined);
+    const newStub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValueOnce(oldStub).mockReturnValue(newStub);
+
+    const r = new TransportRegistry();
+    r.register(makeConfig('alpha'));
+
+    const inflight = r.get('alpha');
+    r.replaceAll([{ ...makeConfig('alpha'), host: 'alpha2.example' }]);
+    await r.closeAll();
+    rejectOldInit(new Error('obsolete connect timeout'));
+
+    await expect(inflight).resolves.toBe(newStub);
+    expect(oldStub.close).toHaveBeenCalledTimes(1);
+    expect(createTransportMock).toHaveBeenCalledTimes(2);
+    expect(r.list().find((x) => x.name === 'alpha')!.connected).toBe(true);
+  });
+
+  it('retries the current config when a stale in-flight prepareConfig REJECTS after a reload', async () => {
+    let rejectOldPrepare: (err: Error) => void = () => {};
+    const prepare = vi.fn<[ServerConfig], Promise<void>>()
+      .mockImplementationOnce(() => new Promise<void>((_res, rej) => { rejectOldPrepare = rej; }))
+      .mockResolvedValue(undefined);
+    const newStub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValue(newStub);
+
+    const r = new TransportRegistry(prepare);
+    r.register(makeConfig('alpha'));
+
+    const inflight = r.get('alpha');
+    r.replaceAll([{ ...makeConfig('alpha'), host: 'alpha2.example' }]);
+    await r.closeAll();
+    rejectOldPrepare(new Error('obsolete key read failure'));
+
+    await expect(inflight).resolves.toBe(newStub);
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(prepare.mock.calls[1][0].host).toBe('alpha2.example');
+    expect(createTransportMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('TransportRegistry.get (Codex R4 finding 1: stale init finally must not evict a newer in-flight init)', () => {

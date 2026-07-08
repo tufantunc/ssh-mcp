@@ -26,7 +26,7 @@
 
 import { EventEmitter } from 'node:events';
 import type { ResolvedConfig, ApprovalMode } from './types.js';
-import { resolveEffectiveDefaultMode } from './approval-policy.js';
+import { resolveApprovalEngineInput, resolveEffectiveDefaultMode } from './approval-policy.js';
 import type { ServerConfig } from '../transports/types.js';
 import type { RegistryStateSnapshot } from '../transports/registry.js';
 import type { ModeStoreState } from '../approval/mode-store.js';
@@ -94,6 +94,21 @@ export interface ConfigReloaderOptions {
   prepareSources?: (sources: ServerConfig[]) => Promise<void>;
   /** Optional log sink (defaults to console.error). */
   log?: (msg: string) => void;
+}
+
+function assertSmartPolicyHasCurrentLlm(config: ResolvedConfig): void {
+  const input = resolveApprovalEngineInput(config);
+  if (input === null) return;
+
+  const effectiveModes: ApprovalMode[] = [
+    resolveEffectiveDefaultMode(config),
+    ...Object.values(config.perSourceApproval ?? {}),
+  ];
+  if (!effectiveModes.includes('smart')) return;
+
+  if (!input.llm?.endpoint || !input.llm?.model) {
+    throw new Error('approval mode "smart" on reload requires current [approval.llm].endpoint and .model');
+  }
 }
 
 /**
@@ -215,8 +230,13 @@ export class ConfigReloader extends EventEmitter {
       this.registry.setRequireConnectionWhenMulti(next.requireConnection ?? true);
 
       // Approval policy reseed validates the new modes name armed engines
-      // before mutating; an unarmed mode throws ModeUnavailableError.
+      // before mutating; an unarmed mode throws ModeUnavailableError. Smart is
+      // stricter than mere engine availability: a server booted with an old LLM
+      // endpoint may have the smart sub-engine armed, but a reload whose CURRENT
+      // file still selects smart must also carry a complete current LLM block so
+      // fresh boot and hot reload enforce the same config validity.
       if (this.engine) {
+        assertSmartPolicyHasCurrentLlm(next);
         this.engine.reloadPolicy({
           // Resolve the effective global default the SAME way boot does
           // (resolveEffectiveDefaultMode): a bare/knob-only [approval] block

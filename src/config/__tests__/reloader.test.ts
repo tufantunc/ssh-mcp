@@ -226,6 +226,73 @@ auth = "kerberos"
     expect(engine.getGlobalMode()).toBe('yolo');
     expect(events).toHaveLength(0);
   });
+
+  it('rejects a smart reload that would keep using a stale boot-time LLM config', async () => {
+    const registry = freshRegistry(TOML_A);
+    const engine = new ApprovalDispatcher({
+      defaultMode: 'smart',
+      smart: { llm: { endpoint: 'https://old.example/v1/chat/completions', model: 'old-model' } },
+    });
+    const smartWithoutCurrentLlmToml = `
+[approval]
+mode = "smart"
+
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+`;
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () => parseTomlConfig(smartWithoutCurrentLlmToml) as ResolvedConfig,
+      log: () => {},
+    });
+    const events: ConfigReloadedEvent[] = [];
+    reloader.on('config-reloaded', e => events.push(e));
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/rolled back/);
+    expect(res.reason).toMatch(/smart.*\[approval\.llm\]\.endpoint and \.model/);
+    expect(engine.getGlobalMode()).toBe('smart');
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+    expect(events).toHaveLength(0);
+  });
+
+  it('rejects a per-source smart reload unless the new file still carries current LLM settings', async () => {
+    const registry = freshRegistry(TOML_A);
+    const engine = new ApprovalDispatcher({
+      defaultMode: 'yolo',
+      smart: { llm: { endpoint: 'https://old.example/v1/chat/completions', model: 'old-model' } },
+    });
+    const perSourceSmartWithoutLlmToml = `
+[approval]
+mode = "yolo"
+
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+approval = { mode = "smart" }
+`;
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () => parseTomlConfig(perSourceSmartWithoutLlmToml) as ResolvedConfig,
+      log: () => {},
+    });
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/smart.*\[approval\.llm\]\.endpoint and \.model/);
+    expect(engine.getEffectiveMode('alpha')).toBe('yolo');
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+  });
 });
 
 describe('ConfigReloader — no approval engine wired (security: cannot silently apply unenforced policy)', () => {
