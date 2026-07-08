@@ -43,6 +43,17 @@ export class TransportRegistry {
   private configs = new Map<string, ServerConfig>();
   private transports = new Map<string, ISshTransport>();
   private initPromises = new Map<string, Promise<ISshTransport>>();
+  /**
+   * Per-name identity token for the CURRENTLY-owning in-flight initializer.
+   * A hot-reload (closeAll clears initPromises) followed by a fresh get() can
+   * install a NEWER init promise under the same name while an older init() is
+   * still awaiting. Each initializer captures its own token here on start and,
+   * in its finally, only clears initPromises when the slot still holds ITS
+   * token — so a stale initializer completing late cannot evict the newer
+   * in-flight entry (which would let a later concurrent get() start a duplicate
+   * init and leak transports). In-memory only.
+   */
+  private initTokens = new Map<string, object>();
   private defaultName: string | null = null;
   /**
    * Live per-source description overrides (PR-8, Decision D3: in-memory only).
@@ -262,6 +273,11 @@ export class TransportRegistry {
 
     const cfg = this.configs.get(resolved)!;
     const gen = this.reloadGeneration;
+    // Identity token for THIS initializer. Recorded in initTokens[resolved]
+    // below; the finally only clears the shared init entry if the slot still
+    // belongs to this token, so a stale init resolving after a reload cannot
+    // wipe a newer in-flight initializer.
+    const token = {};
     const initPromise = (async () => {
       let t: ISshTransport | undefined;
       try {
@@ -274,14 +290,24 @@ export class TransportRegistry {
         t = createTransport(cfg);
         await t.init();
       } finally {
-        // Always clear the in-flight entry so a rejected prep/init (e.g. a
-        // missing key file, or a transient connect timeout to a temporarily-
-        // unreachable host) is NOT cached. Otherwise every later get() would
-        // replay the same rejection via the pending-promise return above, and
-        // the connection could never retry without a process restart. Cleared
-        // BEFORE the generation re-check below so the recursive re-get on a
-        // mid-init reload can't deadlock on this very promise.
-        this.initPromises.delete(resolved);
+        // Clear the in-flight entry so a rejected prep/init (e.g. a missing key
+        // file, or a transient connect timeout to a temporarily-unreachable
+        // host) is NOT cached. Otherwise every later get() would replay the same
+        // rejection via the pending-promise return above, and the connection
+        // could never retry without a process restart. Cleared BEFORE the
+        // generation re-check below so the recursive re-get on a mid-init
+        // reload can't deadlock on this very promise.
+        //
+        // Guard on the identity token: a reload (closeAll clears initPromises +
+        // initTokens) followed by a fresh get() installs a NEWER init under this
+        // same name. If this (now stale) initializer blindly deleted the slot,
+        // it would evict that newer initializer, letting a subsequent get()
+        // start a THIRD init and leak transports. Only delete when the slot
+        // still holds our token.
+        if (this.initTokens.get(resolved) === token) {
+          this.initPromises.delete(resolved);
+          this.initTokens.delete(resolved);
+        }
       }
       if (!t) {
         throw new Error(`Transport initialization aborted before transport creation: ${resolved}`);
@@ -301,6 +327,7 @@ export class TransportRegistry {
       return t;
     })();
     this.initPromises.set(resolved, initPromise);
+    this.initTokens.set(resolved, token);
     return initPromise;
   }
 
@@ -349,8 +376,24 @@ export class TransportRegistry {
       tasks.push(t.close().catch(() => { /* best effort */ }));
     }
     this.transports.clear();
+    // Clear the in-flight init registry AND its parallel identity tokens in
+    // lockstep. A stale initializer that resolves after this only deletes the
+    // slot when it still holds its own token (see get()), so dropping the
+    // tokens here lets the NEXT get() install a fresh, unambiguously-current
+    // initializer for the same name.
     this.initPromises.clear();
+    this.initTokens.clear();
     await Promise.allSettled(tasks);
+  }
+
+  /**
+   * Current monotonic reload generation (bumped by {@link closeAll}). Callers
+   * that captured a generation BEFORE an awaited operation (e.g. a manual
+   * approval prompt) compare against this AFTER the await to detect that a
+   * config hot-reload landed underneath them and revalidate accordingly.
+   */
+  getReloadGeneration(): number {
+    return this.reloadGeneration;
   }
 
   // ===========================================================================

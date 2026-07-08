@@ -402,6 +402,134 @@ describe('TransportRegistry.get (finding 1: stale in-flight init must not surviv
   });
 });
 
+describe('TransportRegistry.get (Codex R4 finding 1: stale init finally must not evict a newer in-flight init)', () => {
+  // Flush all pending microtasks so a parked async chain (init finally →
+  // generation re-check → recursive re-get) runs to its next await point.
+  const flush = () => new Promise<void>((res) => setTimeout(res, 0));
+
+  it('a stale initializer completing after a reload does not delete the newer init, so no duplicate init runs', async () => {
+    // init #1 (pre-reload) and init #2 (post-reload) are both parked; init #2
+    // uses a fresh transport. A THIRD createTransport call would mean init #1's
+    // finally wrongly evicted init #2's in-flight entry, letting a later get()
+    // start a duplicate init (the leak this finding is about).
+    let resolveInit1: () => void = () => {};
+    const init1 = vi.fn<() => Promise<void>>().mockImplementation(
+      () => new Promise<void>((res) => { resolveInit1 = res; }),
+    );
+    const stub1 = makeStub(init1);
+    stub1.close = vi.fn().mockResolvedValue(undefined);
+
+    let resolveInit2: () => void = () => {};
+    const init2 = vi.fn<() => Promise<void>>().mockImplementation(
+      () => new Promise<void>((res) => { resolveInit2 = res; }),
+    );
+    const stub2 = makeStub(init2);
+
+    // A third stub only ever materializes if the bug lets a duplicate init run.
+    const stub3 = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock
+      .mockReturnValueOnce(stub1)
+      .mockReturnValueOnce(stub2)
+      .mockReturnValue(stub3);
+
+    const r = new TransportRegistry();
+    r.register(makeConfig('alpha'));
+
+    // 1. First get parks init #1 mid-flight.
+    const p1 = r.get('alpha');
+    // 2. A hot-reload swaps params for 'alpha' and drops stale transports —
+    //    this clears the in-flight init map + tokens and bumps the generation.
+    r.replaceAll([{ ...makeConfig('alpha'), host: 'alpha2.example' }]);
+    await r.closeAll();
+    // 3. A fresh get installs init #2 under the SAME name (its own token).
+    const p2 = r.get('alpha');
+    expect(createTransportMock).toHaveBeenCalledTimes(2);
+
+    // 4. NOW the stale init #1 resolves. Its finally must NOT evict init #2's
+    //    entry (the slot holds init #2's token, not init #1's). Flush so init
+    //    #1's finally + generation re-check + recursive re-get all run.
+    resolveInit1();
+    await flush();
+
+    // 5. A concurrent get while init #2 is still parked must SHARE init #2's
+    //    in-flight promise — not start a third init. If the finally had evicted
+    //    init #2, this would call createTransport a 3rd time (stub3).
+    const p3 = r.get('alpha');
+    expect(createTransportMock).toHaveBeenCalledTimes(2);
+
+    // 6. Finish init #2; every waiter resolves to the single post-reload stub.
+    resolveInit2();
+    const [t1, t2, t3] = await Promise.all([p1, p2, p3]);
+    expect(t2).toBe(stub2);
+    expect(t3).toBe(stub2); // shared the same in-flight init, no duplicate
+    expect(t1).toBe(stub2); // stale init #1 re-resolved against the new config
+    // The stale transport was closed, and only two transports were ever built.
+    expect(stub1.close).toHaveBeenCalledTimes(1);
+    expect(createTransportMock).toHaveBeenCalledTimes(2);
+    // 'alpha' is connected via the post-reload transport only.
+    expect(r.list().find((x) => x.name === 'alpha')!.connected).toBe(true);
+  });
+});
+
+describe('TransportRegistry.get (Codex R4 finding 2: lazy key prep survives a reload)', () => {
+  it('runs prepareConfig lazily per-host after replaceAll, isolating one source\'s bad key', async () => {
+    // The registry keeps its lazy prepareConfig hook across a reload (replaceAll
+    // swaps configs, not the registry). A source whose key is unreadable must
+    // fail ONLY when that host is selected — never at reload time, and never
+    // breaking an unrelated healthy host. This is the mechanism the fixed
+    // buildConfigReloader relies on (no eager prepareSources on reload).
+    const prepare = vi.fn<[ServerConfig], Promise<void>>().mockImplementation(async (cfg) => {
+      if (cfg.host === 'broken.example') throw new Error('ENOENT: unreadable key file');
+    });
+    const stub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValue(stub);
+
+    const r = new TransportRegistry(prepare);
+    r.register(makeConfig('orig'));
+
+    // Reload swaps in one healthy source + one whose key would be unreadable.
+    r.replaceAll([
+      { ...makeConfig('healthy'), host: 'healthy.example' },
+      { ...makeConfig('broken'), host: 'broken.example' },
+    ]);
+    // The swap itself read NO keys — prepareConfig is deferred to get().
+    expect(prepare).not.toHaveBeenCalled();
+
+    // The healthy host works; the bad key on the other source is irrelevant.
+    await expect(r.get('healthy')).resolves.toBe(stub);
+    // The broken host fails only now, when actually selected (lazy) — a reload
+    // was never rolled back by it.
+    await expect(r.get('broken')).rejects.toThrow(/unreadable key file/);
+    // A later get('broken') retries prepare (the rejection was not cached).
+    prepare.mockResolvedValue(undefined);
+    await expect(r.get('broken')).resolves.toBe(stub);
+  });
+});
+
+describe('TransportRegistry.getReloadGeneration (Codex R4 finding 4: post-approval revalidation signal)', () => {
+  it('starts at 0, increments once per closeAll, and is stable across get()/register()', async () => {
+    const stub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValue(stub);
+
+    const r = new TransportRegistry();
+    r.register(makeConfig('solo'));
+    // Baseline: no reload has happened.
+    expect(r.getReloadGeneration()).toBe(0);
+
+    // A get() (lazy init) does not bump the generation.
+    await r.get('solo');
+    expect(r.getReloadGeneration()).toBe(0);
+
+    // Each reload (closeAll drops stale transports) bumps it exactly once — the
+    // exec/sudo-exec handlers compare this before/after an awaited approval to
+    // detect that a config hot-reload landed during the wait.
+    await r.closeAll();
+    expect(r.getReloadGeneration()).toBe(1);
+    await r.closeAll();
+    expect(r.getReloadGeneration()).toBe(2);
+  });
+});
+
 describe('TransportRegistry.list / closeAll', () => {
   it('reports connection status and default flag', async () => {
     const stub = makeStub(vi.fn().mockResolvedValue(undefined));

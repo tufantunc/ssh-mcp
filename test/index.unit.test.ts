@@ -14,8 +14,9 @@ import {
   approvalResolverWarningFromInput,
   validateConfig,
   resolveCliConfigPath,
+  reacquireTransportIfReloaded,
 } from '../src/index';
-import type { ExecResult } from '../src/transports/types';
+import type { ExecResult, ISshTransport } from '../src/transports/types';
 import type { ResolvedConfig } from '../src/config/types';
 
 // Pure-function unit tests for the CLI config/result mapping layer. These
@@ -372,3 +373,81 @@ describe('resolveCliConfigPath (Codex R2 P2: reject value-less --config)', () =>
       .toThrow(/--config requires a value/);
   });
 });
+
+describe('reacquireTransportIfReloaded (Codex R4 finding 4: revalidate after awaited approval)', () => {
+  const stub = (name = 'ssh2'): ISshTransport => ({
+    name,
+    init: async () => {},
+    exec: async () => ({ stdout: '', stderr: '', exitCode: 0 }) as ExecResult,
+    execElevated: async () => ({ stdout: '', stderr: '', exitCode: 0 }) as ExecResult,
+    close: async () => {},
+  } as unknown as ISshTransport);
+
+  function fakeRegistry(opts: {
+    genBefore: number;
+    genAfter: number;
+    profileId: string;
+    getTransport?: ISshTransport;
+    getThrows?: Error;
+  }) {
+    // First getReloadGeneration() call (the capture) returns genBefore; the
+    // check inside the helper sees genAfter, emulating a reload during approval.
+    let firstRead = true;
+    const reg = {
+      getReloadGeneration: () => {
+        if (firstRead) { firstRead = false; return opts.genBefore; }
+        return opts.genAfter;
+      },
+      get: async (_name?: string) => {
+        if (opts.getThrows) throw opts.getThrows;
+        return opts.getTransport!;
+      },
+      profile: (_name?: string) => ({ id: opts.profileId } as any),
+    };
+    return reg;
+  }
+
+  it('returns the ORIGINAL transport unchanged when no reload landed during approval', async () => {
+    const original = stub('original');
+    const reg = {
+      getReloadGeneration: () => 5, // same before and after — no reload
+      get: async () => { throw new Error('get() must NOT be called when no reload'); },
+      profile: (_n?: string) => ({ id: 'alpha' } as any),
+    };
+    const captured = reg.getReloadGeneration();
+    const { transport, profile } = await reacquireTransportIfReloaded(
+      reg as any, 'alpha', original, captured,
+    );
+    expect(transport).toBe(original);
+    expect(profile).toBe('alpha');
+  });
+
+  it('RE-ACQUIRES a fresh transport when a reload bumped the generation during approval', async () => {
+    const original = stub('pre-reload');
+    const fresh = stub('post-reload');
+    const reg = fakeRegistry({ genBefore: 1, genAfter: 2, profileId: 'alpha', getTransport: fresh });
+    const captured = reg.getReloadGeneration(); // 1
+    const { transport, profile } = await reacquireTransportIfReloaded(
+      reg as any, 'alpha', original, captured,
+    );
+    // The stale pre-reload transport is discarded for the freshly re-dialed one.
+    expect(transport).toBe(fresh);
+    expect(transport).not.toBe(original);
+    expect(profile).toBe('alpha');
+  });
+
+  it('propagates a clean error when the source was REMOVED by the reload (get() throws)', async () => {
+    const original = stub('pre-reload');
+    const reg = fakeRegistry({
+      genBefore: 1,
+      genAfter: 2,
+      profileId: 'gone',
+      getThrows: new Error('Unknown connection name: gone. Registered: beta'),
+    });
+    const captured = reg.getReloadGeneration();
+    await expect(
+      reacquireTransportIfReloaded(reg as any, 'gone', original, captured),
+    ).rejects.toThrow(/Unknown connection name: gone/);
+  });
+});
+

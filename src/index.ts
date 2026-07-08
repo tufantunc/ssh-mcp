@@ -614,6 +614,37 @@ export function buildApprovalProfile(
   };
 }
 
+/**
+ * Finding-4 (Codex R4) revalidation after an awaited approval.
+ *
+ * A manual/smart approval can block for a long time. During that wait a config
+ * hot-reload (closeAll bumps the registry's reload generation) can remove or
+ * re-parameterize the source, but the transport `current` was already dialed
+ * against the PRE-approval config. Running the approved command on it would
+ * bypass the swap (execute on a stale host, or on a source that no longer
+ * exists). Compare the generation captured BEFORE the approval against the live
+ * one: if it changed, re-acquire the transport against the CURRENT config
+ * (registry.get() re-resolves the name — throwing a clear error if it was
+ * removed — and re-dials the new params) and re-sample the profile so audit
+ * attribution matches the transport actually used.
+ *
+ * Returns the transport to execute with and its effective audit profile id.
+ * When no reload landed, returns the originals unchanged (single sync generation
+ * read — no await — so no further reload can interleave before the caller runs).
+ */
+export async function reacquireTransportIfReloaded(
+  reg: Pick<TransportRegistry, 'getReloadGeneration' | 'get' | 'profile'>,
+  connectionName: string | undefined,
+  current: ISshTransport,
+  generationBeforeApproval: number,
+): Promise<{ transport: ISshTransport; profile: string }> {
+  if (reg.getReloadGeneration() === generationBeforeApproval) {
+    return { transport: current, profile: reg.profile(connectionName).id };
+  }
+  const transport = await reg.get(connectionName);
+  return { transport, profile: reg.profile(connectionName).id };
+}
+
 function auditExecution(params: {
   tool: 'exec' | 'sudo-exec';
   profile: string;
@@ -1046,9 +1077,18 @@ function buildConfigReloader(): ConfigReloader | null {
     registry,
     loadConfig: reloadResolveConfig,
     engine: approvalEngine ?? undefined,
-    prepareSources: async (sources) => {
-      for (const cfg of sources) await prepareKeyContents(cfg);
-    },
+    // NOTE: deliberately NO `prepareSources` hook here. Key reading stays LAZY
+    // on reload, exactly like boot: the live `registry` was constructed with
+    // `prepareKeyContents` as its per-host `prepareConfig` hook (see
+    // `new TransportRegistry(prepareKeyContents)`), which runs inside get(name)
+    // for whichever host is actually selected — and survives reloads because
+    // replaceAll() only swaps configs, never the registry instance. Eagerly
+    // running prepareKeyContents() over EVERY new source here (the old
+    // behaviour) made one source with an unreadable/unmounted ssh2 key throw
+    // mid-swap and roll back the ENTIRE reload — including edits to unrelated
+    // healthy sources — a divergence from boot, where a bad key only fails when
+    // that specific host is used. Leaving it lazy keeps reload and boot on the
+    // same failure-isolation contract (multi-host R2 hardening).
   });
 }
 
@@ -1274,7 +1314,7 @@ server.tool(
     try {
       const resolvedProfile = registry.profile(connectionName);
       profile = resolvedProfile.id;
-      const t = await registry.get(connectionName);
+      let t = await registry.get(connectionName);
       // Re-resolve the profile AFTER get() returns. registry.get() can complete
       // a config hot-reload redial while its init() is in flight (see
       // TransportRegistry.get reloadGeneration re-check): the transport handed
@@ -1288,12 +1328,29 @@ server.tool(
       // gating + audit to the same config the transport was dialed against.
       const effectiveProfile = registry.profile(connectionName);
       profile = effectiveProfile.id;
+      // Capture the reload generation BEFORE the awaited approval. A manual/
+      // smart approval can block for a long time, during which a config
+      // hot-reload (closeAll bumps the generation) may remove or re-parameterize
+      // this source. `t` above was dialed against the PRE-approval config;
+      // executing on it after such a reload would run the command on a stale
+      // transport for a host that may no longer exist or now has different
+      // params — bypassing the swap. See the post-approval re-check below.
+      const genBeforeApproval = registry.getReloadGeneration();
       approvalDecision = await gateApproval({
         profile: effectiveProfile,
         tool: 'exec',
         command: commandWithDescription,
         description,
       });
+      // A config hot-reload landed WHILE we were awaiting approval. Re-acquire
+      // the transport against the CURRENT config so the approved command runs
+      // on the live source (or fails cleanly if the source was removed) rather
+      // than on the captured pre-reload transport, and re-sample the profile so
+      // audit attribution matches the transport actually used. No await between
+      // the re-sample and t.exec below, so no further reload can interleave.
+      ({ transport: t, profile } = await reacquireTransportIfReloaded(
+        registry, connectionName, t, genBeforeApproval,
+      ));
       startedAt = Date.now();
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
       auditSink.record({
@@ -1358,7 +1415,7 @@ if (!DISABLE_SUDO) {
       try {
         const resolvedProfile = registry.profile(connectionName);
         profile = resolvedProfile.id;
-        const t = await registry.get(connectionName);
+        let t = await registry.get(connectionName);
         // Re-resolve the profile AFTER get() returns — a config hot-reload
         // redial may have completed during get()'s in-flight init(), handing
         // back a transport built from the POST-reload config while
@@ -1369,12 +1426,23 @@ if (!DISABLE_SUDO) {
         // See the matching comment in the `exec` handler for the full rationale.
         const effectiveProfile = registry.profile(connectionName);
         profile = effectiveProfile.id;
+        // Capture the reload generation BEFORE the awaited approval so a
+        // hot-reload landing DURING a long manual/smart approval is detected
+        // below. See the matching comment + rationale in the `exec` handler.
+        const genBeforeApproval = registry.getReloadGeneration();
         approvalDecision = await gateApproval({
           profile: effectiveProfile,
           tool: 'sudo-exec',
           command: commandWithDescription,
           description,
         });
+        // A config hot-reload landed while awaiting approval: re-acquire the
+        // transport against the CURRENT config (or fail cleanly if the source
+        // was removed) instead of running on the captured pre-reload transport,
+        // and re-sample the profile so audit attribution matches.
+        ({ transport: t, profile } = await reacquireTransportIfReloaded(
+          registry, connectionName, t, genBeforeApproval,
+        ));
         // Legacy single-host mode may still pass --sudoPassword on CLI; in
         // multi-host mode each ServerConfig carries its own sudoPassword.
         const legacySudo = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined && !isMultiHost)

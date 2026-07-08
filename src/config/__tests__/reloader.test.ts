@@ -505,6 +505,72 @@ describe('ConfigReloader — boot/reload parity (Codex round: findings 1-3)', ()
   });
 });
 
+describe('ConfigReloader — lazy key prep on reload (Codex R4 finding 2: boot/reload parity)', () => {
+  // Boot reads ssh2 key files LAZILY inside registry.get(name) (the registry's
+  // prepareConfig hook), so a source with an unreadable/unmounted key only
+  // fails when that host is used — a bad UNUSED key never breaks startup. The
+  // fixed buildConfigReloader mirrors this by passing NO eager `prepareSources`
+  // hook, so a reload does not pre-read every source's key. These two tests
+  // reproduce both wirings to pin the regression: the OLD eager hook rolls the
+  // whole reload back on one unreadable key; the FIXED no-hook wiring applies.
+
+  // Mirrors index.ts prepareKeyContents: reads the ssh2 key file eagerly.
+  const eagerPrepareKeyContents = async (sources: ServerConfig[]) => {
+    const fs = await import('node:fs/promises');
+    for (const cfg of sources) {
+      if (cfg.transport === 'ssh2' && cfg.keyPath && !cfg.privateKey) {
+        cfg.privateKey = await fs.readFile(cfg.keyPath, 'utf8'); // throws ENOENT
+      }
+    }
+  };
+
+  // A reloaded config whose second (kept) source is an ssh2 host with a key
+  // path that does not exist on disk. Only the parse/registry layers should run.
+  const withUnreadableSsh2Key = (): ResolvedConfig => ({
+    sources: [
+      { name: 'alpha', host: 'alpha.example', port: 22, username: 'root', authMode: 'kerberos', transport: 'openssh', kerberos: true },
+      { name: 'keyhost', host: 'keyhost.example', port: 22, username: 'root', authMode: 'key', transport: 'ssh2', keyPath: '/nonexistent/ssh-mcp/id_ed25519' },
+    ],
+    perSourceApproval: {},
+    defaultExplicit: false,
+    approval: { mode: 'yolo' },
+  } as ResolvedConfig);
+
+  it('FIXED wiring (no prepareSources): applies the reload even when a source key is unreadable', async () => {
+    const registry = freshRegistry(TOML_A);
+    const reloader = new ConfigReloader({
+      registry,
+      loadConfig: () => withUnreadableSsh2Key(),
+      // No prepareSources — key reads stay lazy, deferred to registry.get().
+      log: () => {},
+    });
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(true);
+    // The swap applied: an unused source's bad key never rolled it back.
+    expect(registry.names()).toEqual(['alpha', 'keyhost']);
+  });
+
+  it('OLD wiring (eager prepareSources): the same unreadable key rolls the whole reload back', async () => {
+    const registry = freshRegistry(TOML_A);
+    const reloader = new ConfigReloader({
+      registry,
+      loadConfig: () => withUnreadableSsh2Key(),
+      // The pre-fix buildConfigReloader passed exactly this eager hook, which
+      // pre-reads EVERY source's key before the swap — one ENOENT aborts and
+      // rolls back edits to unrelated healthy sources. This is the regression.
+      prepareSources: eagerPrepareKeyContents,
+      log: () => {},
+    });
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/rolled back/);
+    // The old connection set is preserved (the reload never applied).
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+  });
+});
+
 describe('ConfigReloader — in-memory only (no disk write-back)', () => {
   it('never mutates the config file on disk during a reload', async () => {
     const { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } = await import('node:fs');
