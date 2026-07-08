@@ -55,6 +55,46 @@ describe('audit integration with exec wrapper', () => {
     }
   });
 
+  it('neutralizes description newlines before executing audited transport commands', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ssh-mcp-audit-wrapper-description-'));
+    try {
+      process.env.SSH_MCP_AUDIT_DIR = dir;
+      process.env.SSH_MCP_DISABLE_MAIN = '1';
+      const { executeAuditedTransportCommand } = await import('../../index.js');
+
+      const calls: string[] = [];
+      const transport: Pick<ISshTransport, 'exec' | 'execElevated'> = {
+        exec: async (command: string): Promise<ExecResult> => {
+          calls.push(command);
+          return { stdout: 'ok', stderr: '', exitCode: 0 };
+        },
+        execElevated: async (): Promise<ExecResult> => {
+          throw new Error('not used');
+        },
+      };
+      const store = new AuditStore({ auditDir: dir, auditMaxBytes: 1000 });
+
+      await executeAuditedTransportCommand({
+        transport,
+        store,
+        tool: 'exec',
+        command: 'true',
+        description: 'safe note\nuname -a\r\nwhoami',
+      });
+
+      expect(calls[0]).toBe('true # safe note uname -a whoami');
+      expect(calls[0]).not.toMatch(/[\r\n]/);
+
+      const file = activeFilePath(dir);
+      const records = readFileSync(file, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      expect(records[0].command).toBe('true # safe note uname -a whoami');
+      expect(records[0].command).not.toMatch(/[\r\n]/);
+    } finally {
+      delete process.env.SSH_MCP_AUDIT_DIR;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('writes a failure audit record when the transport throws (audit contract covers failure)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ssh-mcp-audit-wrapper-fail-'));
     try {

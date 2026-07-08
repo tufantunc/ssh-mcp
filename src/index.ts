@@ -969,9 +969,7 @@ export async function executeAuditedTransportCommand(input: {
   let auditCommand = String(input.command ?? '');
   try {
     const sanitizedCommand = sanitizeCommand(input.command);
-    const commandWithDescription = input.description
-      ? `${sanitizedCommand} # ${input.description.replace(/#/g, '\\#')}`
-      : sanitizedCommand;
+    const commandWithDescription = appendDescriptionComment(sanitizedCommand, input.description);
     auditCommand = commandWithDescription;
     const result = input.tool === 'sudo-exec'
       ? await input.transport.execElevated(commandWithDescription, {
