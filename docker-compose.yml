@@ -1,6 +1,9 @@
 services:
-  ssh:
+  # ─── Test SSH Server ───────────────────────────────────────────────────────
+  # Used for integration tests and local development
+  ssh-test:
     image: lscr.io/linuxserver/openssh-server:latest
+    profiles: ["test"]
     environment:
       - USER_NAME=test
       - PASSWORD_ACCESS=true
@@ -9,4 +12,29 @@ services:
     ports:
       - "2222:2222"
 
+  # ─── SSH MCP Server v2 ────────────────────────────────────────────────────
+  # Production-like deployment. Config file mounted as a volume.
+  # Credentials via environment variables or config file — NEVER CLI args.
+  ssh-mcp:
+    build: .
+    profiles: ["app"]
+    stdin_open: true
+    environment:
+      # Credentials via env (read by credential cascade resolver)
+      - SSH_MCP_PASSWORD=${SSH_MCP_PASSWORD}
+      - SSH_MCP_SUDO_PASSWORD=${SSH_MCP_SUDO_PASSWORD}
+    volumes:
+      # Mount your TOML config (must be 0600)
+      - ./config.local.toml:/home/appuser/.config/ssh-mcp/config.toml:ro
+      # Mount SSH keys if using key-based auth
+      - ~/.ssh:/home/appuser/.ssh:ro
+      # Persist audit logs
+      - ssh-mcp-audit:/home/appuser/.local/share/ssh-mcp
+    # stdio transport — connect via MCP client
+    # For HTTP transport, uncomment:
+    # ports:
+    #   - "3000:3000"
+    # command: ["--transport=http", "--port=3000"]
 
+volumes:
+  ssh-mcp-audit:
