@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main, v2]
   pull_request:
-    branches: [ main ]
+    branches: [main, v2]
 
 jobs:
   test:
@@ -26,10 +26,19 @@ jobs:
           --health-retries=30
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+
       - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Dependency resolution check
+        run: npm ls zod zod-to-json-schema @modelcontextprotocol/sdk --all
+
       - name: Wait for sshd
         run: |
           for i in {1..60}; do
@@ -37,13 +46,43 @@ jobs:
             sleep 1
           done
           echo "sshd not ready" && exit 1
+
       - name: Run tests
         env:
           SSH_MCP_DISABLE_MAIN: "1"
+          SSH_MCP_TEST_PASSWORD: secret
           SSH_HOST: 127.0.0.1
           SSH_PORT: "2222"
-          SSH_USER: test
-          SSH_PASSWORD: secret
         run: npm test
 
+  security-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
 
+      - name: Semgrep Scan
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/javascript
+            p/nodejs
+            p/typescript
+            p/owasp-top-ten
+            p/command-injection
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: npm audit
+        run: npm audit --audit-level=high || true
+
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+        if: github.event_name == 'pull_request'
+        with:
+          fail-on-severity: high
