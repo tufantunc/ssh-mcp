@@ -373,7 +373,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
 
   const server = parsed.server ? validateServerSection(parsed.server) : undefined;
   const webui = parsed.webui ? validateWebUI(parsed.webui, env) : undefined;
-  const approval = parsed.approval ? validateApproval(parsed.approval, env) : undefined;
+  const approval = parsed.approval
+    ? validateApproval(parsed.approval, env, Object.values(perSourceApproval).includes('smart'))
+    : undefined;
 
   return {
     sources: resolvedSources,
@@ -441,7 +443,11 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv) {
   return out;
 }
 
-function validateApproval(raw: any, env: NodeJS.ProcessEnv): ApprovalSection {
+function validateApproval(
+  raw: any,
+  env: NodeJS.ProcessEnv,
+  resolveLlmApiKeyForPerSourceSmart = false,
+): ApprovalSection {
   const out: ApprovalSection = {};
   if (raw.mode !== undefined) {
     if (!VALID_APPROVAL_MODE.includes(raw.mode)) {
@@ -466,12 +472,12 @@ function validateApproval(raw: any, env: NodeJS.ProcessEnv): ApprovalSection {
       resolved.endpoint = llm.endpoint;
     }
     if (llm.api_key !== undefined) {
-      // Only resolve the api_key env ref when smart approval is actually
-      // enabled. [approval.llm] settings are irrelevant in the default/manual
+      // Only resolve the api_key env ref when smart approval is actually used:
+      // either by the top-level [approval].mode or by a per-source override.
+      // [approval.llm] settings are otherwise irrelevant in the default/manual
       // mode, so resolving here would fail startup on a missing OPENAI_API_KEY
       // for a user who copied the example config without enabling smart mode.
-      // Defer resolution to smart mode; leave api_key unresolved otherwise.
-      if (out.mode === 'smart') {
+      if (out.mode === 'smart' || resolveLlmApiKeyForPerSourceSmart) {
         resolved.api_key = resolveEnvRef(String(llm.api_key), '[approval.llm].api_key', env);
       }
     }
