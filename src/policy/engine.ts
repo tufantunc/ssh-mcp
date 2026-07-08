@@ -41,7 +41,13 @@ const CLASS_RANK: Record<CommandClass, number> = {
 };
 
 export class PolicyEngine {
+  private opaUrl: string | null = null;
+
   constructor(private rules: PolicyRules = DEFAULT_RULES) {}
+
+  setOpaUrl(url: string | null): void {
+    this.opaUrl = url;
+  }
 
   evaluate(
     command: string,
@@ -93,6 +99,55 @@ export class PolicyEngine {
       binary: parsed.binary,
       ruleId: 'default',
     };
+  }
+
+  async evaluateWithOpa(
+    command: string,
+    profile: Profile,
+    toolName: string,
+  ): Promise<PolicyEvaluation> {
+    const local = this.evaluate(command, profile, toolName);
+
+    if (local.decision === 'deny') {
+      return local;
+    }
+
+    if (!this.opaUrl) {
+      return local;
+    }
+
+    try {
+      const parsed = classifyCommand(command);
+      const input = {
+        subject: { role: profile.role, profile: profile.name },
+        action: { tool: toolName, commandClass: parsed.class },
+        resource: { command: parsed.fullCommand, binary: parsed.binary, host: profile.host },
+        context: { readOnly: profile.readOnly },
+      };
+
+      const resp = await fetch(`${this.opaUrl}/v1/data/ssh/mcp/allow`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input }),
+      });
+
+      if (!resp.ok) return local;
+
+      const data = await resp.json() as { result?: boolean };
+      if (data.result === false) {
+        return {
+          decision: 'deny',
+          commandClass: parsed.class,
+          binary: parsed.binary,
+          ruleId: 'opa',
+          reason: 'Denied by OPA policy',
+        };
+      }
+    } catch {
+      // OPA unreachable — fall back to local evaluation
+    }
+
+    return local;
   }
 
   private getAllowedClasses(profile: Profile): CommandClass[] {
