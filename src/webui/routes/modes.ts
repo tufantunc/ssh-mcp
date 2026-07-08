@@ -73,7 +73,17 @@ export function handleSetProfileMode(
     const event = controller.setProfileMode(profileId, isClear ? null : (requested as string));
     return {
       status: 200,
-      body: { ok: true, scope: 'profile', profileId, mode: event.mode, effective: event.effective },
+      // `override` mirrors the REQUESTED value (null on a clear) so the client
+      // can distinguish a cleared override from one set to the fallback mode.
+      // `mode` stays the resolved effective mode for backward compatibility.
+      body: {
+        ok: true,
+        scope: 'profile',
+        profileId,
+        mode: event.mode,
+        effective: event.effective,
+        override: isClear ? null : (requested as string),
+      },
       event,
     };
   } catch (err: any) {

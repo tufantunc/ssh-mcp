@@ -130,6 +130,22 @@ describe('WebUI mode-switch routes (controller wired)', () => {
     expect(controller.getEffectiveMode('prod')).toBe('yolo');
   });
 
+  // Finding: a cleared override (PUT {mode:null}) must be reported as null so a
+  // client can mirror the cleared state instead of keeping a phantom override
+  // equal to the fallback mode. The response carries an explicit `override`.
+  it('response override mirrors the request: mode string on set, null on clear', async () => {
+    const set = await req(handle, '/api/profiles/prod/approval-mode', putJson({ mode: 'manual' }));
+    const setBody = await set.json();
+    expect(setBody.override).toBe('manual');
+    expect(setBody.effective).toBe('manual');
+
+    const cleared = await req(handle, '/api/profiles/prod/approval-mode', putJson({ mode: null }));
+    const clearedBody = await cleared.json();
+    // effective falls back to yolo, but override is explicitly null (not 'yolo').
+    expect(clearedBody.override).toBeNull();
+    expect(clearedBody.effective).toBe('yolo');
+  });
+
   it('PUT /api/approval-mode switches the global default', async () => {
     const r = await req(handle, '/api/approval-mode', putJson({ mode: 'manual' }));
     expect(r.status).toBe(200);
