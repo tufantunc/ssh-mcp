@@ -186,6 +186,11 @@ export class ApprovalDispatcher extends EventEmitter implements ApprovalEngine {
       profileId,
       mode: mode ?? effective,
       effective,
+      // Echo the REQUESTED override verbatim (mode string, or null on a clear)
+      // so clients can distinguish "override cleared, now showing fallback" from
+      // "override set to that same mode". Without this, a clear looks identical
+      // to a set and leaves a phantom override in the client's mirror.
+      override: mode,
       at: new Date().toISOString(),
     };
     this.emit('mode-changed', payload);
@@ -305,7 +310,15 @@ export function buildApprovalEngineFromConfig(
   // Default mode mirrors TOML default ('manual' per ApprovalSection comment).
   const defaultMode: ApprovalMode = approval?.defaultMode ?? 'manual';
   const perSource = approval?.perSourceModes ?? [];
-  const usedModes = new Set<ApprovalMode>([defaultMode, ...perSource]);
+  // staticOverrides is a distinct source of per-profile modes (seeded straight
+  // into the mode store, see below). A mode declared ONLY there — never in
+  // defaultMode or perSourceModes — would otherwise skip sub-engine arming and
+  // surface as an effective mode whose engine requireEngineFor() cannot resolve,
+  // failing the first decision for that profile. Fold static modes into the
+  // arming/validation set so a static-only manual/smart cannot become an
+  // unavailable effective mode.
+  const staticModes = Object.values(approval?.staticOverrides ?? {});
+  const usedModes = new Set<ApprovalMode>([defaultMode, ...perSource, ...staticModes]);
 
   const built: BuildApprovalEngineOptions = {
     defaultMode,
@@ -325,6 +338,10 @@ export function buildApprovalEngineFromConfig(
     built.smart = {
       llm: {
         endpoint: llm!.endpoint!,
+        // api_key is preserved by validateApproval() whenever the LLM block is
+        // fully configured (endpoint+model), even when smart is only PRE-ARMED
+        // and not the active mode — so a live WebUI switch to smart still
+        // authenticates instead of silently sending unauthenticated requests.
         api_key: llm!.api_key,
         model: llm!.model!,
         timeout_ms: llm!.timeout_ms,

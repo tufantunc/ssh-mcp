@@ -170,6 +170,37 @@ describe('ApprovalDispatcher — mode-changed events', () => {
     expect(events[0].at).toMatch(/T/);
   });
 
+  // Finding: clearing a profile override must be distinguishable from setting a
+  // live override to the fallback mode. The payload carries an explicit
+  // `override` field (the REQUESTED value) so clients can mirror a cleared
+  // override instead of keeping a phantom one.
+  it('reports the requested override verbatim: mode string on set, null on clear', () => {
+    const d = new ApprovalDispatcher({
+      defaultMode: 'yolo',
+      manual: { webuiEnabled: true, timeout_ms: 5000 },
+    });
+    const set = d.setProfileMode('prod', 'manual');
+    expect(set.override).toBe('manual');
+    expect(set.mode).toBe('manual');
+    expect(set.effective).toBe('manual');
+
+    // Clearing reveals the yolo fallback. `mode`/`effective` are the fallback,
+    // but `override` MUST be null so the clear is not mistaken for a set-to-yolo.
+    const cleared = d.setProfileMode('prod', null);
+    expect(cleared.override).toBeNull();
+    expect(cleared.mode).toBe('yolo');       // fallback effective
+    expect(cleared.effective).toBe('yolo');
+  });
+
+  it('global switches carry no override field (profile-only concept)', () => {
+    const d = new ApprovalDispatcher({
+      defaultMode: 'yolo',
+      manual: { webuiEnabled: true, timeout_ms: 5000 },
+    });
+    const ev = d.setGlobalMode('manual');
+    expect(ev.override).toBeUndefined();
+  });
+
   it('does NOT emit when a switch is rejected (no half-applied event)', () => {
     const d = new ApprovalDispatcher({ defaultMode: 'yolo' });
     const spy = vi.fn();
@@ -218,5 +249,43 @@ describe('buildApprovalEngineFromConfig — pre-arms engines for live switching'
     );
     expect(d.getEffectiveMode('prod')).toBe('manual'); // static
     expect(d.getEffectiveMode('lab')).toBe('yolo');     // global
+  });
+
+  // Finding: modes declared ONLY in staticOverrides (never in defaultMode or
+  // perSourceModes) must still drive sub-engine arming/validation. Otherwise a
+  // static-only mode surfaces as an effective mode whose engine was never
+  // armed, and the FIRST decision for that profile throws in requireEngineFor.
+  // The fix folds Object.values(staticOverrides) into the used-modes set, so
+  // such a config now fails FAST at build instead of at first decision.
+  it('validates a static-only smart mode: fails fast at build when [approval.llm] is absent', () => {
+    expect(() =>
+      buildApprovalEngineFromConfig(
+        { defaultMode: 'yolo', staticOverrides: { prod: 'smart' } }, // no llm, smart not in perSourceModes
+        { manualOpts: { webuiEnabled: true, timeout_ms: 5000 } },
+      ),
+    ).toThrow(/smart.*requires.*\[approval\.llm\]\.endpoint/i);
+  });
+
+  it('validates a static-only manual mode: fails fast at build when WebUI is off (gate-12)', () => {
+    expect(() =>
+      buildApprovalEngineFromConfig(
+        { defaultMode: 'yolo', staticOverrides: { prod: 'manual' } }, // manual not in perSourceModes
+        { manualOpts: { webuiEnabled: false } },
+      ),
+    ).toThrow(); // ManualApprovalDisabledError — manual sub-engine cannot arm without WebUI
+  });
+
+  it('arms a static-only smart mode when the LLM is configured (effective mode stays available)', () => {
+    const d = buildApprovalEngineFromConfig(
+      { defaultMode: 'yolo', staticOverrides: { prod: 'smart' }, llm: { endpoint: 'http://stub/llm', model: 'm' } },
+      {
+        manualOpts: { webuiEnabled: false },
+        smartFetchImpl: (async () => ({ ok: true, status: 200, text: async () => '{}' })) as any,
+      },
+    );
+    expect(d.getEffectiveMode('prod')).toBe('smart');
+    // The armed set includes smart, so the static effective mode is switch-able
+    // and a decision for that profile will not throw in requireEngineFor.
+    expect(d.availableModes()).toContain('smart');
   });
 });

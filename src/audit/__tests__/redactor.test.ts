@@ -87,6 +87,14 @@ describe('audit redactor', () => {
     expect(out).not.toContain('abc123');
   });
 
+  it('redacts dangling PEM private keys in command metadata', () => {
+    const begin = '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----';
+    const out = redact(`ssh-add ${begin}\nraw-key-material-without-terminator`);
+    expect(out).toContain(R);
+    expect(out).not.toContain('raw-key-material');
+    expect(out).not.toContain('PRIVATE KEY');
+  });
+
   it('redacts AWS key id / secret hint and JWT shapes', () => {
     const awsKey = 'AKIA' + 'A'.repeat(16);
     const awsSecret = 'a'.repeat(40);

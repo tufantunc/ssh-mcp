@@ -17,6 +17,7 @@
  */
 import type { ApprovalDecision } from './types.js';
 import type { ExecResult } from '../transports/types.js';
+import { fileURLToPath } from 'node:url';
 
 export type AuditToolName = 'exec' | 'sudo-exec';
 
@@ -71,6 +72,28 @@ interface AuditModuleLike {
   yoloApproval(now?: Date): unknown;
 }
 
+export type AuditModuleImporter = (specifier: string) => Promise<unknown>;
+
+const defaultAuditImporter: AuditModuleImporter = (specifier) => import(specifier);
+
+export function isOptionalAuditStoreMissing(
+  err: unknown,
+  expectedStoreUrl = new URL('../audit/store.js', import.meta.url).href,
+): boolean {
+  const code = (err as { code?: string })?.code;
+  if (code !== 'ERR_MODULE_NOT_FOUND') return false;
+
+  const actualUrl = (err as { url?: string })?.url;
+  if (actualUrl) return actualUrl === expectedStoreUrl;
+
+  const expectedStorePath = fileURLToPath(expectedStoreUrl);
+  const message = (err as { message?: string })?.message ?? String(err);
+  return message.includes(`Cannot find module '${expectedStorePath}'`)
+    || message.includes(`Cannot find module "${expectedStorePath}"`)
+    || message.includes("Cannot find module '../audit/store.js'")
+    || message.includes('Cannot find module "../audit/store.js"');
+}
+
 /** Shared no-op sink for the audit-absent path. */
 const NO_OP_SINK: AuditSink = {
   record(): void {
@@ -93,26 +116,29 @@ function toApprovalSection(decision: ApprovalDecision) {
  * when `src/audit/` is not part of this build, so callers can wire the seam
  * unconditionally at boot and treat the result as always-present.
  */
-export async function loadAuditSink(config: AuditSeamConfig = {}): Promise<AuditSink> {
+export async function loadAuditSink(
+  config: AuditSeamConfig = {},
+  importer: AuditModuleImporter = defaultAuditImporter,
+): Promise<AuditSink> {
   // Non-literal specifier: tsc does NOT resolve this, so the build succeeds
   // even though `src/audit/store.js` does not exist on `pr/toml-config`.
   const specifier = '../audit/' + 'store.js';
+  const expectedStoreUrl = new URL(specifier, import.meta.url).href;
 
   let mod: AuditModuleLike;
   try {
-    mod = (await import(specifier)) as unknown as AuditModuleLike;
+    mod = (await importer(specifier)) as unknown as AuditModuleLike;
   } catch (err) {
-    // Only ERR_MODULE_NOT_FOUND is the expected "audit module absent" case
-    // (Decision D2 optional seam). Any other import failure — a syntax or
-    // runtime error inside a *present* audit module — is a real
-    // misconfiguration that would otherwise be silently indistinguishable
-    // from "not installed". Surface it before degrading to the no-op sink.
-    const code = (err as { code?: string })?.code;
-    if (code !== 'ERR_MODULE_NOT_FOUND') {
-      const message = (err as { message?: string })?.message ?? String(err);
-      console.error(`[ssh-mcp][audit-seam] audit module present but failed to load; auditing disabled: ${message}`);
+    // Only a missing ../audit/store.js is the expected "audit module absent"
+    // case (Decision D2 optional seam). A present audit module whose own import
+    // is missing also reports ERR_MODULE_NOT_FOUND; do not misclassify that as
+    // optional absence, or the broken module is silently suppressed.
+    if (isOptionalAuditStoreMissing(err, expectedStoreUrl)) {
+      return NO_OP_SINK;
     }
-    return NO_OP_SINK; // audit module absent (or unusable) → no-op
+    const message = (err as { message?: string })?.message ?? String(err);
+    console.error(`[ssh-mcp][audit-seam] audit module present but failed to load; auditing disabled: ${message}`);
+    return NO_OP_SINK; // audit module unusable → visible warning + no-op
   }
   if (!mod || typeof mod.AuditStore !== 'function') {
     return NO_OP_SINK;

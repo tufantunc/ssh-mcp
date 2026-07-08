@@ -73,8 +73,19 @@ class FakeModeController extends EventEmitter implements ModeController {
   }
 }
 
+function webuiOrigin(handle: WebUIHandle): string {
+  return `http://${handle.address.host}:${handle.address.port}`;
+}
+
 async function req(handle: WebUIHandle, path: string, init?: RequestInit) {
-  return fetch(`http://${handle.address.host}:${handle.address.port}${path}`, init);
+  const origin = webuiOrigin(handle);
+  const nextInit: RequestInit | undefined = init ? { ...init } : undefined;
+  if (nextInit?.method && nextInit.method.toUpperCase() !== 'GET') {
+    const headers = new Headers(nextInit.headers);
+    if (!headers.has('Origin')) headers.set('Origin', origin);
+    nextInit.headers = headers;
+  }
+  return fetch(`${origin}${path}`, nextInit);
 }
 const putJson = (body: unknown): RequestInit => ({
   method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -119,12 +130,59 @@ describe('WebUI mode-switch routes (controller wired)', () => {
     expect(controller.getEffectiveMode('prod')).toBe('yolo');
   });
 
+  // Finding: a cleared override (PUT {mode:null}) must be reported as null so a
+  // client can mirror the cleared state instead of keeping a phantom override
+  // equal to the fallback mode. The response carries an explicit `override`.
+  it('response override mirrors the request: mode string on set, null on clear', async () => {
+    const set = await req(handle, '/api/profiles/prod/approval-mode', putJson({ mode: 'manual' }));
+    const setBody = await set.json();
+    expect(setBody.override).toBe('manual');
+    expect(setBody.effective).toBe('manual');
+
+    const cleared = await req(handle, '/api/profiles/prod/approval-mode', putJson({ mode: null }));
+    const clearedBody = await cleared.json();
+    // effective falls back to yolo, but override is explicitly null (not 'yolo').
+    expect(clearedBody.override).toBeNull();
+    expect(clearedBody.effective).toBe('yolo');
+  });
+
   it('PUT /api/approval-mode switches the global default', async () => {
     const r = await req(handle, '/api/approval-mode', putJson({ mode: 'manual' }));
     expect(r.status).toBe(200);
     const j = await r.json();
     expect(j).toMatchObject({ ok: true, scope: 'global', mode: 'manual' });
     expect(controller.getGlobalMode()).toBe('manual');
+  });
+
+  it('rejects cross-origin mode-switch mutations before changing state', async () => {
+    const evilPut = (body: unknown): RequestInit => ({
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Origin: 'http://evil.example' },
+      body: JSON.stringify(body),
+    });
+
+    const global = await req(handle, '/api/approval-mode', evilPut({ mode: 'manual' }));
+    expect(global.status).toBe(403);
+    expect(controller.getGlobalMode()).toBe('yolo');
+
+    const profile = await req(handle, '/api/profiles/prod/approval-mode', evilPut({ mode: 'manual' }));
+    expect(profile.status).toBe(403);
+    expect(controller.getEffectiveMode('prod')).toBe('yolo');
+  });
+
+  it('rejects an unknown profile id with 404 before storing an override', async () => {
+    const r = await req(handle, '/api/profiles/missing/approval-mode', putJson({ mode: 'manual' }));
+    expect(r.status).toBe(404);
+    const j = await r.json();
+    expect(j).toMatchObject({ error: 'profile not found', profileId: 'missing' });
+    expect(controller.getEffectiveMode('missing')).toBe('yolo');
+  });
+
+  it('returns 400 for a malformed percent-encoded profile id', async () => {
+    const r = await req(handle, '/api/profiles/%E0%A4%A/approval-mode', putJson({ mode: 'manual' }));
+    expect(r.status).toBe(400);
+    const j = await r.json();
+    expect(j.error).toMatch(/malformed profile id/);
   });
 
   it('rejects an unavailable mode with 400 and the available list', async () => {

@@ -11,7 +11,7 @@
  *      `--api-key=VALUE`, `--secret VALUE`, `Authorization: Bearer ...`.
  *   2. Inline `KEY=value` env-style pairs (KEY matches PASSWORD/TOKEN/SECRET/...).
  *   3. JSON / TOML quoted `"key": "value"` pairs for the same key set.
- *   4. PEM blocks (BEGIN/END *PRIVATE KEY*).
+ *   4. PEM blocks (BEGIN/END *PRIVATE KEY*) and dangling BEGIN blocks.
  *   5. AWS access-key-id shapes (AKIA/ASIA + 16 chars).
  *   6. AWS secret-access-key when on the same line as a hint.
  *   7. JWT tokens (three base64url segments).
@@ -118,6 +118,7 @@ const RULES: Rule[] = [
   { re: BARE_KV_RE, replace: (_m, head) => `${head}${REDACTED}` },
   { re: SIMPLE_SECRET_WORD_RE, replace: (_m, word) => `${word} ${REDACTED}` },
   { re: PEM_RE, replace: REDACTED },
+  { re: PEM_OPEN_RE, replace: REDACTED },
   { re: AWS_ACCESS_KEY_RE, replace: REDACTED },
   { re: AWS_SECRET_HINT_RE, replace: (_m, head, _val, tail) => `${head}${REDACTED}${tail}` },
   { re: JWT_RE, replace: REDACTED },

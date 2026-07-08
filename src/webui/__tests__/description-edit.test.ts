@@ -64,7 +64,14 @@ class FakeSourceController implements SourceController {
 }
 
 async function req(handle: WebUIHandle, path: string, init?: RequestInit) {
-  return fetch(`http://${handle.address.host}:${handle.address.port}${path}`, init);
+  const origin = `http://${handle.address.host}:${handle.address.port}`;
+  const nextInit: RequestInit | undefined = init ? { ...init } : undefined;
+  if (nextInit?.method && nextInit.method.toUpperCase() !== 'GET') {
+    const headers = new Headers(nextInit.headers);
+    if (!headers.has('Origin')) headers.set('Origin', origin);
+    nextInit.headers = headers;
+  }
+  return fetch(`${origin}${path}`, nextInit);
 }
 const putJson = (body: unknown): RequestInit => ({
   method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -133,6 +140,42 @@ describe('WebUI description-edit routes (controller wired)', () => {
   it('rejects a non-string, non-null description with 400', async () => {
     const r = await req(handle, '/api/sources/prod/description', putJson({ description: 42 }));
     expect(r.status).toBe(400);
+  });
+
+  it('rejects cross-origin description-edit mutations before changing state', async () => {
+    const evilPut = (body: unknown): RequestInit => ({
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Origin: 'http://evil.example' },
+      body: JSON.stringify(body),
+    });
+    const r = await req(handle, '/api/sources/prod/description', evilPut({ description: 'hijacked' }));
+    expect(r.status).toBe(403);
+    const j = await r.json();
+    expect(j.error).toMatch(/same-origin loopback/);
+    // State untouched.
+    expect(controller.getEffectiveDescription('prod')).toBe('production bastion');
+  });
+
+  it('rejects description-edit mutations with no Origin/Referer and no token', async () => {
+    // Bypass the same-origin helper: send a raw PUT with neither header set.
+    const r = await fetch(
+      `http://${handle.address.host}:${handle.address.port}/api/sources/prod/description`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: 'no-origin' }),
+      },
+    );
+    expect(r.status).toBe(403);
+    // State untouched.
+    expect(controller.getEffectiveDescription('prod')).toBe('production bastion');
+  });
+
+  it('returns 400 for a malformed percent-encoded source id', async () => {
+    const r = await req(handle, '/api/sources/%E0%A4%A/description', putJson({ description: 'x' }));
+    expect(r.status).toBe(400);
+    const j = await r.json();
+    expect(j.error).toMatch(/malformed source id/);
   });
 
   it('rejects an over-long description with 400', async () => {

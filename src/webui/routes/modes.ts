@@ -30,11 +30,13 @@ export function handleListModes(
  *
  * Returns 400 on a malformed body or a mode whose engine is not armed (the
  * controller throws; the store is left untouched — the switch is atomic).
+ * Returns 404 when the profile id is not registered.
  * Returns 503 when no controller is wired (mode switching disabled).
  */
 export function handleSetProfileMode(
   controller: ModeController | undefined,
   profileId: string,
+  profileExists: boolean,
   body: any,
 ): { status: number; body: unknown; event?: ModeChangedEvent } {
   if (!controller) {
@@ -42,6 +44,9 @@ export function handleSetProfileMode(
   }
   if (!profileId) {
     return { status: 400, body: { error: 'missing profile id' } };
+  }
+  if (!profileExists) {
+    return { status: 404, body: { error: 'profile not found', profileId } };
   }
   if (body === null || typeof body !== 'object' || !('mode' in body)) {
     return { status: 400, body: { error: 'body must be {"mode": "<mode>" | null}' } };
@@ -68,7 +73,17 @@ export function handleSetProfileMode(
     const event = controller.setProfileMode(profileId, isClear ? null : (requested as string));
     return {
       status: 200,
-      body: { ok: true, scope: 'profile', profileId, mode: event.mode, effective: event.effective },
+      // `override` mirrors the REQUESTED value (null on a clear) so the client
+      // can distinguish a cleared override from one set to the fallback mode.
+      // `mode` stays the resolved effective mode for backward compatibility.
+      body: {
+        ok: true,
+        scope: 'profile',
+        profileId,
+        mode: event.mode,
+        effective: event.effective,
+        override: isClear ? null : (requested as string),
+      },
       event,
     };
   } catch (err: any) {

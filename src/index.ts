@@ -697,38 +697,58 @@ let auditSink: AuditSink = { record() { /* no-op until wired (or audit absent) *
  * perSourceModes for the manual-without-resolver boot warning) so the warning
  * can never disagree with the mode the engine actually runs.
  */
-function resolveApprovalEngineInput(): BuildEngineFromConfigInput | null {
-  const approvalCfg = resolvedConfig.approval;
-  const perSourceModes: ApprovalMode[] = Object.values(resolvedConfig.perSourceApproval ?? {});
+export function resolveApprovalEngineInput(
+  config: ResolvedConfig = resolvedConfig,
+): BuildEngineFromConfigInput | null {
+  const approvalCfg = config.approval;
+  const perSourceModes: ApprovalMode[] = Object.values(config.perSourceApproval ?? {});
   if (approvalCfg === undefined && perSourceModes.length === 0) {
     return null;
   }
+  const approvalLlmOnly = approvalCfg !== undefined
+    && approvalCfg.mode === undefined
+    && approvalCfg.fail_closed === undefined
+    && approvalCfg.llm !== undefined;
+  const perSourceOnlyDefault = perSourceModes.length > 0
+    && (approvalCfg === undefined || approvalLlmOnly);
   return {
     // Resolve the GLOBAL default mode:
     //  - explicit [approval].mode set        -> honor it.
-    //  - no global mode, per-source overrides -> the [approval] block (when
-    //    present at all) exists only to host [approval.llm] for a per-source
-    //    smart override; keep the global default 'yolo' (unrestricted) so only
-    //    the overridden sources are gated. Defining [approval.llm] for a
-    //    per-source `mode = "smart"` makes resolvedConfig.approval non-undefined
-    //    even though no global mode was requested, so keying solely on
-    //    `approvalCfg === undefined` would wrongly fall through to manual here
-    //    and gate every ungated host (or throw at boot with WebUI off). This
-    //    also covers the no-[approval]-block case (per-source overrides only).
-    //  - no global mode and no per-source overrides -> a bare [approval] block
-    //    (e.g. `fail_closed = true`, or `[approval.llm]` alone) was added
+    //  - no global mode, per-source overrides, and either no [approval] block
+    //    or an [approval.llm]-only block -> keep the global default 'yolo'
+    //    (unrestricted) so only the overridden sources are gated. Defining
+    //    [approval.llm] for a per-source `mode = "smart"` makes
+    //    resolvedConfig.approval non-undefined even though no global mode was
+    //    requested, so keying solely on `approvalCfg === undefined` would
+    //    wrongly fall through to manual here and gate every ungated host (or
+    //    throw at boot with WebUI off).
+    //  - no global mode but a real top-level approval knob (e.g.
+    //    `fail_closed = true`, or a bare [approval] block) was added
     //    deliberately to enable approval; leave defaultMode undefined so
     //    buildApprovalEngineFromConfig applies the documented 'manual' default.
     defaultMode:
       approvalCfg?.mode !== undefined
         ? approvalCfg.mode
-        : perSourceModes.length > 0
+        : perSourceOnlyDefault
           ? 'yolo'
           : undefined,
     fail_closed: approvalCfg?.fail_closed,
     llm: approvalCfg?.llm,
     perSourceModes,
   };
+}
+
+export function approvalResolverWarningFromInput(
+  input: BuildEngineFromConfigInput | null,
+  params: { webuiEnabled: boolean; resolverWired: boolean },
+): string | null {
+  if (input === null) return null;
+  return manualWithoutResolverWarning({
+    webuiEnabled: params.webuiEnabled,
+    defaultMode: input.defaultMode,
+    perSourceModes: input.perSourceModes,
+    resolverWired: params.resolverWired,
+  });
 }
 
 /**
@@ -790,15 +810,12 @@ function isWebUIActive(): boolean {
 
 /**
  * True when a driver that settles the manual-approval queue is wired into this
- * build. The queue resolver — the WebUI manual-approval server — lands in the
- * child lane `pr/webui-manual-approval`; the approval-engine lane ships only the
- * queue primitive, so no resolver is wired here. Kept as an explicit predicate
- * (rather than inlining `false`) so the child lane can flip it to a real
- * detection — e.g. `return isWebUIServerWired();` — without touching the warning
- * call site.
+ * build. This lane includes the WebUI manual-approval POST route and passes the
+ * in-process ApprovalDispatcher through buildWebUIApprovalQueueAdapter(), so a
+ * WebUI-enabled manual queue has a resolver.
  */
 function isApprovalResolverWired(): boolean {
-  return false;
+  return true;
 }
 
 /**
@@ -817,10 +834,8 @@ async function wireApprovalAndAudit(): Promise<void> {
   // still succeeds (the queue exists, it just times out until a resolver lands);
   // warn so the operator is not left wondering why every command hangs.
   const input = resolveApprovalEngineInput();
-  const warning = manualWithoutResolverWarning({
+  const warning = approvalResolverWarningFromInput(input, {
     webuiEnabled: webuiActive,
-    defaultMode: input?.defaultMode,
-    perSourceModes: input?.perSourceModes,
     resolverWired: isApprovalResolverWired(),
   });
   if (warning) {
@@ -1122,9 +1137,7 @@ export async function executeAuditedTransportCommand(input: {
   let auditCommand = String(input.command ?? '');
   try {
     const sanitizedCommand = sanitizeCommand(input.command);
-    const commandWithDescription = input.description
-      ? `${sanitizedCommand} # ${input.description.replace(/#/g, '\\#')}`
-      : sanitizedCommand;
+    const commandWithDescription = appendDescriptionComment(sanitizedCommand, input.description);
     auditCommand = commandWithDescription;
     const result = input.tool === 'sudo-exec'
       ? await input.transport.execElevated(commandWithDescription, {
