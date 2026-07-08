@@ -775,15 +775,12 @@ function isWebUIActive(): boolean {
 
 /**
  * True when a driver that settles the manual-approval queue is wired into this
- * build. The queue resolver — the WebUI manual-approval server — lands in the
- * child lane `pr/webui-manual-approval`; the approval-engine lane ships only the
- * queue primitive, so no resolver is wired here. Kept as an explicit predicate
- * (rather than inlining `false`) so the child lane can flip it to a real
- * detection — e.g. `return isWebUIServerWired();` — without touching the warning
- * call site.
+ * build. This lane includes the WebUI manual-approval POST route and passes the
+ * in-process ApprovalDispatcher through buildWebUIApprovalQueueAdapter(), so a
+ * WebUI-enabled manual queue has a resolver.
  */
 function isApprovalResolverWired(): boolean {
-  return false;
+  return true;
 }
 
 /**

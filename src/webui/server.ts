@@ -117,6 +117,55 @@ function checkAuth(opts: { req: http.IncomingMessage; authToken?: string; bind: 
   return false;
 }
 
+function singleHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function normalizeHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[|\]$/g, '');
+}
+
+function hostnameFromAuthority(authority: string | undefined): string | undefined {
+  if (!authority) return undefined;
+  try {
+    return normalizeHostname(new URL(`http://${authority}`).hostname);
+  } catch {
+    return undefined;
+  }
+}
+
+function headerOriginIsSameHost(value: string | undefined, hostHeader: string): boolean {
+  if (!value) return true;
+  try {
+    const origin = new URL(value);
+    return origin.host.toLowerCase() === hostHeader.toLowerCase()
+      && isLoopback(normalizeHostname(origin.hostname));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * State-changing approval routes stay usable in loopback/no-token mode, but
+ * reject browser cross-origin or DNS-rebinding requests. Token-protected
+ * deployments already authenticate above with bearer/X-Auth-Token.
+ */
+function checkApprovalMutationAuth(opts: { req: http.IncomingMessage; authToken?: string }): boolean {
+  if (opts.authToken) return true;
+
+  const hostHeader = singleHeader(opts.req.headers.host);
+  const hostName = hostnameFromAuthority(hostHeader);
+  if (!hostHeader || !hostName || !isLoopback(hostName)) return false;
+
+  const origin = singleHeader(opts.req.headers.origin);
+  const referer = singleHeader(opts.req.headers.referer);
+  if (!origin && !referer) return false;
+  if (!headerOriginIsSameHost(origin, hostHeader)) return false;
+  if (!headerOriginIsSameHost(referer, hostHeader)) return false;
+
+  return true;
+}
+
 /**
  * Start the WebUI HTTP server.
  *
@@ -182,7 +231,17 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
 
         const m = pathname.match(/^\/api\/approvals\/([^/]+)\/(allow|deny)$/);
         if (m && method === 'POST') {
-          const id = decodeURIComponent(m[1]);
+          if (!checkApprovalMutationAuth({ req, authToken: opts.authToken })) {
+            sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
+            return;
+          }
+          let id: string;
+          try {
+            id = decodeURIComponent(m[1]);
+          } catch {
+            sendJson(res, 400, { error: 'malformed approval id' });
+            return;
+          }
           const kind = m[2] as ApprovalDecisionKind;
           const body = await readJson(req);
           if (body === null) {
