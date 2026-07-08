@@ -354,18 +354,25 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
   return new Promise((resolve, reject) => {
     let timeoutId: NodeJS.Timeout;
     let isResolved = false;
+    let activeStream: ClientChannel | null = null;
 
     const conn = manager.getConnection();
 
-    // Set up timeout
+    // Set up timeout with in-band signal cancellation
     timeoutId = setTimeout(() => {
       if (!isResolved) {
         isResolved = true;
+        if (activeStream) {
+          try { activeStream.signal('INT'); } catch { /* try TERM */ }
+          setTimeout(() => {
+            try { activeStream?.signal('TERM'); } catch { /* force close */ }
+            setTimeout(() => { try { activeStream?.close(); } catch { /* ignore */ } }, 2000);
+          }, 3000);
+        }
         reject(new McpError(ErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
       }
     }, DEFAULT_TIMEOUT);
 
-    // Use exec() for all commands — no persistent su shell (removed in v2, closes #34)
     conn.exec(command, (err: Error | undefined, stream: ClientChannel) => {
       if (err) {
         if (!isResolved) {
@@ -375,6 +382,7 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
         }
         return;
       }
+      activeStream = stream;
 
       let stdout = '';
       let stderr = '';
@@ -423,28 +431,21 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
     const conn = new Client();
     let timeoutId: NodeJS.Timeout;
     let isResolved = false;
+    let activeStream: ClientChannel | null = null;
 
-    // Set up timeout
+    // Set up timeout with in-band signal cancellation (replaces old pkill hack)
     timeoutId = setTimeout(() => {
       if (!isResolved) {
         isResolved = true;
-        // Try to abort the running command before closing connection
-        const abortTimeout = setTimeout(() => {
-          // If abort command itself times out, force close connection
+        if (activeStream) {
+          try { activeStream.signal('INT'); } catch { /* try TERM */ }
+          setTimeout(() => {
+            try { activeStream?.signal('TERM'); } catch { /* force close */ }
+            setTimeout(() => { try { conn.end(); } catch { /* ignore */ } }, 2000);
+          }, 3000);
+        } else {
           conn.end();
-        }, 5000); // 5 second timeout for abort command
-
-        conn.exec('timeout 3s pkill -f \'' + escapeCommandForShell(command) + '\' 2>/dev/null || true', (err: Error | undefined, abortStream: ClientChannel | undefined) => {
-          if (abortStream) {
-            abortStream.on('close', () => {
-              clearTimeout(abortTimeout);
-              conn.end();
-            });
-          } else {
-            clearTimeout(abortTimeout);
-            conn.end();
-          }
-        });
+        }
         reject(new McpError(ErrorCode.InternalError, `Command execution timed out after ${DEFAULT_TIMEOUT}ms`));
       }
     }, DEFAULT_TIMEOUT);
@@ -461,6 +462,7 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
           return;
         }
         // If stdin provided, write it to the stream and end stdin
+        activeStream = stream;
         if (stdin && stdin.length > 0) {
           try {
             stream.write(stdin);
