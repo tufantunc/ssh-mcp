@@ -20,6 +20,7 @@ import {
 } from './types.js';
 import { YoloApproval } from './yolo.js';
 import { SmartApproval } from './smart.js';
+import type { SmartLlmSnapshot } from './smart.js';
 import { ManualApproval } from './manual.js';
 import { ApprovalModeStore } from './mode-store.js';
 import type { ModeStoreState } from './mode-store.js';
@@ -236,6 +237,18 @@ export class ApprovalDispatcher extends EventEmitter implements ApprovalEngine {
   /** Capture the mode-store state for external rollback (PR-9). */
   captureModeState(): ModeStoreState {
     return this.modeStore.capture();
+  }
+
+  /**
+   * Normalized snapshot of the live smart sub-engine's LLM settings, or `null`
+   * when no smart engine is armed. The config hot-reload path uses this to
+   * reject a reload that edits `[approval.llm]` (endpoint/model/api_key/
+   * timeout_ms/provider/fail_closed): sub-engines are built once at boot and
+   * never rebuilt on reload, so a changed LLM block would otherwise be reported
+   * as applied while approvals keep hitting the stale boot-time endpoint.
+   */
+  describeSmartLlm(): SmartLlmSnapshot | null {
+    return this.smart?.describeConfig() ?? null;
   }
 
   /** Restore a previously captured mode-store state (PR-9 rollback). */

@@ -281,8 +281,10 @@ A reload re-establishes the **file** as the source of truth: any live in-memory 
 A bad edit can't take the server down. The reload is transactional:
 
 1. **Parse + validate** the new file. If it fails to parse or validate, the server logs the error and **keeps every existing connection and the current approval policy** untouched.
-2. **Swap** connections + approval policy atomically. If any step fails (e.g. a key file became unreadable, or the new policy selects an approval mode whose engine wasn't armed at boot — see below), the server **rolls both layers back together** to the last known-good state.
+2. **Swap** connections + approval policy atomically. If any step fails — e.g. the new policy selects an approval mode whose engine wasn't armed at boot, or a smart reload edits `[approval.llm]` (see below) — the server **rolls both layers back together** to the last known-good state. Note that ssh2 key files are read **lazily**, on first use of a source, not at reload time (mirroring boot): a TOML edit with a bad ssh2 `key_path` is therefore *applied* at reload and surfaces only when that source is next selected — it is **not** rolled back at reload. This deliberately isolates one host's bad key from edits to unrelated healthy sources.
 3. **Broadcast** a `config-reloaded` SSE event so every open WebUI dashboard re-fetches and converges on the new server truth.
+
+A successful reload closes **only** the transports of sources that were removed or whose connection parameters changed; sources whose connection params are unchanged keep their live persistent connection, so editing a description or approval mode never interrupts an in-flight command on an untouched host.
 
 Multiple rapid saves (editors often fire several change events per save) are **debounced** into a single reload (~500ms window), and a change arriving while a reload is in flight is coalesced into exactly one trailing reload.
 
@@ -291,6 +293,8 @@ Multiple rapid saves (editors often fire several change events per save) are **d
 > Hot reload refreshes connections, descriptions, and approval policy — it does **not** add or remove MCP tools. ssh-mcp's tool set (`exec` / `sudo-exec` / `list-servers`) is static and registered once at startup, so a STDIO client never needs to reconnect to keep working. The WebUI receives the `config-reloaded` SSE event and updates live; STDIO MCP clients see the new connection set the next time they call `list-servers` or target a connection by name. (This mirrors dbhub's documented STDIO limitation, where the tool list *is* config-derived; here it isn't, so the caveat is narrower.)
 
 > **Switching INTO a newly-configured `smart` or `manual` mode needs a restart.** The approval sub-engines (yolo / smart / manual) are built once at boot from the engines that are *armed* then — e.g. `smart` is only armed when `[approval.llm]` was present at startup. A hot reload can freely switch *among already-armed* modes, but a reload that newly introduces `[approval.llm]` (or first enables the WebUI for `manual`) is rejected and rolled back; restart the server to arm the new engine. The same applies when the server booted with **no `[approval]` policy at all and the WebUI disabled** (no engine is wired, so the gate is `legacy:no-engine` allow): a reload that introduces any enforcing policy — a global or per-source mode other than `yolo` — is rejected and rolled back rather than reported as applied while commands keep running unenforced. Restart to arm the engine.
+
+> **Editing `[approval.llm]` while `smart` is active also needs a restart.** Because the `smart` sub-engine (its LLM endpoint / model / api_key / timeout / provider / fail_closed) is captured once at boot and never rebuilt on reload, a reload that *changes* any of those `[approval.llm]` fields while `smart` remains the effective mode is **rejected and rolled back** — otherwise the reload would report success while approvals kept hitting the stale boot-time endpoint (silently ignoring a rotated key or a new model). Restart the server to pick up an `[approval.llm]` change.
 
 ## Testing
 

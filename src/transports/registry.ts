@@ -400,6 +400,78 @@ export class TransportRegistry {
   }
 
   /**
+   * Connection-relevant equality between two ServerConfigs. Compares ONLY the
+   * fields that decide how a transport dials/authenticates — NOT `name` (the
+   * map key), `description`, or `approval` (which never affect the live
+   * connection). Two configs that differ only in description/approval are
+   * considered the SAME connection, so {@link closeChanged} keeps that source's
+   * live persistent transport across a reload.
+   */
+  private connectionParamsEqual(a: ServerConfig, b: ServerConfig): boolean {
+    return (
+      a.host === b.host &&
+      a.port === b.port &&
+      a.username === b.username &&
+      a.password === b.password &&
+      a.privateKey === b.privateKey &&
+      a.suPassword === b.suPassword &&
+      a.sudoPassword === b.sudoPassword &&
+      a.transport === b.transport &&
+      a.authMode === b.authMode &&
+      a.keyPath === b.keyPath &&
+      a.kerberos === b.kerberos &&
+      a.gssapiDelegateCredentials === b.gssapiDelegateCredentials &&
+      a.knownHostsFile === b.knownHostsFile &&
+      a.strictHostKeyChecking === b.strictHostKeyChecking
+    );
+  }
+
+  /**
+   * Close ONLY the transports whose source was removed or whose connection
+   * parameters changed relative to `previousConfigs`, preserving the live
+   * persistent transport of every source whose connection params are unchanged
+   * (PR-9). This is the reload path's replacement for {@link closeAll}: a save
+   * that only edits descriptions or approval policy must NOT tear down a healthy
+   * ssh2 `Client` out from under an in-flight command. Called AFTER
+   * `replaceAll()` has committed the new configs, so `this.configs` is the NEW
+   * set and `previousConfigs` is the pre-swap map (`snapshotState().configs`).
+   */
+  async closeChanged(previousConfigs: Map<string, ServerConfig>): Promise<void> {
+    // Bump the reload generation FIRST — exactly like closeAll — so any get()
+    // whose init() is still in flight (captured the old generation) discards a
+    // transport it dialed against now-stale params and re-resolves against the
+    // CURRENT config, instead of caching it after this returns. Unlike closeAll
+    // this does NOT close the transports of unchanged sources, so their live
+    // persistent connections (and any command running on them) survive.
+    this.reloadGeneration++;
+
+    const toClose: string[] = [];
+    for (const name of this.transports.keys()) {
+      const prev = previousConfigs.get(name);
+      const curr = this.configs.get(name);
+      // Removed (no longer in the new set), newly-appearing under a cached name
+      // (defensive: prev missing), or connection params changed → drop it so it
+      // re-dials lazily with the new config on next use.
+      if (!curr || !prev || !this.connectionParamsEqual(prev, curr)) {
+        toClose.push(name);
+      }
+    }
+
+    const tasks: Promise<void>[] = [];
+    for (const name of toClose) {
+      const t = this.transports.get(name);
+      if (t) tasks.push(t.close().catch(() => { /* best effort */ }));
+      this.transports.delete(name);
+      // Clear any in-flight init for a dropped name so the next get() installs a
+      // fresh, unambiguously-current initializer (mirrors closeAll's cleanup,
+      // scoped to just the changed/removed names).
+      this.initPromises.delete(name);
+      this.initTokens.delete(name);
+    }
+    await Promise.allSettled(tasks);
+  }
+
+  /**
    * Current monotonic reload generation (bumped by {@link closeAll}). Callers
    * that captured a generation BEFORE an awaited operation (e.g. a manual
    * approval prompt) compare against this AFTER the await to detect that a

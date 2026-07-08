@@ -30,6 +30,7 @@ import { resolveApprovalEngineInput, resolveEffectiveDefaultMode } from './appro
 import type { ServerConfig } from '../transports/types.js';
 import type { RegistryStateSnapshot } from '../transports/registry.js';
 import type { ModeStoreState } from '../approval/mode-store.js';
+import type { SmartLlmSnapshot } from '../approval/smart.js';
 
 /** The registry surface the reloader drives (subset of TransportRegistry). */
 export interface RegistryReloadTarget {
@@ -46,6 +47,15 @@ export interface RegistryReloadTarget {
    */
   setRequireConnectionWhenMulti(required: boolean): void;
   closeAll(): Promise<void>;
+  /**
+   * Close ONLY the transports whose source was removed or whose connection
+   * parameters changed relative to `previousConfigs`, preserving the live
+   * persistent transports of sources whose connection params are unchanged.
+   * A reload that only edits descriptions or approval policy must not tear
+   * down healthy in-flight ssh2 connections (Codex V5 finding). `previousConfigs`
+   * is the pre-swap config map (from `snapshotState().configs`).
+   */
+  closeChanged(previousConfigs: Map<string, ServerConfig>): Promise<void>;
   names(): string[];
   getDefaultName(): string | null;
 }
@@ -55,6 +65,14 @@ export interface ApprovalReloadTarget {
   reloadPolicy(input: { defaultMode?: ApprovalMode; staticOverrides?: Record<string, ApprovalMode> }): void;
   captureModeState(): ModeStoreState;
   restoreModeState(state: ModeStoreState): void;
+  /**
+   * Snapshot of the live smart sub-engine's LLM settings, or `null` when no
+   * smart engine is armed. Sub-engines are built once at boot and never rebuilt
+   * on reload, so the reloader compares this against the incoming file to reject
+   * an `[approval.llm]` change that would otherwise silently keep using stale
+   * boot-time settings (Codex V5 finding).
+   */
+  describeSmartLlm(): SmartLlmSnapshot | null;
 }
 
 /** Outcome of one reload attempt — surfaced to logs and (on success) SSE. */
@@ -108,6 +126,60 @@ function assertSmartPolicyHasCurrentLlm(config: ResolvedConfig): void {
 
   if (!input.llm?.endpoint || !input.llm?.model) {
     throw new Error('approval mode "smart" on reload requires current [approval.llm].endpoint and .model');
+  }
+}
+
+/** True when the reloaded config resolves smart as an effective (default or per-source) mode. */
+function reloadSelectsSmart(config: ResolvedConfig): boolean {
+  const effectiveModes: ApprovalMode[] = [
+    resolveEffectiveDefaultMode(config),
+    ...Object.values(config.perSourceApproval ?? {}),
+  ];
+  return effectiveModes.includes('smart');
+}
+
+/**
+ * Reject a smart reload that CHANGES the live LLM settings. The SmartApproval
+ * sub-engine is constructed once at boot and never rebuilt on reload
+ * (reloadPolicy only reseeds the mode store), so an edited `[approval.llm]`
+ * block — endpoint/model/api_key/timeout_ms/provider/fail_closed — would be
+ * reported as applied while approvals keep hitting the stale boot-time engine.
+ * Rather than silently rebuild (which would tear a live LLM client out from
+ * under an in-flight decision), reject the reload so the operator restarts to
+ * pick up rotated keys / endpoint / model changes. Boot vs. reload thus enforce
+ * the same LLM config for as long as the process lives.
+ *
+ * Only fires when the reload selects smart AND a live smart engine is armed;
+ * the missing-endpoint/model and unarmed-smart cases are already caught by
+ * assertSmartPolicyHasCurrentLlm + reloadPolicy's assertSwitchable.
+ */
+function assertSmartLlmUnchanged(config: ResolvedConfig, engine: ApprovalReloadTarget): void {
+  if (!reloadSelectsSmart(config)) return;
+  const live = engine.describeSmartLlm();
+  if (live === null) return; // unarmed smart → handled elsewhere (rejected).
+
+  const input = resolveApprovalEngineInput(config);
+  const llm = input?.llm;
+  // assertSmartPolicyHasCurrentLlm already guaranteed endpoint+model when smart
+  // is selected; this is a defensive guard so the comparison never dereferences
+  // undefined.
+  if (!llm?.endpoint || !llm?.model) return;
+
+  const nextProvider = (llm.provider as string | undefined) ?? 'openai';
+  const nextFailClosed = config.approval?.fail_closed !== false; // default true
+  const changed: string[] = [];
+  if (llm.endpoint !== live.endpoint) changed.push('endpoint');
+  if (llm.model !== live.model) changed.push('model');
+  if ((llm.api_key ?? undefined) !== (live.api_key ?? undefined)) changed.push('api_key');
+  if ((llm.timeout_ms ?? undefined) !== (live.timeout_ms ?? undefined)) changed.push('timeout_ms');
+  if (nextProvider !== live.provider) changed.push('provider');
+  if (nextFailClosed !== live.fail_closed) changed.push('fail_closed');
+
+  if (changed.length > 0) {
+    throw new Error(
+      `smart approval [approval.llm] change (${changed.join(', ')}) cannot be hot-reloaded ` +
+      `(the smart engine is built once at boot) — restart to apply`,
+    );
   }
 }
 
@@ -237,6 +309,7 @@ export class ConfigReloader extends EventEmitter {
       // fresh boot and hot reload enforce the same config validity.
       if (this.engine) {
         assertSmartPolicyHasCurrentLlm(next);
+        assertSmartLlmUnchanged(next, this.engine);
         this.engine.reloadPolicy({
           // Resolve the effective global default the SAME way boot does
           // (resolveEffectiveDefaultMode): a bare/knob-only [approval] block
@@ -249,11 +322,16 @@ export class ConfigReloader extends EventEmitter {
         });
       }
 
-      // Drop stale transports so a host whose params changed re-dials lazily
-      // with the new config. Best-effort: a close failure must not fail the
-      // reload (the config is already swapped and valid).
+      // Drop ONLY the transports whose source was removed or whose connection
+      // parameters changed, so a host whose params changed re-dials lazily with
+      // the new config. Sources whose connection params are UNCHANGED keep their
+      // live persistent ssh2 transport — a reload that only edits descriptions
+      // or approval policy must not interrupt an in-flight command on a healthy
+      // connection. Best-effort: a close failure must not fail the reload (the
+      // config is already swapped and valid). `registrySnap.configs` is the
+      // pre-swap config map captured above.
       try {
-        await this.registry.closeAll();
+        await this.registry.closeChanged(registrySnap.configs);
       } catch (closeErr: any) {
         this.log(`Config reload: closing stale transports failed (continuing): ${closeErr?.message || closeErr}`);
       }

@@ -13,13 +13,14 @@
  *   - live description overrides (D3) are dropped on a successful reload
  *   - in-memory only: no fs write-back surface is touched
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 import { ConfigReloader } from '../reloader.js';
 import type { ConfigReloadedEvent } from '../reloader.js';
 import { parseTomlConfig } from '../toml-loader.js';
 import type { ResolvedConfig } from '../types.js';
 import { TransportRegistry } from '../../transports/registry.js';
+import type { ServerConfig } from '../../transports/types.js';
 import { ApprovalDispatcher } from '../../approval/engine.js';
 
 const TOML_A = `
@@ -685,5 +686,226 @@ describe('ConfigReloader — in-memory only (no disk write-back)', () => {
     for (const k of Object.keys(reloader)) {
       expect(k.toLowerCase()).not.toMatch(/writeback|persist|savefile/);
     }
+  });
+});
+
+describe('ConfigReloader — smart [approval.llm] change is rejected (Codex V5 finding 1)', () => {
+  // The SmartApproval sub-engine is built ONCE at boot and never rebuilt on
+  // reload (reloadPolicy only reseeds the mode store). So a reload that edits
+  // [approval.llm] while smart stays the effective mode would be reported as
+  // applied while approvals keep hitting the STALE boot-time endpoint/model/key.
+  // The reloader must reject + roll back such a change; an unchanged LLM block
+  // (only source/description edits) must still reload fine.
+  const smartToml = (endpoint: string, model: string, apiKey: string, extra = '') => `
+[approval]
+mode = "smart"
+${extra}
+[approval.llm]
+endpoint = "${endpoint}"
+model = "${model}"
+api_key = "${apiKey}"
+
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+`;
+
+  function smartArmedEngine(): ApprovalDispatcher {
+    return new ApprovalDispatcher({
+      defaultMode: 'smart',
+      smart: { llm: { endpoint: 'https://llm.old/v1/chat/completions', model: 'gpt-old', api_key: 'boot-key' } },
+    });
+  }
+
+  it('rejects + rolls back a reload that changes the LLM endpoint', async () => {
+    const registry = freshRegistry(TOML_A);
+    const engine = smartArmedEngine();
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () =>
+        parseTomlConfig(smartToml('https://llm.NEW/v1/chat/completions', 'gpt-old', 'boot-key')) as ResolvedConfig,
+      log: () => {},
+    });
+    const events: ConfigReloadedEvent[] = [];
+    reloader.on('config-reloaded', e => events.push(e));
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/rolled back/);
+    expect(res.reason).toMatch(/\[approval\.llm\] change/);
+    expect(res.reason).toMatch(/endpoint/);
+    // Connections untouched, no success event.
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+    expect(events).toHaveLength(0);
+  });
+
+  it('rejects a reload that only rotates the api_key', async () => {
+    const registry = freshRegistry(TOML_A);
+    const engine = smartArmedEngine();
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () =>
+        parseTomlConfig(smartToml('https://llm.old/v1/chat/completions', 'gpt-old', 'ROTATED-key')) as ResolvedConfig,
+      log: () => {},
+    });
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/\[approval\.llm\] change/);
+    expect(res.reason).toMatch(/api_key/);
+  });
+
+  it('rejects a reload that changes the model', async () => {
+    const registry = freshRegistry(TOML_A);
+    const engine = smartArmedEngine();
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () =>
+        parseTomlConfig(smartToml('https://llm.old/v1/chat/completions', 'gpt-NEW', 'boot-key')) as ResolvedConfig,
+      log: () => {},
+    });
+    const res = await reloader.reload();
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/model/);
+  });
+
+  it('rejects a reload that flips fail_closed', async () => {
+    const registry = freshRegistry(TOML_A);
+    const engine = smartArmedEngine(); // fail_closed defaults to true
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () =>
+        parseTomlConfig(
+          smartToml('https://llm.old/v1/chat/completions', 'gpt-old', 'boot-key', 'fail_closed = false'),
+        ) as ResolvedConfig,
+      log: () => {},
+    });
+    const res = await reloader.reload();
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/fail_closed/);
+  });
+
+  it('ALLOWS a reload that keeps the LLM block byte-identical (only source edits)', async () => {
+    const registry = freshRegistry(TOML_A);
+    const engine = smartArmedEngine();
+    // Same endpoint/model/api_key/fail_closed as boot — a legitimate reload that
+    // swaps sources but does not touch [approval.llm]. Must NOT be rejected.
+    const sameLlmWithExtraSource = `
+[approval]
+mode = "smart"
+
+[approval.llm]
+endpoint = "https://llm.old/v1/chat/completions"
+model = "gpt-old"
+api_key = "boot-key"
+
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+
+[[sources]]
+id = "gamma"
+host = "gamma.example"
+user = "root"
+auth = "kerberos"
+`;
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () => parseTomlConfig(sameLlmWithExtraSource) as ResolvedConfig,
+      log: () => {},
+    });
+    const events: ConfigReloadedEvent[] = [];
+    reloader.on('config-reloaded', e => events.push(e));
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(true);
+    expect(registry.names()).toEqual(['alpha', 'gamma']);
+    expect(events).toHaveLength(1);
+  });
+});
+
+describe('ConfigReloader — a successful reload closes only changed transports (Codex V5 finding 3)', () => {
+  // A successful reload must call registry.closeChanged(previousConfigs) — NOT
+  // the blunt closeAll() — so unchanged sources keep their live persistent ssh2
+  // transport and an in-flight command is not interrupted by a description /
+  // approval-policy-only edit.
+  it('calls closeChanged with the pre-swap config map, never closeAll', async () => {
+    const registry = freshRegistry(TOML_A);
+    const preSwapConfigs = registry.snapshotState().configs;
+
+    const closeChangedSpy = vi.spyOn(registry, 'closeChanged');
+    const closeAllSpy = vi.spyOn(registry, 'closeAll');
+
+    let loaded = parseTomlConfig(TOML_A) as ResolvedConfig;
+    const reloader = new ConfigReloader({ registry, loadConfig: () => loaded, log: () => {} });
+
+    // A yolo→yolo reload that only swaps the source set (no engine needed).
+    loaded = parseTomlConfig(`
+[approval]
+mode = "yolo"
+
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+
+[[sources]]
+id = "gamma"
+host = "gamma.example"
+user = "root"
+auth = "kerberos"
+`) as ResolvedConfig;
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(true);
+    expect(closeAllSpy).not.toHaveBeenCalled();
+    expect(closeChangedSpy).toHaveBeenCalledTimes(1);
+    // Passed the pre-swap config map so it can diff old-vs-new params. The map
+    // instance differs (snapshot copy), but it must carry the OLD source names.
+    const passed = closeChangedSpy.mock.calls[0][0] as Map<string, ServerConfig>;
+    expect([...passed.keys()]).toEqual([...preSwapConfigs.keys()]);
+    expect([...passed.keys()]).toEqual(['alpha', 'beta']);
+  });
+
+  it('a close failure during closeChanged does not fail the reload (best-effort)', async () => {
+    const registry = freshRegistry(TOML_A);
+    vi.spyOn(registry, 'closeChanged').mockRejectedValueOnce(new Error('transport close boom'));
+
+    let loaded = parseTomlConfig(TOML_A) as ResolvedConfig;
+    const reloader = new ConfigReloader({ registry, loadConfig: () => loaded, log: () => {} });
+    loaded = parseTomlConfig(`
+[approval]
+mode = "yolo"
+
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+
+[[sources]]
+id = "gamma"
+host = "gamma.example"
+user = "root"
+auth = "kerberos"
+`) as ResolvedConfig;
+
+    const res = await reloader.reload();
+    // The config is already swapped and valid; a close failure only logs.
+    expect(res.ok).toBe(true);
+    expect(registry.names()).toEqual(['alpha', 'gamma']);
   });
 });
