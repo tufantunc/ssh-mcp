@@ -287,7 +287,7 @@ export class SSHConnectionManager {
             clearTimeout(timeoutId);
             cleanup();
             this.suPromise = null;
-            reject(new McpError(ErrorCode.InternalError, `su authentication failed: ${buffer}`));
+            reject(new McpError(ErrorCode.InternalError, 'Authentication failed'));
             return;
           }
         };
@@ -352,9 +352,8 @@ server.tool(
   "Execute a shell command on the remote SSH server and return the output.",
   {
     command: z.string().describe("Shell command to execute on the remote SSH server"),
-    description: z.string().optional().describe("Optional description of what this command will do"),
   },
-  async ({ command, description }) => {
+  async ({ command }) => {
     // Sanitize command input
     const sanitizedCommand = sanitizeCommand(command);
 
@@ -377,37 +376,13 @@ server.tool(
           sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
         }
 
-        if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-          sshConfig.suPassword = sanitizePassword(SUPASSWORD);
-        }
         connectionManager = new SSHConnectionManager(sshConfig);
       }
 
       // Ensure connection is active (reconnect if needed)
       await connectionManager.ensureConnected();
 
-      // If a suPassword was provided, explicitly wait for elevation before executing.
-      // This is critical: ensureElevated is idempotent and will return immediately if
-      // already elevated, so this ensures we have a su shell before we try to use it.
-      if ((connectionManager as any).getSuPassword && (connectionManager as any).getSuPassword()) {
-        try {
-          const elevationPromise = (connectionManager as any).ensureElevated();
-          // Add a short timeout for elevation to complete
-          await Promise.race([
-            elevationPromise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Elevation timeout')), 5000))
-          ]);
-        } catch (err) {
-          // Log but don't fail; fall back to non-elevated execution if elevation times out
-        }
-      }
-
-      // Append description as comment if provided
-      const commandWithDescription = description
-        ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
-        : sanitizedCommand;
-
-      const result = await execSshCommandWithConnection(connectionManager, commandWithDescription);
+      const result = await execSshCommandWithConnection(connectionManager, sanitizedCommand);
       return result;
     } catch (err: any) {
       // Wrap unexpected errors
@@ -424,9 +399,8 @@ if (!DISABLE_SUDO) {
     "Execute a shell command on the remote SSH server using sudo. Will use sudo password if provided, otherwise assumes passwordless sudo.",
     {
       command: z.string().describe("Shell command to execute with sudo on the remote SSH server"),
-      description: z.string().optional().describe("Optional description of what this command will do"),
     },
-    async ({ command, description }) => {
+    async ({ command }) => {
       const sanitizedCommand = sanitizeCommand(command);
 
       try {
@@ -446,9 +420,6 @@ if (!DISABLE_SUDO) {
             const fs = await import('fs/promises');
             sshConfig.privateKey = await fs.readFile(KEY, 'utf8');
           }
-          if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-            sshConfig.suPassword = sanitizePassword(SUPASSWORD);
-          }
           if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
             sshConfig.sudoPassword = sanitizePassword(SUDOPASSWORD);
           }
@@ -457,37 +428,25 @@ if (!DISABLE_SUDO) {
 
         await connectionManager.ensureConnected();
 
-        // If suPassword or sudoPassword were provided on this call but the
-        // existing connection manager was created earlier without them,
-        // update the manager's values so the subsequent sudo-exec call uses
-        // the latest passwords.
-        if (SUPASSWORD !== null && SUPASSWORD !== undefined) {
-          await connectionManager.setSuPassword(sanitizePassword(SUPASSWORD));
-        }
         if (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined) {
-          // update sudoPassword on the manager instance
           (connectionManager as any).sshConfig = { ...(connectionManager as any).sshConfig, sudoPassword: sanitizePassword(SUDOPASSWORD) };
         }
 
         let wrapped: string;
+        let stdin: string | undefined;
         const sudoPassword = connectionManager.getSudoPassword();
-
-        // Append description as comment if provided
-        const commandWithDescription = description
-          ? `${sanitizedCommand} # ${description.replace(/#/g, '\\#')}`
-          : sanitizedCommand;
 
         if (!sudoPassword) {
           // No password provided, use -n to fail if sudo requires a password
-          wrapped = `sudo -n sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
+          wrapped = `sudo -n sh -c '${sanitizedCommand.replace(/'/g, "'\\''")}'`;
         } else {
-          // Password provided — pipe it into sudo using printf. This avoids complex
-          // PTY/stdin handling on the SSH channel and is simpler and more reliable.
-          const pwdEscaped = sudoPassword.replace(/'/g, "'\\''");
-          wrapped = `printf '%s\\n' '${pwdEscaped}' | sudo -p "" -S sh -c '${commandWithDescription.replace(/'/g, "'\\''")}'`;
+          // Password provided — pass via channel stdin (NOT in argv).
+          // This prevents the password from leaking via ps/proc on the remote host (CWE-522).
+          wrapped = `sudo -p "" -S sh -c '${sanitizedCommand.replace(/'/g, "'\\''")}'`;
+          stdin = sudoPassword + '\n';
         }
 
-        return await execSshCommandWithConnection(connectionManager, wrapped);
+        return await execSshCommandWithConnection(connectionManager, wrapped, stdin);
       } catch (err: any) {
         if (err instanceof McpError) throw err;
         throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);

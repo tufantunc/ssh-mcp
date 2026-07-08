@@ -67,11 +67,7 @@ function runMcpCommand(command: string, extraArgs: string[] = [], toolName = 'su
   });
 }
 
-// Helper that runs a command using the server's `--suPassword` option.
-// It establishes an elevated su session at connection time so all commands run as root.
-function runSuMcpCommand(command: string, suPassword = 'secret', extraArgs: string[] = []): Promise<any> {
-  return runMcpCommand(command, [`--suPassword=${suPassword}`, ...extraArgs], 'exec');
-}
+// Helper removed — --suPassword feature deprecated in v2
 
 describe('sudo-exec tool authentication', () => {
   // Set up the su environment before running tests that need it
@@ -105,13 +101,6 @@ describe('sudo-exec tool authentication', () => {
     const cleanup = await runMcpCommand('rm -rf /root/test_dir', ['--sudoPassword=secret']);
     expect(cleanup.error).toBeUndefined();
   }, 60000); // Increased timeout for su operations
-
-  it('executes su when provided --suPassword', async () => {
-    const res = await runSuMcpCommand('whoami', 'secret');
-    expect(res.error).toBeUndefined();
-    const out = (res.result?.content?.[0]?.text || '').toLowerCase();
-    expect(out).toContain('root');
-  }, 60000);
 
   it('fails when sudo requires password but none provided', async () => {
     const res = await runMcpCommand('whoami');
