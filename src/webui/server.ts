@@ -264,6 +264,10 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
         }
 
         if (pathname === '/api/approval-mode' && method === 'PUT') {
+          if (!checkApprovalMutationAuth({ req, authToken: opts.authToken })) {
+            sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
+            return;
+          }
           const body = await readJson(req);
           if (body === null) {
             sendJson(res, 400, { error: 'invalid JSON body' });
@@ -276,13 +280,24 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
 
         const modeMatch = pathname.match(/^\/api\/profiles\/([^/]+)\/approval-mode$/);
         if (modeMatch && method === 'PUT') {
-          const id = decodeURIComponent(modeMatch[1]);
+          if (!checkApprovalMutationAuth({ req, authToken: opts.authToken })) {
+            sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
+            return;
+          }
+          let id: string;
+          try {
+            id = decodeURIComponent(modeMatch[1]);
+          } catch {
+            sendJson(res, 400, { error: 'malformed profile id' });
+            return;
+          }
+          const profileExists = opts.registry.list().some(p => p.name === id);
           const body = await readJson(req);
           if (body === null) {
             sendJson(res, 400, { error: 'invalid JSON body' });
             return;
           }
-          const r = handleSetProfileMode(opts.modeController, id, body);
+          const r = handleSetProfileMode(opts.modeController, id, profileExists, body);
           sendJson(res, r.status, r.body);
           return;
         }
