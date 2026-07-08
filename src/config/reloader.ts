@@ -26,6 +26,7 @@
 
 import { EventEmitter } from 'node:events';
 import type { ResolvedConfig, ApprovalMode } from './types.js';
+import { resolveEffectiveDefaultMode } from './approval-policy.js';
 import type { ServerConfig } from '../transports/types.js';
 import type { RegistryStateSnapshot } from '../transports/registry.js';
 import type { ModeStoreState } from '../approval/mode-store.js';
@@ -36,6 +37,14 @@ export interface RegistryReloadTarget {
   snapshotState(): RegistryStateSnapshot;
   restoreState(snap: RegistryStateSnapshot): void;
   replaceAll(sources: ServerConfig[], defaultName?: string): void;
+  /**
+   * Apply the reloaded `[server].require_connection` value to the multi-source
+   * omit-name guard. A reload must re-project this exactly like boot
+   * (applyRegistryConnectionPolicy) so a file that flips the setting takes
+   * effect without a restart; captured in snapshotState() so a rolled-back swap
+   * restores the pre-swap guard state.
+   */
+  setRequireConnectionWhenMulti(required: boolean): void;
   closeAll(): Promise<void>;
   names(): string[];
   getDefaultName(): string | null;
@@ -155,8 +164,14 @@ export class ConfigReloader extends EventEmitter {
       // wide open after a hot reload. Reject and roll back instead. Switching
       // INTO manual/smart needs a restart (documented in the README).
       if (!this.engine) {
-        const introduced: ApprovalMode[] = [];
-        if (next.approval?.mode) introduced.push(next.approval.mode);
+        // Compute the modes the NEW file would ENFORCE the same way boot does.
+        // The global default must go through resolveEffectiveDefaultMode(), not
+        // a raw `next.approval?.mode` read: a bare/knob-only [approval] block
+        // (e.g. `[approval]\nfail_closed = true`, no `mode`) resolves to the
+        // documented `manual` at boot, so reading only `next.approval?.mode`
+        // (undefined) would miss that the new file is enforcing and let the
+        // reload silently "succeed" with approval still unarmed.
+        const introduced: ApprovalMode[] = [resolveEffectiveDefaultMode(next)];
         for (const m of Object.values(next.perSourceApproval ?? {})) introduced.push(m);
         const enforcing = introduced.find(m => m !== 'yolo');
         if (enforcing) {
@@ -172,13 +187,44 @@ export class ConfigReloader extends EventEmitter {
       }
       // registry.replaceAll validates (dup names, unknown default) before it
       // mutates, so a bad source list throws here with the registry untouched.
-      this.registry.replaceAll(next.sources, next.defaultName);
+      //
+      // Pass the explicit default ONLY when the operator actually chose one
+      // (`default = true` on a source → defaultExplicit). Boot keys the
+      // multi-source omit-name guard on defaultExplicit: for a config with
+      // several `[[sources]]` and no explicit default, resolveConfig() sets
+      // `defaultName` to the FIRST source merely as a routing fallback while
+      // `defaultExplicit` stays false, and boot deliberately does NOT call
+      // setDefault(). Forwarding `next.defaultName` unconditionally here would
+      // make replaceAll() treat that positional fallback as an explicit default
+      // (defaultExplicit=true), so after the first hot reload the same config
+      // would start routing omitted `connectionName` calls to the first host
+      // instead of rejecting them — a silent multi-host safety regression that
+      // boot never has. Mirror boot: only forward an EXPLICIT default.
+      this.registry.replaceAll(
+        next.sources,
+        next.defaultExplicit ? next.defaultName : undefined,
+      );
+
+      // Apply the reloaded [server].require_connection to the omit-name guard,
+      // exactly like boot's applyRegistryConnectionPolicy (absent field → safe
+      // default ON). Without this the guard is sticky from boot: a server
+      // started with require_connection=false would keep accepting omitted
+      // connectionName even after the file is edited to true (or the field
+      // removed), leaving the unsafe opt-out active until restart. Captured in
+      // snapshotState() above, so a later rollback restores the pre-swap value.
+      this.registry.setRequireConnectionWhenMulti(next.requireConnection ?? true);
 
       // Approval policy reseed validates the new modes name armed engines
       // before mutating; an unarmed mode throws ModeUnavailableError.
       if (this.engine) {
         this.engine.reloadPolicy({
-          defaultMode: next.approval?.mode,
+          // Resolve the effective global default the SAME way boot does
+          // (resolveEffectiveDefaultMode): a bare/knob-only [approval] block
+          // documents `manual`, and a per-source-only config keeps `yolo`.
+          // Passing the raw `next.approval?.mode` (undefined for those shapes)
+          // would let reloadPolicy's `?? 'yolo'` silently downgrade a manual
+          // boot policy to yolo — disabling approval until restart.
+          defaultMode: resolveEffectiveDefaultMode(next),
           staticOverrides: next.perSourceApproval ?? {},
         });
       }

@@ -328,6 +328,183 @@ auth = "kerberos"
   });
 });
 
+describe('ConfigReloader — boot/reload parity (Codex round: findings 1-3)', () => {
+  // These mimic resolveConfig()'s PRODUCTION output shape, which parseTomlConfig
+  // does NOT reproduce: for a multi-source TOML with no explicit default,
+  // resolveConfig() sets `defaultName` to the first source POSITIONALLY while
+  // keeping `defaultExplicit=false`. parseTomlConfig leaves defaultName
+  // undefined instead, so a test that reloads a parseTomlConfig() result would
+  // never exercise the "positional fallback leaks as explicit default" bug.
+  function resolvedShape(over: Partial<ResolvedConfig> & { sources: ResolvedConfig['sources'] }): ResolvedConfig {
+    return {
+      defaultExplicit: false,
+      perSourceApproval: {},
+      ...over,
+    } as ResolvedConfig;
+  }
+
+  const twoSourcesNoDefault = () => {
+    const cfg = parseTomlConfig(TOML_A); // alpha + beta, [approval] mode = yolo
+    return resolvedShape({
+      sources: cfg.sources,
+      // resolveConfig's positional fallback: names the first source but marks
+      // it NON-explicit so the omit-name guard must stay armed.
+      defaultName: cfg.sources[0].name,
+      defaultExplicit: false,
+      perSourceApproval: {},
+      approval: { mode: 'yolo' },
+    });
+  };
+
+  it('finding 1: a positional (non-explicit) default does NOT arm the omit-name shortcut after reload', async () => {
+    const registry = freshRegistry(TOML_A); // alpha+beta, no explicit default → guard armed
+    // Guard is armed at boot: omit-name rejects.
+    expect(() => registry.getEffectiveDescription()).toThrow(/connectionName is required/);
+
+    let loaded = twoSourcesNoDefault();
+    const reloader = new ConfigReloader({ registry, loadConfig: () => loaded, log: () => {} });
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(true);
+    // The bug: forwarding next.defaultName unconditionally would flip
+    // defaultExplicit=true and let omit-name silently route to the first host.
+    // Fixed: the guard stays armed because the default was only positional.
+    expect(() => registry.getEffectiveDescription()).toThrow(/connectionName is required/);
+    expect(registry.getDefaultName()).toBe('alpha');
+  });
+
+  it('finding 1: an EXPLICIT default still re-arms omit-name across a reload', async () => {
+    const registry = freshRegistry(TOML_A);
+    const loaded = resolvedShape({
+      sources: parseTomlConfig(TOML_A).sources,
+      defaultName: 'beta',
+      defaultExplicit: true, // user chose default = true on beta
+      approval: { mode: 'yolo' },
+    });
+    const reloader = new ConfigReloader({ registry, loadConfig: () => loaded, log: () => {} });
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(true);
+    // Explicit default → omit-name resolves to beta instead of throwing.
+    expect(() => registry.getEffectiveDescription()).not.toThrow();
+    expect(registry.getDefaultName()).toBe('beta');
+  });
+
+  it('finding 2: a bare [approval] block (no mode) reloads to manual, not yolo', async () => {
+    const registry = freshRegistry(TOML_A);
+    // Manual-armed engine (so a manual reload IS switchable). Boot default yolo.
+    const engine = freshEngine();
+    expect(engine.getGlobalMode()).toBe('yolo');
+
+    // The reloaded file has an [approval] block with ONLY fail_closed (no mode).
+    // Boot resolves that to the documented 'manual'; the reloader must too —
+    // reading raw next.approval?.mode (undefined) would let reloadPolicy default
+    // it to yolo, silently disabling approval until restart.
+    const loaded = resolvedShape({
+      sources: parseTomlConfig(TOML_A).sources,
+      defaultName: parseTomlConfig(TOML_A).sources[0].name,
+      defaultExplicit: false,
+      approval: { fail_closed: true }, // bare knob, no mode
+    });
+    const reloader = new ConfigReloader({ registry, engine, loadConfig: () => loaded, log: () => {} });
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(true);
+    expect(engine.getGlobalMode()).toBe('manual');
+  });
+
+  it('finding 2: the no-engine guard REJECTS a bare [approval] block (would silently enforce)', async () => {
+    const registry = freshRegistry(TOML_A);
+    // No engine — the no-[approval]/WebUI-off boot shape.
+    const loaded = resolvedShape({
+      sources: parseTomlConfig(TOML_A).sources,
+      defaultName: parseTomlConfig(TOML_A).sources[0].name,
+      defaultExplicit: false,
+      approval: { fail_closed: true }, // resolves to manual → enforcing
+    });
+    const reloader = new ConfigReloader({ registry, loadConfig: () => loaded, log: () => {} });
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/no approval engine is armed/);
+    // The bug: keying on raw next.approval?.mode (undefined) would MISS that the
+    // file enforces manual and let the reload "succeed" with approval unarmed.
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+  });
+
+  it('finding 3: require_connection = false in the reloaded file opts OUT the guard live', async () => {
+    const registry = freshRegistry(TOML_A); // guard armed at boot
+    expect(() => registry.getEffectiveDescription()).toThrow(/connectionName is required/);
+
+    const loaded = resolvedShape({
+      sources: parseTomlConfig(TOML_A).sources,
+      defaultName: parseTomlConfig(TOML_A).sources[0].name,
+      defaultExplicit: false,
+      requireConnection: false, // operator edited [server] to disable the guard
+      approval: { mode: 'yolo' },
+    });
+    const reloader = new ConfigReloader({ registry, loadConfig: () => loaded, log: () => {} });
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(true);
+    // Guard now opted out: omit-name falls back to the first host instead of throwing.
+    expect(() => registry.getEffectiveDescription()).not.toThrow();
+  });
+
+  it('finding 3: require_connection re-tightens to true on a later reload (not sticky from boot)', async () => {
+    // Start from a registry booted with the guard OFF.
+    const registry = freshRegistry(TOML_A);
+    registry.setRequireConnectionWhenMulti(false);
+    expect(() => registry.getEffectiveDescription()).not.toThrow();
+
+    const loaded = resolvedShape({
+      sources: parseTomlConfig(TOML_A).sources,
+      defaultName: parseTomlConfig(TOML_A).sources[0].name,
+      defaultExplicit: false,
+      requireConnection: true, // file edited to re-enable the guard
+      approval: { mode: 'yolo' },
+    });
+    const reloader = new ConfigReloader({ registry, loadConfig: () => loaded, log: () => {} });
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(true);
+    // The bug: sticky-from-boot would keep accepting omitted connectionName.
+    // Fixed: the guard re-arms because the reload applied require_connection=true.
+    expect(() => registry.getEffectiveDescription()).toThrow(/connectionName is required/);
+  });
+
+  it('finding 3: a rolled-back reload restores the pre-swap require_connection state', async () => {
+    const registry = freshRegistry(TOML_A);
+    registry.setRequireConnectionWhenMulti(false); // guard OFF before the swap
+    expect(() => registry.getEffectiveDescription()).not.toThrow();
+
+    // A reload that would set the guard ON but then FAILS mid-swap (prepareSources
+    // throws AFTER replaceAll + setRequireConnectionWhenMulti already ran) must
+    // roll the guard back to its pre-swap OFF state, not leave it stuck ON.
+    const loaded = resolvedShape({
+      sources: parseTomlConfig(TOML_B).sources, // alpha + gamma
+      defaultName: parseTomlConfig(TOML_B).sources[0].name,
+      defaultExplicit: false,
+      requireConnection: true,
+      approval: { mode: 'yolo' },
+      perSourceApproval: {},
+    });
+    const reloader = new ConfigReloader({
+      registry,
+      loadConfig: () => loaded,
+      prepareSources: async () => { throw new Error('key file unreadable'); },
+      log: () => {},
+    });
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/rolled back/);
+    // Guard restored to OFF (pre-swap), and the source set is unchanged.
+    expect(() => registry.getEffectiveDescription()).not.toThrow();
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+  });
+});
+
 describe('ConfigReloader — in-memory only (no disk write-back)', () => {
   it('never mutates the config file on disk during a reload', async () => {
     const { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } = await import('node:fs');

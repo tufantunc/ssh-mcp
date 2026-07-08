@@ -12,6 +12,7 @@ import { createTransport } from './transports/factory.js';
 import { TransportRegistry } from './transports/registry.js';
 import { resolveConfig } from './config/resolver.js';
 import type { ResolvedConfig, ApprovalMode } from './config/types.js';
+import { resolveApprovalEngineInput as resolveApprovalEngineInputForConfig } from './config/approval-policy.js';
 import { startConfigWatcher } from './config/config-watcher.js';
 import { ConfigReloader } from './config/reloader.js';
 import {
@@ -700,42 +701,11 @@ let auditSink: AuditSink = { record() { /* no-op until wired (or audit absent) *
 export function resolveApprovalEngineInput(
   config: ResolvedConfig = resolvedConfig,
 ): BuildEngineFromConfigInput | null {
-  const approvalCfg = config.approval;
-  const perSourceModes: ApprovalMode[] = Object.values(config.perSourceApproval ?? {});
-  if (approvalCfg === undefined && perSourceModes.length === 0) {
-    return null;
-  }
-  const approvalLlmOnly = approvalCfg !== undefined
-    && approvalCfg.mode === undefined
-    && approvalCfg.fail_closed === undefined
-    && approvalCfg.llm !== undefined;
-  const perSourceOnlyDefault = perSourceModes.length > 0
-    && (approvalCfg === undefined || approvalLlmOnly);
-  return {
-    // Resolve the GLOBAL default mode:
-    //  - explicit [approval].mode set        -> honor it.
-    //  - no global mode, per-source overrides, and either no [approval] block
-    //    or an [approval.llm]-only block -> keep the global default 'yolo'
-    //    (unrestricted) so only the overridden sources are gated. Defining
-    //    [approval.llm] for a per-source `mode = "smart"` makes
-    //    resolvedConfig.approval non-undefined even though no global mode was
-    //    requested, so keying solely on `approvalCfg === undefined` would
-    //    wrongly fall through to manual here and gate every ungated host (or
-    //    throw at boot with WebUI off).
-    //  - no global mode but a real top-level approval knob (e.g.
-    //    `fail_closed = true`, or a bare [approval] block) was added
-    //    deliberately to enable approval; leave defaultMode undefined so
-    //    buildApprovalEngineFromConfig applies the documented 'manual' default.
-    defaultMode:
-      approvalCfg?.mode !== undefined
-        ? approvalCfg.mode
-        : perSourceOnlyDefault
-          ? 'yolo'
-          : undefined,
-    fail_closed: approvalCfg?.fail_closed,
-    llm: approvalCfg?.llm,
-    perSourceModes,
-  };
+  // Delegate to the shared pure resolver so this boot path and the config
+  // hot-reload path (src/config/reloader.ts) can NEVER disagree about how a
+  // ResolvedConfig maps to the effective default/per-source modes. See
+  // src/config/approval-policy.ts for the precedence rationale.
+  return resolveApprovalEngineInputForConfig(config);
 }
 
 export function approvalResolverWarningFromInput(
@@ -1062,6 +1032,16 @@ function reloadResolveConfig(): ResolvedConfig {
  */
 function buildConfigReloader(): ConfigReloader | null {
   if (!resolvedConfig.configPath) return null;
+  // Skip the reloader (and, upstream, the watcher) whenever CLI sources win.
+  // resolveConfig() records `configPath` even when the user supplied CLI/`--ssh`
+  // sources plus a `--config` TOML purely for top-level [server]/[webui]/
+  // [approval] settings — in that mode the TOML `[[sources]]` are intentionally
+  // SUPPRESSED (see resolver.ts "CLI wins"). Watching that file anyway would
+  // start a watcher for a non-file-backed connection set: every save would fire
+  // reload()/closeAll(), dropping the established CLI/`--ssh` transports even
+  // though source edits in the file can never apply. A reload only makes sense
+  // when the registry's sources actually came from the TOML.
+  if (cliSourceConfigs.length > 0) return null;
   return new ConfigReloader({
     registry,
     loadConfig: reloadResolveConfig,
@@ -1295,8 +1275,21 @@ server.tool(
       const resolvedProfile = registry.profile(connectionName);
       profile = resolvedProfile.id;
       const t = await registry.get(connectionName);
+      // Re-resolve the profile AFTER get() returns. registry.get() can complete
+      // a config hot-reload redial while its init() is in flight (see
+      // TransportRegistry.get reloadGeneration re-check): the transport handed
+      // back is then built from the POST-reload config, but `resolvedProfile`
+      // above was captured from the PRE-reload config. Gating/auditing with the
+      // stale profile would let a command run on the reloaded transport while
+      // approved + audited under the old source's approval mode/description —
+      // one command could bypass a newly-tightened manual/smart policy. Sampling
+      // the profile again here (a pure, synchronous name resolution — no await
+      // between it and gateApproval, so no further reload can interleave) pins
+      // gating + audit to the same config the transport was dialed against.
+      const effectiveProfile = registry.profile(connectionName);
+      profile = effectiveProfile.id;
       approvalDecision = await gateApproval({
-        profile: resolvedProfile,
+        profile: effectiveProfile,
         tool: 'exec',
         command: commandWithDescription,
         description,
@@ -1366,8 +1359,18 @@ if (!DISABLE_SUDO) {
         const resolvedProfile = registry.profile(connectionName);
         profile = resolvedProfile.id;
         const t = await registry.get(connectionName);
+        // Re-resolve the profile AFTER get() returns — a config hot-reload
+        // redial may have completed during get()'s in-flight init(), handing
+        // back a transport built from the POST-reload config while
+        // `resolvedProfile` still reflects the PRE-reload source. Sampling the
+        // profile again here pins gating + audit to the config the transport
+        // was actually dialed against, so a command can't run on the reloaded
+        // host while approved/audited under the old source's approval policy.
+        // See the matching comment in the `exec` handler for the full rationale.
+        const effectiveProfile = registry.profile(connectionName);
+        profile = effectiveProfile.id;
         approvalDecision = await gateApproval({
-          profile: resolvedProfile,
+          profile: effectiveProfile,
           tool: 'sudo-exec',
           command: commandWithDescription,
           description,

@@ -18,6 +18,14 @@ export interface RegistryStateSnapshot {
    * (resolveName) into a different multi-server behavior than before the swap.
    */
   defaultExplicit: boolean;
+  /**
+   * Captured value of the multi-source omit-name guard toggle
+   * (`[server].require_connection`). A reload applies the NEW file's
+   * require_connection; carrying the old value here lets a failed/rolled-back
+   * swap restore the exact guard state that was live before the swap, so a
+   * bad reload can never leave the guard looser (or stricter) than boot.
+   */
+  requireConnectionWhenMulti: boolean;
   descriptionOverrides: Map<string, string>;
 }
 
@@ -371,6 +379,7 @@ export class TransportRegistry {
       configs: new Map(this.configs),
       defaultName: this.defaultName,
       defaultExplicit: this.defaultExplicit,
+      requireConnectionWhenMulti: this.requireConnectionWhenMulti,
       descriptionOverrides: new Map(this.descriptionOverrides),
     };
   }
@@ -380,6 +389,7 @@ export class TransportRegistry {
     this.configs = new Map(snap.configs);
     this.defaultName = snap.defaultName;
     this.defaultExplicit = snap.defaultExplicit;
+    this.requireConnectionWhenMulti = snap.requireConnectionWhenMulti;
     this.descriptionOverrides = new Map(snap.descriptionOverrides);
   }
 
