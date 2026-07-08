@@ -20,6 +20,7 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "~1.17.5",
+    "smol-toml": "^1.7.0",
     "ssh2": "^1.17.0",
     "zod": "^3.25.28"
   },

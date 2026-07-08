@@ -1,0 +1,72 @@
+# SSH MCP Server v2 — Example Configuration
+#
+# Copy to:
+#   Linux:   ~/.config/ssh-mcp/config.toml
+#   macOS:   ~/Library/Application Support/ssh-mcp/config.toml
+#   Windows: %APPDATA%\ssh-mcp\config.toml
+#
+# IMPORTANT: Set permissions to 0600 (chmod 600 config.toml)
+# The server will refuse to load group/world-readable config files.
+
+[defaults]
+defaultProfile = "dev"            # Profile used when none is specified
+sessionMaxPerConnection = 5       # Max interactive+background sessions per host
+sessionIdleTimeoutMs = 600000     # 10min idle -> auto-close session
+sessionBackgroundMaxMs = 3600000  # 1hr max for background sessions
+commandTimeoutMs = 60000          # Per-command timeout
+commandMaxChars = 5000            # Max command length
+commandMaxOutputBytes = 1048576   # 1MB output cap per command
+connectionIdleReapMs = 900000     # 15min -> close idle connection
+approvalMode = "ask-destructive"  # auto | ask-destructive | ask-all | deny
+
+# Development server — permissive
+[[profiles]]
+name = "dev"
+host = "localhost"
+port = 2222
+user = "developer"
+auth = "agent"                    # agent | key | password | keychain
+role = "admin"
+readOnly = false
+approvalPolicy = "auto"           # dev is permissive
+
+# Production web server — strict
+[[profiles]]
+name = "prod-web-1"
+host = "10.0.1.50"
+port = 22
+user = "deploy"
+auth = "key"
+keyRef = "~/.ssh/id_ed25519"      # Path to private key
+via = "bastion"                   # ProxyJump profile name
+workdir = "/var/www/myapp"
+trustedHostKey = "SHA256:..."     # Pin host key fingerprint (optional)
+role = "operator"
+readOnly = false
+approvalPolicy = "ask-all"        # Prod requires approval for everything
+tty = false
+timeout = 30000
+sessionMaxPerConnection = 3       # Stricter limit for prod
+sessionIdleTimeoutMs = 300000     # 5min idle for prod
+
+# Bastion / jump host
+[[profiles]]
+name = "bastion"
+host = "bastion.example.com"
+port = 22
+user = "deploy"
+auth = "agent"
+role = "viewer"
+readOnly = true
+
+# Read-only database observer
+[[profiles]]
+name = "db-observer"
+host = "db.internal"
+port = 22
+user = "monitor"
+auth = "keychain"
+keychainEntry = "ssh-mcp/db-observer"
+role = "viewer"
+readOnly = true
+approvalPolicy = "auto"

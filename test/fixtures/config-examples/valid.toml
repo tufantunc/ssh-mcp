@@ -1,0 +1,47 @@
+# Example SSH MCP v2 config
+
+[defaults]
+defaultProfile = "dev-local"
+sessionMaxPerConnection = 5
+sessionIdleTimeoutMs = 600000
+commandTimeoutMs = 60000
+commandMaxChars = 5000
+approvalMode = "ask-destructive"
+
+[[profiles]]
+name = "dev-local"
+host = "localhost"
+port = 2222
+user = "developer"
+auth = "agent"
+role = "admin"
+readOnly = false
+approvalPolicy = "auto"
+
+[[profiles]]
+name = "prod-web-1"
+host = "10.0.1.50"
+port = 22
+user = "deploy"
+auth = "key"
+keyRef = "~/.ssh/id_ed25519"
+via = "bastion"
+workdir = "/var/www/myapp"
+trustedHostKey = "SHA256:abc123..."
+role = "operator"
+readOnly = false
+approvalPolicy = "ask-all"
+tty = false
+timeout = 30000
+maxChars = 5000
+sessionMaxPerConnection = 3
+sessionIdleTimeoutMs = 300000
+
+[[profiles]]
+name = "bastion"
+host = "bastion.example.com"
+port = 22
+user = "deploy"
+auth = "agent"
+role = "viewer"
+readOnly = true
