@@ -32,7 +32,6 @@ const HOST = argvConfig.host;
 const PORT = argvConfig.port ? parseInt(argvConfig.port) : 22;
 const USER = argvConfig.user;
 const PASSWORD = argvConfig.password;
-const SUPASSWORD = argvConfig.suPassword;
 const SUDOPASSWORD = argvConfig.sudoPassword;
 const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
 const KEY = argvConfig.key;
@@ -112,8 +111,7 @@ export interface SSHConfig {
   username: string;
   password?: string;
   privateKey?: string;
-  suPassword?: string;
-  sudoPassword?: string;  // Password for sudo commands specifically (if different from suPassword)
+  sudoPassword?: string;
 }
 
 export class SSHConnectionManager {
@@ -121,9 +119,6 @@ export class SSHConnectionManager {
   private sshConfig: SSHConfig;
   private isConnecting = false;
   private connectionPromise: Promise<void> | null = null;
-  private suShell: any = null;  // Store the elevated shell session
-  private suPromise: Promise<void> | null = null;
-  private isElevated = false;  // Track if we're in su mode
 
   constructor(config: SSHConfig) {
     this.sshConfig = config;
@@ -150,23 +145,9 @@ export class SSHConnectionManager {
         reject(new McpError(ErrorCode.InternalError, 'SSH connection timeout'));
       }, 30000); // 30 seconds connection timeout
 
-      this.conn.on('ready', async () => {
+      this.conn.on('ready', () => {
         clearTimeout(timeoutId);
         this.isConnecting = false;
-
-        // In test mode, don't wait for su elevation during connection setup, as it
-        // may cause JSON-RPC server initialization to hang. Instead, elevation will
-        // be triggered on-demand when a command is executed.
-        // In production, elevation during connection is desirable for robustness.
-        if (this.sshConfig.suPassword && !process.env.SSH_MCP_TEST) {
-          try {
-            await this.ensureElevated();
-          } catch (err) {
-            // Do not reject the connection; just log the error. Subsequent commands
-            // will either use the su shell if available or fall back to normal execution.
-          }
-        }
-
         resolve();
       });
 
@@ -206,110 +187,6 @@ export class SSHConnectionManager {
     return this.sshConfig.sudoPassword;
   }
 
-  getSuPassword(): string | undefined {
-    return this.sshConfig.suPassword;
-  }
-
-  async setSuPassword(pwd?: string): Promise<void> {
-    this.sshConfig.suPassword = pwd;
-    if (pwd) {
-      try {
-        await this.ensureElevated();
-      } catch (err) {
-        console.error('setSuPassword: failed to elevate to su shell:', err);
-      }
-    } else {
-      // If clearing suPassword, drop any existing suShell
-      if (this.suShell) {
-        try { this.suShell.end(); } catch (e) { /* ignore */ }
-        this.suShell = null;
-        this.isElevated = false;
-      }
-    }
-  }
-
-  private async ensureElevated(): Promise<void> {
-    if (this.isElevated && this.suShell) return;
-    if (!this.sshConfig.suPassword) return;
-
-    if (this.suPromise) return this.suPromise;
-
-    this.suPromise = new Promise((resolve, reject) => {
-      const conn = this.getConnection();
-
-      // Add a safety timeout so elevation doesn't hang forever
-      const timeoutId = setTimeout(() => {
-        this.suPromise = null;
-        reject(new McpError(ErrorCode.InternalError, 'su elevation timed out'));
-      }, 10000);  // 10 second timeout for elevation
-
-      conn.shell({ term: 'xterm', cols: 80, rows: 24 }, (err: Error | undefined, stream: ClientChannel) => {
-        if (err) {
-          clearTimeout(timeoutId);
-          this.suPromise = null;
-          reject(new McpError(ErrorCode.InternalError, `Failed to start interactive shell for su: ${err.message}`));
-          return;
-        }
-
-        let buffer = '';
-        let passwordSent = false;
-        const cleanup = () => {
-          try { stream.removeAllListeners('data'); } catch (e) { /* ignore */ }
-        };
-
-        const onData = (data: Buffer) => {
-          const text = data.toString();
-          buffer += text;
-
-          // If we haven't sent the password yet, look for the password prompt
-          if (!passwordSent && /password[: ]/i.test(buffer)) {
-            passwordSent = true;
-            stream.write(this.sshConfig.suPassword + '\n');
-            // Don't return; keep looking for root prompt
-          }
-
-          // After password is sent, look for any root indicator
-          // Look for '#' which indicates root prompt (may be followed by spaces, escape codes, etc)
-          if (passwordSent) {
-            if (/#/.test(buffer)) {
-              clearTimeout(timeoutId);
-              cleanup();
-              this.suShell = stream;
-              this.isElevated = true;
-              this.suPromise = null;
-              resolve();
-              return;
-            }
-          }
-
-          // Detect authentication failure messages
-          if (/authentication failure|incorrect password|su: .*failed|su: failure/i.test(buffer)) {
-            clearTimeout(timeoutId);
-            cleanup();
-            this.suPromise = null;
-            reject(new McpError(ErrorCode.InternalError, 'Authentication failed'));
-            return;
-          }
-        };
-
-        stream.on('data', onData);
-
-        stream.on('close', () => {
-          clearTimeout(timeoutId);
-          if (!this.isElevated) {
-            this.suPromise = null;
-            reject(new McpError(ErrorCode.InternalError, 'su shell closed before elevation completed'));
-          }
-        });
-
-        // Kick off the su command
-        stream.write('su -\n');
-      });
-    });
-
-    return this.suPromise;
-  }
-
   async ensureConnected(): Promise<void> {
     if (!this.isConnected()) {
       await this.connect();
@@ -325,11 +202,6 @@ export class SSHConnectionManager {
 
   close(): void {
     if (this.conn) {
-      if (this.suShell) {
-        try { this.suShell.end(); } catch (e) { /* ignore */ }
-        this.suShell = null;
-        this.isElevated = false;
-      }
       this.conn.end();
       this.conn = null;
     }
@@ -462,7 +334,6 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
     let isResolved = false;
 
     const conn = manager.getConnection();
-    const shell = (manager as any).suShell;  // Use su shell if available
 
     // Set up timeout
     timeoutId = setTimeout(() => {
@@ -472,44 +343,7 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
       }
     }, DEFAULT_TIMEOUT);
 
-    // If we have an active su shell, use it directly (commands run as root in session)
-    if (shell) {
-      let buffer = '';
-
-      const dataHandler = (data: Buffer) => {
-        const text = data.toString();
-        buffer += text;
-
-        // Wait for root prompt (#) to know command is complete
-        // Match # which indicates root prompt (may be followed by spaces, escape codes, etc)
-        if (/#/.test(buffer)) {
-          if (!isResolved) {
-            isResolved = true;
-            clearTimeout(timeoutId);
-
-            // Extract output: remove the command echo and final prompt
-            const lines = buffer.split('\n');
-            // First line is often the echoed command; last line is the prompt
-            let output = lines.slice(1, -1).join('\n');
-
-            resolve({
-              content: [{
-                type: 'text',
-                text: output + (output ? '\n' : ''),
-              }],
-            });
-          }
-          shell.removeListener('data', dataHandler);
-        }
-      };
-
-      shell.on('data', dataHandler);
-      // Send command immediately; shell is ready after elevation
-      shell.write(command + '\n');
-      return;
-    }
-
-    // No persistent su shell; use normal exec with optional password piping
+    // Use exec() for all commands — no persistent su shell (removed in v2, closes #34)
     conn.exec(command, (err: Error | undefined, stream: ClientChannel) => {
       if (err) {
         if (!isResolved) {
