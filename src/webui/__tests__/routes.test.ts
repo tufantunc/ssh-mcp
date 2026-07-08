@@ -186,11 +186,12 @@ describe('WebUI server', () => {
     const j1 = await r1.json();
     expect(j1.approvals.map((a: any) => a.id)).toContain('roundtrip-1');
 
+    const origin = `http://${handle.address.host}:${handle.address.port}`;
     const r2 = await fetch(
-      `http://${handle.address.host}:${handle.address.port}/api/approvals/roundtrip-1/allow`,
+      `${origin}/api/approvals/roundtrip-1/allow`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Origin: origin },
         body: JSON.stringify({ note: 'go for it' }),
       },
     );
@@ -211,11 +212,92 @@ describe('WebUI server', () => {
   });
 
   it('POST allow on unknown id returns 404', async () => {
-    const r = await fetch(
-      `http://${handle.address.host}:${handle.address.port}/api/approvals/nope/allow`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
-    );
+    const origin = `http://${handle.address.host}:${handle.address.port}`;
+    const r = await fetch(`${origin}/api/approvals/nope/allow`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: origin },
+      body: '{}',
+    });
     expect(r.status).toBe(404);
+  });
+
+  it('POST approval mutation rejects cross-origin loopback requests without a token', async () => {
+    queue.enqueue({
+      id: 'origin-guard-1',
+      profile: 'prod',
+      tool: 'exec',
+      command: 'systemctl restart nginx',
+      enqueuedAt: new Date().toISOString(),
+    });
+    const r = await fetch(
+      `http://${handle.address.host}:${handle.address.port}/api/approvals/origin-guard-1/allow`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'http://evil.example',
+        },
+        body: '{}',
+      },
+    );
+    expect(r.status).toBe(403);
+    const j = await r.json();
+    expect(j.error).toMatch(/same-origin loopback/);
+    expect(queue.list()).toHaveLength(1);
+  });
+
+  it('POST approval mutation rejects missing Origin/Referer without a token', async () => {
+    queue.enqueue({
+      id: 'origin-guard-missing',
+      profile: 'prod',
+      tool: 'exec',
+      command: 'systemctl restart nginx',
+      enqueuedAt: new Date().toISOString(),
+    });
+    const r = await fetch(
+      `http://${handle.address.host}:${handle.address.port}/api/approvals/origin-guard-missing/allow`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      },
+    );
+    expect(r.status).toBe(403);
+    expect(queue.list()).toHaveLength(1);
+  });
+
+  it('POST approval mutation accepts same-origin loopback requests without a token', async () => {
+    const decisionPromise = queue.enqueue({
+      id: 'origin-guard-2',
+      profile: 'prod',
+      tool: 'exec',
+      command: 'systemctl restart nginx',
+      enqueuedAt: new Date().toISOString(),
+    });
+    const origin = `http://${handle.address.host}:${handle.address.port}`;
+    const r = await fetch(`${origin}/api/approvals/origin-guard-2/allow`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: origin,
+      },
+      body: '{}',
+    });
+    expect(r.status).toBe(200);
+    const decision = await decisionPromise;
+    expect(decision.decision).toBe('allow');
+  });
+
+  it('POST approval with malformed percent-encoded id returns 400', async () => {
+    const origin = `http://${handle.address.host}:${handle.address.port}`;
+    const r = await fetch(`${origin}/api/approvals/%E0%A4%A/allow`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: origin },
+      body: '{}',
+    });
+    expect(r.status).toBe(400);
+    const j = await r.json();
+    expect(j.error).toMatch(/malformed approval id/);
   });
 
   it('POST deny resolves with deny', async () => {
@@ -226,14 +308,12 @@ describe('WebUI server', () => {
       command: 'rm -rf /tmp/x',
       enqueuedAt: new Date().toISOString(),
     });
-    await fetch(
-      `http://${handle.address.host}:${handle.address.port}/api/approvals/deny-1/deny`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ note: 'nope' }),
-      },
-    );
+    const origin = `http://${handle.address.host}:${handle.address.port}`;
+    await fetch(`${origin}/api/approvals/deny-1/deny`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: origin },
+      body: JSON.stringify({ note: 'nope' }),
+    });
     const d = await decisionPromise;
     expect(d.decision).toBe('deny');
     expect(d.reason).toBe('nope');

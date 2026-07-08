@@ -10,10 +10,13 @@ import {
   hasLegacyCliFlags,
   buildApprovalProfile,
   appendDescriptionComment,
+  resolveApprovalEngineInput,
+  approvalResolverWarningFromInput,
   validateConfig,
   resolveCliConfigPath,
 } from '../src/index';
 import type { ExecResult } from '../src/transports/types';
+import type { ResolvedConfig } from '../src/config/types';
 
 // Pure-function unit tests for the CLI config/result mapping layer. These
 // import from src/index, which is safe because the test runner sets
@@ -191,6 +194,13 @@ describe('buildTransportConfig (finding 2: no unconditional key read for passwor
 });
 
 describe('approval command/context helpers', () => {
+  const resolvedConfig = (partial: Partial<ResolvedConfig> = {}): ResolvedConfig => ({
+    sources: [],
+    perSourceApproval: {},
+    defaultExplicit: false,
+    ...partial,
+  });
+
   it('threads per-source approval mode and source description into the approval profile', () => {
     const profile = buildApprovalProfile(
       'prod',
@@ -215,6 +225,37 @@ describe('approval command/context helpers', () => {
     expect(assembled).toMatch(/^true # /);
     expect(assembled).toContain('rm -rf /tmp/should-not-run');
     expect(assembled).not.toMatch(/[\r\n]/);
+  });
+
+  it('treats no [approval] and no per-source overrides as approval inactive', () => {
+    const input = resolveApprovalEngineInput(resolvedConfig());
+    expect(input).toBeNull();
+    expect(approvalResolverWarningFromInput(input, {
+      webuiEnabled: true,
+      resolverWired: false,
+    })).toBeNull();
+  });
+
+  it('uses yolo as the default only for per-source-only approval configs', () => {
+    expect(resolveApprovalEngineInput(resolvedConfig({
+      perSourceApproval: { lab: 'manual' },
+    }))?.defaultMode).toBe('yolo');
+  });
+
+  it('keeps yolo default for [approval.llm]-only configs that support per-source smart', () => {
+    expect(resolveApprovalEngineInput(resolvedConfig({
+      approval: { llm: { endpoint: 'https://api.example/v1/c', model: 'm-1', api_key: 'sk-test' } },
+      perSourceApproval: { lab: 'smart' },
+    }))?.defaultMode).toBe('yolo');
+  });
+
+  it('preserves the documented manual default when a top-level approval option is configured', () => {
+    const input = resolveApprovalEngineInput(resolvedConfig({
+      approval: { fail_closed: true },
+      perSourceApproval: { lab: 'yolo' },
+    }));
+    expect(input?.defaultMode).toBeUndefined();
+    expect(input?.fail_closed).toBe(true);
   });
 });
 
