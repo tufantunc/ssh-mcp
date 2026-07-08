@@ -1,0 +1,208 @@
+import type { ClientChannel } from 'ssh2';
+import type { CommandResult, SessionInfo, SessionStatus } from '../types.js';
+
+export abstract class Session {
+  readonly id: string;
+  readonly name: string;
+  readonly profile: string;
+  readonly type: 'interactive' | 'background';
+  readonly createdAt: Date;
+  lastActivity: Date;
+  ttlMs: number;
+  protected _status: SessionStatus = 'active';
+
+  constructor(id: string, name: string, profile: string, type: 'interactive' | 'background', ttlMs: number) {
+    this.id = id;
+    this.name = name;
+    this.profile = profile;
+    this.type = type;
+    this.createdAt = new Date();
+    this.lastActivity = new Date();
+    this.ttlMs = ttlMs;
+  }
+
+  get status(): SessionStatus {
+    return this._status;
+  }
+
+  isExpired(): boolean {
+    return Date.now() - this.lastActivity.getTime() > this.ttlMs;
+  }
+
+  protected touch(): void {
+    this.lastActivity = new Date();
+  }
+
+  abstract run(command: string, timeoutMs?: number): Promise<CommandResult>;
+  abstract close(): Promise<void>;
+
+  toInfo(): SessionInfo {
+    return {
+      id: this.id,
+      name: this.name,
+      profile: this.profile,
+      type: this.type,
+      status: this._status,
+      createdAt: this.createdAt,
+      lastActivity: this.lastActivity,
+      ttlMs: this.ttlMs,
+    };
+  }
+}
+
+export class InteractiveSession extends Session {
+  private stream: ClientChannel;
+  private cwd = '~';
+  private outputBuffer = '';
+  private static MAX_OUTPUT = 1_048_576;
+
+  constructor(id: string, name: string, profile: string, stream: ClientChannel, ttlMs: number) {
+    super(id, name, profile, 'interactive', ttlMs);
+    this.stream = stream;
+    stream.on('close', () => {
+      this._status = 'closed';
+    });
+  }
+
+  async run(command: string, timeoutMs = 60_000): Promise<CommandResult> {
+    if (this._status !== 'active') {
+      throw new Error(`Session ${this.name} is not active (status: ${this._status})`);
+    }
+
+    const marker = this.generateMarker();
+    const sentinel = `__SSHMCP_${marker}__EXIT:$?__`;
+    const startTime = Date.now();
+
+    return new Promise((resolve, reject) => {
+      let buffer = '';
+      let resolved = false;
+
+      const timeoutId = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          this.stream.removeListener('data', dataHandler);
+          reject(new Error(`Command timed out after ${timeoutMs}ms in session ${this.name}`));
+        }
+      }, timeoutMs);
+
+      const dataHandler = (data: Buffer) => {
+        buffer += data.toString();
+        if (buffer.length > InteractiveSession.MAX_OUTPUT) {
+          buffer = buffer.slice(-InteractiveSession.MAX_OUTPUT);
+        }
+
+        const match = buffer.match(new RegExp(`${sentinel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+        if (match && !resolved) {
+          resolved = true;
+          clearTimeout(timeoutId);
+          this.stream.removeListener('data', dataHandler);
+
+          const exitMatch = buffer.match(/__SSHMCP_\w+__EXIT:(\d+)__/);
+          const exitCode = exitMatch ? parseInt(exitMatch[1]) : -1;
+
+          const sentinelIdx = buffer.indexOf(sentinel);
+          const lines = buffer.substring(0, sentinelIdx).split('\n');
+          const output = lines.slice(1).join('\n').replace(/\n$/, '');
+
+          if (command.startsWith('cd ') || command.startsWith('cd\t')) {
+            this.cwd = command.slice(3).trim() || '~';
+          }
+
+          this.touch();
+          this.outputBuffer = output;
+
+          resolve({
+            stdout: output,
+            stderr: '',
+            exitCode,
+            durationMs: Date.now() - startTime,
+            cwd: this.cwd,
+            sessionId: this.id,
+            profile: this.profile,
+          });
+        }
+      };
+
+      this.stream.on('data', dataHandler);
+      this.stream.write(`${command}\n`);
+      this.stream.write(`printf '\\n${sentinel}\\n'\n`);
+    });
+  }
+
+  private generateMarker(): string {
+    return Math.random().toString(36).substring(2, 14) + Date.now().toString(36);
+  }
+
+  async close(): Promise<void> {
+    try {
+      this.stream.end();
+    } catch { /* ignore */ }
+    this._status = 'closed';
+  }
+
+  get currentCwd(): string {
+    return this.cwd;
+  }
+}
+
+export class BackgroundSession extends Session {
+  private stream: ClientChannel;
+  private ringBuffer: string[] = [];
+  private ringMax = 10_000;
+  private exitCode: number | null = null;
+  private static RING_CHAR_LIMIT = 100_000;
+
+  constructor(id: string, name: string, profile: string, stream: ClientChannel, ttlMs: number) {
+    super(id, name, profile, 'background', ttlMs);
+    this.stream = stream;
+    stream.on('data', (data: Buffer) => {
+      const text = data.toString();
+      const lines = text.split('\n');
+      this.ringBuffer.push(...lines);
+      this.trimRingBuffer();
+      this.touch();
+    });
+    stream.on('close', (code: number) => {
+      this.exitCode = code;
+      this._status = this.isExpired() ? 'expired' : 'closed';
+    });
+  }
+
+  private trimRingBuffer(): void {
+    let total = this.ringBuffer.join('\n').length;
+    while (total > BackgroundSession.RING_CHAR_LIMIT && this.ringBuffer.length > 0) {
+      this.ringBuffer.shift();
+      total = this.ringBuffer.join('\n').length;
+    }
+    if (this.ringBuffer.length > this.ringMax) {
+      this.ringBuffer = this.ringBuffer.slice(-this.ringMax);
+    }
+  }
+
+  readOutput(lines = 50): string {
+    return this.ringBuffer.slice(-lines).join('\n');
+  }
+
+  isRunning(): boolean {
+    return this._status === 'active';
+  }
+
+  getExitCode(): number | null {
+    return this.exitCode;
+  }
+
+  async run(_command: string): Promise<CommandResult> {
+    throw new Error('Background sessions do not support run(). The command was started when the session was opened.');
+  }
+
+  async close(): Promise<void> {
+    try {
+      this.stream.signal('TERM');
+      setTimeout(() => {
+        try { this.stream.signal('KILL'); } catch { /* ignore */ }
+        try { this.stream.close(); } catch { /* ignore */ }
+      }, 3000);
+    } catch { /* ignore */ }
+    this._status = 'closed';
+  }
+}
