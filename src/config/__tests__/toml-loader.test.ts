@@ -661,6 +661,40 @@ api_key = "env:MISSING_KEY"
     expect(cfg.approval?.llm?.api_key).toBeUndefined();
   });
 
+  it('resolves api_key when smart mode is only enabled by a per-source override', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+approval = { mode = "smart" }
+
+[approval.llm]
+endpoint = "https://api.example/v1/c"
+api_key = "env:KEY"
+model = "m-1"
+`, { env: { KEY: 'sk-xyz' } });
+    expect(cfg.perSourceApproval).toEqual({ x: 'smart' });
+    expect(cfg.approval?.llm?.api_key).toBe('sk-xyz');
+  });
+
+  it('requires api_key env when a per-source smart override uses [approval.llm]', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+approval = { mode = "smart" }
+
+[approval.llm]
+endpoint = "https://api.example/v1/c"
+api_key = "env:MISSING_KEY"
+model = "m-1"
+`, { env: {} })).toThrow(/MISSING_KEY|not set or empty/);
+  });
+
   it('still resolves api_key when smart mode is enabled', () => {
     const cfg = parseTomlConfig(`
 [[sources]]
