@@ -243,7 +243,10 @@ export class SSHConnection {
           initBuffer += data.toString();
           if (/[#$>]\s*$/.test(initBuffer) || initBuffer.length > 1000) {
             stream.removeListener('data', initHandler);
-            resolve(session);
+            stream.write('PS1=""\n');
+            stream.write('set +o history 2>/dev/null\n');
+            stream.write('bind "set enable-bracketed-paste off" 2>/dev/null\n');
+            setTimeout(() => resolve(session), 200);
           }
         };
         stream.on('data', initHandler);
@@ -317,6 +320,7 @@ export class SSHConnection {
       this.client.end();
       this.client = null;
     }
+    this.connecting = null;
     this.connectedAt = null;
   }
 

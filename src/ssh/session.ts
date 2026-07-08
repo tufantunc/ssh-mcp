@@ -1,6 +1,12 @@
 import type { ClientChannel } from 'ssh2';
 import type { CommandResult, SessionInfo, SessionStatus } from '../types.js';
 
+const ANSI_REGEX = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r/g;
+
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_REGEX, '');
+}
+
 export abstract class Session {
   readonly id: string;
   readonly name: string;
@@ -70,7 +76,7 @@ export class InteractiveSession extends Session {
     }
 
     const marker = this.generateMarker();
-    const sentinel = `__SSHMCP_${marker}__EXIT:$?__`;
+    const sentinel = `SSHMCP_END_${marker}`;
     const startTime = Date.now();
 
     return new Promise((resolve, reject) => {
@@ -85,27 +91,40 @@ export class InteractiveSession extends Session {
         }
       }, timeoutMs);
 
+      const sentinelRegex = new RegExp(`${sentinel}__(\\d+)__`);
+
       const dataHandler = (data: Buffer) => {
         buffer += data.toString();
-        if (buffer.length > InteractiveSession.MAX_OUTPUT) {
-          buffer = buffer.slice(-InteractiveSession.MAX_OUTPUT);
+        if (buffer.length > InteractiveSession.MAX_OUTPUT * 2) {
+          buffer = buffer.slice(-InteractiveSession.MAX_OUTPUT * 2);
         }
 
-        const match = buffer.match(new RegExp(`${sentinel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+        const match = buffer.match(sentinelRegex);
         if (match && !resolved) {
           resolved = true;
           clearTimeout(timeoutId);
           this.stream.removeListener('data', dataHandler);
 
-          const exitMatch = buffer.match(/__SSHMCP_\w+__EXIT:(\d+)__/);
-          const exitCode = exitMatch ? parseInt(exitMatch[1]) : -1;
+          const exitCode = parseInt(match[1]);
 
-          const sentinelIdx = buffer.indexOf(sentinel);
-          const lines = buffer.substring(0, sentinelIdx).split('\n');
-          const output = lines.slice(1).join('\n').replace(/\n$/, '');
+          const sentinelLineIdx = buffer.indexOf(`${sentinel}__`);
+          let beforeSentinel = buffer.substring(0, sentinelLineIdx);
 
-          if (command.startsWith('cd ') || command.startsWith('cd\t')) {
-            this.cwd = command.slice(3).trim() || '~';
+          const cleaned = stripAnsi(beforeSentinel);
+          const lines = cleaned.split('\n');
+
+          const outputLines: string[] = [];
+          for (let i = 1; i < lines.length; i++) {
+            const line = lines[i];
+            if (line.includes('printf') && line.includes(sentinel.slice(0, 10))) break;
+            if (/^[^$]*\$?\s*printf\s+/.test(line) && line.includes(sentinel.slice(0, 10))) break;
+            outputLines.push(line);
+          }
+
+          let output = outputLines.join('\n').replace(/^\n+/, '').replace(/\n+$/, '');
+
+          if (command.trim().startsWith('cd ')) {
+            this.cwd = command.trim().slice(3) || '~';
           }
 
           this.touch();
@@ -125,7 +144,7 @@ export class InteractiveSession extends Session {
 
       this.stream.on('data', dataHandler);
       this.stream.write(`${command}\n`);
-      this.stream.write(`printf '\\n${sentinel}\\n'\n`);
+      this.stream.write(`printf '%s__%s__\\n' '${sentinel}' "$?"\n`);
     });
   }
 
