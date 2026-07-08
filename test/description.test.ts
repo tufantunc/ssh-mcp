@@ -68,32 +68,30 @@ function runMcpCommand(command: string, description?: string, extraArgs: string[
   });
 }
 
-describe('command description functionality', () => {
+describe('command execution', () => {
   it('should execute commands without description (backward compatibility)', async () => {
     const res = await runMcpCommand('echo "test without description"');
     expect(res.error).toBeUndefined();
     expect(res.result?.content?.[0]?.text).toContain('test without description');
   });
 
-  it('should execute commands with simple description', async () => {
+  it('should execute commands with simple description (description is ignored in v2)', async () => {
     const res = await runMcpCommand('echo "test with description"', 'This is a test command');
     expect(res.error).toBeUndefined();
     expect(res.result?.content?.[0]?.text).toContain('test with description');
   });
 
-  it('should handle descriptions with special characters', async () => {
+  it('should handle descriptions with special characters (description is ignored in v2)', async () => {
     const res = await runMcpCommand('ls -la', 'List all files # detailed format');
     expect(res.error).toBeUndefined();
-    // The command should execute successfully even with special characters in description
   });
 
-  it('should work with sudo-exec tool and description', async () => {
-    const res = await runMcpCommand('whoami', 'Check current user identity', ['--sudoPassword=secret'], 'sudo-exec');
+  it('should work with sudo-exec tool', async () => {
+    const res = await runMcpCommand('whoami', undefined, ['--sudoPassword=secret'], 'sudo-exec');
     expect(res.error).toBeUndefined();
-    // Should execute successfully with sudo
   });
 
-  it('should handle empty description parameter', async () => {
+  it('should handle empty description parameter (description is ignored in v2)', async () => {
     const res = await runMcpCommand('pwd', '');
     expect(res.error).toBeUndefined();
     expect(res.result?.content?.[0]?.text).toBeTruthy();
