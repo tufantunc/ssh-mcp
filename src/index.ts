@@ -5,6 +5,8 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { Client, ClientChannel } from 'ssh2';
 import { z } from 'zod';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { FROZEN_ALGORITHMS } from './ssh/algorithms.js';
+import { verifyHostKey, fingerprintPublicKey, type HostKeyMode } from './ssh/host-key.js';
 
 // Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000 --disableSudo
 function parseArgv() {
@@ -35,6 +37,8 @@ const PASSWORD = argvConfig.password;
 const SUDOPASSWORD = argvConfig.sudoPassword;
 const DISABLE_SUDO = argvConfig.disableSudo !== undefined;
 const KEY = argvConfig.key;
+const HOST_KEY_MODE: HostKeyMode = argvConfig.insecureHostKey ? 'insecure' : 'tofu';
+const knownHostsStore = new Map<string, string>();
 const DEFAULT_TIMEOUT = argvConfig.timeout ? parseInt(argvConfig.timeout) : 60000; // 60 seconds default timeout
 // Max characters configuration:
 // - Default: 1000 characters
@@ -173,7 +177,25 @@ export class SSHConnectionManager {
         this.connectionPromise = null;
       });
 
-      this.conn.connect(this.sshConfig);
+      const connectConfig: any = {
+        ...this.sshConfig,
+        algorithms: FROZEN_ALGORITHMS,
+        hostVerifier: (key: Buffer) => {
+          const fp = fingerprintPublicKey(key);
+          return verifyHostKey(
+            this.sshConfig.host,
+            this.sshConfig.port,
+            fp,
+            knownHostsStore,
+            HOST_KEY_MODE,
+          );
+        },
+        readyTimeout: 20000,
+        keepaliveInterval: 15000,
+        keepaliveCountMax: 3,
+      };
+
+      this.conn.connect(connectConfig);
     });
 
     return this.connectionPromise;
