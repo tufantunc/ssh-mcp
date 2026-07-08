@@ -27,6 +27,13 @@ export interface ModeChangedEvent {
   profileId?: string;
   mode: string;
   effective: string;
+  /**
+   * Present only for scope === 'profile': the requested per-profile override —
+   * a mode string when set, or `null` when the override was cleared. Lets
+   * clients mirror a cleared override instead of treating the fallback
+   * `effective` mode as a still-active override.
+   */
+  override?: string | null;
   at: string;
 }
 

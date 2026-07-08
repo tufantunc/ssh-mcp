@@ -32,6 +32,14 @@ export interface ModeChangedPayload {
   profileId?: string;
   mode: ApprovalMode;
   effective: ApprovalMode;
+  /**
+   * Present only for scope === 'profile': the per-profile override that was
+   * REQUESTED — a mode string when one was set, or `null` when the override was
+   * CLEARED (revealing the static/global mode beneath it). Lets clients mirror
+   * a cleared override instead of mistaking the fallback effective mode in
+   * `mode` for a still-active phantom override. Absent for global switches.
+   */
+  override?: ApprovalMode | null;
   at: string;
 }
 

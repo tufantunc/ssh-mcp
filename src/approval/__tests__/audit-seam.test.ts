@@ -12,7 +12,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { loadAuditSink } from '../audit-seam.js';
+import { isOptionalAuditStoreMissing, loadAuditSink } from '../audit-seam.js';
 import type { ApprovalDecision } from '../types.js';
 
 describe('optional audit seam', () => {
@@ -87,6 +87,41 @@ describe('optional audit seam', () => {
       expect(logged).toMatch(/audit store initialization failed/i);
     } finally {
       errSpy.mockRestore();
+    }
+  });
+
+  it('classifies only the optional store module itself as absent', () => {
+    const expected = 'file:///repo/build/audit/store.js';
+    const absent = Object.assign(
+      new Error("Cannot find module '/repo/build/audit/store.js' imported from /repo/build/approval/audit-seam.js"),
+      { code: 'ERR_MODULE_NOT_FOUND' },
+    );
+    const absentRelative = Object.assign(
+      new Error("Cannot find module '../audit/store.js' imported from '/repo/src/approval/audit-seam.ts'"),
+      { code: 'ERR_MODULE_NOT_FOUND' },
+    );
+    const brokenNestedImport = Object.assign(
+      new Error("Cannot find module '/repo/build/audit/missing.js' imported from /repo/build/audit/store.js"),
+      { code: 'ERR_MODULE_NOT_FOUND' },
+    );
+
+    expect(isOptionalAuditStoreMissing(absent, expected)).toBe(true);
+    expect(isOptionalAuditStoreMissing(absentRelative, expected)).toBe(true);
+    expect(isOptionalAuditStoreMissing(brokenNestedImport, expected)).toBe(false);
+  });
+
+  it('surfaces broken imports from a present audit module before degrading to no-op', async () => {
+    const err = Object.assign(
+      new Error("Cannot find module '/repo/build/audit/missing.js' imported from /repo/build/audit/store.js"),
+      { code: 'ERR_MODULE_NOT_FOUND' },
+    );
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const sink = await loadAuditSink({}, async () => { throw err; });
+      expect(typeof sink.record).toBe('function');
+      expect(spy).toHaveBeenCalledWith(expect.stringContaining('audit module present but failed to load'));
+    } finally {
+      spy.mockRestore();
     }
   });
 });
