@@ -306,7 +306,17 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
         // --- Live per-source description editing (PR-8, in-memory only) -----
         const descMatch = pathname.match(/^\/api\/sources\/([^/]+)\/description$/);
         if (descMatch && method === 'PUT') {
-          const id = decodeURIComponent(descMatch[1]);
+          if (!checkApprovalMutationAuth({ req, authToken: opts.authToken })) {
+            sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
+            return;
+          }
+          let id: string;
+          try {
+            id = decodeURIComponent(descMatch[1]);
+          } catch {
+            sendJson(res, 400, { error: 'malformed source id' });
+            return;
+          }
           const body = await readJson(req);
           if (body === null) {
             sendJson(res, 400, { error: 'invalid JSON body' });
