@@ -235,11 +235,12 @@ export class TransportRegistry {
     isDefault: boolean;
   }> {
     // A name is only a *usable* default when it can actually be selected with an
-    // omitted connectionName: either it's the lone server, or setDefault() was
-    // called. In the normal multi-host case (>1 server, no explicit default)
-    // resolveName() rejects an omitted name, so advertising the first-registered
-    // host as "(default)" would be misleading — report isDefault=false there.
-    const defaultUsable = this.defaultExplicit || this.configs.size === 1;
+    // omitted connectionName: either it's the lone server, the multi-source
+    // guard is disabled, or setDefault() was called. In the normal multi-host
+    // case (>1 server, guard enabled, no explicit default), resolveName()
+    // rejects an omitted name, so advertising the first-registered host as
+    // "(default)" would be misleading — report isDefault=false there.
+    const defaultUsable = !this.requireConnectionWhenMulti || this.defaultExplicit || this.configs.size === 1;
     const out = [];
     for (const [name, cfg] of this.configs) {
       out.push({

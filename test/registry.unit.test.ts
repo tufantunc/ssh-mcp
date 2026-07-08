@@ -270,6 +270,15 @@ describe('TransportRegistry.list / closeAll', () => {
     expect(rows.find((x) => x.name === 'b')!.isDefault).toBe(true);
   });
 
+  it('marks the first registered server as the default when the multi-source guard is disabled', () => {
+    const r = new TransportRegistry({ requireConnectionWhenMulti: false });
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    const rows = r.list();
+    expect(rows.find((x) => x.name === 'a')!.isDefault).toBe(true);
+    expect(rows.find((x) => x.name === 'b')!.isDefault).toBe(false);
+  });
+
   it('closeAll closes connected transports and clears state', async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     const stub = { name: 'ssh2', init: vi.fn().mockResolvedValue(undefined), exec: vi.fn(), execElevated: vi.fn(), close } as unknown as ISshTransport;

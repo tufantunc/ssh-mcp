@@ -147,6 +147,16 @@ describe('TransportRegistry — D-A2 opt-out seam (default must be safe: require
     expect(r.getDefaultName()).toBe('first');
   });
 
+  it('opt-out enabled: list() marks the first-registered fallback as the usable default', () => {
+    const r = new TransportRegistry({ requireConnectionWhenMulti: false });
+    r.register(cfg('first'));
+    r.register(cfg('second'));
+
+    const rows = r.list();
+    expect(rows.find((s) => s.name === 'first')?.isDefault).toBe(true);
+    expect(rows.find((s) => s.name === 'second')?.isDefault).toBe(false);
+  });
+
   it('setter form (D-A2 may inject post-construction) toggles the same behavior', async () => {
     const r = new TransportRegistry();
     r.register(cfg('first'));
@@ -154,9 +164,11 @@ describe('TransportRegistry — D-A2 opt-out seam (default must be safe: require
 
     r.setRequireConnectionWhenMulti(false);
     await expect(r.get(undefined)).resolves.toBeTruthy();
+    expect(r.list().find((s) => s.name === 'first')?.isDefault).toBe(true);
 
     r.setRequireConnectionWhenMulti(true);
     await expect(r.get(undefined)).rejects.toThrow(/connectionName is required/);
+    expect(r.list().every((s) => s.isDefault === false)).toBe(true);
   });
 });
 
