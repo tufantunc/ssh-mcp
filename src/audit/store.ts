@@ -1,4 +1,5 @@
-import { appendFile, mkdir, stat, rename, readFile } from 'fs/promises';
+import { appendFile, mkdir, stat, rename, readFile, chmod, open } from 'fs/promises';
+import { createWriteStream, type WriteStream } from 'fs';
 import { homedir, platform } from 'os';
 import { join, dirname } from 'path';
 import { randomUUID, createHash } from 'crypto';
@@ -27,11 +28,27 @@ export class AuditStore {
   private entropyScan: boolean;
   private tamperEvident: boolean;
   private lastHash: string = '';
+  private writeStream: WriteStream | null = null;
+  private dirEnsured = false;
+  private recordCount = 0;
 
   constructor(logPath?: string, entropyScan = false, tamperEvident = false) {
     this.logPath = logPath || getAuditLogPath();
     this.entropyScan = entropyScan;
     this.tamperEvident = tamperEvident;
+  }
+
+  private async ensureStream(): Promise<WriteStream> {
+    if (this.writeStream && !this.writeStream.destroyed) return this.writeStream;
+
+    if (!this.dirEnsured) {
+      await mkdir(dirname(this.logPath), { recursive: true });
+      this.dirEnsured = true;
+    }
+
+    this.writeStream = createWriteStream(this.logPath, { flags: 'a' });
+    try { await chmod(this.logPath, 0o600); } catch { /* may not exist yet */ }
+    return this.writeStream;
   }
 
   async record(entry: Omit<AuditRecord, 'timestamp' | 'eventId'>): Promise<void> {
@@ -42,8 +59,9 @@ export class AuditStore {
     };
 
     const redactedCommand = redactText(record.command, { entropyScan: this.entropyScan });
+    const redactedError = record.error ? redactText(record.error, { entropyScan: this.entropyScan }) : undefined;
 
-    let lineObj: Record<string, unknown> = { ...record, command: redactedCommand };
+    let lineObj: Record<string, unknown> = { ...record, command: redactedCommand, error: redactedError };
 
     if (this.tamperEvident) {
       if (!this.lastHash) {
@@ -58,15 +76,25 @@ export class AuditStore {
 
     const line = JSON.stringify(lineObj) + '\n';
 
-    await mkdir(dirname(this.logPath), { recursive: true });
     await this.rotateIfNeeded();
-    await appendFile(this.logPath, line, 'utf8');
+    const stream = await this.ensureStream();
+    await new Promise<void>((resolve, reject) => {
+      stream.write(line, (err) => err ? reject(err) : resolve());
+    });
+
+    this.recordCount++;
   }
 
   private async loadLastHash(): Promise<void> {
     try {
-      const content = await readFile(this.logPath, 'utf8');
-      const lines = content.trim().split('\n').filter(Boolean);
+      const fileStat = await stat(this.logPath);
+      const readSize = Math.min(fileStat.size, 8192);
+      const fd = await open(this.logPath, 'r');
+      const buf = Buffer.alloc(readSize);
+      await fd.read(buf, 0, readSize, fileStat.size - readSize);
+      await fd.close();
+      const content = buf.toString('utf8');
+      const lines = content.split('\n').filter(Boolean);
       if (lines.length === 0) return;
       const lastLine = JSON.parse(lines[lines.length - 1]);
       this.lastHash = lastLine.selfHash || '';
@@ -79,6 +107,13 @@ export class AuditStore {
     try {
       const fileStat = await stat(this.logPath);
       if (fileStat.size < MAX_FILE_SIZE) return;
+
+      if (this.writeStream && !this.writeStream.destroyed) {
+        await new Promise<void>((resolve) => {
+          this.writeStream!.end(() => resolve());
+        });
+        this.writeStream = null;
+      }
 
       for (let i = MAX_FILES - 1; i > 0; i--) {
         const oldPath = `${this.logPath}.${i}`;

@@ -167,6 +167,7 @@ export class InteractiveSession extends Session {
 export class BackgroundSession extends Session {
   private stream: ClientChannel;
   private ringBuffer: string[] = [];
+  private ringBytes = 0;
   private ringMax = 10_000;
   private exitCode: number | null = null;
   private static RING_CHAR_LIMIT = 100_000;
@@ -177,7 +178,10 @@ export class BackgroundSession extends Session {
     stream.on('data', (data: Buffer) => {
       const text = data.toString();
       const lines = text.split('\n');
-      this.ringBuffer.push(...lines);
+      for (const line of lines) {
+        this.ringBuffer.push(line);
+        this.ringBytes += line.length + 1;
+      }
       this.trimRingBuffer();
       this.touch();
     });
@@ -188,13 +192,15 @@ export class BackgroundSession extends Session {
   }
 
   private trimRingBuffer(): void {
-    let total = this.ringBuffer.join('\n').length;
-    while (total > BackgroundSession.RING_CHAR_LIMIT && this.ringBuffer.length > 0) {
-      this.ringBuffer.shift();
-      total = this.ringBuffer.join('\n').length;
+    while (this.ringBytes > BackgroundSession.RING_CHAR_LIMIT && this.ringBuffer.length > 0) {
+      const removed = this.ringBuffer.shift()!;
+      this.ringBytes -= removed.length + 1;
     }
     if (this.ringBuffer.length > this.ringMax) {
-      this.ringBuffer = this.ringBuffer.slice(-this.ringMax);
+      const drop = this.ringBuffer.splice(0, this.ringBuffer.length - this.ringMax);
+      for (const d of drop) {
+        this.ringBytes -= d.length + 1;
+      }
     }
   }
 
