@@ -1,0 +1,6 @@
+{
+  "name": "ssh-mcp",
+  "version": "1.0.0",
+  "description": "SSH MCP Server project-specific signals",
+  "reviewers": ["security", "correctness", "backend", "tests", "craft", "ai-antipatterns", "performance"]
+}
