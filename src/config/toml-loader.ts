@@ -253,9 +253,6 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     if (src.default !== undefined && typeof src.default !== 'boolean') {
       throw new Error(`Config: sources.${src.id}.default must be a boolean`);
     }
-    if (src.description !== undefined && typeof src.description !== 'string') {
-      throw new Error(`Config: sources.${src.id}.description must be a string`);
-    }
     // GSSAPIDelegateCredentials is only wired in the Kerberos auth branch (see
     // the `case 'kerberos'` below and OpenSshTransport.buildArgs); for key or
     // password auth the option is silently dropped, so a user requesting
@@ -323,6 +320,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       ? requireConfigString(src.private_key, 'private_key')
       : undefined;
     const knownHostsFile = requireConfigString(src.known_hosts_file, 'known_hosts_file');
+    const description = requireConfigString(src.description, 'description');
 
     const out: ServerConfig = {
       name: src.id,
@@ -332,8 +330,8 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       authMode: src.auth,
       transport: resolvedTransport,
     };
-    if (typeof src.description === 'string' && src.description.length > 0) {
-      out.description = src.description;
+    if (description && description.length > 0) {
+      out.description = description;
     }
 
     switch (src.auth) {
