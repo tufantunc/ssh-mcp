@@ -186,6 +186,36 @@ describe('buildTransportConfig (finding 2: no unconditional key read for passwor
   });
 });
 
+describe('buildTransportConfig (Codex 3541767256: deferKeyRead keeps legacy key reads lazy)', () => {
+  it('does NOT read the ssh2 key file at build time when deferKeyRead is set', async () => {
+    // The legacy single-host bootstrap passes deferKeyRead so startup never
+    // reads the key file — a key mounted after process launch must still work,
+    // matching the pre-registry behavior (read on first tool call, not startup).
+    const cfg = await buildTransportConfig(
+      { host: 'h', port: 22, username: 'u', key: '/nonexistent/path/to/key' },
+      { deferKeyRead: true },
+    );
+    expect(cfg.transport).toBe('ssh2');
+    expect(cfg.authMode).toBe('key');
+    // keyPath is recorded so the registry's lazy prepareKeyContents can read it
+    // on first use, but the (nonexistent) file must NOT be read now.
+    expect(cfg.keyPath).toBe('/nonexistent/path/to/key');
+    expect(cfg.privateKey).toBeUndefined();
+  });
+
+  it('still reads the ssh2 key eagerly when deferKeyRead is not set (default)', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-test-'));
+    const keyPath = path.join(dir, 'id_test');
+    await fs.writeFile(keyPath, 'KEYDATA');
+    try {
+      const cfg = await buildTransportConfig({ host: 'h', port: 22, username: 'u', key: keyPath });
+      expect(cfg.privateKey).toBe('KEYDATA');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('validateConfig (Codex P2: reject value-less OpenSSH option flags)', () => {
   const baseCfg = { host: 'h', user: 'u', transport: 'openssh' };
 

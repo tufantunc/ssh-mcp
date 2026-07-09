@@ -31,6 +31,15 @@ export class OpenSshTransport implements ISshTransport {
   private askpassDir?: string;
   private askpassEnvName?: string;
   private cleanupRegistered = false;
+  /**
+   * True once at least one command has completed a live SSH session (an exec
+   * whose failure, if any, was not a connect/transport-layer failure). OpenSSH
+   * has no persistent connection — init() only verifies the local ssh binary —
+   * so this is the only proof the configured host is actually reachable.
+   * list-servers reads it via isConnected() so it does not report a merely
+   * initialized transport as "connected" when the host has never answered.
+   */
+  private everConnected = false;
 
   constructor(private cfg: TransportConfig) {}
 
@@ -56,10 +65,36 @@ export class OpenSshTransport implements ISshTransport {
   async exec(command: string, opts: ExecOptions): Promise<ExecResult> {
     // If suPassword is configured, route through PTY-su state machine to
     // preserve the implicit-su behaviour that ssh2 transport has.
-    if (this.cfg.suPassword) {
-      return this.runSuViaPty(command, this.cfg.suPassword, opts);
+    const result = this.cfg.suPassword
+      ? await this.runSuViaPty(command, this.cfg.suPassword, opts)
+      : await this.runSsh(command, opts);
+    this.recordLiveness(result);
+    return result;
+  }
+
+  /**
+   * Update everConnected from a completed exec result. A command that reached
+   * the remote host — success, a non-zero remote exit, or an auth/host-key
+   * rejection (all of which require a completed TCP+SSH handshake) — proves the
+   * host is live. Only connect/transport-layer failures (TCP refused, DNS
+   * failure, ssh spawn error) and a bare timeout leave the flag unchanged,
+   * since they do not prove the host ever answered.
+   */
+  private recordLiveness(result: ExecResult): void {
+    if (result.category === 'connect' || result.category === 'transport' || result.category === 'timeout') {
+      return;
     }
-    return this.runSsh(command, opts);
+    this.everConnected = true;
+  }
+
+  /**
+   * OpenSSH has no persistent connection; report a live connection only after a
+   * command has actually completed a session (see everConnected). This keeps
+   * list-servers from advertising a merely-initialized transport as connected
+   * when the host has never answered (Codex 3541767250).
+   */
+  isConnected(): boolean {
+    return this.everConnected;
   }
 
   async execElevated(command: string, opts: ExecElevatedOptions): Promise<ExecResult> {
@@ -74,7 +109,9 @@ export class OpenSshTransport implements ISshTransport {
       // no sudo password is available but a su password is, run the command as
       // root via su to preserve equivalent behaviour.
       if (pwd === undefined && this.cfg.suPassword) {
-        return this.runSuViaPty(command, this.cfg.suPassword, opts);
+        const r = await this.runSuViaPty(command, this.cfg.suPassword, opts);
+        this.recordLiveness(r);
+        return r;
       }
       if (pwd !== undefined) {
         // OpenSSH receives the remote command as a local ssh argv element.
@@ -82,16 +119,21 @@ export class OpenSshTransport implements ISshTransport {
         // exposes it to local process inspection. Keep argv password-free and
         // feed sudo -S via stdin instead.
         const wrapped = buildOpenSshSudoWrapper(command, true);
-        return this.runSsh(wrapped, {
+        const r = await this.runSsh(wrapped, {
           ...opts,
           stdin: `${pwd}\n${opts.stdin ?? ''}`,
         });
+        this.recordLiveness(r);
+        return r;
       }
       const wrapped = buildOpenSshSudoWrapper(command, false);
-      return this.runSsh(wrapped, opts);
+      const r = await this.runSsh(wrapped, opts);
+      this.recordLiveness(r);
+      return r;
     }
     const suPwd = opts.password ?? this.cfg.suPassword;
     if (!suPwd) {
+      // Config error — no command runs, so this does not prove host liveness.
       return {
         stdout: '',
         stderr: 'su elevation requires --suPassword',
@@ -99,7 +141,9 @@ export class OpenSshTransport implements ISshTransport {
         category: 'auth',
       };
     }
-    return this.runSuViaPty(command, suPwd, opts);
+    const r = await this.runSuViaPty(command, suPwd, opts);
+    this.recordLiveness(r);
+    return r;
   }
 
   async close(): Promise<void> {

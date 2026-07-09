@@ -127,6 +127,16 @@ export function parseServerConfigJson(raw: string): ServerConfig {
       break;
     case 'key':
       cfg.transport = resolveJsonTransport(obj);
+      // The legacy single-host CLI used `--key=<path>`; the multi-host JSON
+      // schema uses `keyPath` (openssh -i / ssh2 read from disk) or
+      // `privateKey` (ssh2 inline contents). A legacy-shaped top-level `key`
+      // field is read by neither transport, so a config that supplies only
+      // `key` has NO key material and would silently fall back to ambient
+      // agent/default identities. Reject it with guidance instead of accepting
+      // a credential-less key config (Codex 3541767246).
+      if (obj.key !== undefined) {
+        throw new Error(`--ssh "${obj.name}" auth "key" uses "keyPath" (or "privateKey" for ssh2), not "key"`);
+      }
       // OpenSshTransport.buildArgs only passes cfg.keyPath via `-i`; an inline
       // privateKey would be silently ignored and ssh would fall back to
       // agent/default identities. Reject the combination so the configured
@@ -136,6 +146,17 @@ export function parseServerConfigJson(raw: string): ServerConfig {
       }
       if (obj.keyPath) cfg.keyPath = obj.keyPath;
       if (obj.privateKey) cfg.privateKey = obj.privateKey;
+      // Require actual key material. Without keyPath (openssh -i / ssh2 read)
+      // or an inline privateKey (ssh2), buildArgs() omits `-i` and
+      // `IdentitiesOnly=yes`, and the ssh2 transport has no key, so the
+      // connection silently falls back to whatever default or agent identity is
+      // offered instead of the intended key. Fail at parse time rather than
+      // let a key-auth config connect with an ambient identity (Codex 3541767246).
+      if (!cfg.keyPath && !cfg.privateKey) {
+        throw new Error(
+          `--ssh "${obj.name}" auth "key" requires "keyPath"${cfg.transport === 'ssh2' ? ' or inline "privateKey"' : ''}`,
+        );
+      }
       break;
     case 'password':
       cfg.transport = resolveJsonTransport(obj);
@@ -367,7 +388,22 @@ export interface BuildTransportConfigInputs {
   strictHostKeyChecking?: string | null;
 }
 
-export async function buildTransportConfig(inputs: BuildTransportConfigInputs): Promise<TransportConfig> {
+export interface BuildTransportConfigOptions {
+  /**
+   * When true, an ssh2 key config records `keyPath` but does NOT read the key
+   * file contents into `privateKey`. The read is deferred to the registry's
+   * lazy `prepareKeyContents` hook on the first tool call. Used by the legacy
+   * single-host bootstrap so a key mounted after process launch still works —
+   * matching the pre-registry behavior where the key was only read inside
+   * getOrCreateTransport() on first use, not at startup.
+   */
+  deferKeyRead?: boolean;
+}
+
+export async function buildTransportConfig(
+  inputs: BuildTransportConfigInputs,
+  opts: BuildTransportConfigOptions = {},
+): Promise<TransportConfig> {
   const { host, username } = inputs;
   if (!host || !username) {
     throw new McpError(ErrorCode.InvalidParams, 'Missing required host or username');
@@ -396,7 +432,12 @@ export async function buildTransportConfig(inputs: BuildTransportConfigInputs): 
     // stale/sample --key must NOT read the (possibly nonexistent) key file,
     // which would otherwise throw ENOENT before connecting (regression vs base
     // main, where password took precedence and the key was never read).
-    if (transport === 'ssh2' && authMode === 'key') {
+    //
+    // deferKeyRead skips the eager read entirely so the registry's lazy
+    // prepareKeyContents hook reads it on first tool call instead. The legacy
+    // single-host bootstrap uses this so a key mounted after process launch is
+    // still honored — startup must not read the key file (Codex 3541767256).
+    if (transport === 'ssh2' && authMode === 'key' && !opts.deferKeyRead) {
       const fs = await import('fs/promises');
       cfg.privateKey = await fs.readFile(inputs.key, 'utf8');
     }
@@ -438,10 +479,13 @@ async function bootstrapRegistry(): Promise<void> {
   } else {
     if (!HOST || !USER) return; // Test mode with no CLI — tools will error if called
     // Route the legacy single-host path through buildTransportConfig so it
-    // inherits the kerberos>password>key precedence and the gated key read
-    // (a password config carrying a stale --key must not ENOENT on a missing
-    // key file). buildTransportConfig already loads privateKey when key is the
-    // resolved auth mode, so no separate prepareKeyContents call is needed here.
+    // inherits the kerberos>password>key precedence. Pass deferKeyRead so the
+    // ssh2 key file is NOT read at startup: prepareKeyContents (the registry's
+    // lazy prepareConfig hook) reads it on the first tool call instead, exactly
+    // like the multi-host path. This preserves the pre-registry behavior where
+    // the key was read only inside getOrCreateTransport(), so a key-based
+    // deployment whose secret mount appears after process launch still starts
+    // (Codex 3541767256).
     const tcfg = await buildTransportConfig({
       host: HOST,
       port: PORT,
@@ -455,7 +499,7 @@ async function bootstrapRegistry(): Promise<void> {
       gssapiDelegateCredentials: GSSAPI_DELEGATE,
       knownHostsFile: KNOWN_HOSTS_FILE,
       strictHostKeyChecking: STRICT_HOST_KEY,
-    });
+    }, { deferKeyRead: true });
     registry.register({ ...tcfg, name: 'default' });
   }
 }
