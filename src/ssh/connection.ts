@@ -67,12 +67,20 @@ export class SSHConnection {
         this.markSessionsDisconnected();
         this.client = null;
         this.connectedAt = null;
+        if (this.connecting) {
+          this.connecting = null;
+          reject(new Error('SSH connection ended during handshake'));
+        }
       });
 
       this.client.on('close', () => {
         this.markSessionsDisconnected();
         this.client = null;
         this.connectedAt = null;
+        if (this.connecting) {
+          this.connecting = null;
+          reject(new Error('SSH connection closed during handshake'));
+        }
       });
 
       const connectConfig: any = {
@@ -181,10 +189,10 @@ export class SSHConnection {
         stream.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
 
         stream.on('close', (code: number, signal: string) => {
+          this.activeChannels--;
           if (!resolved) {
             resolved = true;
             clearTimeout(timeoutId);
-            this.activeChannels--;
             this.lastActivity = new Date();
             resolve({
               stdout,
