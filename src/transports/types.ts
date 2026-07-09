@@ -63,6 +63,24 @@ export interface ISshTransport {
 
   /** Release resources. Idempotent — safe to call multiple times. */
   close(): Promise<void>;
+
+  /**
+   * Optional liveness probe. When present, list-servers uses it to distinguish
+   * a transport that is merely *initialized* (cached after init()) from one
+   * with a *proven live connection*.
+   *
+   *   - ssh2 keeps a persistent Client socket, so init() establishes a real
+   *     connection; isConnected() reflects the live socket state.
+   *   - openssh has NO persistent connection — init() only verifies the local
+   *     ssh binary/askpass setup and each command spawns a fresh process. Being
+   *     initialized therefore does not prove the host is reachable (the first
+   *     command can still fail with connection refused). isConnected() reports
+   *     whether at least one command has actually run over a live SSH session.
+   *
+   * When a transport does not implement this, the registry falls back to
+   * treating "cached after successful init" as connected.
+   */
+  isConnected?(): boolean;
 }
 
 /** Auth mode for OpenSshTransport. Ssh2Transport selects auth from SshConfig fields. */

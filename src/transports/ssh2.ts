@@ -305,6 +305,14 @@ export class Ssh2Transport implements ISshTransport {
     this.manager.close();
   }
 
+  /**
+   * ssh2 keeps a persistent Client socket established at init() time, so live
+   * connection status is the underlying manager's socket state.
+   */
+  isConnected(): boolean {
+    return this.manager.isConnected();
+  }
+
   private runOnConnection(command: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
       let timeoutId: NodeJS.Timeout;
