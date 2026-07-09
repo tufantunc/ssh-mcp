@@ -140,4 +140,17 @@ describe('checkPermissions', () => {
     const path = await writeConfig(``, 0o644);
     await expect(checkPermissions(path)).rejects.toThrow(/accessible/);
   });
+
+  it('fails for world-readable directory', async () => {
+    const subdir = join(tempDir, 'insecure-dir');
+    await mkdtemp(subdir, 'x').catch(async () => {
+      await import('fs/promises').then((fs) => fs.mkdir(subdir, { recursive: true }));
+    });
+    const cfgPath = join(tempDir, 'config.toml');
+    await writeFile(cfgPath, '', 'utf8');
+    await chmod(cfgPath, 0o600);
+    await chmod(tempDir, 0o777);
+    await expect(checkPermissions(cfgPath)).rejects.toThrow(/directory.*accessible/i);
+    await chmod(tempDir, 0o700);
+  });
 });

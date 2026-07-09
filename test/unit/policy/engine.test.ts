@@ -82,4 +82,25 @@ describe('PolicyEngine', () => {
     // Admin on dev also needs approval (ask-destructive default)
     expect(engine.evaluate('rm -rf /tmp/test', adminDev, 'run-command').decision).toBe('require-approval');
   });
+
+  it('ask-all mode requires approval even for read-only', () => {
+    const profile = makeProfile({ role: 'admin', name: 'dev', approvalPolicy: 'ask-all' });
+    expect(engine.evaluate('ls -la', profile, 'read-command').decision).toBe('require-approval');
+  });
+
+  it('deny mode requires approval for destructive', () => {
+    const profile = makeProfile({ role: 'admin', name: 'dev', approvalPolicy: 'deny' });
+    expect(engine.evaluate('rm -rf /tmp/x', profile, 'run-command').decision).toBe('require-approval');
+  });
+
+  it('denylist with invalid regex falls back to substring match', () => {
+    const engineWithBadRegex = new PolicyEngine({
+      ...DEFAULT_RULES,
+      denylist: ['[invalid'],
+    });
+    const profile = makeProfile({ role: 'admin', name: 'dev', approvalPolicy: 'auto' });
+    // Should not throw, should fall back to includes()
+    const result = engineWithBadRegex.evaluate('echo [invalid pattern', profile, 'run-command');
+    expect(result.decision).toBe('deny');
+  });
 });

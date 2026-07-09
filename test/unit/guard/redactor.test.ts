@@ -27,6 +27,23 @@ MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDFakeKey123
     expect(result).toContain('[REDACTED:jwt');
   });
 
+  it('masks GitLab tokens', () => {
+    const result = redactText('token: glpat-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234');
+    expect(result).toContain('[REDACTED:gitlab-token');
+    expect(result).not.toContain('glpat-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234');
+  });
+
+  it('masks Bearer auth headers', () => {
+    const result = redactText('Authorization: Bearer dGhpcyBpcyBhIHRva2Vu');
+    expect(result).toContain('[REDACTED:bearer-auth');
+    expect(result).not.toContain('dGhpcyBpcyBhIHRva2Vu');
+  });
+
+  it('masks generic api_key assignments', () => {
+    const result = redactText('api_key = "0123456789abcdef0123456789"');
+    expect(result).toContain('[REDACTED:generic-api-key');
+  });
+
   it('leaves normal text unchanged', () => {
     expect(redactText('ls -la /var/log/syslog')).toBe('ls -la /var/log/syslog');
   });
@@ -35,6 +52,12 @@ MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDFakeKey123
     const random = 'xK7pQ2mNvR4wL8jF3hB6cY1dZ5aG0tS9eU';
     const result = redactText(random, { entropyScan: true });
     expect(result).toContain('[REDACTED:entropy');
+  });
+
+  it('entropy scan preserves low-entropy long strings', () => {
+    const lowEntropy = 'a'.repeat(40);
+    const result = redactText(lowEntropy, { entropyScan: true });
+    expect(result).toBe(lowEntropy);
   });
 
   it('entropy scan off leaves base64 unchanged', () => {
