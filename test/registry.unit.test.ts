@@ -316,6 +316,23 @@ describe('TransportRegistry.list / closeAll', () => {
     expect(rows.find((x) => x.name === 'b')!.isDefault).toBe(true);
   });
 
+  // Codex 3541772413: when the multi-source guard is opted out
+  // (require_connection=false), an omitted connectionName routes to the
+  // first-registered host, so list() must mark that host as the default rather
+  // than reporting "no default".
+  it('marks the first-registered host as default when the omit-name guard is opted out', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+    // Default state (guard ON, no explicit default): no host is a usable default.
+    expect(r.list().every((x) => x.isDefault === false)).toBe(true);
+    // Opt out: omitted connectionName routes to 'a', so 'a' is the effective default.
+    r.setRequireConnectionWhenMulti(false);
+    const rows = r.list();
+    expect(rows.find((x) => x.name === 'a')!.isDefault).toBe(true);
+    expect(rows.find((x) => x.name === 'b')!.isDefault).toBe(false);
+  });
+
   it('closeAll closes connected transports and clears state', async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     const stub = { name: 'ssh2', init: vi.fn().mockResolvedValue(undefined), exec: vi.fn(), execElevated: vi.fn(), close } as unknown as ISshTransport;
@@ -326,5 +343,30 @@ describe('TransportRegistry.list / closeAll', () => {
     await r.closeAll();
     expect(close).toHaveBeenCalledTimes(1);
     expect(r.list().find((x) => x.name === 'a')!.connected).toBe(false);
+  });
+
+  // Codex 3541767250: a cached transport that exposes an isConnected() probe
+  // (OpenSSH) must have list() defer to it, so a merely-initialized transport
+  // with no proven live session is reported as NOT connected.
+  it('defers to a cached transport isConnected() probe for connected status', async () => {
+    let live = false;
+    const stub = {
+      name: 'openssh',
+      init: vi.fn().mockResolvedValue(undefined),
+      exec: vi.fn(),
+      execElevated: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+      isConnected: () => live,
+    } as unknown as ISshTransport;
+    createTransportMock.mockReturnValue(stub);
+
+    const r = new TransportRegistry();
+    r.register(makeConfig('oss'));
+    // After init the transport is cached, but the probe says no live session yet.
+    await r.get('oss');
+    expect(r.list().find((x) => x.name === 'oss')!.connected).toBe(false);
+    // Once a command proves the host is live, the probe flips to true.
+    live = true;
+    expect(r.list().find((x) => x.name === 'oss')!.connected).toBe(true);
   });
 });

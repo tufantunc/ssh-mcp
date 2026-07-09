@@ -162,13 +162,30 @@ export class TransportRegistry {
     isDefault: boolean;
   }> {
     // A name is only a *usable* default when it can actually be selected with an
-    // omitted connectionName: either it's the lone server, or setDefault() was
-    // called. In the normal multi-host case (>1 server, no explicit default)
-    // resolveName() rejects an omitted name, so advertising the first-registered
-    // host as "(default)" would be misleading — report isDefault=false there.
-    const defaultUsable = this.defaultExplicit || this.configs.size === 1;
+    // omitted connectionName: it's the lone server, setDefault() was called, OR
+    // the multi-source guard was opted out via require_connection=false. In the
+    // last case resolveName() routes an omitted connectionName to the
+    // first-registered host (this.defaultName), so that host IS the effective
+    // default and list-servers must mark it — otherwise it reports "no default"
+    // while omitted commands silently land on the first host, misleading the
+    // user about where they run (Codex 3541772413). In the normal multi-host
+    // case (>1 server, guard ON, no explicit default) resolveName() rejects an
+    // omitted name, so no host is advertised as default.
+    const defaultUsable =
+      this.defaultExplicit || this.configs.size === 1 || !this.requireConnectionWhenMulti;
     const out = [];
     for (const [name, cfg] of this.configs) {
+      // A cached transport is "initialized" — but for OpenSSH that only means
+      // the local ssh binary/askpass setup passed; no live connection is proven
+      // until a command actually runs (openssh spawns per-exec, has no
+      // persistent socket). Prefer the transport's own isConnected() liveness
+      // probe when present so list-servers does not report an initialized-only
+      // OpenSSH host as connected when it has never answered. Fall back to
+      // "cached after successful init" only for transports without a probe.
+      const cached = this.transports.get(name);
+      const connected = cached
+        ? (typeof cached.isConnected === 'function' ? cached.isConnected() : true)
+        : false;
       out.push({
         name,
         host: cfg.host,
@@ -176,7 +193,7 @@ export class TransportRegistry {
         username: cfg.username,
         transport: (cfg.transport ?? (cfg.kerberos ? 'openssh' : 'ssh2')) as 'ssh2' | 'openssh',
         authMode: cfg.authMode ?? (cfg.kerberos ? 'kerberos' : cfg.keyPath || cfg.privateKey ? 'key' : cfg.password ? 'password' : 'unspecified'),
-        connected: this.transports.has(name),
+        connected,
         isDefault: defaultUsable && this.defaultName === name,
       });
     }
