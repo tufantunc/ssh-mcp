@@ -1,5 +1,11 @@
+import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PolicyEvaluation } from '../types.js';
+
+const ElicitResponseSchema = z.object({
+  action: z.enum(['accept', 'decline', 'cancel']),
+  content: z.record(z.unknown()).optional(),
+});
 
 export interface ApprovalResult {
   approved: boolean;
@@ -32,11 +38,11 @@ export async function requestApproval(
           },
         },
       },
-      undefined,
+      ElicitResponseSchema,
     );
 
     if (result.action === 'accept' && result.content?.confirm === true) {
-      return { approved: true, approver: result.content.user || 'mcp-client' };
+      return { approved: true, approver: 'mcp-client' };
     }
     return { approved: false };
   } catch {

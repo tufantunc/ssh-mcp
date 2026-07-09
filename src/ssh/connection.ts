@@ -124,6 +124,10 @@ export class SSHConnection {
     return this.client;
   }
 
+  getSudoPassword(): string | undefined {
+    return this.credentials.sudoPassword;
+  }
+
   async exec(command: string, opts: ExecOpts = {}): Promise<CommandResult> {
     await this.ensureConnected();
     const client = this.getClient();

@@ -7,7 +7,16 @@ import { sanitizeCommand, sanitizeSessionName } from '../guard/sanitizer.js';
 import { redactText } from '../guard/redactor.js';
 import { requestApproval } from '../guard/elicitation.js';
 import { SftpClient } from '../ssh/sftp.js';
-import type { CommandResult, ToolContext } from '../types.js';
+import { BackgroundSession } from '../ssh/session.js';
+import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass } from '../types.js';
+
+function deniedEvaluation(commandClass: CommandClass): PolicyEvaluation {
+  return { decision: 'deny', commandClass, binary: '', ruleId: 'error' };
+}
+
+function textResult(text: string) {
+  return { content: [{ type: 'text' as const, text }] };
+}
 
 export function registerTools(
   server: McpServer,
@@ -47,7 +56,7 @@ export function registerTools(
     ctx: ToolContext,
     profileName: string,
     command: string,
-    evaluation: any,
+    evaluation: PolicyEvaluation,
     result: CommandResult | { error: string },
     approver?: string,
   ) {
@@ -66,6 +75,38 @@ export function registerTools(
     });
   }
 
+  function makeCtx(extra: any, profile?: string, session?: string): ToolContext {
+    return { requestId: extra?.requestId ?? 0, profile, session };
+  }
+
+  function defaultProfileName(profile?: string): string {
+    return profile || registry.getProfile().name;
+  }
+
+  async function runAudited(
+    command: string,
+    opts: {
+      toolName: string;
+      failureClass: CommandClass;
+      profile?: string;
+      extra: any;
+      exec: (conn: Awaited<ReturnType<typeof resolveConn>>) => Promise<CommandResult>;
+    },
+  ) {
+    const ctx = makeCtx(opts.extra, opts.profile);
+    const cleanCmd = sanitizeCommand(command, Infinity);
+    const profileName = defaultProfileName(opts.profile);
+    try {
+      const { conn, evaluation, approver } = await checkPolicyAndApprove(cleanCmd, profileName, opts.toolName, ctx);
+      const result = await opts.exec(conn);
+      await auditResult(ctx, profileName, cleanCmd, evaluation, result, approver);
+      return textResult(redactText(result.stdout));
+    } catch (err: any) {
+      await auditResult(ctx, profileName, cleanCmd, deniedEvaluation(opts.failureClass), { error: err.message });
+      throw err;
+    }
+  }
+
   // ─── list-connections ──────────────────────────────────────────────────
   server.tool(
     'list-connections',
@@ -81,7 +122,7 @@ export function registerTools(
         const sessions = conn?.sessionCount || 0;
         return `${p.name}: ${p.user}@${p.host}:${p.port} [${status}] sessions=${sessions} role=${p.role}`;
       });
-      return { content: [{ type: 'text', text: lines.join('\n') }] };
+      return textResult(lines.join('\n'));
     },
   );
 
@@ -94,13 +135,13 @@ export function registerTools(
     async ({ profile }) => {
       const conn = registry.get(profile);
       if (!conn || conn.listSessions().length === 0) {
-        return { content: [{ type: 'text', text: 'No active sessions.' }] };
+        return textResult('No active sessions.');
       }
       const sessions = conn.listSessions().map((s) => {
         const info = s.toInfo();
         return `${info.name} [${info.type}] status=${info.status} idle=${Math.round((Date.now() - info.lastActivity.getTime()) / 1000)}s`;
       });
-      return { content: [{ type: 'text', text: sessions.join('\n') }] };
+      return textResult(sessions.join('\n'));
     },
   );
 
@@ -115,16 +156,23 @@ export function registerTools(
       profile: z.string().optional().describe('Profile name (uses default if omitted)'),
     },
     {},
-    async ({ name, type, command, profile }) => {
+    async ({ name, type, command, profile }, extra) => {
       const cleanName = sanitizeSessionName(name);
+      const ctx = makeCtx(extra, profile);
+      const profileName = defaultProfileName(profile);
+
+      if (type === 'background' && command) {
+        try {
+          await checkPolicyAndApprove(command, profileName, 'open-session', ctx);
+        } catch (err: any) {
+          await auditResult(ctx, profileName, command, deniedEvaluation('destructive'), { error: err.message });
+          throw err;
+        }
+      }
+
       const conn = await resolveConn(profile);
       const session = await conn.openSession({ name: cleanName, type, command });
-      return {
-        content: [{
-          type: 'text',
-          text: `Session "${cleanName}" opened on ${conn.profile.name} (${type}).`,
-        }],
-      };
+      return textResult(`Session "${cleanName}" opened on ${conn.profile.name} (${type}).`);
     },
   );
 
@@ -140,9 +188,7 @@ export function registerTools(
     async ({ name, profile }) => {
       const conn = await resolveConn(profile);
       await conn.closeSession(name);
-      return {
-        content: [{ type: 'text', text: `Session "${name}" closed.` }],
-      };
+      return textResult(`Session "${name}" closed.`);
     },
   );
 
@@ -160,10 +206,12 @@ export function registerTools(
       const conn = await resolveConn(profile);
       const session = conn.getSession(name);
       if (!session || session.type !== 'background') {
-        return { content: [{ type: 'text', text: `Background session "${name}" not found.` }] };
+        return textResult(`Background session "${name}" not found.`);
       }
-      const bg = session as any;
-      return { content: [{ type: 'text', text: bg.readOutput(lines) }] };
+      if (session instanceof BackgroundSession) {
+        return textResult(session.readOutput(lines));
+      }
+      return textResult(`Session "${name}" is not a background session.`);
     },
   );
 
@@ -177,18 +225,13 @@ export function registerTools(
     },
     { readOnlyHint: true },
     async ({ command, profile }, extra) => {
-      const ctx: ToolContext = { requestId: (extra as any)?.requestId ?? 0, profile };
-      const cleanCmd = sanitizeCommand(command, Infinity);
-      const profileName = profile || registry.getProfile().name;
-      try {
-        const { conn, evaluation } = await checkPolicyAndApprove(cleanCmd, profileName, 'read-command', ctx);
-        const result = await conn.exec(cleanCmd);
-        await auditResult(ctx, profileName, cleanCmd, evaluation, result);
-        return { content: [{ type: 'text', text: redactText(result.stdout) }] };
-      } catch (err: any) {
-        await auditResult(ctx, profileName, cleanCmd, { commandClass: 'read-only', binary: '', decision: 'deny' }, { error: err.message });
-        throw err;
-      }
+      return runAudited(command, {
+        toolName: 'read-command',
+        failureClass: 'read-only',
+        profile,
+        extra,
+        exec: (conn) => conn.exec(command),
+      });
     },
   );
 
@@ -202,11 +245,11 @@ export function registerTools(
       session: z.string().optional().describe('Run in an existing interactive session (stateful)'),
       tty: z.boolean().optional().describe('Allocate a pseudo-terminal'),
     },
-    {},
+    { destructiveHint: true },
     async ({ command, profile, session, tty }, extra) => {
-      const ctx: ToolContext = { requestId: (extra as any)?.requestId ?? 0, profile, session };
+      const ctx = makeCtx(extra, profile, session);
       const cleanCmd = sanitizeCommand(command, Infinity);
-      const profileName = profile || registry.getProfile().name;
+      const profileName = defaultProfileName(profile);
       try {
         const { conn, evaluation, approver } = await checkPolicyAndApprove(cleanCmd, profileName, 'run-command', ctx);
 
@@ -220,9 +263,9 @@ export function registerTools(
         }
 
         await auditResult(ctx, profileName, cleanCmd, evaluation, result, approver);
-        return { content: [{ type: 'text', text: redactText(result.stdout) }] };
+        return textResult(redactText(result.stdout));
       } catch (err: any) {
-        await auditResult(ctx, profileName, cleanCmd, { commandClass: 'safe', binary: '', decision: 'deny' }, { error: err.message });
+        await auditResult(ctx, profileName, cleanCmd, deniedEvaluation('safe'), { error: err.message });
         throw err;
       }
     },
@@ -238,28 +281,26 @@ export function registerTools(
     },
     { destructiveHint: true },
     async ({ command, profile }, extra) => {
-      const ctx: ToolContext = { requestId: (extra as any)?.requestId ?? 0, profile };
+      const ctx = makeCtx(extra, profile);
       const cleanCmd = sanitizeCommand(command, Infinity);
-      const profileName = profile || registry.getProfile().name;
+      const profileName = defaultProfileName(profile);
       try {
         const { conn, evaluation, approver } = await checkPolicyAndApprove(`sudo ${cleanCmd}`, profileName, 'privileged-command', ctx);
 
-        const conn2 = await resolveCredentialsWithSudo(profileName);
+        const sudoPassword = conn.getSudoPassword();
         const wrapped = `sudo -p "" -S sh -c '${cleanCmd.replace(/'/g, "'\\''")}'`;
-        const result = await conn2.exec(wrapped, { stdin: conn2.getClient() ? undefined : undefined });
+        const result = await conn.exec(wrapped, {
+          stdin: sudoPassword ? sudoPassword + '\n' : undefined,
+        });
 
         await auditResult(ctx, profileName, `sudo ${cleanCmd}`, evaluation, result, approver);
-        return { content: [{ type: 'text', text: redactText(result.stdout) }] };
+        return textResult(redactText(result.stdout));
       } catch (err: any) {
-        await auditResult(ctx, profileName, `sudo ${cleanCmd}`, { commandClass: 'privileged', binary: '', decision: 'deny' }, { error: err.message });
+        await auditResult(ctx, profileName, `sudo ${cleanCmd}`, deniedEvaluation('privileged'), { error: err.message });
         throw err;
       }
     },
   );
-
-  async function resolveCredentialsWithSudo(profileName: string) {
-    return resolveConn(profileName);
-  }
 
   // ─── sftp-upload ───────────────────────────────────────────────────────
   server.tool(
@@ -271,11 +312,20 @@ export function registerTools(
       profile: z.string().optional().describe('Profile name'),
     },
     { destructiveHint: true },
-    async ({ remotePath, content, profile }) => {
-      const conn = await resolveConn(profile);
-      const sftp = new SftpClient(conn);
-      await sftp.upload({ remotePath, content });
-      return { content: [{ type: 'text', text: `Uploaded ${content.length} bytes to ${remotePath}` }] };
+    async ({ remotePath, content, profile }, extra) => {
+      const ctx = makeCtx(extra, profile);
+      const profileName = defaultProfileName(profile);
+      const syntheticCommand = `sftp:upload ${remotePath}`;
+      try {
+        const { conn, evaluation, approver } = await checkPolicyAndApprove(syntheticCommand, profileName, 'sftp-upload', ctx);
+        const sftp = new SftpClient(conn);
+        await sftp.upload({ remotePath, content });
+        await auditResult(ctx, profileName, syntheticCommand, evaluation, { exitCode: 0, stdout: '', stderr: '', durationMs: 0, profile: profileName } as CommandResult, approver);
+        return textResult(`Uploaded ${content.length} bytes to ${remotePath}`);
+      } catch (err: any) {
+        await auditResult(ctx, profileName, syntheticCommand, deniedEvaluation('destructive'), { error: err.message });
+        throw err;
+      }
     },
   );
 
@@ -288,11 +338,20 @@ export function registerTools(
       profile: z.string().optional().describe('Profile name'),
     },
     { readOnlyHint: true },
-    async ({ remotePath, profile }) => {
-      const conn = await resolveConn(profile);
-      const sftp = new SftpClient(conn);
-      const data = await sftp.download({ remotePath });
-      return { content: [{ type: 'text', text: data.toString('utf8') }] };
+    async ({ remotePath, profile }, extra) => {
+      const ctx = makeCtx(extra, profile);
+      const profileName = defaultProfileName(profile);
+      const syntheticCommand = `sftp:download ${remotePath}`;
+      try {
+        const { conn, evaluation, approver } = await checkPolicyAndApprove(syntheticCommand, profileName, 'sftp-download', ctx);
+        const sftp = new SftpClient(conn);
+        const data = await sftp.download({ remotePath });
+        await auditResult(ctx, profileName, syntheticCommand, evaluation, { exitCode: 0, stdout: '', stderr: '', durationMs: 0, profile: profileName } as CommandResult, approver);
+        return textResult(redactText(data.toString('utf8'), { entropyScan: true }));
+      } catch (err: any) {
+        await auditResult(ctx, profileName, syntheticCommand, deniedEvaluation('read-only'), { error: err.message });
+        throw err;
+      }
     },
   );
 
@@ -301,15 +360,24 @@ export function registerTools(
     'signal-process',
     'Send a signal (INT, TERM, KILL) to a remote process by PID.',
     {
-      pid: z.number().describe('Process ID to signal'),
+      pid: z.number().int().min(1).describe('Process ID to signal (positive integer)'),
       signal: z.enum(['INT', 'TERM', 'KILL']).default('TERM').describe('Signal to send'),
       profile: z.string().optional().describe('Profile name'),
     },
     { destructiveHint: true },
-    async ({ pid, signal, profile }) => {
-      const conn = await resolveConn(profile);
-      const result = await conn.exec(`kill -${signal} ${pid}`);
-      return { content: [{ type: 'text', text: result.stdout || `Signal ${signal} sent to PID ${pid}` }] };
+    async ({ pid, signal, profile }, extra) => {
+      const ctx = makeCtx(extra, profile);
+      const command = `kill -${signal} ${pid}`;
+      const profileName = defaultProfileName(profile);
+      try {
+        const { conn, evaluation, approver } = await checkPolicyAndApprove(command, profileName, 'signal-process', ctx);
+        const result = await conn.exec(command);
+        await auditResult(ctx, profileName, command, evaluation, result, approver);
+        return textResult(result.stdout || `Signal ${signal} sent to PID ${pid}`);
+      } catch (err: any) {
+        await auditResult(ctx, profileName, command, deniedEvaluation('destructive'), { error: err.message });
+        throw err;
+      }
     },
   );
 }
