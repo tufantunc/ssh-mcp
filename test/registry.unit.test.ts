@@ -290,4 +290,29 @@ describe('TransportRegistry.list / closeAll', () => {
     expect(close).toHaveBeenCalledTimes(1);
     expect(r.list().find((x) => x.name === 'a')!.connected).toBe(false);
   });
+
+  // Codex 3541767250: a cached transport that exposes an isConnected() probe
+  // (OpenSSH) must have list() defer to it, so a merely-initialized transport
+  // with no proven live session is reported as NOT connected.
+  it('defers to a cached transport isConnected() probe for connected status', async () => {
+    let live = false;
+    const stub = {
+      name: 'openssh',
+      init: vi.fn().mockResolvedValue(undefined),
+      exec: vi.fn(),
+      execElevated: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+      isConnected: () => live,
+    } as unknown as ISshTransport;
+    createTransportMock.mockReturnValue(stub);
+
+    const r = new TransportRegistry();
+    r.register(makeConfig('oss'));
+    // After init the transport is cached, but the probe says no live session yet.
+    await r.get('oss');
+    expect(r.list().find((x) => x.name === 'oss')!.connected).toBe(false);
+    // Once a command proves the host is live, the probe flips to true.
+    live = true;
+    expect(r.list().find((x) => x.name === 'oss')!.connected).toBe(true);
+  });
 });

@@ -243,6 +243,17 @@ export class TransportRegistry {
     const defaultUsable = !this.requireConnectionWhenMulti || this.defaultExplicit || this.configs.size === 1;
     const out = [];
     for (const [name, cfg] of this.configs) {
+      // A cached transport is "initialized" — but for OpenSSH that only means
+      // the local ssh binary/askpass setup passed; no live connection is proven
+      // until a command actually runs (openssh spawns per-exec, has no
+      // persistent socket). Prefer the transport's own isConnected() liveness
+      // probe when present so list-servers does not report an initialized-only
+      // OpenSSH host as connected when it has never answered. Fall back to
+      // "cached after successful init" only for transports without a probe.
+      const cached = this.transports.get(name);
+      const connected = cached
+        ? (typeof cached.isConnected === 'function' ? cached.isConnected() : true)
+        : false;
       out.push({
         name,
         host: cfg.host,
@@ -250,7 +261,7 @@ export class TransportRegistry {
         username: cfg.username,
         transport: (cfg.transport ?? (cfg.kerberos ? 'openssh' : 'ssh2')) as 'ssh2' | 'openssh',
         authMode: cfg.authMode ?? (cfg.kerberos ? 'kerberos' : cfg.keyPath || cfg.privateKey ? 'key' : cfg.password ? 'password' : 'unspecified'),
-        connected: this.transports.has(name),
+        connected,
         isDefault: defaultUsable && this.defaultName === name,
       });
     }
