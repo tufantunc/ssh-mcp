@@ -138,4 +138,55 @@ describe('TransportRegistry.closeChanged', () => {
 
     expect(transports.keyhost.closed).toBe(true);
   });
+
+  it('ignores lazy privateKey contents when the keyPath connection identity is unchanged', async () => {
+    const { reg, transports, prevConfigs } = seedWithTransports([
+      cfg('keyhost', {
+        transport: 'ssh2',
+        authMode: 'key',
+        kerberos: false,
+        keyPath: '/keys/id_ed25519',
+        privateKey: 'lazy-loaded-key-material',
+      }),
+    ]);
+
+    // A reload reparses the same TOML key_path but has not lazily read the key
+    // yet, so privateKey is absent. This must not look like a connection change.
+    reg.replaceAll([
+      cfg('keyhost', {
+        transport: 'ssh2',
+        authMode: 'key',
+        kerberos: false,
+        keyPath: '/keys/id_ed25519',
+        description: 'label-only edit',
+      }),
+    ]);
+    await reg.closeChanged(prevConfigs);
+
+    expect(transports.keyhost.closed).toBe(false);
+    expect(((reg as any).transports as Map<string, ISshTransport>).has('keyhost')).toBe(true);
+  });
+
+  it('clears pending initializers for changed or removed sources even without cached transports', async () => {
+    const reg = new TransportRegistry();
+    for (const c of [cfg('alpha'), cfg('beta'), cfg('stable')]) reg.register(c);
+    const prevConfigs = reg.snapshotState().configs;
+    const pending = (reg as any).initPromises as Map<string, Promise<ISshTransport>>;
+    const tokens = (reg as any).initTokens as Map<string, object>;
+    for (const name of ['alpha', 'beta', 'stable']) {
+      pending.set(name, Promise.resolve(fakeTransport()));
+      tokens.set(name, {});
+    }
+
+    // alpha changes connection params, beta is removed, stable is unchanged.
+    reg.replaceAll([cfg('alpha', { host: 'alpha2.example' }), cfg('stable')]);
+    await reg.closeChanged(prevConfigs);
+
+    expect(pending.has('alpha')).toBe(false);
+    expect(tokens.has('alpha')).toBe(false);
+    expect(pending.has('beta')).toBe(false);
+    expect(tokens.has('beta')).toBe(false);
+    expect(pending.has('stable')).toBe(true);
+    expect(tokens.has('stable')).toBe(true);
+  });
 });

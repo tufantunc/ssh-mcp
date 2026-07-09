@@ -408,12 +408,19 @@ export class TransportRegistry {
    * live persistent transport across a reload.
    */
   private connectionParamsEqual(a: ServerConfig, b: ServerConfig): boolean {
+    // For ssh2 key_path sources, privateKey is runtime/lazily derived from the
+    // key file by prepareKeyContents(). A reload reparses the same TOML with the
+    // same keyPath but no privateKey yet; that derived in-memory material must
+    // not make an unchanged source look like a connection-parameter edit. Inline
+    // private_key (no keyPath) is still part of the dial/auth signature.
+    const comparablePrivateKeyA = a.keyPath ? undefined : a.privateKey;
+    const comparablePrivateKeyB = b.keyPath ? undefined : b.privateKey;
     return (
       a.host === b.host &&
       a.port === b.port &&
       a.username === b.username &&
       a.password === b.password &&
-      a.privateKey === b.privateKey &&
+      comparablePrivateKeyA === comparablePrivateKeyB &&
       a.suPassword === b.suPassword &&
       a.sudoPassword === b.sudoPassword &&
       a.transport === b.transport &&
@@ -446,12 +453,19 @@ export class TransportRegistry {
     this.reloadGeneration++;
 
     const toClose: string[] = [];
-    for (const name of this.transports.keys()) {
+    const candidates = new Set<string>([
+      ...this.transports.keys(),
+      ...this.initPromises.keys(),
+    ]);
+    for (const name of candidates) {
       const prev = previousConfigs.get(name);
       const curr = this.configs.get(name);
       // Removed (no longer in the new set), newly-appearing under a cached name
       // (defensive: prev missing), or connection params changed → drop it so it
-      // re-dials lazily with the new config on next use.
+      // re-dials lazily with the new config on next use. Include pending-only
+      // initializers too: during first get(), a source lives only in
+      // initPromises until init() resolves, and changed/removed configs must
+      // invalidate that stale in-flight init even when no transport is cached.
       if (!curr || !prev || !this.connectionParamsEqual(prev, curr)) {
         toClose.push(name);
       }

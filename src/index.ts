@@ -660,9 +660,24 @@ export async function approveTransportForCurrentConfig(params: {
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     // Capture immediately before the awaited manual/smart gate. If a reload
     // completes while the gate is pending, the decision belongs to the OLD
-    // profile/config and must not authorize the freshly re-acquired transport.
+    // profile/config and must not authorize or deny the freshly re-acquired
+    // transport/profile.
     const generationBeforeApproval = params.reg.getReloadGeneration();
-    const approval = await params.gate(effectiveProfile);
+    let approval: ApprovalDecision;
+    try {
+      approval = await params.gate(effectiveProfile);
+    } catch (err) {
+      if (params.reg.getReloadGeneration() === generationBeforeApproval) {
+        throw err;
+      }
+
+      // A reload invalidated the denial/timeout we just received. Re-acquire the
+      // transport/profile from the CURRENT config, then loop so approval is run
+      // again against the current profile before surfacing or executing.
+      transport = await params.reg.get(params.connectionName);
+      effectiveProfile = params.reg.profile(params.connectionName);
+      continue;
+    }
     if (params.reg.getReloadGeneration() === generationBeforeApproval) {
       return { transport, profile: effectiveProfile.id, approval };
     }

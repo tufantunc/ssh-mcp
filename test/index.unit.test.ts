@@ -503,5 +503,54 @@ describe('approveTransportForCurrentConfig (Codex V4 finding: re-run approval af
     expect(result.profile).toBe('new-profile');
     expect(result.approval.reason).toBe('current decision');
   });
+
+  it('retries against the CURRENT profile when a stale pre-reload denial throws', async () => {
+    let generation = 1;
+    const original = stub('pre-reload');
+    const fresh = stub('post-reload');
+    const approvedProfiles: string[] = [];
+    const reg = {
+      getReloadGeneration: () => generation,
+      get: async (_name?: string) => fresh,
+      profile: (_name?: string) => ({ id: generation === 1 ? 'old-profile' : 'new-profile' } as any),
+    };
+
+    const result = await approveTransportForCurrentConfig({
+      reg: reg as any,
+      connectionName: 'alpha',
+      transport: original,
+      profile: reg.profile('alpha') as any,
+      gate: async (profile) => {
+        approvedProfiles.push(profile.id);
+        if (approvedProfiles.length === 1) {
+          generation = 2;
+          throw new Error('approval denied by stale profile');
+        }
+        return allow('current decision');
+      },
+    });
+
+    expect(approvedProfiles).toEqual(['old-profile', 'new-profile']);
+    expect(result.transport).toBe(fresh);
+    expect(result.profile).toBe('new-profile');
+    expect(result.approval.reason).toBe('current decision');
+  });
+
+  it('preserves a real denial when no reload changed the generation', async () => {
+    const original = stub('pre-reload');
+    const reg = {
+      getReloadGeneration: () => 1,
+      get: async () => { throw new Error('get() must NOT be called for a current denial'); },
+      profile: (_name?: string) => ({ id: 'current-profile' } as any),
+    };
+
+    await expect(approveTransportForCurrentConfig({
+      reg: reg as any,
+      connectionName: 'alpha',
+      transport: original,
+      profile: reg.profile('alpha') as any,
+      gate: async () => { throw new Error('approval denied by current profile'); },
+    })).rejects.toThrow(/current profile/);
+  });
 });
 

@@ -743,6 +743,39 @@ auth = "kerberos"
     expect(events).toHaveLength(0);
   });
 
+  it('rejects an LLM endpoint edit even when the reloaded policy currently selects yolo', async () => {
+    const registry = freshRegistry(TOML_A);
+    const engine = smartArmedEngine();
+    const inactiveSmartLlmEdit = `
+[approval]
+mode = "yolo"
+
+[approval.llm]
+endpoint = "https://llm.NEW/v1/chat/completions"
+model = "gpt-old"
+api_key = "boot-key"
+
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+`;
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () => parseTomlConfig(inactiveSmartLlmEdit) as ResolvedConfig,
+      log: () => {},
+    });
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/\[approval\.llm\] change/);
+    expect(res.reason).toMatch(/endpoint/);
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+  });
+
   it('rejects a reload that only rotates the api_key', async () => {
     const registry = freshRegistry(TOML_A);
     const engine = smartArmedEngine();

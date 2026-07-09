@@ -139,37 +139,33 @@ function reloadSelectsSmart(config: ResolvedConfig): boolean {
 }
 
 /**
- * Reject a smart reload that CHANGES the live LLM settings. The SmartApproval
- * sub-engine is constructed once at boot and never rebuilt on reload
- * (reloadPolicy only reseeds the mode store), so an edited `[approval.llm]`
- * block — endpoint/model/api_key/timeout_ms/provider/fail_closed — would be
- * reported as applied while approvals keep hitting the stale boot-time engine.
- * Rather than silently rebuild (which would tear a live LLM client out from
- * under an in-flight decision), reject the reload so the operator restarts to
- * pick up rotated keys / endpoint / model changes. Boot vs. reload thus enforce
- * the same LLM config for as long as the process lives.
+ * Reject a reload that CHANGES the live smart engine's LLM settings. The
+ * SmartApproval sub-engine is constructed once at boot and never rebuilt on
+ * reload (reloadPolicy only reseeds the mode store), so an edited
+ * `[approval.llm]` block — endpoint/model/api_key/timeout_ms/provider or the
+ * associated fail_closed flag — would be reported as applied while approvals
+ * keep hitting the stale boot-time engine.
  *
- * Only fires when the reload selects smart AND a live smart engine is armed;
- * the missing-endpoint/model and unarmed-smart cases are already caught by
- * assertSmartPolicyHasCurrentLlm + reloadPolicy's assertSwitchable.
+ * This must run whenever a smart engine is armed, even if the reloaded policy
+ * currently resolves to yolo/manual. Otherwise an operator can edit inactive
+ * `[approval.llm]`, then later flip back to smart and expect the new endpoint /
+ * model / key to be live while the process still holds the boot-time engine.
+ * Missing endpoint/model for an actually-selected smart policy is still handled
+ * by assertSmartPolicyHasCurrentLlm + reloadPolicy's assertSwitchable.
  */
 function assertSmartLlmUnchanged(config: ResolvedConfig, engine: ApprovalReloadTarget): void {
-  if (!reloadSelectsSmart(config)) return;
   const live = engine.describeSmartLlm();
-  if (live === null) return; // unarmed smart → handled elsewhere (rejected).
+  if (live === null) return; // unarmed smart → handled elsewhere (rejected if selected).
 
   const input = resolveApprovalEngineInput(config);
   const llm = input?.llm;
-  // assertSmartPolicyHasCurrentLlm already guaranteed endpoint+model when smart
-  // is selected; this is a defensive guard so the comparison never dereferences
-  // undefined.
-  if (!llm?.endpoint || !llm?.model) return;
+  if (!llm) return; // No incoming [approval.llm] block to compare.
 
   const nextProvider = (llm.provider as string | undefined) ?? 'openai';
   const nextFailClosed = config.approval?.fail_closed !== false; // default true
   const changed: string[] = [];
-  if (llm.endpoint !== live.endpoint) changed.push('endpoint');
-  if (llm.model !== live.model) changed.push('model');
+  if ((llm.endpoint ?? undefined) !== live.endpoint) changed.push('endpoint');
+  if ((llm.model ?? undefined) !== live.model) changed.push('model');
   if ((llm.api_key ?? undefined) !== (live.api_key ?? undefined)) changed.push('api_key');
   if ((llm.timeout_ms ?? undefined) !== (live.timeout_ms ?? undefined)) changed.push('timeout_ms');
   if (nextProvider !== live.provider) changed.push('provider');
