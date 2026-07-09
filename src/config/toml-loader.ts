@@ -295,7 +295,18 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
         break;
       case 'key':
         if (src.key_path) out.keyPath = expandHome(src.key_path);
-        if (src.private_key) out.privateKey = src.private_key;
+        // Resolve `env:NAME` for inline private_key the same way password/
+        // sudo_password/su_password are resolved. Without this the literal
+        // "env:SSH_KEY" placeholder would be copied into ServerConfig.privateKey
+        // and the ssh2 transport would try to parse it as key material, failing
+        // auth even when the env var is set (Codex 3541772408).
+        if (src.private_key) {
+          out.privateKey = resolveEnvRef(
+            requireSecretString(src.private_key, 'private_key'),
+            `sources.${src.id}.private_key`,
+            env,
+          );
+        }
         if (!out.keyPath && !out.privateKey) {
           throw new Error(
             `Config: sources.${src.id} auth="key" requires key_path or private_key`,
@@ -345,6 +356,15 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
 
     resolvedSources.push(out);
 
+    // `default` controls omit-name routing under the multi-source guard, so a
+    // non-boolean value (e.g. the quoted `default = "true"`) must be rejected
+    // rather than silently ignored — otherwise the intended default is never
+    // applied and omitted connectionName calls start failing (Codex 3541772419).
+    if (src.default !== undefined && typeof src.default !== 'boolean') {
+      throw new Error(
+        `Config: sources.${src.id}.default must be a boolean (got ${JSON.stringify(src.default)})`,
+      );
+    }
     if (src.default === true) {
       if (defaultName && defaultName !== src.id) {
         throw new Error(
@@ -425,11 +445,16 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv) {
   if (raw.auth_token !== undefined) {
     out.auth_token = resolveEnvRef(String(raw.auth_token), '[webui].auth_token', env);
   }
-  // Cross-field check: non-loopback bind requires a token.
-  if (out.host && out.host !== '127.0.0.1' && out.host !== 'localhost' && out.host !== '::1') {
+  // Cross-field check: a non-loopback bind requires a token — but ONLY when the
+  // web UI is actually enabled. With `[webui] enabled = false` the section is
+  // inert (parsed/reserved, never served), so demanding a token for a disabled
+  // section would let an otherwise-off optional block fail SSH startup (Codex
+  // 3541772404). When the eventual CLI enable path turns it on, the same check
+  // applies against the resolved enabled=true state.
+  if (out.enabled && out.host && out.host !== '127.0.0.1' && out.host !== 'localhost' && out.host !== '::1') {
     if (!out.auth_token) {
       throw new Error(
-        `Config: [webui].host="${out.host}" is non-loopback; auth_token is required`,
+        `Config: [webui].host="${out.host}" is non-loopback; auth_token is required when [webui].enabled = true`,
       );
     }
   }

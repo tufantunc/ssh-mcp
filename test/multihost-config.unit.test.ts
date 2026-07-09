@@ -162,6 +162,47 @@ describe('parseServerConfigJson (round-2: input validation hardening)', () => {
   });
 });
 
+describe('parseServerConfigJson (Codex 3541767246: key auth requires key material)', () => {
+  it('rejects an ssh2 key config with no keyPath and no privateKey', () => {
+    // Without key material the ssh2 transport has no key and openssh omits -i,
+    // so the connection silently falls back to an ambient agent/default
+    // identity. Fail at parse time instead.
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'key',
+    }))).toThrow(/auth "key" requires "keyPath" or inline "privateKey"/);
+  });
+
+  it('rejects an openssh key config with no keyPath (inline privateKey is unsupported there)', () => {
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'key', transport: 'openssh',
+    }))).toThrow(/auth "key" requires "keyPath"/);
+  });
+
+  it('rejects a legacy-shaped top-level "key" field (read by neither transport)', () => {
+    // The multi-host schema uses keyPath/privateKey; a legacy `key` field is
+    // ignored, leaving the config with no usable key material.
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'key', key: '/home/u/.ssh/id_ed25519',
+    }))).toThrow(/uses "keyPath" \(or "privateKey" for ssh2\), not "key"/);
+  });
+
+  it('accepts an ssh2 key config with keyPath', () => {
+    const cfg = parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'key', keyPath: '/home/u/.ssh/id_ed25519',
+    }));
+    expect(cfg.transport).toBe('ssh2');
+    expect(cfg.keyPath).toBe('/home/u/.ssh/id_ed25519');
+  });
+
+  it('accepts an openssh key config with keyPath', () => {
+    const cfg = parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'key', transport: 'openssh', keyPath: '/home/u/.ssh/id_ed25519',
+    }));
+    expect(cfg.transport).toBe('openssh');
+    expect(cfg.keyPath).toBe('/home/u/.ssh/id_ed25519');
+  });
+});
+
 describe('validateConfig multi-host (finding 2: legacy flags must be rejected)', () => {
   it('rejects --port mixed with --ssh', () => {
     expect(() => validateConfig({ port: '2222' }, true)).toThrow(/cannot be mixed with legacy single-host flags/);
