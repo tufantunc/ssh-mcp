@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
-import { randomUUID } from 'crypto';
+import { randomUUID, timingSafeEqual } from 'crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ConnectionRegistry } from '../ssh/connection-registry.js';
@@ -19,12 +19,26 @@ export async function startHttpServer(
 ): Promise<void> {
   const { port, host = '127.0.0.1', bearerToken, registry, audit } = opts;
 
+  if (!bearerToken) {
+    throw new Error(
+      'HTTP transport requires --bearerToken. Example: --transport=http --bearerToken=secret\n' +
+      'Without authentication, any network client can execute SSH commands on your hosts.',
+    );
+  }
+
+  const tokenBuf = Buffer.from(bearerToken);
+
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
-    if (bearerToken) {
-      const auth = req.headers.authorization;
-      if (auth !== `Bearer ${bearerToken}`) {
+    {
+      const auth = req.headers.authorization || '';
+      const expected = `Bearer ${bearerToken}`;
+      const authBuf = Buffer.from(auth);
+      const expectedBuf = Buffer.from(expected);
+      const match = authBuf.length === expectedBuf.length &&
+        timingSafeEqual(authBuf, expectedBuf);
+      if (!match) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Unauthorized' }));
         return;
