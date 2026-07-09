@@ -160,7 +160,16 @@ export function parseServerConfigJson(raw: string): ServerConfig {
       break;
     case 'password':
       cfg.transport = resolveJsonTransport(obj);
-      if (obj.password) cfg.password = obj.password;
+      // Require actual password material. An empty/missing password still
+      // registers the server as password-authenticated but fails on first use:
+      // OpenSshTransport.init() throws "authMode=password requires --password",
+      // and the default ssh2 path attempts to connect without the credential the
+      // selected auth mode promises. Fail at parse time like the key-auth branch
+      // already does for missing key material (Codex 3549295040).
+      if (typeof obj.password !== 'string' || obj.password.length === 0) {
+        throw new Error(`--ssh "${obj.name}" auth "password" requires a non-empty "password"`);
+      }
+      cfg.password = obj.password;
       break;
   }
 
@@ -552,9 +561,20 @@ export async function buildTransportConfig(
 
 const registry = new TransportRegistry(prepareKeyContents);
 
-async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
+export async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
   // ssh2 transport reads key contents in memory; openssh uses -i path.
-  if (cfg.transport === 'ssh2' && cfg.keyPath && !cfg.privateKey) {
+  // Gate on authMode === 'key': buildTransportConfig() still records keyPath
+  // even when password auth takes precedence over a stale/sample --key, so a
+  // config such as `--password=... --key=/stale` must NOT read the (possibly
+  // nonexistent) key file here — otherwise the first tool call fails with
+  // ENOENT instead of using the password (Codex 3549295046). Mirrors the eager
+  // read's `authMode === 'key'` guard in buildTransportConfig().
+  if (
+    cfg.authMode === 'key' &&
+    cfg.transport === 'ssh2' &&
+    cfg.keyPath &&
+    !cfg.privateKey
+  ) {
     const fs = await import('fs/promises');
     cfg.privateKey = await fs.readFile(cfg.keyPath, 'utf8');
   }
