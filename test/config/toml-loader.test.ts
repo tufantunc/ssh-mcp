@@ -175,6 +175,20 @@ sudo_password = "env:LAB_SUDO"
     expect(cfg.sources[0].sudoPassword).toBe('secret-sudo');
   });
 
+  it('treats an empty TOML sudo_password as unset instead of feeding blank sudo stdin (Codex 3551304734)', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+sudo_password = ""
+su_password = "root-pw"
+`);
+    expect(cfg.sources[0].sudoPassword).toBeUndefined();
+    expect(cfg.sources[0].suPassword).toBe('root-pw');
+  });
+
   it('errors when env var missing', () => {
     expect(() => parseTomlConfig(
       `
@@ -977,6 +991,38 @@ mode = "smart"
 api_key = "env:KEY"
 `, { env: { KEY: 'sk-xyz' } });
     expect(cfg.approval?.llm?.api_key).toBe('sk-xyz');
+  });
+
+  it('rejects a non-string smart approval api_key instead of coercing it (Codex 3551304740)', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[approval]
+mode = "smart"
+
+[approval.llm]
+api_key = 123
+`)).toThrow(/api_key must be a string/);
+  });
+
+  it('rejects array-shaped smart approval api_key env refs instead of coercing them (Codex 3551304740)', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[approval]
+mode = "smart"
+
+[approval.llm]
+api_key = ["env:KEY"]
+`, { env: { KEY: 'sk-xyz' } })).toThrow(/api_key must be a string/);
   });
 
   // Finding: ignoreSources skips validating suppressed [[sources]] entirely.

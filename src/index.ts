@@ -345,6 +345,18 @@ function validateConfig(config: Record<string, string | null>, multiHost = false
 const isMultiHost = sshJsonArgs.length > 0;
 const hasLegacyCli = hasLegacyCliFlags(argvConfig);
 
+// Validate CLI-mode errors before TOML discovery/loading. Otherwise an
+// incomplete legacy invocation such as `--host=h` can auto-discover an unrelated
+// TOML file and report that TOML's parse/env error before the real missing
+// `--user` legacy CLI error.
+if (isCliEnabled || isTestMode) {
+  if (isMultiHost) {
+    validateConfig(argvConfig, true);
+  } else if (hasLegacyCli) {
+    validateConfig(argvConfig, false);
+  }
+}
+
 function buildLegacyServerConfig(): ServerConfig | undefined {
   if (!HOST || !USER) return undefined;
 
@@ -433,11 +445,7 @@ const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
   : { sources: [], perSourceApproval: {}, defaultExplicit: false, requireConnection: true };
 
 if (isCliEnabled) {
-  if (isMultiHost) {
-    validateConfig(argvConfig, true);
-  } else if (hasLegacyCli) {
-    validateConfig(argvConfig, false);
-  } else if (resolvedConfig.sources.length === 0) {
+  if (!isMultiHost && !hasLegacyCli && resolvedConfig.sources.length === 0) {
     throw new Error(
       'Configuration error:\nMissing required --host (or use --ssh=<JSON>, --config=<path>, SSH_MCP_CONFIG, or a default ssh-mcp config.toml)',
     );

@@ -296,16 +296,22 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     const passwordValue = src.auth === 'password'
       ? requireConfigString(src.password, 'password')
       : undefined;
-    const sudoPassword = resolveEnvRef(
-      requireConfigString(src.sudo_password, 'sudo_password'),
-      `sources.${src.id}.sudo_password`,
-      env,
-    );
-    const suPassword = resolveEnvRef(
-      requireConfigString(src.su_password, 'su_password'),
-      `sources.${src.id}.su_password`,
-      env,
-    );
+    const resolveOptionalElevationPassword = (
+      value: unknown,
+      field: 'sudo_password' | 'su_password',
+    ): string | undefined => {
+      const resolved = resolveEnvRef(
+        requireConfigString(value, field),
+        `sources.${src.id}.${field}`,
+        env,
+      );
+      // Treat an explicitly empty TOML elevation password as unset. Leaving it
+      // as '' makes the OpenSSH sudo path feed a blank line via sudo -S, which
+      // blocks the intended passwordless-sudo / suPassword fallback behavior.
+      return resolved === '' ? undefined : resolved;
+    };
+    const sudoPassword = resolveOptionalElevationPassword(src.sudo_password, 'sudo_password');
+    const suPassword = resolveOptionalElevationPassword(src.su_password, 'su_password');
     const keyPath = requireConfigString(src.key_path, 'key_path');
     const privateKey = src.auth === 'key'
       ? requireConfigString(src.private_key, 'private_key')
@@ -538,7 +544,10 @@ function validateApproval(raw: any, env: NodeJS.ProcessEnv): ApprovalSection {
       // for a user who copied the example config without enabling smart mode.
       // Defer resolution to smart mode; leave api_key unresolved otherwise.
       if (out.mode === 'smart') {
-        resolved.api_key = resolveEnvRef(String(llm.api_key), '[approval.llm].api_key', env);
+        if (typeof llm.api_key !== 'string') {
+          throw new Error('Config: [approval.llm].api_key must be a string');
+        }
+        resolved.api_key = resolveEnvRef(llm.api_key, '[approval.llm].api_key', env);
       }
     }
     if (llm.model !== undefined) {
