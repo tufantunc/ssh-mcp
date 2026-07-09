@@ -254,6 +254,17 @@ auth = "bogus"
 `)).toThrow(/auth/);
   });
 
+  it('rejects a non-string source description instead of silently dropping it', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+description = 123
+`)).toThrow(/sources\.x\.description must be a quoted string/);
+  });
+
   it('rejects key auth with no key_path or private_key', () => {
     expect(() => parseTomlConfig(`
 [[sources]]

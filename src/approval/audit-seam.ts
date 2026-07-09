@@ -102,8 +102,12 @@ function toApprovalSection(decision: ApprovalDecision) {
   };
 }
 
+function errorMessageFromUnknown(error: unknown): string {
+  return error instanceof Error ? error.message : String(error ?? 'unknown error');
+}
+
 function approvalNotReachedSection(now: Date, error: unknown) {
-  const message = error instanceof Error ? error.message : String(error ?? 'unknown error');
+  const message = errorMessageFromUnknown(error);
   return {
     mode: 'manual',
     decision: 'deny',
@@ -111,6 +115,17 @@ function approvalNotReachedSection(now: Date, error: unknown) {
     decided_at: now.toISOString(),
     decided_by: 'approval:not-run',
   };
+}
+
+function stderrWithExecutionError(stderr: string | undefined, error: unknown): string {
+  const base = stderr ?? '';
+  if (error === undefined) return base;
+
+  const message = errorMessageFromUnknown(error);
+  if (base.includes(message)) return base;
+
+  const executionError = `execution error: ${message}`;
+  return base ? `${base}\n${executionError}` : executionError;
 }
 
 /**
@@ -172,16 +187,18 @@ export async function loadAuditSink(
           exec: input.result
             ? {
                 stdout: input.result.stdout ?? '',
-                stderr: input.result.stderr ?? '',
+                // When resultToMcpContent rejects after the transport already
+                // returned an ExecResult, keep both the raw transport stderr and
+                // the mapped MCP error. Otherwise timeout/auth/host-key/
+                // transport/non-zero results become audit records that only say
+                // "a result existed" and lose the execution failure context.
+                stderr: stderrWithExecutionError(input.result.stderr, input.error),
                 exitCode: input.result.exitCode ?? null,
                 durationMs,
               }
             : {
                 stdout: '',
-                stderr:
-                  input.error instanceof Error
-                    ? input.error.message
-                    : String(input.error ?? 'unknown error'),
+                stderr: errorMessageFromUnknown(input.error),
                 exitCode: null,
                 durationMs,
               },

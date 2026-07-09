@@ -317,6 +317,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       ? requireConfigString(src.private_key, 'private_key')
       : undefined;
     const knownHostsFile = requireConfigString(src.known_hosts_file, 'known_hosts_file');
+    const description = requireConfigString(src.description, 'description');
 
     const out: ServerConfig = {
       name: src.id,
@@ -326,8 +327,8 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       authMode: src.auth,
       transport: resolvedTransport,
     };
-    if (typeof src.description === 'string' && src.description.length > 0) {
-      out.description = src.description;
+    if (description && description.length > 0) {
+      out.description = description;
     }
 
     switch (src.auth) {

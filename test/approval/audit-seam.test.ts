@@ -9,8 +9,8 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 
-import { isOptionalAuditStoreMissing, loadAuditSink } from '../audit-seam.js';
-import type { ApprovalDecision } from '../types.js';
+import { isOptionalAuditStoreMissing, loadAuditSink } from '../../src/approval/audit-seam.js';
+import type { ApprovalDecision } from '../../src/approval/types.js';
 
 describe('optional audit seam', () => {
   it('loadAuditSink resolves to a usable sink even when src/audit/ is absent', async () => {
@@ -79,6 +79,43 @@ describe('optional audit seam', () => {
       decided_by: 'approval:not-run',
     });
     expect(appended.approval.reason).toContain('approval gate was not reached');
+  });
+
+  it('preserves mapper error context when a failed ExecResult is audited', async () => {
+    let appended: any;
+    const approval: ApprovalDecision = {
+      decision: 'allow',
+      reason: 'manual approved',
+      decided_by: 'user',
+      decided_at: new Date().toISOString(),
+      mode: 'manual',
+    };
+    const sink = await loadAuditSink({}, async () => ({
+      resolveAuditDir: () => '/tmp/ssh-mcp-audit-test',
+      AuditStore: class {
+        append(record: unknown): unknown {
+          appended = record;
+          return record;
+        }
+      },
+    }));
+
+    sink.record({
+      tool: 'exec',
+      profile: 'default',
+      command: 'false',
+      startedAt: Date.now(),
+      result: { stdout: '', stderr: '', exitCode: 7 },
+      error: new Error('Error (code 7):\nCommand exited with status 7'),
+      approval,
+    });
+
+    expect(appended.exec).toMatchObject({
+      stdout: '',
+      exitCode: 7,
+    });
+    expect(appended.exec.stderr).toContain('execution error:');
+    expect(appended.exec.stderr).toContain('Command exited with status 7');
   });
 
   it('classifies only the optional store module itself as absent', () => {
