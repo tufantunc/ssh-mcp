@@ -179,14 +179,19 @@ export class SSHConnection {
 
         let stdout = '';
         let stderr = '';
+        const maxOutput = 1_048_576; // 1MB cap
 
         if (opts.stdin) {
           try { stream.write(opts.stdin); } catch { /* */ }
         }
         try { stream.end(); } catch { /* */ }
 
-        stream.on('data', (data: Buffer) => { stdout += data.toString(); });
-        stream.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+        stream.on('data', (data: Buffer) => {
+          if (stdout.length < maxOutput) stdout += data.toString();
+        });
+        stream.stderr.on('data', (data: Buffer) => {
+          if (stderr.length < maxOutput) stderr += data.toString();
+        });
 
         stream.on('close', (code: number, signal: string) => {
           this.activeChannels--;
