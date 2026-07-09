@@ -198,6 +198,74 @@ describe('audit store', () => {
     expect(out.text).toContain('<redacted>');
   });
 
+  it('redacts a long JWT whose signature falls past the scan window (Codex 3541772953)', () => {
+    const cap = 64;
+    // A JWT that STARTS inside the retained window but whose large payload/
+    // signature pushes the third segment past cap + headroom. Under a
+    // cap-before-redact ordering the JWT regex could not see a complete token,
+    // leaving the token prefix in the persisted slice. Pre-redaction over the
+    // full text must scrub the whole token.
+    const header = 'eyJ' + 'a'.repeat(20);
+    const payload = 'eyJ' + 'b'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 1000); // huge claims
+    const sig = 'c'.repeat(50);
+    const jwt = `${header}.${payload}.${sig}`;
+    const out = capThenRedact(`token ${jwt} tail`, cap);
+    expect(out.text).not.toContain(header);
+    expect(out.text).not.toContain('eyJbbbb');
+    expect(out.text).not.toContain(sig);
+    expect(out.text).toContain('<redacted>');
+  });
+
+  it('caps a huge rejected command so it cannot bypass the size guard (Codex 3541772945)', () => {
+    // A multi-MB command (e.g. a rejected over-maxChars payload) must not be
+    // persisted verbatim — buildRecord caps command/description to bound the
+    // JSONL append and redaction cost.
+    const huge = 'A'.repeat(5 * 1024 * 1024); // 5 MB
+    const rec = buildRecord({
+      now: new Date('2026-05-25T12:00:00Z'),
+      profile: 'p',
+      tool: 'exec',
+      command: huge,
+      description: 'B'.repeat(5 * 1024 * 1024),
+      approval: yoloApproval(),
+      auditMaxBytes: 64,
+    });
+    // Bounded well under the raw 5 MB — the command cap floor keeps it modest.
+    expect(Buffer.byteLength(rec.command, 'utf8')).toBeLessThanOrEqual(64 * 1024);
+    expect(Buffer.byteLength(rec.description ?? '', 'utf8')).toBeLessThanOrEqual(64 * 1024);
+    expect(rec.command.length).toBeLessThan(huge.length);
+  });
+
+  it('preserves a normal short command even when auditMaxBytes (output cap) is tiny', () => {
+    // The command cap must not collapse to a tiny stdout cap: a legitimate
+    // command line survives in full while output capture is set to a few bytes.
+    const rec = buildRecord({
+      now: new Date('2026-05-25T12:00:00Z'),
+      profile: 'p',
+      tool: 'exec',
+      command: 'systemctl restart nginx && journalctl -u nginx --since "10 min ago"',
+      approval: yoloApproval(),
+      auditMaxBytes: 5,
+    });
+    expect(rec.command).toBe('systemctl restart nginx && journalctl -u nginx --since "10 min ago"');
+  });
+
+  it('caps a huge command that carries a secret past the window without leaking it', () => {
+    // Belt-and-suspenders: a giant command with an embedded token must be both
+    // bounded AND scrubbed of the token.
+    const secret = 'ghp_' + 'Z'.repeat(36);
+    const rec = buildRecord({
+      now: new Date('2026-05-25T12:00:00Z'),
+      profile: 'p',
+      tool: 'exec',
+      command: 'echo ' + 'x'.repeat(2 * 1024 * 1024) + ' ' + secret,
+      approval: yoloApproval(),
+      auditMaxBytes: 64,
+    });
+    expect(rec.command).not.toContain(secret);
+    expect(Buffer.byteLength(rec.command, 'utf8')).toBeLessThanOrEqual(64 * 1024);
+  });
+
   it('persists a redacted PEM key end-to-end through append (large key past window)', () => {
     const dir = tmpAuditDir();
     try {
