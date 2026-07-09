@@ -1,7 +1,7 @@
-import { appendFile, mkdir, stat, rename } from 'fs/promises';
+import { appendFile, mkdir, stat, rename, readFile } from 'fs/promises';
 import { homedir, platform } from 'os';
 import { join, dirname } from 'path';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import type { AuditRecord } from '../types.js';
 import { redactText } from '../guard/redactor.js';
 
@@ -25,10 +25,13 @@ export function getAuditLogPath(): string {
 export class AuditStore {
   private logPath: string;
   private entropyScan: boolean;
+  private tamperEvident: boolean;
+  private lastHash: string = '';
 
-  constructor(logPath?: string, entropyScan = false) {
+  constructor(logPath?: string, entropyScan = false, tamperEvident = false) {
     this.logPath = logPath || getAuditLogPath();
     this.entropyScan = entropyScan;
+    this.tamperEvident = tamperEvident;
   }
 
   async record(entry: Omit<AuditRecord, 'timestamp' | 'eventId'>): Promise<void> {
@@ -40,14 +43,36 @@ export class AuditStore {
 
     const redactedCommand = redactText(record.command, { entropyScan: this.entropyScan });
 
-    const line = JSON.stringify({
-      ...record,
-      command: redactedCommand,
-    }) + '\n';
+    let lineObj: Record<string, unknown> = { ...record, command: redactedCommand };
+
+    if (this.tamperEvident) {
+      if (!this.lastHash) {
+        await this.loadLastHash();
+      }
+      const prevHash = this.lastHash;
+      const contentForHash = JSON.stringify(lineObj) + prevHash;
+      const selfHash = createHash('sha256').update(contentForHash).digest('hex');
+      lineObj = { ...lineObj, prevHash, selfHash };
+      this.lastHash = selfHash;
+    }
+
+    const line = JSON.stringify(lineObj) + '\n';
 
     await mkdir(dirname(this.logPath), { recursive: true });
     await this.rotateIfNeeded();
     await appendFile(this.logPath, line, 'utf8');
+  }
+
+  private async loadLastHash(): Promise<void> {
+    try {
+      const content = await readFile(this.logPath, 'utf8');
+      const lines = content.trim().split('\n').filter(Boolean);
+      if (lines.length === 0) return;
+      const lastLine = JSON.parse(lines[lines.length - 1]);
+      this.lastHash = lastLine.selfHash || '';
+    } catch {
+      // File doesn't exist or can't be read — start fresh
+    }
   }
 
   private async rotateIfNeeded(): Promise<void> {

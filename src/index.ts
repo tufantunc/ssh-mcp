@@ -83,10 +83,11 @@ async function main() {
   const config = await buildAppConfig(argv);
   const hostKeyMode: HostKeyMode = argv.insecureHostKey ? 'insecure' : 'tofu';
   const entropyScan = !!argv.auditEntropyScan;
+  const tamperEvident = !!argv.auditTamperEvident;
 
   const registry = new ConnectionRegistry(config, hostKeyMode);
   const policy = new PolicyEngine(DEFAULT_RULES);
-  const audit = new AuditStore(undefined, entropyScan);
+  const audit = new AuditStore(undefined, entropyScan, tamperEvident);
 
   const server = new McpServer({
     name: 'SSH MCP Server',
