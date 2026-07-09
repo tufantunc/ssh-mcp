@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
+import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -18,6 +19,61 @@ import type { ExecResult, ServerConfig } from '../src/transports/types';
 // import from src/index, which is safe because the test runner sets
 // SSH_MCP_DISABLE_MAIN=1 (isCliEnabled=false) so no server/CLI side effects run
 // on import.
+
+function runCliStartup(args: string[], envOverrides: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.SSH_MCP_DISABLE_MAIN;
+  delete env.SSH_MCP_TEST;
+  for (const [key, value] of Object.entries(envOverrides)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts', ...args], {
+      cwd: process.cwd(),
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`CLI startup did not exit within timeout. stdout=${stdout} stderr=${stderr}`));
+    }, 10000);
+
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.on('error', (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timeout);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+describe('CLI bootstrap validation order', () => {
+  it('reports incomplete legacy CLI args before loading auto-discovered TOML (Codex 3551304743)', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-cli-order-'));
+    const badToml = path.join(dir, 'bad.toml');
+    await fs.writeFile(badToml, '[[sources]]\nid = "broken"\npassword = "unterminated\n');
+    try {
+      const result = await runCliStartup(['--host=h'], {
+        SSH_MCP_CONFIG: badToml,
+        XDG_CONFIG_HOME: path.join(dir, 'xdg'),
+        HOME: dir,
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain('Missing required --user');
+      expect(result.stderr).not.toContain('TOML parse failed');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('resultToMcpContent (finding 1: exit-0 stderr must not error)', () => {
   it('treats exit 0 as success even when stderr carries an OpenSSH host-key warning', () => {
