@@ -956,9 +956,10 @@ server.tool(
         command: commandWithDescription,
         description,
       });
-      const t = await registry.get(connectionName);
+      const t = await registry.get(resolvedProfile.id);
       startedAt = Date.now();
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
+      audited = true;
       const response = recordAuditResult({
         tool: 'exec',
         profile,
@@ -967,7 +968,6 @@ server.tool(
         startedAt,
         approval: approvalDecision,
       }, result);
-      audited = true;
       return response;
     } catch (err: any) {
       approvalDecision = approvalDecision ?? getApprovalDecisionFromError(err);
@@ -1026,7 +1026,7 @@ if (!DISABLE_SUDO) {
           command: commandWithDescription,
           description,
         });
-        const t = await registry.get(connectionName);
+        const t = await registry.get(resolvedProfile.id);
         // Legacy single-host mode may still pass --sudoPassword on CLI; in
         // multi-host mode each ServerConfig carries its own sudoPassword.
         const legacySudo = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined && !isMultiHost)
@@ -1038,6 +1038,7 @@ if (!DISABLE_SUDO) {
           mode: 'sudo',
           password: legacySudo,
         });
+        audited = true;
         const response = recordAuditResult({
           tool: 'sudo-exec',
           profile,
@@ -1046,7 +1047,6 @@ if (!DISABLE_SUDO) {
           startedAt,
           approval: approvalDecision,
         }, result);
-        audited = true;
         return response;
       } catch (err: any) {
         approvalDecision = approvalDecision ?? getApprovalDecisionFromError(err);

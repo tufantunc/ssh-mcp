@@ -112,8 +112,12 @@ export class TransportRegistry {
     );
   }
 
-  /** Resolve name argument → canonical name. Falls back to default. */
-  private resolveName(name?: string): string {
+  /**
+   * Resolve name argument → canonical name without initializing a transport.
+   * Useful when a caller must validate target selection before doing other
+   * work (for example, before prompting for approval).
+   */
+  resolveRegisteredName(name?: string): string {
     if (name && this.configs.has(name)) return name;
     if (name && !this.configs.has(name)) {
       throw new Error(
@@ -135,6 +139,11 @@ export class TransportRegistry {
       );
     }
     return this.defaultName;
+  }
+
+  /** Resolve name argument → canonical name. Falls back to default. */
+  private resolveName(name?: string): string {
+    return this.resolveRegisteredName(name);
   }
 
   /** Get (or lazily create+init) the transport for a given name. */
