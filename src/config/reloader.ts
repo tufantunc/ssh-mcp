@@ -139,19 +139,22 @@ function reloadSelectsSmart(config: ResolvedConfig): boolean {
 }
 
 /**
- * Reject a reload that CHANGES the live smart engine's LLM settings. The
- * SmartApproval sub-engine is constructed once at boot and never rebuilt on
+ * Reject a reload that CHANGES OR REMOVES the live smart engine's LLM settings.
+ * The SmartApproval sub-engine is constructed once at boot and never rebuilt on
  * reload (reloadPolicy only reseeds the mode store), so an edited
  * `[approval.llm]` block — endpoint/model/api_key/timeout_ms/provider or the
  * associated fail_closed flag — would be reported as applied while approvals
- * keep hitting the stale boot-time engine.
+ * keep hitting the stale boot-time engine. Removing the block entirely is the
+ * same trap: the armed sub-engine survives and stays WebUI-selectable, so a
+ * later switch back to smart hits settings the on-disk file claims are gone.
  *
  * This must run whenever a smart engine is armed, even if the reloaded policy
- * currently resolves to yolo/manual. Otherwise an operator can edit inactive
- * `[approval.llm]`, then later flip back to smart and expect the new endpoint /
- * model / key to be live while the process still holds the boot-time engine.
- * Missing endpoint/model for an actually-selected smart policy is still handled
- * by assertSmartPolicyHasCurrentLlm + reloadPolicy's assertSwitchable.
+ * currently resolves to yolo/manual. Otherwise an operator can edit or delete
+ * inactive `[approval.llm]`, then later flip back to smart and expect the new
+ * (or absent) endpoint / model / key to be honored while the process still
+ * holds the boot-time engine. Missing endpoint/model for an actually-selected
+ * smart policy is still handled by assertSmartPolicyHasCurrentLlm +
+ * reloadPolicy's assertSwitchable.
  */
 function assertSmartLlmUnchanged(config: ResolvedConfig, engine: ApprovalReloadTarget): void {
   const live = engine.describeSmartLlm();
@@ -159,7 +162,22 @@ function assertSmartLlmUnchanged(config: ResolvedConfig, engine: ApprovalReloadT
 
   const input = resolveApprovalEngineInput(config);
   const llm = input?.llm;
-  if (!llm) return; // No incoming [approval.llm] block to compare.
+  if (!llm) {
+    // The reloaded file has REMOVED the `[approval.llm]` block (or the whole
+    // `[approval]` section) while a smart sub-engine is still armed from boot.
+    // The sub-engine is never rebuilt, and buildApprovalEngineFromConfig
+    // PRE-ARMS smart whenever the LLM is fully configured, so the WebUI keeps
+    // listing `smart` in availableModes() even while the current policy resolves
+    // to yolo/manual. An operator who later switches back to smart would hit the
+    // STALE boot-time endpoint/model/key that the on-disk config claims no longer
+    // exists — the same stale-config trap as an edited block, and a divergence
+    // between fresh boot (which would fail to arm smart) and hot reload. Reject
+    // and roll back; restart to actually drop the LLM settings / disarm smart.
+    throw new Error(
+      'smart approval [approval.llm] removed while the smart engine is armed ' +
+      'cannot be hot-reloaded (the smart engine is built once at boot) — restart to apply',
+    );
+  }
 
   const nextProvider = (llm.provider as string | undefined) ?? 'openai';
   const nextFailClosed = config.approval?.fail_closed !== false; // default true

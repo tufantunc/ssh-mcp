@@ -825,6 +825,71 @@ auth = "kerberos"
     expect(res.reason).toMatch(/fail_closed/);
   });
 
+  it('rejects a reload that REMOVES the [approval.llm] block while smart is armed but inactive', async () => {
+    // Codex V7: smart was armed at boot, but the reloaded file deletes the whole
+    // [approval.llm] block while currently selecting yolo. The armed SmartApproval
+    // sub-engine survives (never rebuilt) and stays WebUI-selectable, so a later
+    // switch back to smart would hit the STALE boot-time endpoint/model/key that
+    // the on-disk config claims no longer exists. Must be rejected + rolled back.
+    const registry = freshRegistry(TOML_A);
+    const engine = smartArmedEngine();
+    const removedLlmWhileYolo = `
+[approval]
+mode = "yolo"
+
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+`;
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () => parseTomlConfig(removedLlmWhileYolo) as ResolvedConfig,
+      log: () => {},
+    });
+    const events: ConfigReloadedEvent[] = [];
+    reloader.on('config-reloaded', e => events.push(e));
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/rolled back/);
+    expect(res.reason).toMatch(/\[approval\.llm\] removed/);
+    // Connections + policy untouched, no success event.
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+    expect(events).toHaveLength(0);
+  });
+
+  it('rejects removing the entire [approval] section while smart is armed but inactive', async () => {
+    // Even harsher removal: the whole [approval] section is gone, so
+    // resolveApprovalEngineInput has no llm to compare, yet the boot smart engine
+    // is still armed. A per-source-only config keeps global default yolo; the
+    // armed engine must still block the reload rather than silently drop the LLM.
+    const registry = freshRegistry(TOML_A);
+    const engine = smartArmedEngine();
+    const noApprovalSection = `
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+`;
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () => parseTomlConfig(noApprovalSection) as ResolvedConfig,
+      log: () => {},
+    });
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/\[approval\.llm\] removed/);
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+  });
+
   it('ALLOWS a reload that keeps the LLM block byte-identical (only source edits)', async () => {
     const registry = freshRegistry(TOML_A);
     const engine = smartArmedEngine();
