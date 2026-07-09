@@ -35,7 +35,7 @@ export function registerTools(
     ctx: ToolContext,
   ) {
     const conn = await resolveConn(profileName);
-    const evaluation = policy.evaluate(command, conn.profile, toolName);
+    const evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName);
 
     if (evaluation.decision === 'deny') {
       throw new Error(`POLICY_DENIED: ${evaluation.reason || 'Command not allowed'}`);
@@ -94,8 +94,9 @@ export function registerTools(
     },
   ) {
     const ctx = makeCtx(opts.extra, opts.profile);
-    const cleanCmd = sanitizeCommand(command, Infinity);
     const profileName = defaultProfileName(opts.profile);
+    const profile = registry.getProfile(profileName);
+    const cleanCmd = sanitizeCommand(command, profile.maxChars);
     try {
       const { conn, evaluation, approver } = await checkPolicyAndApprove(cleanCmd, profileName, opts.toolName, ctx);
       const result = await opts.exec(conn);
@@ -248,8 +249,8 @@ export function registerTools(
     { destructiveHint: true },
     async ({ command, profile, session, tty }, extra) => {
       const ctx = makeCtx(extra, profile, session);
-      const cleanCmd = sanitizeCommand(command, Infinity);
       const profileName = defaultProfileName(profile);
+      const cleanCmd = sanitizeCommand(command, registry.getProfile(profileName).maxChars);
       try {
         const { conn, evaluation, approver } = await checkPolicyAndApprove(cleanCmd, profileName, 'run-command', ctx);
 
@@ -282,8 +283,8 @@ export function registerTools(
     { destructiveHint: true },
     async ({ command, profile }, extra) => {
       const ctx = makeCtx(extra, profile);
-      const cleanCmd = sanitizeCommand(command, Infinity);
       const profileName = defaultProfileName(profile);
+      const cleanCmd = sanitizeCommand(command, registry.getProfile(profileName).maxChars);
       try {
         const { conn, evaluation, approver } = await checkPolicyAndApprove(`sudo ${cleanCmd}`, profileName, 'privileged-command', ctx);
 

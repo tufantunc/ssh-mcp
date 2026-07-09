@@ -33,13 +33,6 @@ export const DEFAULT_RULES: PolicyRules = {
   },
 };
 
-const CLASS_RANK: Record<CommandClass, number> = {
-  'read-only': 0,
-  safe: 1,
-  destructive: 2,
-  privileged: 3,
-};
-
 export class PolicyEngine {
   private opaUrl: string | null = null;
 
