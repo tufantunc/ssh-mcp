@@ -212,6 +212,39 @@ auth = "key"
 `)).toThrow(/key_path|private_key/);
   });
 
+  it('resolves env:NAME for an inline private_key (Codex 3541772408)', () => {
+    // Without env resolution the literal "env:SSH_KEY" would be copied into
+    // ServerConfig.privateKey and the ssh2 transport would fail to parse it as
+    // key material even though the env var is set.
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "key"
+private_key = "env:SSH_KEY"
+`, { env: { SSH_KEY: '-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----' } });
+    expect(cfg.sources[0].privateKey).toBe('-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----');
+    expect(cfg.sources[0].privateKey).not.toMatch(/^env:/);
+  });
+
+  it('throws (redact-safe) when an inline private_key env ref is unset', () => {
+    try {
+      parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "key"
+private_key = "env:SSH_KEY_MISSING"
+`, { env: {} });
+      throw new Error('should have thrown');
+    } catch (e: any) {
+      expect(e.message).toMatch(/SSH_KEY_MISSING/);
+      expect(e.message).toMatch(/private_key/);
+    }
+  });
+
   it('rejects password auth with no password', () => {
     expect(() => parseTomlConfig(`
 [[sources]]
@@ -240,8 +273,84 @@ default = true
 `)).toThrow(/default/);
   });
 
-  it('rejects non-loopback webui without auth_token', () => {
+  it('rejects a non-boolean default marker such as default = "true" (Codex 3541772419)', () => {
+    // A quoted/non-boolean `default` value must be rejected rather than silently
+    // ignored, otherwise the intended default is never applied and omitted
+    // connectionName calls start failing under the multi-source guard.
     expect(() => parseTomlConfig(`
+[[sources]]
+id = "a"
+host = "h"
+user = "u"
+auth = "kerberos"
+default = "true"
+`)).toThrow(/default must be a boolean/);
+  });
+
+  it('rejects a numeric default marker (default = 1)', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "a"
+host = "h"
+user = "u"
+auth = "kerberos"
+default = 1
+`)).toThrow(/default must be a boolean/);
+  });
+
+  it('accepts default = false (explicit non-default) without error', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "a"
+host = "h"
+user = "u"
+auth = "kerberos"
+default = false
+`);
+    expect(cfg.defaultName).toBeUndefined();
+    expect(cfg.defaultExplicit).toBe(false);
+  });
+
+  it('rejects non-loopback webui without auth_token when enabled', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[webui]
+enabled = true
+host = "0.0.0.0"
+port = 8080
+`)).toThrow(/auth_token/);
+  });
+
+  it('does NOT require auth_token for a disabled non-loopback webui (Codex 3541772404)', () => {
+    // With enabled = false the section is inert (parsed/reserved, never served),
+    // so a non-loopback host must not force SSH startup to fail on a missing
+    // token.
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[webui]
+enabled = false
+host = "0.0.0.0"
+port = 8080
+`);
+    expect(cfg.webui?.enabled).toBe(false);
+    expect(cfg.webui?.host).toBe('0.0.0.0');
+    expect(cfg.webui?.auth_token).toBeUndefined();
+  });
+
+  it('does NOT require auth_token for a non-loopback webui with enabled omitted (defaults off)', () => {
+    // [webui] with a host but no `enabled` key is off by default, so the token
+    // gate must not fire.
+    const cfg = parseTomlConfig(`
 [[sources]]
 id = "x"
 host = "h"
@@ -251,7 +360,8 @@ auth = "kerberos"
 [webui]
 host = "0.0.0.0"
 port = 8080
-`)).toThrow(/auth_token/);
+`);
+    expect(cfg.webui?.auth_token).toBeUndefined();
   });
 
   it('accepts non-loopback webui when auth_token is set', () => {
@@ -263,6 +373,7 @@ user = "u"
 auth = "kerberos"
 
 [webui]
+enabled = true
 host = "0.0.0.0"
 port = 8080
 auth_token = "env:TKN"
