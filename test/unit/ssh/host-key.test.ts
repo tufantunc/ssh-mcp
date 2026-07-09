@@ -40,9 +40,16 @@ describe('verifyHostKey', () => {
 });
 
 describe('fingerprintPublicKey', () => {
-  it('produces a SHA256 fingerprint', () => {
+  it('produces a deterministic SHA256 fingerprint', () => {
     const key = Buffer.from('fake-key-data');
     const fp = fingerprintPublicKey(key);
     expect(fp).toMatch(/^SHA256:/);
+    expect(fp).toBe(fingerprintPublicKey(key));
+  });
+
+  it('produces different fingerprints for different keys', () => {
+    const fp1 = fingerprintPublicKey(Buffer.from('key-one'));
+    const fp2 = fingerprintPublicKey(Buffer.from('key-two'));
+    expect(fp1).not.toBe(fp2);
   });
 });

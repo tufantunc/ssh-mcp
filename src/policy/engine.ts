@@ -163,11 +163,10 @@ export class PolicyEngine {
   }
 
   private requiresApproval(profile: Profile, needsApproval: boolean): boolean {
-    if (!needsApproval) return false;
     const mode: ApprovalMode = profile.approvalPolicy;
     if (mode === 'auto') return false;
-    if (mode === 'deny') return true;
     if (mode === 'ask-all') return true;
+    if (mode === 'deny') return needsApproval;
     return needsApproval;
   }
 
