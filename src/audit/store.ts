@@ -29,7 +29,7 @@ import {
   DEFAULT_MAX_FILE_BYTES,
   DEFAULT_RETAIN,
 } from './types.js';
-import { redact, redactPemBlocks } from './redactor.js';
+import { redact, preRedactUnboundedTokens } from './redactor.js';
 import { rotateIfNeeded, pruneOldDays } from './rotator.js';
 
 /** Resolve audit directory, expanding `~` and honoring env override. */
@@ -92,6 +92,19 @@ export function capUtf8(s: string, maxBytes: number): { text: string; truncated:
 export const REDACT_SCAN_HEADROOM_BYTES = 4096;
 
 /**
+ * Floor (bytes) for the command/description audit cap.
+ *
+ * The command is capped so a rejected multi-MB payload cannot force expensive
+ * redaction plus a large JSONL append (Codex 3541772945). But the cap must not
+ * be the (possibly tiny) stdout/stderr `auditMaxBytes` — a legitimate command
+ * is short and must survive even when output capture is set to a few bytes. So
+ * the effective command cap is `max(auditMaxBytes, this floor)`: honor a larger
+ * configured output cap, never drop below a bound generous enough to hold any
+ * realistic command line, while still bounding a genuine multi-MB DoS payload.
+ */
+export const AUDIT_COMMAND_MIN_CAP_BYTES = 16384;
+
+/**
  * Bound, then redact, then cap — in that order.
  *
  * The naive `capUtf8(redact(s), cap)` redacts the *entire* raw string before
@@ -111,14 +124,15 @@ export function capThenRedact(
   cap: number,
 ): { text: string; truncated: boolean } {
   if (cap <= 0) return { text: '', truncated: s.length > 0 };
-  // 0. Redact PEM private-key blocks over the FULL text first. PEM_RE is
-  //    terminator-anchored, so a key whose `END` marker falls past the bounded
-  //    scan window below would otherwise never match and its raw prefix could
-  //    survive into the capped output. This full-scan is cheap when no key is
-  //    present and is the only rule that must see the un-capped string.
-  const pemSafe = redactPemBlocks(s);
+  // 0. Pre-redact the UNBOUNDED token shapes over the FULL text first. PEM_RE is
+  //    terminator-anchored and JWTs can carry large claims/cert chains, so a key
+  //    or token whose end falls past the bounded scan window below would
+  //    otherwise never fully match and its raw prefix could survive into the
+  //    capped output. This full-scan is cheap when none are present and is the
+  //    only step that must see the un-capped string (Codex 3541772953).
+  const preRedacted = preRedactUnboundedTokens(s);
   // 1. Bound the bytes the remaining redaction rules scan.
-  const scan = capUtf8(pemSafe, cap + REDACT_SCAN_HEADROOM_BYTES);
+  const scan = capUtf8(preRedacted, cap + REDACT_SCAN_HEADROOM_BYTES);
   // 2. Redact within the bounded window.
   const redacted = redact(scan.text);
   // 3. Cap the redacted text to the final size.
@@ -169,13 +183,26 @@ export function buildRecord(input: BuildRecordInput): AuditRecord {
   const now = input.now ?? new Date();
   const cap = input.auditMaxBytes ?? DEFAULT_AUDIT_MAX_BYTES;
 
+  // Cap the command/description so a rejected multi-MB payload cannot force
+  // expensive redaction plus a large JSONL append, bypassing the size guard
+  // (Codex 3541772945). Use max(cap, floor) so a legitimate short command still
+  // survives when the stdout/stderr auditMaxBytes is set very small, while a
+  // genuine oversized command is still bounded. capThenRedact pre-redacts
+  // unbounded key/token shapes over the full text before truncating. The same
+  // auditCommand pattern feeds the sudo/helper paths.
+  const cmdCap = Math.max(cap, AUDIT_COMMAND_MIN_CAP_BYTES);
+  const command = capThenRedact(input.command, cmdCap).text;
+  const description = input.description
+    ? capThenRedact(input.description, cmdCap).text
+    : undefined;
+
   const rec: AuditRecord = {
     ts: now.toISOString(),
     id: newRecordId(now),
     profile: input.profile,
     tool: input.tool,
-    command: redact(input.command),
-    description: input.description ? redact(input.description) : undefined,
+    command,
+    description,
     approval: {
       mode: input.approval.mode,
       decision: input.approval.decision,

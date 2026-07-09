@@ -110,9 +110,41 @@ describe('audit redactor', () => {
 
   it('redacts a fine-grained PAT embedded in a remote URL', () => {
     const fineGrained = 'github_pat_' + 'D'.repeat(22) + '_' + 'E'.repeat(59);
-    const url = `https://x-access-token:${fineGrained}@github.com/owner/repo.git`;
+    const url = 'https://' + 'x-access-token' + ':' + fineGrained + '@' + 'github.com/owner/repo.git';
     const out = redact(`git clone ${url}`);
     expect(out).not.toContain(fineGrained);
     expect(out).toContain('<redacted>');
+  });
+
+  it('redacts a dangling PEM header with no matching END marker (Codex 3541772951)', () => {
+    // A truncated pasted key / here-doc command text carries a BEGIN header
+    // without an END terminator; the main redact() path must still scrub it.
+    const dangling = [
+      'cat <<EOF',
+      '-----BEGIN ' + 'RSA PRIVATE KEY-----',
+      'MIIEowIBAAKCAQEA' + 'x'.repeat(40),
+      'more-secret-key-bytes-with-no-end-marker',
+    ].join('\n');
+    const out = redact(dangling);
+    expect(out).toContain(R);
+    expect(out).not.toContain('MIIEowIBAAKCAQEA');
+    expect(out).not.toContain('more-secret-key-bytes-with-no-end-marker');
+  });
+
+  it('redacts URL userinfo passwords while preserving scheme/user/host (Codex 3541772956)', () => {
+    const httpUrl = 'https://alice:hunter2@example.com/repo.git';
+    const dbUrl = 'postgres://dbuser:s3cr3tpw@db.internal:5432/app';
+    const out = redact(`git clone ${httpUrl} && psql ${dbUrl}`);
+    // Passwords gone.
+    expect(out).not.toContain('hunter2');
+    expect(out).not.toContain('s3cr3tpw');
+    // Structure preserved.
+    expect(out).toContain(`https://alice:${R}@example.com/repo.git`);
+    expect(out).toContain(`postgres://dbuser:${R}@db.internal:5432/app`);
+  });
+
+  it('does not touch a URL with no userinfo credentials', () => {
+    const url = 'https://example.com/path?query=1';
+    expect(redact(url)).toBe(url);
   });
 });
