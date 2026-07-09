@@ -122,17 +122,28 @@ async function main() {
     console.error('SSH MCP Server v2 running on stdio');
   }
 
+  const reaperInterval = setInterval(() => {
+    for (const info of registry.listConnections()) {
+      const conn = registry.get(info.profile);
+      if (conn) {
+        conn.reapExpiredSessions();
+      }
+    }
+    registry.reapIdleConnections();
+  }, 60_000);
+
+  let isShuttingDown = false;
   const cleanup = async () => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
     console.error('Shutting down SSH MCP Server...');
+    clearInterval(reaperInterval);
     await registry.closeAll();
     process.exit(0);
   };
 
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
-  process.on('exit', () => {
-    registry.closeAll().catch(() => {});
-  });
 }
 
 const isTestMode = process.env.SSH_MCP_TEST === '1';
