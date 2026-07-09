@@ -61,7 +61,6 @@ interface AuditModuleLike {
     append(record: unknown): unknown;
   };
   resolveAuditDir(override?: string | null): string;
-  yoloApproval(now?: Date): unknown;
 }
 
 export type AuditModuleImporter = (specifier: string) => Promise<unknown>;
@@ -100,6 +99,17 @@ function toApprovalSection(decision: ApprovalDecision) {
     reason: decision.reason,
     decided_at: decision.decided_at,
     decided_by: decision.decided_by,
+  };
+}
+
+function approvalNotReachedSection(now: Date, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? 'unknown error');
+  return {
+    mode: 'manual',
+    decision: 'deny',
+    reason: `approval gate was not reached: ${message}`,
+    decided_at: now.toISOString(),
+    decided_by: 'approval:not-run',
   };
 }
 
@@ -147,11 +157,12 @@ export async function loadAuditSink(
       try {
         const now = new Date();
         const durationMs = Math.max(0, Date.now() - input.startedAt);
-        // Truth: prefer the real decision; fall back to the yolo placeholder
-        // only when the gate never produced one (error before the gate ran).
+        // Truth: prefer the real decision. When a config/transport failure
+        // happens before the gate can decide, never synthesize a yolo/allow
+        // decision: record an explicit not-run denial marker instead.
         const approval = input.approval
           ? toApprovalSection(input.approval)
-          : mod.yoloApproval(now);
+          : approvalNotReachedSection(now, input.error);
         store.append({
           profile: input.profile,
           tool: input.tool,
