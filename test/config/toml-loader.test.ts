@@ -9,6 +9,7 @@ import {
   expandHome,
   resolveEnvRef,
   defaultDiscoveryPaths,
+  discoverConfigPath,
 } from '../../src/config/toml-loader.js';
 
 describe('expandHome', () => {
@@ -63,6 +64,24 @@ describe('defaultDiscoveryPaths', () => {
     const paths = defaultDiscoveryPaths({ XDG_CONFIG_HOME: '/x/conf' });
     expect(paths).toContain('/x/conf/ssh-mcp/config.toml');
     expect(paths[paths.length - 1].endsWith(path.join('.ssh-mcp', 'config.toml'))).toBe(true);
+  });
+
+  it('rejects a non-file SSH_MCP_CONFIG instead of falling through (Codex 3551117478)', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-mcp-discover-'));
+    try {
+      const envDir = path.join(tmp, 'env-config-dir');
+      const xdgRoot = path.join(tmp, 'xdg');
+      fs.mkdirSync(envDir, { recursive: true });
+      fs.mkdirSync(path.join(xdgRoot, 'ssh-mcp'), { recursive: true });
+      fs.writeFileSync(path.join(xdgRoot, 'ssh-mcp', 'config.toml'), '[[sources]]\n');
+
+      expect(() => discoverConfigPath({
+        SSH_MCP_CONFIG: envDir,
+        XDG_CONFIG_HOME: xdgRoot,
+      })).toThrow(/not a regular file|cannot access/);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 
@@ -366,6 +385,38 @@ port = 8080
     expect(cfg.webui?.auth_token).toBeUndefined();
   });
 
+  it('does NOT resolve auth_token env refs when webui is disabled (Codex 3551117490)', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[webui]
+enabled = false
+host = "0.0.0.0"
+auth_token = "env:WEBUI_TOKEN_UNSET"
+`, { env: {} });
+    expect(cfg.webui?.enabled).toBe(false);
+    expect(cfg.webui?.auth_token).toBeUndefined();
+  });
+
+  it('still resolves auth_token env refs when webui is enabled', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[webui]
+enabled = true
+host = "127.0.0.1"
+auth_token = "env:WEBUI_TOKEN_UNSET"
+`, { env: {} })).toThrow(/WEBUI_TOKEN_UNSET/);
+  });
+
   it('does NOT require auth_token for a non-loopback webui with enabled omitted (defaults off)', () => {
     // [webui] with a host but no `enabled` key is off by default, so the token
     // gate must not fire.
@@ -523,6 +574,17 @@ strict_host_key_checking = "accept-new"
     expect(cfg.sources[0].strictHostKeyChecking).toBe('accept-new');
   });
 
+  it('rejects an unquoted numeric known_hosts_file before home expansion (Codex 3551117485)', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u@EX"
+auth = "kerberos"
+known_hosts_file = 123
+`)).toThrow(/known_hosts_file must be a quoted string/);
+  });
+
   it('accepts host-key fields on a kerberos source (implies openssh)', () => {
     const cfg = parseTomlConfig(`
 [[sources]]
@@ -561,6 +623,39 @@ key_path = "/k"
 `);
     expect(cfg.sources[0].keyPath).toBe('/k');
     expect(cfg.sources[0].transport).toBe('openssh');
+  });
+
+  it('ignores unsupported openssh private_key env refs when key_path is present (Codex 3551117493)', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "key"
+transport = "openssh"
+key_path = "/k"
+private_key = "env:SSH_KEY_UNSET"
+`, { env: {} });
+    expect(cfg.sources[0].keyPath).toBe('/k');
+    expect(cfg.sources[0].privateKey).toBeUndefined();
+  });
+
+  it('reports the openssh key_path requirement before resolving unsupported private_key env refs', () => {
+    try {
+      parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "key"
+transport = "openssh"
+private_key = "env:SSH_KEY_UNSET"
+`, { env: {} });
+      throw new Error('should have thrown');
+    } catch (e: any) {
+      expect(e.message).toMatch(/requires key_path/);
+      expect(e.message).not.toContain('SSH_KEY_UNSET');
+    }
   });
 
   it('rejects an unquoted numeric key_path before home expansion (Codex 3549260462)', () => {
@@ -638,6 +733,31 @@ password = 987654
       expect(e.message).toContain('sources.p.password');
       expect(e.message).not.toContain('987654');
     }
+  });
+
+  it('does not resolve inactive password env refs on key or kerberos sources (Codex 3551117501)', () => {
+    const keyCfg = parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "key"
+key_path = "/k"
+password = "env:PASSWORD_UNSET"
+`, { env: {} });
+    expect(keyCfg.sources[0].authMode).toBe('key');
+    expect(keyCfg.sources[0].password).toBeUndefined();
+
+    const kerberosCfg = parseTomlConfig(`
+[[sources]]
+id = "krb"
+host = "h"
+user = "u@EX"
+auth = "kerberos"
+password = "env:PASSWORD_UNSET"
+`, { env: {} });
+    expect(kerberosCfg.sources[0].authMode).toBe('kerberos');
+    expect(kerberosCfg.sources[0].password).toBeUndefined();
   });
 
   it('allowEmptySources tolerates a TOML with only top-level sections', () => {
