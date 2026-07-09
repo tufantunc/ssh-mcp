@@ -677,10 +677,13 @@ export function buildApprovalProfile(
   };
 }
 
-function approvalProfileForConnection(connectionName?: string): ResolvedSource {
-  const id = resolvedProfileName(connectionName);
+function approvalTargetForConnection(connectionName?: string): { profile: string; approvalProfile: ResolvedSource } {
+  const id = registry.resolveRegisteredName(connectionName);
   const source = resolvedConfig.sources.find(s => s.name === id);
-  return buildApprovalProfile(id, resolvedConfig.perSourceApproval ?? {}, source);
+  return {
+    profile: id,
+    approvalProfile: buildApprovalProfile(id, resolvedConfig.perSourceApproval ?? {}, source),
+  };
 }
 
 export function appendDescriptionComment(command: string, description?: string): string {
@@ -952,7 +955,7 @@ server.tool(
   async ({ command, description, connectionName }) => {
     const sanitizedCommand = sanitizeCommand(command);
     const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
-    const profile = resolvedProfileName(connectionName);
+    let profile = resolvedProfileName(connectionName);
     // Fallback timestamp for errors raised before the transport call (registry
     // init failure, approval deny). Re-captured immediately before t.exec below
     // so a SUCCESSFUL command's audit durationMs measures command runtime only,
@@ -961,15 +964,18 @@ server.tool(
     let audited = false;
     let approvalDecision: ApprovalDecision | undefined;
     try {
+      const target = approvalTargetForConnection(connectionName);
+      profile = target.profile;
       approvalDecision = await gateApproval({
-        profile: approvalProfileForConnection(connectionName),
+        profile: target.approvalProfile,
         tool: 'exec',
         command: commandWithDescription,
         description,
       });
-      const t = await registry.get(connectionName);
+      const t = await registry.get(target.profile);
       startedAt = Date.now();
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
+      audited = true;
       const response = recordAuditResult({
         tool: 'exec',
         profile,
@@ -978,7 +984,6 @@ server.tool(
         startedAt,
         approval: approvalDecision,
       }, result);
-      audited = true;
       return response;
     } catch (err: any) {
       approvalDecision = approvalDecision ?? getApprovalDecisionFromError(err);
@@ -1009,7 +1014,7 @@ if (!DISABLE_SUDO) {
     async ({ command, description, connectionName }) => {
       const sanitizedCommand = sanitizeCommand(command);
       const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
-      const profile = resolvedProfileName(connectionName);
+      let profile = resolvedProfileName(connectionName);
       // Fallback timestamp for errors raised before the transport call (registry
       // init failure, approval deny). Re-captured immediately before
       // t.execElevated below so a SUCCESSFUL command's audit durationMs measures
@@ -1018,13 +1023,15 @@ if (!DISABLE_SUDO) {
       let audited = false;
       let approvalDecision: ApprovalDecision | undefined;
       try {
+        const target = approvalTargetForConnection(connectionName);
+        profile = target.profile;
         approvalDecision = await gateApproval({
-          profile: approvalProfileForConnection(connectionName),
+          profile: target.approvalProfile,
           tool: 'sudo-exec',
           command: commandWithDescription,
           description,
         });
-        const t = await registry.get(connectionName);
+        const t = await registry.get(target.profile);
         // Legacy single-host mode may still pass --sudoPassword on CLI; in
         // multi-host mode each ServerConfig carries its own sudoPassword.
         const legacySudo = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined && !isMultiHost)
@@ -1036,6 +1043,7 @@ if (!DISABLE_SUDO) {
           mode: 'sudo',
           password: legacySudo,
         });
+        audited = true;
         const response = recordAuditResult({
           tool: 'sudo-exec',
           profile,
@@ -1044,7 +1052,6 @@ if (!DISABLE_SUDO) {
           startedAt,
           approval: approvalDecision,
         }, result);
-        audited = true;
         return response;
       } catch (err: any) {
         approvalDecision = approvalDecision ?? getApprovalDecisionFromError(err);
