@@ -105,6 +105,14 @@ export const REDACT_SCAN_HEADROOM_BYTES = 4096;
 export const AUDIT_COMMAND_MIN_CAP_BYTES = 16384;
 
 /**
+ * Hard cap for short audit metadata labels such as `profile` / connectionName.
+ * These fields originate from user-provided config or tool arguments on some
+ * error paths, so cap+redact them before JSONL serialization to avoid a
+ * rejected unknown-name request appending multi-MB records.
+ */
+export const AUDIT_PROFILE_MAX_BYTES = 1024;
+
+/**
  * Bound, then redact, then cap — in that order.
  *
  * The naive `capUtf8(redact(s), cap)` redacts the *entire* raw string before
@@ -199,7 +207,7 @@ export function buildRecord(input: BuildRecordInput): AuditRecord {
   const rec: AuditRecord = {
     ts: now.toISOString(),
     id: newRecordId(now),
-    profile: input.profile,
+    profile: capThenRedact(input.profile, AUDIT_PROFILE_MAX_BYTES).text,
     tool: input.tool,
     command,
     description,

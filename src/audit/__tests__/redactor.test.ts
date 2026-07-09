@@ -147,4 +147,22 @@ describe('audit redactor', () => {
     const url = 'https://example.com/path?query=1';
     expect(redact(url)).toBe(url);
   });
+
+  it('redacts quoted CLI secrets that contain escaped quotes', () => {
+    const input = [
+      'ssh --password="abc\\"def"',
+      "--api-key 'one\\'two'",
+      'token "tok\\"next"',
+    ].join(' ');
+    const out = redact(input);
+
+    expect(out).toContain(`--password=${R}`);
+    expect(out).toContain(`--api-key ${R}`);
+    expect(out).toContain(`token ${R}`);
+    expect(out).not.toContain('abc');
+    expect(out).not.toContain('def');
+    expect(out).not.toContain('one');
+    expect(out).not.toContain('two');
+    expect(out).not.toContain('next');
+  });
 });
