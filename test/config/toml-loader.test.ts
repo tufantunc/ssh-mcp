@@ -9,7 +9,7 @@ import {
   expandHome,
   resolveEnvRef,
   defaultDiscoveryPaths,
-} from '../toml-loader.js';
+} from '../../src/config/toml-loader.js';
 
 describe('expandHome', () => {
   it('expands a leading ~ alone', () => {
@@ -172,6 +172,25 @@ password = "env:NOT_SET"
 });
 
 describe('parseTomlConfig: validation', () => {
+  it('redacts secret assignment lines from TOML parser errors (Codex 3549260449)', () => {
+    try {
+      parseTomlConfig(`
+[[sources]]
+id = "p"
+host = "h"
+user = "u"
+auth = "password"
+password = "super-secret-value
+`);
+      throw new Error('should have thrown');
+    } catch (e: any) {
+      expect(e.message).toMatch(/TOML parse failed/);
+      expect(e.message).toContain('password');
+      expect(e.message).toContain('[REDACTED]');
+      expect(e.message).not.toContain('super-secret-value');
+    }
+  });
+
   it('rejects empty source list', () => {
     expect(() => parseTomlConfig(`[server]\naudit_dir = "/tmp"`)).toThrow(/sources/);
   });
@@ -424,6 +443,19 @@ mode = "yolo"
     // object exists (it is always initialized to `{}`).
     expect(cfg.perSourceApproval).toEqual({ x: 'yolo' });
   });
+
+  it('rejects an empty per-source approval override mode (Codex 3549260472)', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[sources.approval]
+mode = ""
+`)).toThrow(/sources\.x\.approval\.mode must be one of/);
+  });
 });
 
 describe('parseTomlConfig: transport/host-key/secret guards (R1 findings 3-6)', () => {
@@ -529,6 +561,17 @@ key_path = "/k"
 `);
     expect(cfg.sources[0].keyPath).toBe('/k');
     expect(cfg.sources[0].transport).toBe('openssh');
+  });
+
+  it('rejects an unquoted numeric key_path before home expansion (Codex 3549260462)', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "key"
+key_path = 123
+`)).toThrow(/key_path must be a quoted string/);
   });
 
   it('still accepts inline private_key on the ssh2 transport', () => {

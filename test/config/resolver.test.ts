@@ -3,8 +3,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { resolveConfig } from '../resolver.js';
-import type { ServerConfig } from '../../transports/types.js';
+import { resolveConfig } from '../../src/config/resolver.js';
+import type { ServerConfig } from '../../src/transports/types.js';
 
 function cliSource(name = 'cli'): ServerConfig {
   return {
@@ -162,6 +162,36 @@ auth = "kerberos"
     const cfg = resolveConfig({ cliSources: [], env: { SSH_MCP_CONFIG: envPath } });
     expect(cfg.sources[0].name).toBe('env');
     expect(cfg.configPath).toBe(envPath);
+  });
+
+  it('fails closed when SSH_MCP_CONFIG is inaccessible instead of falling through (Codex 3549260453)', () => {
+    const blockedDir = path.join(tmp, 'blocked');
+    fs.mkdirSync(blockedDir, { recursive: true });
+    const blockedPath = writeToml(blockedDir, 'config.toml', `
+[[sources]]
+id = "blocked"
+host = "blocked.example"
+user = "u"
+auth = "kerberos"
+`);
+    const xdgRoot = path.join(tmp, 'xdg-readable');
+    writeToml(xdgRoot, 'ssh-mcp/config.toml', `
+[[sources]]
+id = "xdg"
+host = "xdg.example"
+user = "u"
+auth = "kerberos"
+`);
+
+    fs.chmodSync(blockedDir, 0o000);
+    try {
+      expect(() => resolveConfig({
+        cliSources: [],
+        env: { SSH_MCP_CONFIG: blockedPath, XDG_CONFIG_HOME: xdgRoot },
+      })).toThrow(/cannot access|cannot read|EACCES|permission/i);
+    } finally {
+      fs.chmodSync(blockedDir, 0o700);
+    }
   });
 
   it('a set-but-missing SSH_MCP_CONFIG falls through to XDG discovery instead of hard-failing', () => {

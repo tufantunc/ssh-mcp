@@ -8,10 +8,11 @@ import {
   resolveAuthMode,
   buildTransportConfig,
   hasLegacyCliFlags,
+  prepareKeyContents,
   validateConfig,
   resolveCliConfigPath,
 } from '../src/index';
-import type { ExecResult } from '../src/transports/types';
+import type { ExecResult, ServerConfig } from '../src/transports/types';
 
 // Pure-function unit tests for the CLI config/result mapping layer. These
 // import from src/index, which is safe because the test runner sets
@@ -241,6 +242,53 @@ describe('buildTransportConfig (Codex 3541767256: deferKeyRead keeps legacy key 
   });
 });
 
+describe('prepareKeyContents (Codex 3549295046: skip deferred key reads when password auth wins)', () => {
+  it('does NOT read a stale keyPath when the resolved authMode is password', async () => {
+    // The registry hook must mirror buildTransportConfig()'s eager-read guard:
+    // a `--password=... --key=/stale` config records keyPath but authMode is
+    // 'password', so the first tool call must use the password, not ENOENT on
+    // the stale/nonexistent key file.
+    const cfg: ServerConfig = {
+      name: 'n',
+      host: 'h',
+      port: 22,
+      username: 'u',
+      authMode: 'password',
+      transport: 'ssh2',
+      password: 'pw',
+      keyPath: '/nonexistent/path/to/stale-key',
+    };
+    await prepareKeyContents(cfg);
+    expect(cfg.privateKey).toBeUndefined();
+    expect(cfg.password).toBe('pw');
+  });
+
+  it('reads the ssh2 keyPath when the resolved authMode is key', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-test-'));
+    const keyPath = path.join(dir, 'id_test');
+    await fs.writeFile(keyPath, 'KEYDATA');
+    try {
+      const cfg: ServerConfig = {
+        name: 'n', host: 'h', port: 22, username: 'u',
+        authMode: 'key', transport: 'ssh2', keyPath,
+      };
+      await prepareKeyContents(cfg);
+      expect(cfg.privateKey).toBe('KEYDATA');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not read the key for an openssh key config (uses -i path instead)', async () => {
+    const cfg: ServerConfig = {
+      name: 'n', host: 'h', port: 22, username: 'u',
+      authMode: 'key', transport: 'openssh', keyPath: '/nonexistent/path/to/key',
+    };
+    await prepareKeyContents(cfg);
+    expect(cfg.privateKey).toBeUndefined();
+  });
+});
+
 describe('validateConfig (Codex P2: reject value-less OpenSSH option flags)', () => {
   const baseCfg = { host: 'h', user: 'u', transport: 'openssh' };
 
@@ -321,6 +369,11 @@ describe('resolveCliConfigPath (Codex R2 P2: reject value-less --config)', () =>
   it('returns the path for --config=<path>', () => {
     expect(resolveCliConfigPath({ config: '/etc/ssh-mcp/config.toml' }))
       .toBe('/etc/ssh-mcp/config.toml');
+  });
+
+  it('expands a leading home marker for --config=~/... (Codex 3549260475)', () => {
+    expect(resolveCliConfigPath({ config: '~/ssh-mcp/config.toml' }))
+      .toBe(path.join(os.homedir(), 'ssh-mcp/config.toml'));
   });
 
   it('rejects a present-but-value-less --config (parsed as null) instead of silently ignoring it', () => {

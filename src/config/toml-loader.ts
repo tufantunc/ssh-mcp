@@ -33,6 +33,29 @@ import type {
 
 const VALID_AUTH: AuthMode[] = ['kerberos', 'key', 'password'];
 const VALID_APPROVAL_MODE: ApprovalMode[] = ['yolo', 'smart', 'manual'];
+const SECRET_TOML_KEYS = [
+  'password',
+  'sudo_password',
+  'su_password',
+  'private_key',
+  'auth_token',
+  'api_key',
+];
+
+function redactTomlParseMessage(message: string): string {
+  const secretAssignment = new RegExp(
+    `(\\b(?:${SECRET_TOML_KEYS.join('|')})\\s*=\\s*).*$`,
+    'i',
+  );
+  return message
+    .split(/\r?\n/)
+    .map(line => line.replace(secretAssignment, '$1[REDACTED]'))
+    .join('\n');
+}
+
+function isMissingPathError(e: any): boolean {
+  return e?.code === 'ENOENT' || e?.code === 'ENOTDIR';
+}
 
 /** Replace a leading `~` with $HOME (POSIX + Windows). No-op for non-string. */
 export function expandHome(p: string | undefined): string | undefined {
@@ -91,8 +114,15 @@ export function discoverConfigPath(env: NodeJS.ProcessEnv = process.env): string
   for (const candidate of defaultDiscoveryPaths(env)) {
     try {
       if (fs.statSync(candidate).isFile()) return candidate;
-    } catch {
-      // not found / permission denied — fall through
+    } catch (e: any) {
+      // SSH_MCP_CONFIG is an explicit user/env selection. A missing env path
+      // still falls through to XDG/home discovery for compatibility, but an
+      // unreadable/inaccessible env path must fail closed rather than silently
+      // booting from a lower-precedence config.
+      if (candidate === env.SSH_MCP_CONFIG && !isMissingPathError(e)) {
+        throw new Error(`Config: cannot access ${candidate}: ${e?.message || e}`);
+      }
+      // not found — fall through
     }
   }
   return undefined;
@@ -131,7 +161,8 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
   try {
     parsed = TOML.parse(raw);
   } catch (e: any) {
-    throw new Error(`Config: TOML parse failed: ${e?.message || e}`);
+    const message = redactTomlParseMessage(e?.message || String(e));
+    throw new Error(`Config: TOML parse failed: ${message}`);
   }
 
   const rawSources = Array.isArray(parsed?.sources) ? parsed.sources : [];
@@ -247,7 +278,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     // non-strings unchanged, so a number would reach the SSH/sudo password
     // paths and fail with an opaque runtime type error. Reject it here with a
     // clear, redact-safe config error that names the field but not the value.
-    const requireSecretString = (
+    const requireConfigString = (
       value: unknown,
       field: string,
     ): string | undefined => {
@@ -259,20 +290,22 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     };
 
     const password = resolveEnvRef(
-      requireSecretString(src.password, 'password'),
+      requireConfigString(src.password, 'password'),
       `sources.${src.id}.password`,
       env,
     );
     const sudoPassword = resolveEnvRef(
-      requireSecretString(src.sudo_password, 'sudo_password'),
+      requireConfigString(src.sudo_password, 'sudo_password'),
       `sources.${src.id}.sudo_password`,
       env,
     );
     const suPassword = resolveEnvRef(
-      requireSecretString(src.su_password, 'su_password'),
+      requireConfigString(src.su_password, 'su_password'),
       `sources.${src.id}.su_password`,
       env,
     );
+    const keyPath = requireConfigString(src.key_path, 'key_path');
+    const privateKey = requireConfigString(src.private_key, 'private_key');
 
     const out: ServerConfig = {
       name: src.id,
@@ -291,15 +324,15 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
         }
         break;
       case 'key':
-        if (src.key_path) out.keyPath = expandHome(src.key_path);
+        if (keyPath) out.keyPath = expandHome(keyPath);
         // Resolve `env:NAME` for inline private_key the same way password/
         // sudo_password/su_password are resolved. Without this the literal
         // "env:SSH_KEY" placeholder would be copied into ServerConfig.privateKey
         // and the ssh2 transport would try to parse it as key material, failing
         // auth even when the env var is set (Codex 3541772408).
-        if (src.private_key) {
+        if (privateKey !== undefined) {
           out.privateKey = resolveEnvRef(
-            requireSecretString(src.private_key, 'private_key'),
+            privateKey,
             `sources.${src.id}.private_key`,
             env,
           );
@@ -371,13 +404,14 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       defaultName = src.id;
     }
 
-    if (src.approval && src.approval.mode) {
-      if (!VALID_APPROVAL_MODE.includes(src.approval.mode)) {
+    if (src.approval?.mode !== undefined) {
+      const mode = src.approval.mode;
+      if (typeof mode !== 'string' || !VALID_APPROVAL_MODE.includes(mode as ApprovalMode)) {
         throw new Error(
           `Config: sources.${src.id}.approval.mode must be one of: ${VALID_APPROVAL_MODE.join(', ')}`,
         );
       }
-      perSourceApproval[src.id] = src.approval.mode;
+      perSourceApproval[src.id] = mode as ApprovalMode;
     }
   }
 
