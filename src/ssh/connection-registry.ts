@@ -1,3 +1,4 @@
+import { getProfile as getConfigProfile } from '../config/loader.js';
 import type { AppConfig, Profile, ConnectionInfo } from '../types.js';
 import { resolveCredentials } from '../config/credential-resolver.js';
 import { SSHConnection } from './connection.js';
@@ -5,6 +6,7 @@ import type { HostKeyMode } from './host-key.js';
 
 export class ConnectionRegistry {
   private connections = new Map<string, SSHConnection>();
+  private pending = new Map<string, Promise<SSHConnection>>();
   private knownHostsStore = new Map<string, string>();
   private hostKeyMode: HostKeyMode;
   private config: AppConfig;
@@ -17,18 +19,29 @@ export class ConnectionRegistry {
   async getOrCreate(profileName?: string): Promise<SSHConnection> {
     const profile = this.getProfile(profileName);
 
-    let conn = this.connections.get(profile.name);
-    if (conn && conn.isConnected()) {
+    const existing = this.connections.get(profile.name);
+    if (existing && existing.isConnected()) {
+      return existing;
+    }
+
+    const inFlight = this.pending.get(profile.name);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const promise = (async () => {
+      let conn = this.connections.get(profile.name);
+      if (!conn) {
+        conn = new SSHConnection(profile, await resolveCredentials(profile), this.knownHostsStore, this.hostKeyMode);
+        this.connections.set(profile.name, conn);
+      }
+      await conn.ensureConnected();
+      this.pending.delete(profile.name);
       return conn;
-    }
+    })();
 
-    if (!conn) {
-      conn = new SSHConnection(profile, await resolveCredentials(profile), this.knownHostsStore, this.hostKeyMode);
-      this.connections.set(profile.name, conn);
-    }
-
-    await conn.ensureConnected();
-    return conn;
+    this.pending.set(profile.name, promise);
+    return promise;
   }
 
   get(profileName?: string): SSHConnection | undefined {
@@ -37,13 +50,7 @@ export class ConnectionRegistry {
   }
 
   getProfile(profileName?: string): Profile {
-    const name = profileName || this.config.defaults.defaultProfile;
-    if (!name) {
-      return this.config.profiles[0];
-    }
-    const profile = this.config.profiles.find((p) => p.name === name);
-    if (!profile) throw new Error(`Profile "${name}" not found`);
-    return profile;
+    return getConfigProfile(this.config, profileName);
   }
 
   listConnections(): ConnectionInfo[] {

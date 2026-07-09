@@ -5,7 +5,7 @@ const READ_ONLY_ALLOWLIST = new Set([
   'ps', 'uname', 'uptime', 'hostname', 'id', 'who', 'whoami', 'date',
   'env', 'printenv', 'pwd', 'echo', 'printf', 'test', 'true', 'false',
   'which', 'whereis', 'file', 'readlink', 'realpath', 'basename', 'dirname',
-  'seq', 'sort', 'uniq', 'cut', 'tr', 'awk', 'sed', 'diff', 'comm',
+  'seq', 'sort', 'uniq', 'cut', 'tr', 'diff', 'comm',
   'systemctl status', 'journalctl', 'docker ps', 'docker logs', 'docker inspect',
   'docker stats', 'docker images', 'free', 'top', 'htop', 'iostat', 'vmstat',
   'netstat', 'ss', 'ifconfig', 'ip addr', 'ip route', 'arp', 'dig', 'nslookup',
