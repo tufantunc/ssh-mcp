@@ -295,3 +295,69 @@ describe('OpenSshTransport.execElevated sudo mode (finding 6: route via su when 
     expect(runOpts.stdin).toBe('callpw\n');
   });
 });
+
+describe('OpenSshTransport.isConnected (Codex 3541767250: initialized != connected)', () => {
+  function makeTransport(cfg: any) {
+    const t = new OpenSshTransport({ host: 'h', port: 22, username: 'u', ...cfg });
+    const runSsh = vi.fn();
+    const runSuViaPty = vi.fn();
+    (t as any).runSsh = runSsh;
+    (t as any).runSuViaPty = runSuViaPty;
+    return { t, runSsh, runSuViaPty };
+  }
+
+  it('reports NOT connected before any command runs (init-only, no live session)', () => {
+    // OpenSSH init() only verifies the local ssh binary/askpass setup; no SSH
+    // session is established until the first exec. A merely-initialized
+    // transport must not claim a live connection.
+    const { t } = makeTransport({ authMode: 'kerberos' });
+    expect(t.isConnected()).toBe(false);
+  });
+
+  it('reports connected after a command completes a live session (exit 0)', async () => {
+    const { t, runSsh } = makeTransport({ authMode: 'kerberos' });
+    runSsh.mockResolvedValue({ stdout: 'ok', stderr: '', exitCode: 0 });
+    await t.exec('true', { timeoutMs: 60000 });
+    expect(t.isConnected()).toBe(true);
+  });
+
+  it('reports connected after a non-zero REMOTE exit (host answered, command failed)', async () => {
+    const { t, runSsh } = makeTransport({ authMode: 'kerberos' });
+    runSsh.mockResolvedValue({ stdout: '', stderr: 'nope', exitCode: 1, category: 'remote_exit' });
+    await t.exec('false', { timeoutMs: 60000 });
+    // A remote command's own non-zero exit still proves the host is live.
+    expect(t.isConnected()).toBe(true);
+  });
+
+  it('stays NOT connected after a connect-layer failure (e.g. connection refused)', async () => {
+    const { t, runSsh } = makeTransport({ authMode: 'kerberos' });
+    runSsh.mockResolvedValue({ stdout: '', stderr: 'Connection refused', exitCode: 255, category: 'connect' });
+    await t.exec('true', { timeoutMs: 60000 });
+    expect(t.isConnected()).toBe(false);
+  });
+
+  it('stays NOT connected after a transport-layer failure (ssh spawn error)', async () => {
+    const { t, runSsh } = makeTransport({ authMode: 'kerberos' });
+    runSsh.mockResolvedValue({ stdout: '', stderr: 'spawn error', exitCode: null, category: 'transport' });
+    await t.exec('true', { timeoutMs: 60000 });
+    expect(t.isConnected()).toBe(false);
+  });
+
+  it('stays NOT connected after a bare timeout (no proof the host answered)', async () => {
+    const { t, runSsh } = makeTransport({ authMode: 'kerberos' });
+    runSsh.mockResolvedValue({ stdout: '', stderr: '', exitCode: null, category: 'timeout' });
+    await t.exec('sleep 100', { timeoutMs: 10 });
+    expect(t.isConnected()).toBe(false);
+  });
+
+  it('reports connected once a later command succeeds after an initial connect failure', async () => {
+    const { t, runSsh } = makeTransport({ authMode: 'kerberos' });
+    runSsh
+      .mockResolvedValueOnce({ stdout: '', stderr: 'Connection refused', exitCode: 255, category: 'connect' })
+      .mockResolvedValueOnce({ stdout: 'ok', stderr: '', exitCode: 0 });
+    await t.exec('true', { timeoutMs: 60000 });
+    expect(t.isConnected()).toBe(false);
+    await t.exec('true', { timeoutMs: 60000 });
+    expect(t.isConnected()).toBe(true);
+  });
+});
