@@ -1,204 +1,333 @@
-# SSH MCP Server
+# SSH MCP Server v2
 
 [![NPM Version](https://img.shields.io/npm/v/ssh-mcp)](https://www.npmjs.com/package/ssh-mcp)
 [![Downloads](https://img.shields.io/npm/dm/ssh-mcp)](https://www.npmjs.com/package/ssh-mcp)
-[![Node Version](https://img.shields.io/node/v/ssh-mcp)](https://nodejs.org/)
 [![License](https://img.shields.io/github/license/tufantunc/ssh-mcp)](./LICENSE)
-[![GitHub Stars](https://img.shields.io/github/stars/tufantunc/ssh-mcp?style=social)](https://github.com/tufantunc/ssh-mcp/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/tufantunc/ssh-mcp?style=social)](https://github.com/tufantunc/ssh-mcp/forks)
-[![Build Status](https://github.com/tufantunc/ssh-mcp/actions/workflows/publish.yml/badge.svg)](https://github.com/tufantunc/ssh-mcp/actions)
 [![GitHub issues](https://img.shields.io/github/issues/tufantunc/ssh-mcp)](https://github.com/tufantunc/ssh-mcp/issues)
 
-[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/tufantunc/ssh-mcp)](https://archestra.ai/mcp-catalog/tufantunc__ssh-mcp)
+**SSH MCP Server** is a security-first Model Context Protocol server that gives LLM agents controlled SSH access to remote hosts — with command classification, policy-based authorization, human-in-the-loop approval, and full audit logging.
 
-**SSH MCP Server** is a local Model Context Protocol (MCP) server that exposes SSH control for Linux and Windows systems, enabling LLMs and other MCP clients to execute shell commands securely via SSH.
+> **WARNING — Lethal Trifecta Risk.** Giving an LLM SSH access creates a ["Lethal Trifecta"](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/) (private data + untrusted input + network egress). **Never run as root. Never enable `auto` approval on production.** See [SECURITY.md](./SECURITY.md) for the full threat model and mitigation checklist.
 
-## Contents
-
-- [Quick Start](#quick-start)
-- [Features](#features)
-- [Installation](#installation)
-- [Client Setup](#client-setup)
-- [Testing](#testing)
-- [Disclaimer](#disclaimer)
-- [Support](#support)
+---
 
 ## Quick Start
 
-- [Install](#installation) SSH MCP Server
-- [Configure](#configuration) SSH MCP Server
-- [Set up](#client-setup) your MCP Client (e.g. Claude Desktop, Cursor, etc)
-- Execute remote shell commands on your Linux or Windows server via natural language
+### 1. Install
 
-## Features
+```bash
+npm install -g ssh-mcp
+```
 
-- MCP-compliant server exposing SSH capabilities
-- Execute shell commands on remote Linux and Windows systems
-- Secure authentication via password or SSH key
-- Built with TypeScript and the official MCP SDK
-- **Configurable timeout protection** with automatic process abortion
-- **Graceful timeout handling** - attempts to kill hanging processes before closing connections
+### 2. Configure
 
-### Tools
+Create `~/.config/ssh-mcp/config.toml` (Linux/macOS) or `%APPDATA%\ssh-mcp\config.toml` (Windows):
 
-- `exec`: Execute a shell command on the remote server
-  - **Parameters:**
-    - `command` (required): Shell command to execute on the remote SSH server
-    - `description` (optional): Optional description of what this command will do (appended as a comment)
-  - **Timeout Configuration:**
+```toml
+[defaults]
+defaultProfile = "dev"
+approvalMode = "ask-destructive"
 
-- `sudo-exec`: Execute a shell command with sudo elevation
-  - **Parameters:**
-    - `command` (required): Shell command to execute as root using sudo
-    - `description` (optional): Optional description of what this command will do (appended as a comment)
-  - **Notes:**
-    - Requires `--sudoPassword` to be set for password-protected sudo
-    - Can be disabled by passing the `--disableSudo` flag at startup if sudo access is not needed or not available
-    - For persistent root access, consider using `--suPassword` instead which establishes a root shell
-    - Tool will not be available at all if server is started with `--disableSudo`
-  - **Timeout Configuration:**
-    - Timeout is configured via command line argument `--timeout` (in milliseconds)
-    - Default timeout: 60000ms (1 minute)
-    - When a command times out, the server automatically attempts to abort the running process before closing the connection
-  - **Max Command Length Configuration:**
-    - Max command characters are configured via `--maxChars`
-    - Default: `1000`
-    - No-limit mode: set `--maxChars=none` or any `<= 0` value (e.g. `--maxChars=0`)
+[[profiles]]
+name = "dev"
+host = "192.168.1.100"
+port = 22
+user = "deploy"           # NOT root!
+auth = "key"
+keyRef = "~/.ssh/id_ed25519"
+role = "admin"
+approvalPolicy = "auto"    # dev is permissive
+```
 
-## Installation
+```bash
+chmod 600 ~/.config/ssh-mcp/config.toml
+```
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/tufantunc/ssh-mcp.git
-   cd ssh-mcp
-   ```
-2. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+### 3. Set credentials via environment variables
 
-## Client Setup
+```bash
+export SSH_MCP_PASSWORD="your-password"        # if using auth=password
+# OR use SSH agent (recommended):
+export SSH_AUTH_SOCK="$SSH_AUTH_SOCK"           # already set if agent running
+```
 
-You can configure your IDE or LLM like Cursor, Windsurf, Claude Desktop to use this MCP Server.
+### 4. Connect from your MCP client
 
-**Required Parameters:**
-- `host`: Hostname or IP of the Linux or Windows server
-- `user`: SSH username
+**Claude Code:**
+```bash
+claude mcp add --transport stdio ssh-mcp -- ssh-mcp
+```
 
-**Optional Parameters:**
-- `port`: SSH port (default: 22)
-- `password`: SSH password (or use `key` for key-based auth)
-- `key`: Path to private SSH key
-- `sudoPassword`: Password for sudo elevation (when executing commands with sudo)
-- `suPassword`: Password for su elevation (when you need a persistent root shell)
-- `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
-- `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
-- `disableSudo`: Flag to disable the `sudo-exec` tool completely. Useful when sudo access is not needed or not available.
-
-
-```commandline
+**Claude Desktop / Cursor / Windsurf:**
+```json
 {
-    "mcpServers": {
-        "ssh-mcp": {
-            "command": "npx",
-            "args": [
-                "ssh-mcp",
-                "-y",
-                "--",
-                "--host=1.2.3.4",
-                "--port=22",
-                "--user=root",
-                "--password=pass",
-                "--key=path/to/key",
-                "--timeout=30000",
-                "--maxChars=none"
-            ]
-        }
+  "mcpServers": {
+    "ssh-mcp": {
+      "command": "ssh-mcp",
+      "env": {
+        "SSH_MCP_PASSWORD": "your-password"
+      }
     }
+  }
 }
 ```
 
-### Claude Code
+**Never pass passwords as CLI arguments** — they're visible via `ps aux`. Use env vars, config files, SSH agent, or OS keychain.
 
-You can add this MCP server to Claude Code using the `claude mcp add` command. This is the recommended method for Claude Code.
+---
 
-**Basic Installation:**
+## Tools (11)
+
+| Tool | Purpose | readOnly | destructive |
+|------|---------|:--------:|:----------:|
+| `list-connections` | Discover available hosts and connection status | ✅ | — |
+| `list-sessions` | List active sessions per host | ✅ | — |
+| `open-session` | Create a named interactive (stateful) or background session | — | — |
+| `close-session` | Close a session, releasing resources | — | ✅ |
+| `read-session-output` | Read output from background sessions (e.g., `tail -f`) | ✅ | — |
+| `read-command` | Execute allowlisted read-only commands (`ls`, `cat`, `grep`, ...) | ✅ | — |
+| `run-command` | Execute arbitrary commands (destructive ones need approval) | — | — |
+| `privileged-command` | Execute with sudo (always requires approval) | — | ✅ |
+| `sftp-upload` | Upload a file via SFTP | — | ✅ |
+| `sftp-download` | Download a file via SFTP | ✅ | — |
+| `signal-process` | Send INT/TERM/KILL to a remote PID | — | ✅ |
+
+### Interactive Sessions
+
+Sessions maintain state (CWD, environment variables) between commands:
+
+```
+Agent: open-session(name="deploy", type="interactive")
+Agent: run-command(session="deploy", command="cd /opt/myapp")
+Agent: run-command(session="deploy", command="git pull")    # runs in /opt/myapp
+Agent: run-command(session="deploy", command="npm ci")      # CWD persists
+Agent: close-session(name="deploy")
+```
+
+### Background Sessions
+
+Long-running processes (logs, builds):
+
+```
+Agent: open-session(name="logs", type="background", command="tail -f /var/log/syslog")
+Agent: read-session-output(name="logs", lines=20)   # poll
+Agent: close-session(name="logs")
+```
+
+---
+
+## Configuration
+
+### Profile options
+
+```toml
+[defaults]
+defaultProfile = "dev"
+sessionMaxPerConnection = 5
+sessionIdleTimeoutMs = 600000       # 10min
+sessionBackgroundMaxMs = 3600000    # 1hr
+commandTimeoutMs = 60000
+commandMaxChars = 5000
+commandMaxOutputBytes = 1048576     # 1MB
+connectionIdleReapMs = 900000       # 15min
+approvalMode = "ask-destructive"    # auto | ask-destructive | ask-all | deny
+
+[[profiles]]
+name = "prod-web-1"
+host = "10.0.1.50"
+port = 22
+user = "deploy"
+auth = "agent"                      # agent | key | password | keychain
+keyRef = "~/.ssh/id_ed25519"        # for auth=key
+keychainEntry = "ssh-mcp/prod"      # for auth=keychain (requires @napi-rs/keyring)
+via = "bastion"                     # ProxyJump profile
+workdir = "/var/www"
+trustedHostKey = "SHA256:..."       # Pin host key (optional)
+tty = false
+role = "operator"                   # viewer | operator | admin
+readOnly = false
+approvalPolicy = "ask-all"
+cert = false
+sessionMaxPerConnection = 3         # per-profile override
+sessionIdleTimeoutMs = 300000       # stricter for prod
+```
+
+### Credential Resolution Order
+
+1. **SSH agent** (`SSH_AUTH_SOCK`) — no key material in process memory
+2. **OS keychain** (macOS Keychain / Windows Credential Manager / Linux Secret Service) — requires `auth = "keychain"` and `@napi-rs/keyring`
+3. **Environment variables** — `SSH_MCP_PASSWORD`, `SSH_MCP_KEY`, `SSH_MCP_SUDO_PASSWORD`, or profile-specific `SSH_MCP_<NAME>_PASSWORD`
+4. **Key file** — `keyRef` path or `SSH_MCP_KEY` env var
+
+**Never CLI arguments.** v2 removes `--password`, `--sudoPassword`, `--suPassword` entirely.
+
+---
+
+## Policy Engine
+
+### Roles
+
+| Role | Dev | Staging | Prod |
+|------|-----|---------|------|
+| **viewer** | read-only | read-only | read-only |
+| **operator** | read-only, safe, destructive | read-only, safe, destructive | read-only, safe |
+| **admin** | all | all | read-only, safe, destructive |
+
+### Command Classification
+
+Every command is classified before execution:
+
+- **read-only**: Allowlisted commands (`ls`, `cat`, `grep`, `df`, `stat`, `systemctl status`, ...)
+- **safe**: Non-destructive mutations (`npm install`, `git pull`, ...)
+- **destructive**: `rm -rf /`, `mkfs`, `dd of=/dev/`, `shutdown`, `curl|sh`, fork bombs, ...
+- **privileged**: `sudo`, `su`, `doas`, `pkexec`
+
+### Approval Modes
+
+- `auto` — no prompts (dev only!)
+- `ask-destructive` — prompt for destructive/privileged (default)
+- `ask-all` — prompt for every command
+- `deny` — deny all mutations
+
+### External Policy Engine (OPA)
 
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
+ssh-mcp --opaUrl=http://localhost:8181
 ```
 
-**Installation Examples:**
+Connects to an Open Policy Agent instance for Rego-based authorization. Falls back to built-in YAML engine if OPA is unreachable.
 
-**With Password Authentication:**
+---
+
+## Security
+
+### Threat Model
+
+See [SECURITY.md](./SECURITY.md) for the full threat model, vulnerability reporting policy, and deployment checklist.
+
+### Safe Defaults
+
+- **Non-root** user in all examples
+- **TOFU** host key verification (accept on first connect, verify after)
+- **RFC 9142** algorithm allow-list (no SHA-1, no CBC, no ssh-rsa)
+- **exec()-only** (no persistent su shells — fixes PTY leak)
+- **Sudo via stdin** (not argv — fixes process list leak)
+- **Sanitizer** strips CR/LF/NUL from all metadata
+- **3-layer redaction** (field → regex → entropy) on audit logs
+- **No CLI-arg secrets** (use env vars, keychain, or config)
+
+### Hardening Checklist
+
+- [ ] Create dedicated low-privilege service account on target hosts
+- [ ] Use command-specific `sudoers` instead of `NOPASSWD: ALL`
+- [ ] Enable `ask-all` approval for production profiles
+- [ ] Restrict network egress on target hosts
+- [ ] Use `readOnly = true` for monitoring profiles
+- [ ] Review audit logs regularly
+- [ ] Run `chmod 600 config.toml`
+
+---
+
+## Transports
+
+### stdio (default)
+
+For local MCP clients (Claude Code, Cursor, Windsurf). No network exposure.
+
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --port=22 --user=admin --password=your_password
+ssh-mcp                          # reads config from XDG path
+ssh-mcp --config=/path/to.toml   # custom config path
 ```
 
-**With SSH Key Authentication:**
+### HTTP (optional)
+
+For remote/web clients behind a reverse proxy with TLS:
+
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=example.com --user=root --key=/path/to/private/key
+ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret
 ```
 
-**With Custom Timeout and No Character Limit:**
+Endpoints: `POST /` (MCP Streamable HTTP), `GET /status`, `GET /health`
+
+**Always terminate TLS at a reverse proxy** (Caddy/nginx). The server listens on `127.0.0.1` only.
+
+---
+
+## Docker
+
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --timeout=120000 --maxChars=none
+# Build
+docker build -t ssh-mcp .
+
+# Run (config file + env vars for credentials)
+docker run -i \
+  -v ./config.toml:/home/appuser/.config/ssh-mcp/config.toml:ro \
+  -e SSH_MCP_PASSWORD=secret \
+  ssh-mcp
 ```
 
-**With Sudo and Su Support:**
+Or with docker-compose:
+
 ```bash
-claude mcp add --transport stdio ssh-mcp -- npx -y ssh-mcp -- --host=192.168.1.100 --user=admin --password=your_password --sudoPassword=sudo_pass --suPassword=root_pass
+docker-compose --profile app up
 ```
 
-**Installation Scopes:**
+The Docker image runs as non-root UID 65532, with a minimal `node:22-slim` base.
 
-You can specify the scope when adding the server:
+---
 
-- **Local scope** (default): For personal use in the current project
-  ```bash
-  claude mcp add --transport stdio ssh-mcp --scope local -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
-  ```
+## CLI Flags (v2)
 
-- **Project scope**: Share with your team via `.mcp.json` file
-  ```bash
-  claude mcp add --transport stdio ssh-mcp --scope project -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
-  ```
+Secrets are **never** passed as CLI arguments.
 
-- **User scope**: Available across all your projects
-  ```bash
-  claude mcp add --transport stdio ssh-mcp --scope user -- npx -y ssh-mcp -- --host=YOUR_HOST --user=YOUR_USER --password=YOUR_PASSWORD
-  ```
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--config` | XDG path | Path to TOML config file |
+| `--host` | — | Quick start: SSH host (creates single-profile config) |
+| `--user` | — | Quick start: SSH username |
+| `--port` | 22 | Quick start: SSH port |
+| `--key` | — | Quick start: Path to private key |
+| `--timeout` | 60000 | Command timeout in ms |
+| `--maxChars` | 5000 | Max command length |
+| `--transport` | stdio | `stdio` or `http` |
+| `--httpPort` | 3000 | HTTP transport port |
+| `--httpHost` | 127.0.0.1 | HTTP bind address |
+| `--bearerToken` | — | Bearer token for HTTP transport auth |
+| `--insecureHostKey` | false | Disable host key verification (test only!) |
+| `--opaUrl` | — | OPA sidecar URL for external policy |
+| `--auditEntropyScan` | false | Enable entropy-based secret scanning in audit |
+| `--auditTamperEvident` | false | Enable hash-chained tamper-evident audit log |
 
-
-**Verify Installation:**
-
-After adding the server, restart Claude Code and ask Cascade to execute a command:
-```
-"Can you run 'ls -la' on the remote server?"
-```
-
-For more information about MCP in Claude Code, see the [official documentation](https://docs.claude.com/en/docs/claude-code/mcp).
+---
 
 ## Testing
 
-You can use the [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector) for visual debugging of this MCP Server.
+```bash
+# Start test SSH server
+docker-compose --profile test up -d
 
-```sh
+# Run all tests
+npm test
+
+# Run only unit tests
+npm test -- test/unit/
+
+# Run with coverage
+npm run coverage
+```
+
+## MCP Inspector
+
+```bash
 npm run inspect
 ```
 
-## Disclaimer
-
-SSH MCP Server is provided under the [MIT License](./LICENSE). Use at your own risk. This project is not affiliated with or endorsed by any SSH or MCP provider.
+---
 
 ## Contributing
 
-We welcome contributions! Please see our [Contributing Guidelines](./CONTRIBUTING.md) for more information.
-
-## Code of Conduct
-
-This project follows a [Code of Conduct](./CODE_OF_CONDUCT.md) to ensure a welcoming environment for everyone.
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Please follow the [security checklist](./SECURITY.md#security-checklist-for-contributors) in all PRs.
 
 ## Support
 
-If you find SSH MCP Server helpful, consider starring the repository or contributing! Pull requests and feedback are welcome. 
+If you find SSH MCP Server helpful, consider starring the repository or [sponsoring](https://github.com/sponsors/tufantunc)!
