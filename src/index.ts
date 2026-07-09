@@ -99,9 +99,27 @@ async function main() {
 
   registerTools(server, registry, policy, audit);
 
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error('SSH MCP Server v2 running on stdio');
+  if (argv.opaUrl) {
+    policy.setOpaUrl(argv.opaUrl);
+    console.error(`OPA sidecar enabled: ${argv.opaUrl}`);
+  }
+
+  const transportMode = argv.transport || 'stdio';
+
+  if (transportMode === 'http') {
+    const { startHttpServer } = await import('./transport/http.js');
+    await startHttpServer(server, {
+      port: parseInt(argv.httpPort as string) || 3000,
+      host: (argv.httpHost as string) || '127.0.0.1',
+      bearerToken: argv.bearerToken as string | undefined,
+      registry,
+      audit,
+    });
+  } else {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error('SSH MCP Server v2 running on stdio');
+  }
 
   const cleanup = async () => {
     console.error('Shutting down SSH MCP Server...');
