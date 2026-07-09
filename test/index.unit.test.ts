@@ -371,6 +371,11 @@ describe('resolveCliConfigPath (Codex R2 P2: reject value-less --config)', () =>
       .toBe('/etc/ssh-mcp/config.toml');
   });
 
+  it('expands a leading home marker for --config=~/... (Codex 3549260475)', () => {
+    expect(resolveCliConfigPath({ config: '~/ssh-mcp/config.toml' }))
+      .toBe(path.join(os.homedir(), 'ssh-mcp/config.toml'));
+  });
+
   it('rejects a present-but-value-less --config (parsed as null) instead of silently ignoring it', () => {
     // parseArgv records `null` for `--config` with no `=path`. Coercing that to
     // undefined would fall back to SSH_MCP_CONFIG/default discovery, so a

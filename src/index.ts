@@ -11,6 +11,7 @@ import { SSHConnectionManager, SSHConfig } from './transports/ssh2.js';
 import { createTransport } from './transports/factory.js';
 import { TransportRegistry } from './transports/registry.js';
 import { resolveConfig } from './config/resolver.js';
+import { expandHome } from './config/toml-loader.js';
 import type { ResolvedConfig } from './config/types.js';
 import {
   sanitizeCommand as sanitizeCommandImpl,
@@ -421,7 +422,7 @@ export function resolveCliConfigPath(
   if (value === '') {
     throw new Error('Configuration error:\n--config requires a value (--config=<path>)');
   }
-  return value;
+  return expandHome(value);
 }
 
 const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
