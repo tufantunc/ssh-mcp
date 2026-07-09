@@ -164,6 +164,24 @@ auth = "kerberos"
     expect(cfg.configPath).toBe(envPath);
   });
 
+  it('fails closed when SSH_MCP_CONFIG points to a directory instead of falling through (Codex 3551117478)', () => {
+    const envDir = path.join(tmp, 'env-config-dir');
+    fs.mkdirSync(envDir, { recursive: true });
+    const xdgRoot = path.join(tmp, 'xdg-readable');
+    writeToml(xdgRoot, 'ssh-mcp/config.toml', `
+[[sources]]
+id = "xdg"
+host = "xdg.example"
+user = "u"
+auth = "kerberos"
+`);
+
+    expect(() => resolveConfig({
+      cliSources: [],
+      env: { SSH_MCP_CONFIG: envDir, XDG_CONFIG_HOME: xdgRoot },
+    })).toThrow(/not a regular file|cannot access/);
+  });
+
   it('fails closed when SSH_MCP_CONFIG is inaccessible instead of falling through (Codex 3549260453)', () => {
     const blockedDir = path.join(tmp, 'blocked');
     fs.mkdirSync(blockedDir, { recursive: true });

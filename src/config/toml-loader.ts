@@ -113,7 +113,11 @@ export function defaultDiscoveryPaths(env: NodeJS.ProcessEnv = process.env): str
 export function discoverConfigPath(env: NodeJS.ProcessEnv = process.env): string | undefined {
   for (const candidate of defaultDiscoveryPaths(env)) {
     try {
-      if (fs.statSync(candidate).isFile()) return candidate;
+      const st = fs.statSync(candidate);
+      if (st.isFile()) return candidate;
+      if (candidate === env.SSH_MCP_CONFIG) {
+        throw new Error(`Config: cannot access ${candidate}: not a regular file`);
+      }
     } catch (e: any) {
       // SSH_MCP_CONFIG is an explicit user/env selection. A missing env path
       // still falls through to XDG/home discovery for compatibility, but an
@@ -289,11 +293,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       return value;
     };
 
-    const password = resolveEnvRef(
-      requireConfigString(src.password, 'password'),
-      `sources.${src.id}.password`,
-      env,
-    );
+    const passwordValue = src.auth === 'password'
+      ? requireConfigString(src.password, 'password')
+      : undefined;
     const sudoPassword = resolveEnvRef(
       requireConfigString(src.sudo_password, 'sudo_password'),
       `sources.${src.id}.sudo_password`,
@@ -305,7 +307,10 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       env,
     );
     const keyPath = requireConfigString(src.key_path, 'key_path');
-    const privateKey = requireConfigString(src.private_key, 'private_key');
+    const privateKey = src.auth === 'key'
+      ? requireConfigString(src.private_key, 'private_key')
+      : undefined;
+    const knownHostsFile = requireConfigString(src.known_hosts_file, 'known_hosts_file');
 
     const out: ServerConfig = {
       name: src.id,
@@ -325,6 +330,22 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
         break;
       case 'key':
         if (keyPath) out.keyPath = expandHome(keyPath);
+        // The openssh transport authenticates with `-i <keyPath>` and never
+        // materializes an inline private_key — supplying only private_key on
+        // openssh silently falls back to default-identity pubkey auth. Treat
+        // inline private_key as unsupported on openssh: require key_path and do
+        // not resolve an unused private_key env ref that could fail startup.
+        // (ssh2 reads inline key contents in memory, so inline private_key
+        // remains valid there.)
+        if (resolvedTransport === 'openssh') {
+          if (!out.keyPath) {
+            throw new Error(
+              `Config: sources.${src.id} auth="key" with transport="openssh" requires key_path ` +
+              `(inline private_key is not supported on the openssh transport)`,
+            );
+          }
+          break;
+        }
         // Resolve `env:NAME` for inline private_key the same way password/
         // sudo_password/su_password are resolved. Without this the literal
         // "env:SSH_KEY" placeholder would be copied into ServerConfig.privateKey
@@ -342,20 +363,13 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
             `Config: sources.${src.id} auth="key" requires key_path or private_key`,
           );
         }
-        // The openssh transport authenticates with `-i <keyPath>` and never
-        // materializes an inline private_key — supplying only private_key on
-        // openssh silently falls back to default-identity pubkey auth. Require
-        // an on-disk key_path for openssh key sources so the configured key is
-        // actually used. (ssh2 reads inline key contents in memory, so inline
-        // private_key remains valid there.)
-        if (resolvedTransport === 'openssh' && !out.keyPath) {
-          throw new Error(
-            `Config: sources.${src.id} auth="key" with transport="openssh" requires key_path ` +
-            `(inline private_key is not supported on the openssh transport)`,
-          );
-        }
         break;
-      case 'password':
+      case 'password': {
+        const password = resolveEnvRef(
+          passwordValue,
+          `sources.${src.id}.password`,
+          env,
+        );
         if (!password) {
           throw new Error(
             `Config: sources.${src.id} auth="password" requires "password"`,
@@ -363,6 +377,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
         }
         out.password = password;
         break;
+      }
     }
 
     if (sudoPassword !== undefined) out.sudoPassword = sudoPassword;
@@ -374,14 +389,14 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     // require --transport=openssh") and reject the combination at parse time.
     if (
       resolvedTransport === 'ssh2' &&
-      (src.known_hosts_file || src.strict_host_key_checking)
+      (knownHostsFile !== undefined || src.strict_host_key_checking !== undefined)
     ) {
       throw new Error(
         `Config: sources.${src.id} known_hosts_file/strict_host_key_checking require transport="openssh" ` +
         `(the ssh2 transport does not enforce host keys)`,
       );
     }
-    if (src.known_hosts_file) out.knownHostsFile = expandHome(src.known_hosts_file);
+    if (knownHostsFile !== undefined) out.knownHostsFile = expandHome(knownHostsFile);
     if (src.strict_host_key_checking) out.strictHostKeyChecking = src.strict_host_key_checking;
 
     resolvedSources.push(out);
@@ -471,8 +486,10 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv) {
     if (typeof raw.port !== 'number') throw new Error('Config: [webui].port must be a number');
     out.port = raw.port;
   }
-  if (raw.auth_token !== undefined) {
-    out.auth_token = resolveEnvRef(String(raw.auth_token), '[webui].auth_token', env);
+  const webuiEnabled = out.enabled === true;
+  if (raw.auth_token !== undefined && webuiEnabled) {
+    if (typeof raw.auth_token !== 'string') throw new Error('Config: [webui].auth_token must be a string');
+    out.auth_token = resolveEnvRef(raw.auth_token, '[webui].auth_token', env);
   }
   // Cross-field check: a non-loopback bind requires a token — but ONLY when the
   // web UI is actually enabled. With `[webui] enabled = false` the section is
@@ -480,7 +497,7 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv) {
   // section would let an otherwise-off optional block fail SSH startup (Codex
   // 3541772404). When the eventual CLI enable path turns it on, the same check
   // applies against the resolved enabled=true state.
-  if (out.enabled && out.host && out.host !== '127.0.0.1' && out.host !== 'localhost' && out.host !== '::1') {
+  if (webuiEnabled && out.host && out.host !== '127.0.0.1' && out.host !== 'localhost' && out.host !== '::1') {
     if (!out.auth_token) {
       throw new Error(
         `Config: [webui].host="${out.host}" is non-loopback; auth_token is required when [webui].enabled = true`,
