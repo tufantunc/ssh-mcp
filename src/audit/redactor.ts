@@ -98,6 +98,14 @@ const SLACK_TOKEN_RE = /\bxox[abprs]-[A-Za-z0-9\-]{10,}\b/g;
 // 10. Google API keys
 const GOOGLE_API_KEY_RE = /\bAIza[0-9A-Za-z_\-]{35}\b/g;
 
+// 11. URL userinfo credentials, e.g. https://alice:hunter2@example.com/repo.git
+//     or postgres://user:pass@db:5432/app. Redact ONLY the password component,
+//     preserving scheme, username, and host so the audited URL stays
+//     recognizable. The password is any run of non-`@`, non-`/`, non-`:`,
+//     non-whitespace chars between the `:` after the username and the `@`.
+const URL_USERINFO_RE =
+  /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]+:)([^\s/@]+)(@)/g;
+
 interface Rule {
   re: RegExp;
   replace: string | ((substring: string, ...groups: string[]) => string);
@@ -113,10 +121,16 @@ const RULES: Rule[] = [
   { re: CLI_SHORT_P_QUOTED_ARG_RE, replace: (_m, lead, quote) => `${lead}${quote}-p${REDACTED}${quote}` },
   { re: CLI_SHORT_P_ATTACHED_RE, replace: (_m, lead, quote) => `${lead}${quote}-p${REDACTED}${quote}` },
   { re: AUTH_HEADER_RE, replace: (_m, hdr, scheme) => `${hdr}${scheme} ${REDACTED}` },
+  // URL userinfo password: keep scheme://user, drop the password, keep @host.
+  { re: URL_USERINFO_RE, replace: (_m, head, _pw, at) => `${head}${REDACTED}${at}` },
   { re: SHELL_ASSIGN_RE, replace: (_m, key) => `${key}=${REDACTED}` },
   { re: JSON_KV_RE, replace: (_m, head) => `${head}"${REDACTED}"` },
   { re: BARE_KV_RE, replace: (_m, head) => `${head}${REDACTED}` },
   { re: SIMPLE_SECRET_WORD_RE, replace: (_m, word) => `${word} ${REDACTED}` },
+  // Complete PEM blocks first, then any dangling BEGIN with no reachable END
+  // (truncated pasted key / here-doc). Applying the dangling rule in the main
+  // rule set means command/description text — not just stdout/stderr — is
+  // scrubbed of incomplete key material (Codex 3541772951).
   { re: PEM_RE, replace: REDACTED },
   { re: PEM_OPEN_RE, replace: REDACTED },
   { re: AWS_ACCESS_KEY_RE, replace: REDACTED },
@@ -156,6 +170,33 @@ export function redact(input: string | undefined | null): string {
 export function redactPemBlocks(input: string | undefined | null): string {
   if (!input) return '';
   return input.replace(PEM_RE, REDACTED).replace(PEM_OPEN_RE, REDACTED);
+}
+
+/**
+ * Pre-redact the token shapes that are NOT bounded by the redactor's fixed scan
+ * headroom, over the FULL (un-capped) text, before any byte cap is applied.
+ *
+ * `capThenRedact` bounds the bytes the general redaction rules scan to
+ * `cap + REDACT_SCAN_HEADROOM_BYTES` so a multi-MB stdout doesn't pay full
+ * regex cost. But two secret shapes can legitimately exceed that headroom and
+ * would be sliced mid-token — leaking a prefix — if only matched inside the
+ * bounded window:
+ *   - PEM private-key blocks (BEGIN...END), including a dangling BEGIN whose
+ *     END terminator falls past the window.
+ *   - JWTs, whose signature/claims (cert chains, large payloads) can push the
+ *     third segment past the 4 KiB headroom (Codex 3541772953).
+ * Both are matched here over the whole input first, so their full extent is
+ * replaced with `<redacted>` regardless of where the cap lands. The full scan
+ * is cheap when neither shape is present (fast literal prefix scan); the cost
+ * is paid only when key/token material actually exists — exactly when it must
+ * be redacted.
+ */
+export function preRedactUnboundedTokens(input: string | undefined | null): string {
+  if (!input) return '';
+  return input
+    .replace(PEM_RE, REDACTED)
+    .replace(PEM_OPEN_RE, REDACTED)
+    .replace(JWT_RE, REDACTED);
 }
 
 export const REDACTED_PLACEHOLDER = REDACTED;
