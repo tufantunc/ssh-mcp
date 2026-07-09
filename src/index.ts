@@ -11,6 +11,7 @@ import { SSHConnectionManager, SSHConfig } from './transports/ssh2.js';
 import { createTransport } from './transports/factory.js';
 import { TransportRegistry } from './transports/registry.js';
 import { resolveConfig } from './config/resolver.js';
+import { expandHome } from './config/toml-loader.js';
 import type { ResolvedConfig, ApprovalMode } from './config/types.js';
 import {
   sanitizeCommand as sanitizeCommandImpl,
@@ -172,7 +173,16 @@ export function parseServerConfigJson(raw: string): ServerConfig {
       break;
     case 'password':
       cfg.transport = resolveJsonTransport(obj);
-      if (obj.password) cfg.password = obj.password;
+      // Require actual password material. An empty/missing password still
+      // registers the server as password-authenticated but fails on first use:
+      // OpenSshTransport.init() throws "authMode=password requires --password",
+      // and the default ssh2 path attempts to connect without the credential the
+      // selected auth mode promises. Fail at parse time like the key-auth branch
+      // already does for missing key material (Codex 3549295040).
+      if (typeof obj.password !== 'string' || obj.password.length === 0) {
+        throw new Error(`--ssh "${obj.name}" auth "password" requires a non-empty "password"`);
+      }
+      cfg.password = obj.password;
       break;
   }
 
@@ -347,6 +357,18 @@ function validateConfig(config: Record<string, string | null>, multiHost = false
 const isMultiHost = sshJsonArgs.length > 0;
 const hasLegacyCli = hasLegacyCliFlags(argvConfig);
 
+// Validate CLI-mode errors before TOML discovery/loading. Otherwise an
+// incomplete legacy invocation such as `--host=h` can auto-discover an unrelated
+// TOML file and report that TOML's parse/env error before the real missing
+// `--user` legacy CLI error.
+if (isCliEnabled || isTestMode) {
+  if (isMultiHost) {
+    validateConfig(argvConfig, true);
+  } else if (hasLegacyCli) {
+    validateConfig(argvConfig, false);
+  }
+}
+
 function buildLegacyServerConfig(): ServerConfig | undefined {
   if (!HOST || !USER) return undefined;
 
@@ -424,7 +446,7 @@ export function resolveCliConfigPath(
   if (value === '') {
     throw new Error('Configuration error:\n--config requires a value (--config=<path>)');
   }
-  return value;
+  return expandHome(value);
 }
 
 const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
@@ -435,11 +457,7 @@ const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
   : { sources: [], perSourceApproval: {}, defaultExplicit: false };
 
 if (isCliEnabled) {
-  if (isMultiHost) {
-    validateConfig(argvConfig, true);
-  } else if (hasLegacyCli) {
-    validateConfig(argvConfig, false);
-  } else if (resolvedConfig.sources.length === 0) {
+  if (!isMultiHost && !hasLegacyCli && resolvedConfig.sources.length === 0) {
     throw new Error(
       'Configuration error:\nMissing required --host (or use --ssh=<JSON>, --config=<path>, SSH_MCP_CONFIG, or a default ssh-mcp config.toml)',
     );
@@ -564,9 +582,20 @@ export async function buildTransportConfig(
 
 const registry = new TransportRegistry(prepareKeyContents);
 
-async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
+export async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
   // ssh2 transport reads key contents in memory; openssh uses -i path.
-  if (cfg.transport === 'ssh2' && cfg.keyPath && !cfg.privateKey) {
+  // Gate on authMode === 'key': buildTransportConfig() still records keyPath
+  // even when password auth takes precedence over a stale/sample --key, so a
+  // config such as `--password=... --key=/stale` must NOT read the (possibly
+  // nonexistent) key file here — otherwise the first tool call fails with
+  // ENOENT instead of using the password (Codex 3549295046). Mirrors the eager
+  // read's `authMode === 'key'` guard in buildTransportConfig().
+  if (
+    cfg.authMode === 'key' &&
+    cfg.transport === 'ssh2' &&
+    cfg.keyPath &&
+    !cfg.privateKey
+  ) {
     const fs = await import('fs/promises');
     cfg.privateKey = await fs.readFile(cfg.keyPath, 'utf8');
   }
@@ -856,6 +885,29 @@ export function resultToMcpContent(result: ExecResult) {
   };
 }
 
+export function isFailedExecResult(result: ExecResult): boolean {
+  return result.category === 'timeout'
+    || result.category === 'auth'
+    || result.category === 'host_key'
+    || result.category === 'connect'
+    || result.category === 'transport'
+    || (result.exitCode !== null && result.exitCode !== 0);
+}
+
+function recordAuditResult(
+  base: Omit<Parameters<AuditSink['record']>[0], 'result' | 'error'>,
+  result: ExecResult,
+) {
+  try {
+    const response = resultToMcpContent(result);
+    auditSink.record({ ...base, result });
+    return response;
+  } catch (err) {
+    auditSink.record({ ...base, result, error: err });
+    throw err;
+  }
+}
+
 const server = new McpServer({
   name: 'SSH MCP Server',
   version: '2.1.0',
@@ -898,26 +950,25 @@ server.tool(
     try {
       const resolvedProfile = registry.profile(connectionName);
       profile = resolvedProfile.id;
-      const t = await registry.get(connectionName);
       approvalDecision = await gateApproval({
         profile: resolvedProfile,
         tool: 'exec',
         command: commandWithDescription,
         description,
       });
+      const t = await registry.get(connectionName);
       startedAt = Date.now();
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
-      auditSink.record({
+      const response = recordAuditResult({
         tool: 'exec',
         profile,
         command: commandWithDescription,
         description,
         startedAt,
-        result,
         approval: approvalDecision,
-      });
+      }, result);
       audited = true;
-      return resultToMcpContent(result);
+      return response;
     } catch (err: any) {
       approvalDecision = approvalDecision ?? getApprovalDecisionFromError(err);
       if (!audited) auditSink.record({
@@ -969,13 +1020,13 @@ if (!DISABLE_SUDO) {
       try {
         const resolvedProfile = registry.profile(connectionName);
         profile = resolvedProfile.id;
-        const t = await registry.get(connectionName);
         approvalDecision = await gateApproval({
           profile: resolvedProfile,
           tool: 'sudo-exec',
           command: commandWithDescription,
           description,
         });
+        const t = await registry.get(connectionName);
         // Legacy single-host mode may still pass --sudoPassword on CLI; in
         // multi-host mode each ServerConfig carries its own sudoPassword.
         const legacySudo = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined && !isMultiHost)
@@ -987,17 +1038,16 @@ if (!DISABLE_SUDO) {
           mode: 'sudo',
           password: legacySudo,
         });
-        auditSink.record({
+        const response = recordAuditResult({
           tool: 'sudo-exec',
           profile,
           command: commandWithDescription,
           description,
           startedAt,
-          result,
           approval: approvalDecision,
-        });
+        }, result);
         audited = true;
-        return resultToMcpContent(result);
+        return response;
       } catch (err: any) {
         approvalDecision = approvalDecision ?? getApprovalDecisionFromError(err);
         if (!audited) auditSink.record({

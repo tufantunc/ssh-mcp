@@ -53,6 +53,34 @@ describe('optional audit seam', () => {
     ).not.toThrow();
   });
 
+  it('uses an explicit not-run marker instead of yolo allow when no approval decision exists', async () => {
+    let appended: any;
+    const sink = await loadAuditSink({}, async () => ({
+      resolveAuditDir: () => '/tmp/ssh-mcp-audit-test',
+      AuditStore: class {
+        append(record: unknown): unknown {
+          appended = record;
+          return record;
+        }
+      },
+    }));
+
+    sink.record({
+      tool: 'exec',
+      profile: 'default',
+      command: 'uptime',
+      startedAt: Date.now(),
+      error: new Error('transport init failed before approval'),
+    });
+
+    expect(appended.approval).toMatchObject({
+      mode: 'manual',
+      decision: 'deny',
+      decided_by: 'approval:not-run',
+    });
+    expect(appended.approval.reason).toContain('approval gate was not reached');
+  });
+
   it('classifies only the optional store module itself as absent', () => {
     const expected = 'file:///repo/build/audit/store.js';
     const absent = Object.assign(
