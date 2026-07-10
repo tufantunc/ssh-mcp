@@ -199,8 +199,9 @@ function checkApprovalMutationAuth(opts: { req: http.IncomingMessage; authToken?
 export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
   const host = opts.host ?? '127.0.0.1';
   const port = opts.port ?? 0;
+  const authToken = opts.authToken?.trim();
 
-  if (!isLoopback(host) && !opts.authToken) {
+  if (!isLoopback(host) && !authToken) {
     throw new Error(
       `[webui] non-loopback bind (${host}) requires auth_token; refusing to start without one`,
     );
@@ -220,7 +221,7 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
           sendJson(res, 405, { error: 'method not allowed' });
           return;
         }
-        if (!checkAuth({ req, authToken: opts.authToken, bind: host, isSse: true, urlObj })) {
+        if (!checkAuth({ req, authToken, bind: host, isSse: true, urlObj })) {
           sendJson(res, 401, { error: 'unauthorized' });
           return;
         }
@@ -230,7 +231,7 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
 
       // --- API gated by token -------------------------------------------
       if (pathname.startsWith('/api/')) {
-        if (!checkAuth({ req, authToken: opts.authToken, bind: host, urlObj })) {
+        if (!checkAuth({ req, authToken, bind: host, urlObj })) {
           sendJson(res, 401, { error: 'unauthorized' });
           return;
         }

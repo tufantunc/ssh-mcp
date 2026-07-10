@@ -171,6 +171,17 @@ describe('audit store', () => {
     expect(out.truncated).toBe(true);
   });
 
+  it('redacts an open quoted JSON secret before a cap can persist its prefix', () => {
+    const cap = 64;
+    const secretPrefix = 'J'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 1000);
+    const out = capThenRedact(`{"password":"${secretPrefix}"}`, cap);
+
+    expect(out.text).toContain('"password":"<redacted>"');
+    expect(out.text).not.toContain('JJJJ');
+    expect(Buffer.byteLength(out.text, 'utf8')).toBeLessThanOrEqual(cap);
+    expect(out.truncated).toBe(true);
+  });
+
   it('caps and redacts profile names before serializing records', () => {
     const secret = 'ghp_' + 'P'.repeat(36);
     const rec = buildRecord({

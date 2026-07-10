@@ -17,7 +17,9 @@ import {
   prepareKeyContents,
   validateConfig,
   resolveCliConfigPath,
+  buildWebUIApprovalQueueAdapter,
 } from '../src/index';
+import { ApprovalDispatcher } from '../src/approval/engine';
 import type { ExecResult, ServerConfig } from '../src/transports/types';
 import type { ResolvedConfig } from '../src/config/types';
 
@@ -321,6 +323,33 @@ describe('approval command/context helpers', () => {
     }));
     expect(input?.defaultMode).toBeUndefined();
     expect(input?.fail_closed).toBe(true);
+  });
+
+  it('redacts pending command and description text before WebUI list and enqueue exposure', async () => {
+    const engine = new ApprovalDispatcher({
+      defaultMode: 'manual',
+      manual: { webuiEnabled: true, timeout_ms: 5000 },
+    });
+    const queue = buildWebUIApprovalQueueAdapter(engine)!;
+    let enqueued: ReturnType<typeof queue.list>[number] | undefined;
+    queue.on('enqueue', pending => { enqueued = pending; });
+
+    const decision = engine.decide({
+      profile: { id: 'prod' },
+      tool: 'exec',
+      command: 'deploy --token=live-credential',
+      description: 'password another-credential',
+    });
+    await Promise.resolve();
+
+    const listed = queue.list()[0];
+    expect(listed.command).toBe('deploy --token=<redacted>');
+    expect(listed.description).toBe('password <redacted>');
+    expect(enqueued?.command).toBe(listed.command);
+    expect(enqueued?.description).toBe(listed.description);
+
+    engine.resolvePending(listed.id, 'deny', 'test cleanup', 'test');
+    await decision;
   });
 });
 
