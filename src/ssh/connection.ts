@@ -117,7 +117,9 @@ export class SSHConnection {
         connectConfig.agent = this.credentials.agentSocket;
       }
       if (this.credentials.privateKey) {
-        connectConfig.privateKey = this.credentials.privateKey;
+        connectConfig.privateKey = this.credentials.certificate
+          ? this.credentials.privateKey + '\n' + this.credentials.certificate
+          : this.credentials.privateKey;
         if (this.credentials.passphrase) {
           connectConfig.passphrase = this.credentials.passphrase;
         }
