@@ -203,6 +203,43 @@ describe('parseServerConfigJson (Codex 3541767246: key auth requires key materia
   });
 });
 
+describe('parseServerConfigJson (Codex 3549295040: password auth requires a non-empty password)', () => {
+  it('rejects a password config with a missing password', () => {
+    // Without password material the server still registers as password-authed
+    // but fails on first use: OpenSshTransport.init() throws, and the ssh2 path
+    // connects without the promised credential. Fail at parse time instead.
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'password',
+    }))).toThrow(/auth "password" requires a non-empty "password"/);
+  });
+
+  it('rejects a password config with an empty-string password', () => {
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'password', password: '',
+    }))).toThrow(/auth "password" requires a non-empty "password"/);
+  });
+
+  it('rejects a password config with a non-string password', () => {
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'password', password: 123,
+    }))).toThrow(/auth "password" requires a non-empty "password"/);
+  });
+
+  it('rejects a missing password for an explicit openssh password config', () => {
+    expect(() => parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'password', transport: 'openssh',
+    }))).toThrow(/auth "password" requires a non-empty "password"/);
+  });
+
+  it('still accepts a password config with a non-empty password', () => {
+    const cfg = parseServerConfigJson(JSON.stringify({
+      name: 'n', host: 'h', user: 'u', auth: 'password', password: 'pw',
+    }));
+    expect(cfg.authMode).toBe('password');
+    expect(cfg.password).toBe('pw');
+  });
+});
+
 describe('validateConfig multi-host (finding 2: legacy flags must be rejected)', () => {
   it('rejects --port mixed with --ssh', () => {
     expect(() => validateConfig({ port: '2222' }, true)).toThrow(/cannot be mixed with legacy single-host flags/);

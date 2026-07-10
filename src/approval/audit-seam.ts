@@ -69,7 +69,6 @@ interface AuditModuleLike {
     off?(event: 'execution', listener: (record: unknown) => void): void;
   };
   resolveAuditDir(override?: string | null): string;
-  yoloApproval(now?: Date): unknown;
 }
 
 export type AuditModuleImporter = (specifier: string) => Promise<unknown>;
@@ -109,6 +108,32 @@ function toApprovalSection(decision: ApprovalDecision) {
     decided_at: decision.decided_at,
     decided_by: decision.decided_by,
   };
+}
+
+function errorMessageFromUnknown(error: unknown): string {
+  return error instanceof Error ? error.message : String(error ?? 'unknown error');
+}
+
+function approvalNotReachedSection(now: Date, error: unknown) {
+  const message = errorMessageFromUnknown(error);
+  return {
+    mode: 'manual',
+    decision: 'deny',
+    reason: `approval gate was not reached: ${message}`,
+    decided_at: now.toISOString(),
+    decided_by: 'approval:not-run',
+  };
+}
+
+function stderrWithExecutionError(stderr: string | undefined, error: unknown): string {
+  const base = stderr ?? '';
+  if (error === undefined) return base;
+
+  const message = errorMessageFromUnknown(error);
+  if (base.includes(message)) return base;
+
+  const executionError = `execution error: ${message}`;
+  return base ? `${base}\n${executionError}` : executionError;
 }
 
 /**
@@ -178,33 +203,39 @@ export async function loadAuditSink(
       try {
         const now = new Date();
         const durationMs = Math.max(0, Date.now() - input.startedAt);
-        // Truth: prefer the real decision; fall back to the yolo placeholder
-        // only when the gate never produced one (error before the gate ran).
+        // Truth: prefer the real decision. When a config/transport failure
+        // happens before the gate can decide, never synthesize a yolo/allow
+        // decision: record an explicit not-run denial marker instead.
         const approval = input.approval
           ? toApprovalSection(input.approval)
-          : mod.yoloApproval(now);
+          : approvalNotReachedSection(now, input.error);
+        const exec = input.result
+          ? {
+              stdout: input.result.stdout ?? '',
+              // When resultToMcpContent rejects after the transport already
+              // returned an ExecResult, keep both the raw transport stderr and
+              // the mapped MCP error. Otherwise timeout/auth/host-key/
+              // transport/non-zero results become audit records that only say
+              // "a result existed" and lose the execution failure context.
+              stderr: stderrWithExecutionError(input.result.stderr, input.error),
+              exitCode: input.result.exitCode ?? null,
+              durationMs,
+            }
+          : input.approval?.decision === 'deny'
+            ? undefined
+            : {
+                stdout: '',
+                stderr: errorMessageFromUnknown(input.error),
+                exitCode: null,
+                durationMs,
+              };
         store.append({
           profile: input.profile,
           tool: input.tool,
           command: input.command,
           description: input.description,
           approval,
-          exec: input.result
-            ? {
-                stdout: input.result.stdout ?? '',
-                stderr: input.result.stderr ?? '',
-                exitCode: input.result.exitCode ?? null,
-                durationMs,
-              }
-            : {
-                stdout: '',
-                stderr:
-                  input.error instanceof Error
-                    ? input.error.message
-                    : String(input.error ?? 'unknown error'),
-                exitCode: null,
-                durationMs,
-              },
+          ...(exec ? { exec } : {}),
           now,
         });
       } catch (auditErr: any) {
