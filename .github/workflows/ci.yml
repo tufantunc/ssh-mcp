@@ -10,15 +10,42 @@ jobs:
   test:
     runs-on: ubuntu-latest
     services:
-      sshd:
+      ssh-admin:
         image: lscr.io/linuxserver/openssh-server:latest
         env:
-          USER_NAME: test
+          USER_NAME: admin
           PASSWORD_ACCESS: "true"
           USER_PASSWORD: secret
           SUDO_ACCESS: "true"
         ports:
           - 2222:2222
+        options: >-
+          --health-cmd="nc -z localhost 2222 || exit 1"
+          --health-interval=2s
+          --health-timeout=2s
+          --health-retries=30
+      ssh-viewer:
+        image: lscr.io/linuxserver/openssh-server:latest
+        env:
+          USER_NAME: viewer
+          PASSWORD_ACCESS: "true"
+          USER_PASSWORD: viewpass
+        ports:
+          - 2223:2222
+        options: >-
+          --health-cmd="nc -z localhost 2222 || exit 1"
+          --health-interval=2s
+          --health-timeout=2s
+          --health-retries=30
+      ssh-operator:
+        image: lscr.io/linuxserver/openssh-server:latest
+        env:
+          USER_NAME: operator
+          PASSWORD_ACCESS: "true"
+          USER_PASSWORD: oppass
+          SUDO_ACCESS: "true"
+        ports:
+          - 2224:2222
         options: >-
           --health-cmd="nc -z localhost 2222 || exit 1"
           --health-interval=2s
@@ -39,20 +66,23 @@ jobs:
       - name: Dependency resolution check
         run: npm ls zod zod-to-json-schema @modelcontextprotocol/sdk --all
 
-      - name: Wait for sshd
+      - name: Wait for all sshd servers
         run: |
-          for i in {1..60}; do
-            nc -z 127.0.0.1 2222 && echo "sshd ready" && exit 0
-            sleep 1
+          for port in 2222 2223 2224; do
+            for i in {1..60}; do
+              nc -z 127.0.0.1 $port && echo "sshd on $port ready" && break
+              sleep 1
+            done
           done
-          echo "sshd not ready" && exit 1
 
       - name: Run tests
         env:
           SSH_MCP_DISABLE_MAIN: "1"
-          SSH_MCP_TEST_PASSWORD: secret
-          SSH_HOST: 127.0.0.1
-          SSH_PORT: "2222"
+          SSH_MCP_ADMIN_PASSWORD: secret
+          SSH_MCP_OPERATOR_PASSWORD: oppass
+          SSH_MCP_VIEWER_PASSWORD: viewpass
+          SSH_MCP_ADMIN_SUDO_PASSWORD: secret
+          SSH_MCP_OPERATOR_SUDO_PASSWORD: oppass
         run: npm test
 
   security-scan:
