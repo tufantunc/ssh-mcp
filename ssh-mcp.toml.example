@@ -12,12 +12,13 @@ audit_dir = "~/.ssh-mcp"
 audit_max_bytes = 10000
 # Multi-source connection guard. Default: true (safe).
 #
-# When more than one [[sources]] is configured, a tool call that omits or blanks
-# `connectionName` FAILS FAST with the list of valid names, instead of silently
-# routing to the first-registered (default) source. This closes the R1 landmine
-# where an omitted name silently hit whichever host happened to register first.
-# Single-source deployments are unaffected — omission always resolves the lone
-# source regardless of this flag.
+# When more than one [[sources]] is configured and no source is marked
+# `default = true`, a tool call that omits or blanks `connectionName` FAILS FAST
+# with the list of valid names, instead of silently routing to whichever source
+# happened to register first. Marking a source `default = true` is an explicit
+# routing choice and still allows omitted names; the example below does this for
+# `prod-bastion`. Single-source deployments are unaffected — omission always
+# resolves the lone source regardless of this flag.
 #
 # require_connection = true   # default; leave it on.
 #
