@@ -117,6 +117,24 @@ describe('parseServerConfigJson (round-2: input validation hardening)', () => {
     }
   });
 
+  it('requires elevation passwords to be strings when provided', () => {
+    const base = { name: 'n', host: 'h', user: 'u', auth: 'password', password: 'pw' };
+    for (const field of ['sudoPassword', 'suPassword'] as const) {
+      for (const value of [123, true, {}, []]) {
+        expect(() => parseServerConfigJson(JSON.stringify({ ...base, [field]: value })))
+          .toThrow(new RegExp(`"${field}".*string`));
+      }
+    }
+  });
+
+  it('requires knownHostsFile to be a non-empty string when provided', () => {
+    const base = { name: 'n', host: 'h', user: 'u', auth: 'kerberos' };
+    for (const knownHostsFile of [123, true, {}, [], '']) {
+      expect(() => parseServerConfigJson(JSON.stringify({ ...base, knownHostsFile })))
+        .toThrow(/"knownHostsFile".*non-empty string/);
+    }
+  });
+
   it('rejects a non-integer / out-of-range port', () => {
     expect(() => parseServerConfigJson(JSON.stringify({
       name: 'n', host: 'h', user: 'u', auth: 'password', password: 'pw', port: 'abc',
