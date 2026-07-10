@@ -186,8 +186,12 @@ export function parseServerConfigJson(raw: string): ServerConfig {
       break;
   }
 
-  if (obj.sudoPassword) cfg.sudoPassword = obj.sudoPassword;
-  if (obj.suPassword) cfg.suPassword = obj.suPassword;
+  for (const field of ['sudoPassword', 'suPassword'] as const) {
+    if (obj[field] !== undefined && typeof obj[field] !== 'string') {
+      throw new Error(`--ssh "${obj.name}" "${field}" must be a string`);
+    }
+    if (obj[field]) cfg[field] = obj[field];
+  }
 
   // gssapiDelegateCredentials: enum-validate and require kerberos auth (the only
   // path that emits GSSAPIDelegateCredentials). An unchecked typo like "maybe"
@@ -217,7 +221,11 @@ export function parseServerConfigJson(raw: string): ServerConfig {
   // drop the requested host-key enforcement — a security downgrade. Mirror the
   // legacy single-host rule ("--knownHostsFile and --strictHostKeyChecking
   // require --transport=openssh") and reject the combination here.
-  if ((obj.knownHostsFile || obj.strictHostKeyChecking) && cfg.transport !== 'openssh') {
+  if (obj.knownHostsFile !== undefined &&
+      (typeof obj.knownHostsFile !== 'string' || obj.knownHostsFile.length === 0)) {
+    throw new Error(`--ssh "${obj.name}" "knownHostsFile" must be a non-empty string`);
+  }
+  if ((obj.knownHostsFile !== undefined || obj.strictHostKeyChecking !== undefined) && cfg.transport !== 'openssh') {
     throw new Error(
       `--ssh "${obj.name}" knownHostsFile/strictHostKeyChecking require "transport": "openssh" (got ${cfg.transport})`
     );
@@ -580,6 +588,7 @@ export async function buildTransportConfig(
 // Transport registry — lazy init, single entry for legacy single-host mode.
 // =============================================================================
 
+const fileLoadedKeyConfigs = new WeakSet<ServerConfig>();
 const registry = new TransportRegistry(prepareKeyContents);
 
 export async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
@@ -590,14 +599,20 @@ export async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
   // nonexistent) key file here — otherwise the first tool call fails with
   // ENOENT instead of using the password (Codex 3549295046). Mirrors the eager
   // read's `authMode === 'key'` guard in buildTransportConfig().
+  //
+  // Once this hook loads a keyPath, re-read it on every later init attempt. The
+  // registry retries rejected initialization with the same config object; the
+  // WeakSet distinguishes file-loaded contents from an explicit inline key so a
+  // key rotation can recover without a process restart.
   if (
     cfg.authMode === 'key' &&
     cfg.transport === 'ssh2' &&
     cfg.keyPath &&
-    !cfg.privateKey
+    (!cfg.privateKey || fileLoadedKeyConfigs.has(cfg))
   ) {
     const fs = await import('fs/promises');
     cfg.privateKey = await fs.readFile(cfg.keyPath, 'utf8');
+    fileLoadedKeyConfigs.add(cfg);
   }
 }
 
