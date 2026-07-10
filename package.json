@@ -12,6 +12,8 @@
     "build": "tsc && shx chmod +x build/*.js",
     "inspect": "npx @modelcontextprotocol/inspector node build/index.js",
     "test": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run",
+    "test:unit": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/unit/ test/property/",
+    "test:integration": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/integration/",
     "test:watch": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest",
     "coverage": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run --coverage"
   },
