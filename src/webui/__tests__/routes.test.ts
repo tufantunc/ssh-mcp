@@ -228,6 +228,12 @@ describe('WebUI auth', () => {
     ).rejects.toThrow(/auth_token/i);
   });
 
+  it('refuses a whitespace-only auth_token on a non-loopback bind', async () => {
+    await expect(
+      startWebUI({ host: '0.0.0.0', port: 0, registry: fakeRegistry, authToken: ' \t\n ' }),
+    ).rejects.toThrow(/auth_token/i);
+  });
+
   it('loopback without token allows api access (no token configured)', async () => {
     handle = await startWebUI({ host: '127.0.0.1', port: 0, registry: fakeRegistry });
     const r = await get(handle, '/api/profiles');
@@ -265,6 +271,16 @@ describe('WebUI auth', () => {
 
     const bad = await get(handle, '/api/profiles');
     expect(bad.status).toBe(401);
+
+    const good = await get(handle, '/api/profiles', { Authorization: 'Bearer secret-shibboleth' });
+    expect(good.status).toBe(200);
+  });
+
+  it('trims configured auth_token before authenticating requests', async () => {
+    handle = await startWebUI({
+      host: '127.0.0.1', port: 0, registry: fakeRegistry,
+      authToken: '  secret-shibboleth  ',
+    });
 
     const good = await get(handle, '/api/profiles', { Authorization: 'Bearer secret-shibboleth' });
     expect(good.status).toBe(200);
