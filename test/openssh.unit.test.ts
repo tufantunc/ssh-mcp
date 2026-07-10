@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
-import { buildOpenSshSudoWrapper, classifyError, OpenSshTransport, renderAskpassHelper } from '../src/transports/openssh';
+import {
+  buildOpenSshSudoWrapper,
+  classifyError,
+  OpenSshTransport,
+  renderAskpassHelper,
+  renderAskpassSshConfig,
+} from '../src/transports/openssh';
 
 describe('classifyError', () => {
   it('returns undefined for success (exit 0)', () => {
@@ -113,6 +119,16 @@ describe('OpenSshTransport.buildArgs', () => {
     expect(args).toContain('PreferredAuthentications=password,keyboard-interactive');
     expect(args).toContain('PubkeyAuthentication=no');
     expect(args).toContain('GSSAPIAuthentication=no');
+  });
+
+  it('uses a post-user-config SendEnv guard for initialized askpass auth', () => {
+    const t = new OpenSshTransport({ ...baseCfg, authMode: 'password', password: 'hunter2' });
+    (t as any).askpassConfigPath = '/tmp/ssh-mcp/ssh_config';
+    const args = t.buildArgs({ timeoutMs: 60000 });
+    const fIdx = args.indexOf('-F');
+    expect(fIdx).toBeGreaterThanOrEqual(0);
+    expect(args[fIdx + 1]).toBe('/tmp/ssh-mcp/ssh_config');
+    expect(renderAskpassSshConfig()).toBe('Include ~/.ssh/config\nSendEnv -*\n');
   });
 
   it('respects custom strictHostKeyChecking and knownHostsFile', () => {
