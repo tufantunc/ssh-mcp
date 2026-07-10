@@ -242,4 +242,14 @@ describe('SmartApproval — constructor validation', () => {
         }),
     ).toThrow(/model/);
   });
+
+  it('rejects providers whose request/response schema is not implemented', () => {
+    expect(() => new SmartApproval(makeOpts({
+      llm: {
+        endpoint: 'https://anthropic.example/v1/messages',
+        model: 'claude',
+        provider: 'anthropic',
+      },
+    }))).toThrow(/provider "anthropic" is not supported/);
+  });
 });
