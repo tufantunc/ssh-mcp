@@ -306,6 +306,20 @@ describe('OpenSshTransport.isConnected (Codex 3541767250: initialized != connect
     expect(t.isConnected()).toBe(false);
   });
 
+  it('stays NOT connected after authentication is rejected', async () => {
+    const { t, runSsh } = makeTransport({ authMode: 'password', password: 'wrong' });
+    runSsh.mockResolvedValue({ stdout: '', stderr: 'Permission denied', exitCode: 255, category: 'auth' });
+    await t.exec('true', { timeoutMs: 60000 });
+    expect(t.isConnected()).toBe(false);
+  });
+
+  it('stays NOT connected after host-key verification is rejected', async () => {
+    const { t, runSsh } = makeTransport({ authMode: 'key', keyPath: '/tmp/id_test' });
+    runSsh.mockResolvedValue({ stdout: '', stderr: 'Host key verification failed.', exitCode: 255, category: 'host_key' });
+    await t.exec('true', { timeoutMs: 60000 });
+    expect(t.isConnected()).toBe(false);
+  });
+
   it('reports connected once a later command succeeds after an initial connect failure', async () => {
     const { t, runSsh } = makeTransport({ authMode: 'kerberos' });
     runSsh

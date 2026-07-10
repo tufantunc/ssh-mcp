@@ -1,5 +1,5 @@
 import { mkdtempSync, readFileSync, rmSync, existsSync, readdirSync, statSync } from 'fs';
-import { tmpdir } from 'os';
+import { tmpdir, homedir } from 'os';
 import { join } from 'path';
 import { describe, expect, it } from 'vitest';
 
@@ -9,6 +9,8 @@ import {
   buildRecord,
   capThenRedact,
   clampInt,
+  resolveAuditDir,
+  utcDateStamp,
   yoloApproval,
   REDACT_SCAN_HEADROOM_BYTES,
 } from '../store.js';
@@ -158,6 +160,65 @@ describe('audit store', () => {
     expect(out.text).toContain('<redacted>');
   });
 
+  it('redacts an open quoted secret before a cap can persist its prefix', () => {
+    const cap = 64;
+    const secretPrefix = 'S'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 1000);
+    const out = capThenRedact(`run --password="${secretPrefix}" tail`, cap);
+
+    expect(out.text).toContain('--password=<redacted>');
+    expect(out.text).not.toContain('SSSS');
+    expect(Buffer.byteLength(out.text, 'utf8')).toBeLessThanOrEqual(cap);
+    expect(out.truncated).toBe(true);
+  });
+
+  it('redacts an open quoted JSON secret before a cap can persist its prefix', () => {
+    const cap = 64;
+    const secretPrefix = 'J'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 1000);
+    const out = capThenRedact(`{"password":"${secretPrefix}"}`, cap);
+
+    expect(out.text).toContain('"password":"<redacted>"');
+    expect(out.text).not.toContain('JJJJ');
+    expect(Buffer.byteLength(out.text, 'utf8')).toBeLessThanOrEqual(cap);
+    expect(out.truncated).toBe(true);
+  });
+
+  it('caps and redacts profile names before serializing records', () => {
+    const secret = 'ghp_' + 'P'.repeat(36);
+    const rec = buildRecord({
+      now: new Date('2026-05-25T12:00:00Z'),
+      profile: `prod-${secret}-${'x'.repeat(2 * 1024 * 1024)}`,
+      tool: 'exec',
+      command: 'date',
+      approval: yoloApproval(),
+      auditMaxBytes: 64,
+    });
+
+    expect(rec.profile).not.toContain(secret);
+    expect(rec.profile).toContain('<redacted>');
+    expect(Buffer.byteLength(rec.profile, 'utf8')).toBeLessThanOrEqual(1024);
+  });
+
+  it('caps and redacts externally-controlled approval reasons', () => {
+    const secret = 'ghp_' + 'R'.repeat(36);
+    const rec = buildRecord({
+      now: new Date('2026-05-25T12:00:00Z'),
+      profile: 'prod',
+      tool: 'exec',
+      command: 'date',
+      approval: {
+        ...yoloApproval(),
+        mode: 'smart',
+        reason: `Bearer ${secret} ${'x'.repeat(2 * 1024 * 1024)}`,
+        decided_by: 'smart-llm',
+      },
+      auditMaxBytes: 64,
+    });
+
+    expect(rec.approval.reason).not.toContain(secret);
+    expect(rec.approval.reason).toContain('<redacted>');
+    expect(Buffer.byteLength(rec.approval.reason, 'utf8')).toBeLessThanOrEqual(64);
+  });
+
   it('caps the redactor scan window to cap + headroom (does not redact unbounded input)', () => {
     const cap = 16;
     // A secret placed beyond cap + headroom is outside the scan window: it gets
@@ -214,6 +275,14 @@ describe('audit store', () => {
     expect(out.text).not.toContain('eyJbbbb');
     expect(out.text).not.toContain(sig);
     expect(out.text).toContain('<redacted>');
+  });
+
+  it('redacts URL userinfo when the @ delimiter falls past the scan window', () => {
+    const cap = 96;
+    const password = 'p'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 1000);
+    const out = capThenRedact(`clone https://alice:${password}@example.com/repo.git`, cap);
+    expect(out.text).toContain('https://alice:<redacted>@example.com');
+    expect(out.text).not.toContain('pppp');
   });
 
   it('caps a huge rejected command so it cannot bypass the size guard (Codex 3541772945)', () => {
@@ -334,6 +403,91 @@ describe('audit store', () => {
       const parsed = JSON.parse(readFileSync(file, 'utf8').trim());
       // auditMaxBytes clamped to >= 0 default, so stdout is retained, not emptied.
       expect(parsed.exec.stdout.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an empty audit_dir instead of resolving to cwd (Codex 3556038508)', () => {
+    const savedEnv = process.env.SSH_MCP_AUDIT_DIR;
+    try {
+      delete process.env.SSH_MCP_AUDIT_DIR;
+      const home = join(homedir(), '.ssh-mcp');
+      // Empty / whitespace-only override falls back to the default, never cwd.
+      expect(resolveAuditDir('')).toBe(home);
+      expect(resolveAuditDir('   ')).toBe(home);
+      // Empty env override is also ignored.
+      process.env.SSH_MCP_AUDIT_DIR = '';
+      expect(resolveAuditDir(undefined)).toBe(home);
+      expect(resolveAuditDir(undefined)).not.toBe(process.cwd());
+      // A real env value still wins over the default.
+      process.env.SSH_MCP_AUDIT_DIR = '/tmp/ssh-mcp-audit-env';
+      expect(resolveAuditDir(undefined)).toBe('/tmp/ssh-mcp-audit-env');
+      // ...and an explicit non-empty override wins over env.
+      expect(resolveAuditDir('/tmp/ssh-mcp-audit-override')).toBe('/tmp/ssh-mcp-audit-override');
+    } finally {
+      if (savedEnv === undefined) delete process.env.SSH_MCP_AUDIT_DIR;
+      else process.env.SSH_MCP_AUDIT_DIR = savedEnv;
+    }
+  });
+
+  it('falls back to the default for a fractional auditMaxBytes instead of flooring to 0 (Codex 3556038524)', () => {
+    const dir = tmpAuditDir();
+    try {
+      // 0.5 would floor to 0 and silently empty every capture; it must fall
+      // back to the documented default instead.
+      const store = new AuditStore({ auditDir: dir, auditMaxBytes: 0.5 });
+      const now = new Date('2026-05-25T12:00:00.000Z');
+      const rec = store.append({
+        now,
+        profile: 'default',
+        tool: 'exec',
+        command: 'echo hello',
+        approval: yoloApproval(now),
+        exec: { stdout: 'output-visible', stderr: '', exitCode: 0, durationMs: 1 },
+      });
+      expect(rec.exec?.stdout).toBe('output-visible');
+      expect(rec.exec?.stdout_truncated).toBe(false);
+      // Explicit integer 0 ("capture nothing") is still honored.
+      const zeroStore = new AuditStore({ auditDir: dir, auditMaxBytes: 0 });
+      const zeroRec = zeroStore.append({
+        now,
+        profile: 'default',
+        tool: 'exec',
+        command: 'echo hello',
+        approval: yoloApproval(now),
+        exec: { stdout: 'output-visible', stderr: '', exitCode: 0, durationMs: 1 },
+      });
+      expect(zeroRec.exec?.stdout).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('drops expired records from the in-memory tail with the same retention window as disk (Codex 3556038510)', async () => {
+    const dir = tmpAuditDir();
+    try {
+      const store = new AuditStore({ auditDir: dir, auditMaxBytes: 100, retain: 2 });
+      const base = {
+        profile: 'p',
+        tool: 'exec' as const,
+        exec: { stdout: '', stderr: '', exitCode: 0, durationMs: 1 },
+      };
+      // Relative dates: tail() also filters against the real clock at read
+      // time, so anchor the fixture to "now" rather than fixed past dates.
+      const now = new Date();
+      const old = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
+      // Old record enters the tail buffer (and its own dated file).
+      store.append({ ...base, now: old, command: 'echo old-day', approval: yoloApproval(old) });
+      // Today's append crosses the day boundary: retain=2 prunes the 5-day-old
+      // file from disk; the in-memory tail must drop its record with the same
+      // cutoff instead of serving it through /api/executions.
+      store.append({ ...base, now, command: 'echo today', approval: yoloApproval(now) });
+      expect(existsSync(join(dir, `executions-${utcDateStamp(old)}.jsonl`))).toBe(false);
+      const rows = await store.tail({ limit: 10 });
+      const commands = rows.map(r => r.command);
+      expect(commands).toContain('echo today');
+      expect(commands).not.toContain('echo old-day');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

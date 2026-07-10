@@ -161,12 +161,14 @@ describe('WebUI mode-switch routes (controller wired)', () => {
       body: JSON.stringify(body),
     });
 
+    // The general tokenless DNS-rebinding guard rejects a non-loopback Origin
+    // with 401 before the mode-switch route's mutation guard is reached.
     const global = await req(handle, '/api/approval-mode', evilPut({ mode: 'manual' }));
-    expect(global.status).toBe(403);
+    expect(global.status).toBe(401);
     expect(controller.getGlobalMode()).toBe('yolo');
 
     const profile = await req(handle, '/api/profiles/prod/approval-mode', evilPut({ mode: 'manual' }));
-    expect(profile.status).toBe(403);
+    expect(profile.status).toBe(401);
     expect(controller.getEffectiveMode('prod')).toBe('yolo');
   });
 

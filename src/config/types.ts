@@ -39,6 +39,8 @@ export interface WebUISection {
 export interface ApprovalLLMSection {
   endpoint?: string;
   api_key?: string;     // supports env:NAME
+  /** Internal resolved-config marker: a configured key was unavailable. */
+  api_key_unresolved?: true;
   model?: string;
   timeout_ms?: number;
   provider?: 'openai' | string;
