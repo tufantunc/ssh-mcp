@@ -3,13 +3,14 @@ import { SSHConnection } from '../../src/ssh/connection.js';
 import { resolveCredentials } from '../../src/config/credential-resolver.js';
 import type { Profile } from '../../src/types.js';
 import type { HostKeyMode } from '../../src/ssh/host-key.js';
+import { sshAvailable, SSH_HOST, SSH_PORT } from './helpers.js';
 
 const knownHosts = new Map<string, string>();
 
 const testProfile: Profile = {
   name: 'test',
-  host: '127.0.0.1',
-  port: 2222,
+  host: SSH_HOST,
+  port: SSH_PORT,
   user: 'test',
   auth: 'password',
   tty: false,
@@ -24,8 +25,12 @@ const testProfile: Profile = {
 };
 
 let conn: SSHConnection;
+let savedEnv: NodeJS.ProcessEnv;
+const SSH_AVAILABLE = sshAvailable();
 
 beforeAll(async () => {
+  if (!(await SSH_AVAILABLE)) return;
+  savedEnv = { ...process.env };
   process.env.SSH_MCP_TEST_PASSWORD = 'secret';
   const creds = await resolveCredentials(testProfile);
   conn = new SSHConnection(testProfile, creds, knownHosts, 'insecure' as HostKeyMode);
@@ -34,9 +39,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await conn?.close();
+  if (savedEnv) process.env = savedEnv;
 });
 
-describe('InteractiveSession', () => {
+describe.skipIf(await SSH_AVAILABLE === false)('InteractiveSession', () => {
   it('opens and closes an interactive session', async () => {
     const session = await conn.openSession({ name: 'test-sess', type: 'interactive' });
     expect(session.name).toBe('test-sess');

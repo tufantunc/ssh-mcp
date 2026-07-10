@@ -4,13 +4,14 @@ import { SftpClient } from '../../src/ssh/sftp.js';
 import { resolveCredentials } from '../../src/config/credential-resolver.js';
 import type { Profile } from '../../src/types.js';
 import type { HostKeyMode } from '../../src/ssh/host-key.js';
+import { sshAvailable, SSH_HOST, SSH_PORT } from './helpers.js';
 
 const knownHosts = new Map<string, string>();
 
 const testProfile: Profile = {
   name: 'test',
-  host: '127.0.0.1',
-  port: 2222,
+  host: SSH_HOST,
+  port: SSH_PORT,
   user: 'test',
   auth: 'password',
   tty: false,
@@ -26,8 +27,12 @@ const testProfile: Profile = {
 
 let conn: SSHConnection;
 let sftp: SftpClient;
+let savedEnv: NodeJS.ProcessEnv;
+const SSH_AVAILABLE = sshAvailable();
 
 beforeAll(async () => {
+  if (!(await SSH_AVAILABLE)) return;
+  savedEnv = { ...process.env };
   process.env.SSH_MCP_TEST_PASSWORD = 'secret';
   const creds = await resolveCredentials(testProfile);
   conn = new SSHConnection(testProfile, creds, knownHosts, 'insecure' as HostKeyMode);
@@ -37,9 +42,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await conn?.close();
+  if (savedEnv) process.env = savedEnv;
 });
 
-describe('SFTP operations', () => {
+describe.skipIf(await SSH_AVAILABLE === false)('SFTP operations', () => {
   it('uploads and downloads a file', async () => {
     const content = 'Hello SFTP v2!';
     const remotePath = '/tmp/ssh-mcp-test-upload.txt';
@@ -63,9 +69,22 @@ describe('SFTP operations', () => {
     await conn.exec(`rm -f ${remotePath}`);
   });
 
-  it('lists a directory', async () => {
+  it('lists a directory with valid entries', async () => {
+    const markerPath = '/tmp/ssh-mcp-list-marker.txt';
+    await sftp.upload({ remotePath: markerPath, content: 'list marker' });
+
     const entries = await sftp.list('/tmp');
     expect(Array.isArray(entries)).toBe(true);
+    const marker = entries.find((e) => e.path.endsWith('ssh-mcp-list-marker.txt'));
+    expect(marker).toBeTruthy();
+    expect(marker!.isFile).toBe(true);
+    expect(typeof marker!.size).toBe('number');
+
+    await conn.exec(`rm -f ${markerPath}`);
+  });
+
+  it('rejects nonexistent path for stat', async () => {
+    await expect(sftp.stat('/tmp/nonexistent-ssh-mcp-test-12345')).rejects.toThrow();
   });
 
   it('handles binary content', async () => {
