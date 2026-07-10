@@ -580,12 +580,24 @@ function validateApproval(
       const fullyConfigured =
         typeof llm.endpoint === 'string' && typeof llm.model === 'string';
       if (smartActive) {
-        resolved.api_key = resolveEnvRef(llm.api_key, '[approval.llm].api_key', env);
+        const apiKey = resolveEnvRef(llm.api_key, '[approval.llm].api_key', env);
+        if (!apiKey) {
+          throw new Error('Config: [approval.llm].api_key must not be empty when smart mode is active');
+        }
+        resolved.api_key = apiKey;
       } else if (fullyConfigured) {
         try {
-          resolved.api_key = resolveEnvRef(llm.api_key, '[approval.llm].api_key', env);
+          const apiKey = resolveEnvRef(llm.api_key, '[approval.llm].api_key', env);
+          if (apiKey) {
+            resolved.api_key = apiKey;
+          } else {
+            resolved.api_key_unresolved = true;
+          }
         } catch {
-          // env var unset/empty and smart is inactive — proceed without the key.
+          // Missing env remains non-fatal while smart is inactive, but retain a
+          // marker so the engine builder does not advertise/pre-arm an
+          // unauthenticated smart mode.
+          resolved.api_key_unresolved = true;
         }
       }
       // else: incomplete block and smart unused — defer entirely (unchanged).

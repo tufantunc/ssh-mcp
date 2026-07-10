@@ -1004,9 +1004,11 @@ endpoint = "https://api.openai.com/v1/chat/completions"
 api_key = "env:MISSING_KEY"
 model = "gpt-4o-mini"
 `, { env: {} });
-    // No throw (manual is active, smart only pre-armed); key stays unresolved.
+    // No throw (manual is active), but retain that the configured key was
+    // unavailable so the engine builder does not pre-arm/advertise smart.
     expect(cfg.approval?.mode).toBe('manual');
     expect(cfg.approval?.llm?.api_key).toBeUndefined();
+    expect(cfg.approval?.llm?.api_key_unresolved).toBe(true);
   });
 
   it('resolves api_key when smart mode is only enabled by a per-source override', () => {
