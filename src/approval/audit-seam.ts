@@ -125,7 +125,14 @@ function approvalNotReachedSection(now: Date, error: unknown) {
   };
 }
 
-function stderrWithExecutionError(stderr: string | undefined, error: unknown): string {
+/**
+ * Merge a mapped execution error (the McpError raised by `resultToMcpContent`
+ * for a failed ExecResult) into the audited stderr, so failure audit records
+ * keep the synthetic context (`Command exited with status N`, timeout text)
+ * instead of an empty stderr. Exported for the legacy direct wrapper in
+ * `src/index.ts`, which must audit with the same semantics (Codex 3556038517).
+ */
+export function stderrWithExecutionError(stderr: string | undefined, error: unknown): string {
   const base = stderr ?? '';
   if (error === undefined) return base;
 

@@ -480,8 +480,15 @@ function validateServerSection(raw: any) {
     out.audit_dir = expandHome(raw.audit_dir);
   }
   if (raw.audit_max_bytes !== undefined) {
-    if (typeof raw.audit_max_bytes !== 'number' || raw.audit_max_bytes <= 0) {
-      throw new Error('Config: [server].audit_max_bytes must be a positive number');
+    // Byte counts are integer-only: a fractional cap below 1 would floor to 0
+    // downstream and silently empty every stdout/stderr capture, so reject
+    // non-integers at the config entry point (Codex 3556038524).
+    if (
+      typeof raw.audit_max_bytes !== 'number' ||
+      !Number.isInteger(raw.audit_max_bytes) ||
+      raw.audit_max_bytes <= 0
+    ) {
+      throw new Error('Config: [server].audit_max_bytes must be a positive integer');
     }
     out.audit_max_bytes = raw.audit_max_bytes;
   }

@@ -29,7 +29,7 @@ import {
   type ApprovalDispatcher,
   type ResolvedSource,
 } from './approval/index.js';
-import { loadAuditSink, type AuditSink } from './approval/audit-seam.js';
+import { loadAuditSink, stderrWithExecutionError, type AuditSink } from './approval/audit-seam.js';
 import { startWebUI } from './webui/server.js';
 import type {
   ManualApprovalQueue,
@@ -1059,17 +1059,40 @@ export async function executeAuditedTransportCommand(input: {
           password: input.sudoPassword,
         })
       : await input.transport.exec(commandWithDescription, { timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT });
-    auditExecution({
-      tool: input.tool,
-      profile,
-      command: commandWithDescription,
-      description: input.description,
-      startedAt,
-      result,
-      store: input.store,
-    });
-    audited = true;
-    return resultToMcpContent(result);
+    // Map the result BEFORE writing the audit record: for a failed ExecResult
+    // (e.g. non-zero exit with empty stderr) `resultToMcpContent` throws the
+    // synthetic failure context ("Command exited with status N"). Auditing
+    // first would persist an empty stderr and then `audited` would suppress
+    // the catch path, leaving the wrapper's failure audits misleading and
+    // divergent from the MCP handlers (Codex 3556038517). Mirror
+    // `recordAuditResult`: audit the raw result on success, and merge the
+    // mapped execution error into stderr on failure.
+    try {
+      const response = resultToMcpContent(result);
+      auditExecution({
+        tool: input.tool,
+        profile,
+        command: commandWithDescription,
+        description: input.description,
+        startedAt,
+        result,
+        store: input.store,
+      });
+      audited = true;
+      return response;
+    } catch (mapErr) {
+      auditExecution({
+        tool: input.tool,
+        profile,
+        command: commandWithDescription,
+        description: input.description,
+        startedAt,
+        result: { ...result, stderr: stderrWithExecutionError(result.stderr, mapErr) },
+        store: input.store,
+      });
+      audited = true;
+      throw mapErr;
+    }
   } catch (err) {
     // Transport rejection (spawn failure, unexpected exception) OR a
     // sanitization rejection (empty/too-long command) still gets an audit

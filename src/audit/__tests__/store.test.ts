@@ -1,5 +1,5 @@
 import { mkdtempSync, readFileSync, rmSync, existsSync, readdirSync, statSync } from 'fs';
-import { tmpdir } from 'os';
+import { tmpdir, homedir } from 'os';
 import { join } from 'path';
 import { describe, expect, it } from 'vitest';
 
@@ -9,6 +9,8 @@ import {
   buildRecord,
   capThenRedact,
   clampInt,
+  resolveAuditDir,
+  utcDateStamp,
   yoloApproval,
   REDACT_SCAN_HEADROOM_BYTES,
 } from '../store.js';
@@ -390,6 +392,91 @@ describe('audit store', () => {
       const parsed = JSON.parse(readFileSync(file, 'utf8').trim());
       // auditMaxBytes clamped to >= 0 default, so stdout is retained, not emptied.
       expect(parsed.exec.stdout.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an empty audit_dir instead of resolving to cwd (Codex 3556038508)', () => {
+    const savedEnv = process.env.SSH_MCP_AUDIT_DIR;
+    try {
+      delete process.env.SSH_MCP_AUDIT_DIR;
+      const home = join(homedir(), '.ssh-mcp');
+      // Empty / whitespace-only override falls back to the default, never cwd.
+      expect(resolveAuditDir('')).toBe(home);
+      expect(resolveAuditDir('   ')).toBe(home);
+      // Empty env override is also ignored.
+      process.env.SSH_MCP_AUDIT_DIR = '';
+      expect(resolveAuditDir(undefined)).toBe(home);
+      expect(resolveAuditDir(undefined)).not.toBe(process.cwd());
+      // A real env value still wins over the default.
+      process.env.SSH_MCP_AUDIT_DIR = '/tmp/ssh-mcp-audit-env';
+      expect(resolveAuditDir(undefined)).toBe('/tmp/ssh-mcp-audit-env');
+      // ...and an explicit non-empty override wins over env.
+      expect(resolveAuditDir('/tmp/ssh-mcp-audit-override')).toBe('/tmp/ssh-mcp-audit-override');
+    } finally {
+      if (savedEnv === undefined) delete process.env.SSH_MCP_AUDIT_DIR;
+      else process.env.SSH_MCP_AUDIT_DIR = savedEnv;
+    }
+  });
+
+  it('falls back to the default for a fractional auditMaxBytes instead of flooring to 0 (Codex 3556038524)', () => {
+    const dir = tmpAuditDir();
+    try {
+      // 0.5 would floor to 0 and silently empty every capture; it must fall
+      // back to the documented default instead.
+      const store = new AuditStore({ auditDir: dir, auditMaxBytes: 0.5 });
+      const now = new Date('2026-05-25T12:00:00.000Z');
+      const rec = store.append({
+        now,
+        profile: 'default',
+        tool: 'exec',
+        command: 'echo hello',
+        approval: yoloApproval(now),
+        exec: { stdout: 'output-visible', stderr: '', exitCode: 0, durationMs: 1 },
+      });
+      expect(rec.exec?.stdout).toBe('output-visible');
+      expect(rec.exec?.stdout_truncated).toBe(false);
+      // Explicit integer 0 ("capture nothing") is still honored.
+      const zeroStore = new AuditStore({ auditDir: dir, auditMaxBytes: 0 });
+      const zeroRec = zeroStore.append({
+        now,
+        profile: 'default',
+        tool: 'exec',
+        command: 'echo hello',
+        approval: yoloApproval(now),
+        exec: { stdout: 'output-visible', stderr: '', exitCode: 0, durationMs: 1 },
+      });
+      expect(zeroRec.exec?.stdout).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('drops expired records from the in-memory tail with the same retention window as disk (Codex 3556038510)', async () => {
+    const dir = tmpAuditDir();
+    try {
+      const store = new AuditStore({ auditDir: dir, auditMaxBytes: 100, retain: 2 });
+      const base = {
+        profile: 'p',
+        tool: 'exec' as const,
+        exec: { stdout: '', stderr: '', exitCode: 0, durationMs: 1 },
+      };
+      // Relative dates: tail() also filters against the real clock at read
+      // time, so anchor the fixture to "now" rather than fixed past dates.
+      const now = new Date();
+      const old = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
+      // Old record enters the tail buffer (and its own dated file).
+      store.append({ ...base, now: old, command: 'echo old-day', approval: yoloApproval(old) });
+      // Today's append crosses the day boundary: retain=2 prunes the 5-day-old
+      // file from disk; the in-memory tail must drop its record with the same
+      // cutoff instead of serving it through /api/executions.
+      store.append({ ...base, now, command: 'echo today', approval: yoloApproval(now) });
+      expect(existsSync(join(dir, `executions-${utcDateStamp(old)}.jsonl`))).toBe(false);
+      const rows = await store.tail({ limit: 10 });
+      const commands = rows.map(r => r.command);
+      expect(commands).toContain('echo today');
+      expect(commands).not.toContain('echo old-day');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
