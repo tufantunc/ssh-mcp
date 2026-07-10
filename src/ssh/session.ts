@@ -227,13 +227,7 @@ export class BackgroundSession extends Session {
   }
 
   async close(): Promise<void> {
-    try {
-      this.stream.signal('TERM');
-      setTimeout(() => {
-        try { this.stream.signal('KILL'); } catch { /* ignore */ }
-        try { this.stream.close(); } catch { /* ignore */ }
-      }, 3000);
-    } catch { /* ignore */ }
+    try { this.stream.close(); } catch { /* ignore */ }
     this._status = 'closed';
   }
 }

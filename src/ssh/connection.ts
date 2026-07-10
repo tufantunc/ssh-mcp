@@ -157,8 +157,8 @@ export class SSHConnection {
             try { activeStream.signal('INT'); } catch { /* */ }
             setTimeout(() => {
               try { activeStream?.signal('TERM'); } catch { /* */ }
-              setTimeout(() => { try { activeStream?.close(); } catch { /* */ } }, 2000);
-            }, 3000);
+              setTimeout(() => { try { activeStream?.close(); } catch { /* */ } }, 1000);
+            }, 1000);
           }
           reject(new Error(`Command timed out after ${timeoutMs}ms`));
         }
