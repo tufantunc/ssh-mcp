@@ -256,7 +256,9 @@ describe('WebUI server', () => {
       command: 'systemctl restart nginx',
       enqueuedAt: new Date().toISOString(),
     });
-    const r = await fetch(
+    // Non-loopback Origin is now caught by the general tokenless DNS-rebinding
+    // guard (401) before the mutation route's same-origin check runs.
+    const rebound = await fetch(
       `http://${handle.address.host}:${handle.address.port}/api/approvals/origin-guard-1/allow`,
       {
         method: 'POST',
@@ -267,8 +269,22 @@ describe('WebUI server', () => {
         body: '{}',
       },
     );
-    expect(r.status).toBe(403);
-    const j = await r.json();
+    expect(rebound.status).toBe(401);
+    // A loopback Origin from a DIFFERENT port passes the general guard but is
+    // still cross-origin for the mutation route: 403 from the same-origin check.
+    const crossPort = await fetch(
+      `http://${handle.address.host}:${handle.address.port}/api/approvals/origin-guard-1/allow`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: `http://${handle.address.host}:${handle.address.port + 1}`,
+        },
+        body: '{}',
+      },
+    );
+    expect(crossPort.status).toBe(403);
+    const j = await crossPort.json();
     expect(j.error).toMatch(/same-origin loopback/);
     expect(queue.list()).toHaveLength(1);
   });

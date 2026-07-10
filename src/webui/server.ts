@@ -26,19 +26,12 @@ function isLoopback(host: string): boolean {
   return normalized === '127.0.0.1' || normalized === '::1' || normalized === 'localhost';
 }
 
-function hostnameFromAuthority(authority: string | undefined): string | null {
-  if (!authority) return null;
-  try {
-    return new URL(`http://${authority}`).hostname;
-  } catch {
-    return null;
-  }
-}
-
 function isLoopbackHeaderValue(value: string | string[] | undefined): boolean {
   if (Array.isArray(value)) return false;
+  // hostnameFromAuthority is declared below with the approval-mutation CSRF
+  // helpers; function declarations hoist, so the shared helper is reused here.
   const hostname = hostnameFromAuthority(value);
-  return hostname !== null && isLoopback(hostname);
+  return hostname !== undefined && isLoopback(hostname);
 }
 
 function hasLoopbackHostAndOrigin(req: http.IncomingMessage): boolean {
