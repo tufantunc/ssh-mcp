@@ -33,6 +33,7 @@ export interface WebUISection {
   host?: string;        // default 127.0.0.1
   port?: number;        // default 8088
   auth_token?: string;  // required when host != 127.0.0.1; supports env:NAME
+  cors?: boolean;       // emit permissive CORS headers + answer preflight
 }
 
 /** [approval.llm] block — used in smart mode. */

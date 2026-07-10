@@ -506,6 +506,30 @@ auth_token = "env:TKN"
     expect(cfg.webui?.auth_token).toBe('tok');
   });
 
+  it('parses and validates [webui].cors', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[webui]
+cors = true
+`);
+    expect(cfg.webui?.cors).toBe(true);
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[webui]
+cors = "yes"
+`)).toThrow(/\[webui\]\.cors must be a boolean/);
+  });
+
   it('parses [approval] and [approval.llm]', () => {
     const cfg = parseTomlConfig(`
 [[sources]]
