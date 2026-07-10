@@ -256,7 +256,7 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
 
         const m = pathname.match(/^\/api\/approvals\/([^/]+)\/(allow|deny)$/);
         if (m && method === 'POST') {
-          if (!checkApprovalMutationAuth({ req, authToken: opts.authToken })) {
+          if (!checkApprovalMutationAuth({ req, authToken })) {
             sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
             return;
           }
