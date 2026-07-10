@@ -14,6 +14,7 @@ import {
   appendDescriptionComment,
   resolveApprovalEngineInput,
   approvalResolverWarningFromInput,
+  isCliSwitchEnabled,
   prepareKeyContents,
   validateConfig,
   resolveCliConfigPath,
@@ -312,6 +313,19 @@ describe('approval command/context helpers', () => {
       approval: { llm: { endpoint: 'https://api.example/v1/c', model: 'm-1', api_key: 'sk-test' } },
       perSourceApproval: { lab: 'smart' },
     }))?.defaultMode).toBe('yolo');
+  });
+
+  it('keeps [approval.llm]-only config inactive without a smart mode selection', () => {
+    expect(resolveApprovalEngineInput(resolvedConfig({
+      approval: { llm: { endpoint: 'https://api.example/v1/c', model: 'm-1' } },
+    }))).toBeNull();
+  });
+
+  it('parses --webui=false as disabled while preserving the bare flag', () => {
+    expect(isCliSwitchEnabled({ webui: 'false' }, 'webui')).toBe(false);
+    expect(isCliSwitchEnabled({ webui: 'FALSE' }, 'webui')).toBe(false);
+    expect(isCliSwitchEnabled({ webui: null }, 'webui')).toBe(true);
+    expect(isCliSwitchEnabled({}, 'webui')).toBe(false);
   });
 
   it('preserves the documented manual default when a top-level approval option is configured', () => {

@@ -108,6 +108,7 @@ export class ManualApproval extends EventEmitter implements ApprovalEngine {
         settle,
         timer,
         resolve: (decision, note, decided_by) => {
+          if (decision !== 'allow' && decision !== 'deny') return false;
           const live = this.pending.get(id);
           if (!live) return false;
           live.settle({
@@ -122,7 +123,12 @@ export class ManualApproval extends EventEmitter implements ApprovalEngine {
       };
       this.pending.set(id, entry);
       try {
-        this.emit('enqueue', { id, enqueued_at, context: ctx });
+        this.emit('enqueue', {
+          id,
+          enqueued_at,
+          context: ctx,
+          resolve: entry.resolve,
+        } satisfies PendingApproval);
       } catch { /* listener errors must not affect the gate */ }
     });
   }

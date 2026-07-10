@@ -64,6 +64,29 @@ describe('ManualApproval — external resolve', () => {
     expect(m.resolvePending('does-not-exist', 'allow')).toBe(false);
   });
 
+  it('rejects a runtime decision outside allow/deny without settling', async () => {
+    const m = new ManualApproval({ webuiEnabled: true, timeout_ms: 5000 });
+    const p = m.decide(ctx);
+    await Promise.resolve();
+    const id = m.listPending()[0].id;
+    expect((m.resolvePending as any)(id, 'approve')).toBe(false);
+    expect(m.listPending()).toHaveLength(1);
+    expect(m.resolvePending(id, 'deny')).toBe(true);
+    await expect(p).resolves.toMatchObject({ decision: 'deny' });
+  });
+
+  it('includes the public resolve callback in enqueue events', async () => {
+    const m = new ManualApproval({ webuiEnabled: true, timeout_ms: 5000 });
+    let enqueued: any;
+    m.once('enqueue', (entry) => { enqueued = entry; });
+    const p = m.decide(ctx);
+    await Promise.resolve();
+    expect(enqueued).toMatchObject({ context: ctx });
+    expect(enqueued.resolve).toBeTypeOf('function');
+    expect(enqueued.resolve('allow', 'from event')).toBe(true);
+    await expect(p).resolves.toMatchObject({ decision: 'allow', reason: 'from event' });
+  });
+
   it('keeps multiple pending entries independent', async () => {
     const m = new ManualApproval({ webuiEnabled: true, timeout_ms: 5000 });
     const p1 = m.decide(ctx);

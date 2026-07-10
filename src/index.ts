@@ -756,6 +756,12 @@ export function resolveApprovalEngineInput(
     && approvalCfg.llm !== undefined;
   const perSourceOnlyDefault = perSourceModes.length > 0
     && (approvalCfg === undefined || approvalLlmOnly);
+  // An [approval.llm]-only block supplies settings for smart mode but does not
+  // select approval by itself. Keep it inert unless a per-source override uses
+  // it; otherwise undefined defaultMode would accidentally activate manual.
+  if (approvalLlmOnly && perSourceModes.length === 0) {
+    return null;
+  }
   return {
     // Resolve the GLOBAL default mode:
     //  - explicit [approval].mode set        -> honor it.
@@ -815,13 +821,19 @@ function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher
   });
 }
 
+/** Resolve a bare/string boolean CLI switch without treating `--flag=false` as enabled. */
+export function isCliSwitchEnabled(args: Record<string, unknown>, key: string): boolean {
+  if (!(key in args)) return false;
+  const value = args[key];
+  return !(typeof value === 'string' && value.toLowerCase() === 'false');
+}
+
 /** Decide whether the WebUI will be active at boot (TOML or --webui). */
 function isWebUIActive(): boolean {
-  // `--webui` (bare flag) parses to a key present in argvConfig. The WebUI
-  // server itself lands in a later lane; here we only need the boot-time
-  // decision so manual-mode's gate-12 invariant resolves correctly.
-  const cliWebui = 'webui' in argvConfig;
-  return cliWebui || resolvedConfig.webui?.enabled === true;
+  // A bare `--webui` parses as a present key, while `--webui=false` must remain
+  // disabled. The WebUI server itself lands in a later lane; here we only need
+  // the boot-time decision so manual-mode's gate-12 invariant resolves correctly.
+  return isCliSwitchEnabled(argvConfig, 'webui') || resolvedConfig.webui?.enabled === true;
 }
 
 /**
