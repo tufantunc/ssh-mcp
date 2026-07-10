@@ -1,4 +1,4 @@
-import { Client, type ClientChannel } from 'ssh2';
+import { Client, type ClientChannel, type ConnectConfig } from 'ssh2';
 import type { ConnectionInfo, Profile, ResolvedCredentials, ExecOpts, CommandResult, SessionOpts } from '../types.js';
 import { FROZEN_ALGORITHMS } from './algorithms.js';
 import { verifyHostKey, fingerprintPublicKey, type HostKeyMode } from './host-key.js';
@@ -12,6 +12,7 @@ export class SSHConnection {
   private sessions = new Map<string, Session>();
   private activeChannels = 0;
   private connecting: Promise<void> | null = null;
+  private connected = false;
   private connectedAt: Date | null = null;
   private lastActivity = new Date();
   private knownHostsStore: Map<string, string>;
@@ -51,6 +52,7 @@ export class SSHConnection {
       this.client.on('ready', () => {
         clearTimeout(timeoutId);
         this.connecting = null;
+        this.connected = true;
         this.connectedAt = new Date();
         this.lastActivity = new Date();
         resolve();
@@ -64,6 +66,7 @@ export class SSHConnection {
       });
 
       this.client.on('end', () => {
+        this.connected = false;
         this.markSessionsDisconnected();
         this.client = null;
         this.connectedAt = null;
@@ -74,6 +77,7 @@ export class SSHConnection {
       });
 
       this.client.on('close', () => {
+        this.connected = false;
         this.markSessionsDisconnected();
         this.client = null;
         this.connectedAt = null;
@@ -83,11 +87,11 @@ export class SSHConnection {
         }
       });
 
-      const connectConfig: any = {
+      const connectConfig: ConnectConfig = {
         host: this.profile.host,
         port: this.profile.port,
         username: this.profile.user,
-        algorithms: FROZEN_ALGORITHMS,
+        algorithms: FROZEN_ALGORITHMS as ConnectConfig['algorithms'],
         hostVerifier: (key: Buffer) => {
           const fp = fingerprintPublicKey(key);
           if (this.profile.trustedHostKey && fp !== this.profile.trustedHostKey) {
@@ -107,7 +111,7 @@ export class SSHConnection {
       };
 
       if (this.credentials.agentSocket) {
-        connectConfig.agent = process.env.SSH_AUTH_SOCK;
+        connectConfig.agent = this.credentials.agentSocket;
       }
       if (this.credentials.privateKey) {
         connectConfig.privateKey = this.credentials.privateKey;
@@ -124,7 +128,7 @@ export class SSHConnection {
   }
 
   isConnected(): boolean {
-    return this.client !== null && (this.client as any)._sock && !(this.client as any)._sock.destroyed;
+    return this.connected && this.client !== null;
   }
 
   getClient(): Client {
@@ -325,7 +329,7 @@ export class SSHConnection {
 
   private markSessionsDisconnected(): void {
     for (const session of this.sessions.values()) {
-      (session as any)._status = 'disconnected';
+      session.markDisconnected();
     }
   }
 
@@ -338,6 +342,7 @@ export class SSHConnection {
       this.client = null;
     }
     this.connecting = null;
+    this.connected = false;
     this.connectedAt = null;
   }
 

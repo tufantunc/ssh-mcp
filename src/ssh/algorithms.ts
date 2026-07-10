@@ -30,4 +30,5 @@ export const FROZEN_ALGORITHMS = {
     'hmac-sha2-256',
     'hmac-sha2-512',
   ],
-} as const;
+};
+
