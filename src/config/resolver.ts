@@ -32,6 +32,8 @@ export interface ResolverInputs {
   cliConfigPath?: string;
   /** Override env for tests; defaults to process.env. */
   env?: NodeJS.ProcessEnv;
+  /** CLI `--webui` override; makes TOML WebUI secrets/checks active at load. */
+  webuiEnabled?: boolean;
 }
 
 export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
@@ -60,6 +62,7 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
   const fromToml: ResolvedConfig | undefined = tomlPath
     ? loadTomlFile(tomlPath, {
         env,
+        webuiEnabled: inputs.webuiEnabled,
         allowEmptySources: hasCliSources,
         ignoreSources: hasCliSources,
       })

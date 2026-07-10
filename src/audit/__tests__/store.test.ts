@@ -185,6 +185,27 @@ describe('audit store', () => {
     expect(Buffer.byteLength(rec.profile, 'utf8')).toBeLessThanOrEqual(1024);
   });
 
+  it('caps and redacts externally-controlled approval reasons', () => {
+    const secret = 'ghp_' + 'R'.repeat(36);
+    const rec = buildRecord({
+      now: new Date('2026-05-25T12:00:00Z'),
+      profile: 'prod',
+      tool: 'exec',
+      command: 'date',
+      approval: {
+        ...yoloApproval(),
+        mode: 'smart',
+        reason: `Bearer ${secret} ${'x'.repeat(2 * 1024 * 1024)}`,
+        decided_by: 'smart-llm',
+      },
+      auditMaxBytes: 64,
+    });
+
+    expect(rec.approval.reason).not.toContain(secret);
+    expect(rec.approval.reason).toContain('<redacted>');
+    expect(Buffer.byteLength(rec.approval.reason, 'utf8')).toBeLessThanOrEqual(64);
+  });
+
   it('caps the redactor scan window to cap + headroom (does not redact unbounded input)', () => {
     const cap = 16;
     // A secret placed beyond cap + headroom is outside the scan window: it gets

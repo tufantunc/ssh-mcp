@@ -462,6 +462,10 @@ const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
   ? resolveConfig({
       cliSources: cliSourceConfigs,
       cliConfigPath: resolveCliConfigPath(argvConfig),
+      // `--webui` overrides a disabled/omitted TOML enabled flag. Tell the
+      // loader now so it resolves auth_token and applies the non-loopback gate
+      // against the effective boot state rather than dropping the token.
+      webuiEnabled: 'webui' in argvConfig,
     })
   : { sources: [], perSourceApproval: {}, defaultExplicit: false };
 

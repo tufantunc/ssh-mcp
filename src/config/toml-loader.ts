@@ -135,6 +135,13 @@ export function discoverConfigPath(env: NodeJS.ProcessEnv = process.env): string
 interface LoadOptions {
   env?: NodeJS.ProcessEnv;
   /**
+   * Treat [webui] as enabled while validating top-level WebUI settings. The
+   * boot resolver sets this for the CLI `--webui` override so deferred secrets
+   * and cross-field checks use the effective enabled state, not only the TOML
+   * `enabled` key.
+   */
+  webuiEnabled?: boolean;
+  /**
    * Tolerate a TOML with zero [[sources]] entries. Used by the resolver when
    * CLI sources are present and suppress the TOML source list, so a TOML that
    * only supplies top-level sections (e.g. just [webui]) is a valid, supported
@@ -442,7 +449,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
   }
 
   const server = parsed.server ? validateServerSection(parsed.server) : undefined;
-  const webui = parsed.webui ? validateWebUI(parsed.webui, env) : undefined;
+  const webui = parsed.webui
+    ? validateWebUI(parsed.webui, env, opts.webuiEnabled === true)
+    : undefined;
   const approval = parsed.approval
     ? validateApproval(parsed.approval, env, Object.values(perSourceApproval).includes('smart'))
     : undefined;
@@ -485,7 +494,7 @@ function validateServerSection(raw: any) {
   return out;
 }
 
-function validateWebUI(raw: any, env: NodeJS.ProcessEnv) {
+function validateWebUI(raw: any, env: NodeJS.ProcessEnv, enabledByCli = false) {
   const out: TomlConfig['webui'] = {};
   if (raw.enabled !== undefined) {
     if (typeof raw.enabled !== 'boolean') throw new Error('Config: [webui].enabled must be a boolean');
@@ -496,13 +505,17 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv) {
     out.host = raw.host;
   }
   if (raw.port !== undefined) {
-    if (typeof raw.port !== 'number') throw new Error('Config: [webui].port must be a number');
+    if (!Number.isInteger(raw.port) || raw.port < 0 || raw.port > 65535) {
+      throw new Error('Config: [webui].port must be an integer between 0 and 65535');
+    }
     out.port = raw.port;
   }
-  const webuiEnabled = out.enabled === true;
-  if (raw.auth_token !== undefined && webuiEnabled) {
+  const webuiEnabled = out.enabled === true || enabledByCli;
+  if (raw.auth_token !== undefined) {
     if (typeof raw.auth_token !== 'string') throw new Error('Config: [webui].auth_token must be a string');
-    out.auth_token = resolveEnvRef(raw.auth_token, '[webui].auth_token', env);
+    if (webuiEnabled) {
+      out.auth_token = resolveEnvRef(raw.auth_token, '[webui].auth_token', env);
+    }
   }
   // Cross-field check: a non-loopback bind requires a token — but ONLY when the
   // web UI is actually enabled. With `[webui] enabled = false` the section is
@@ -513,7 +526,7 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv) {
   if (webuiEnabled && out.host && out.host !== '127.0.0.1' && out.host !== 'localhost' && out.host !== '::1') {
     if (!out.auth_token) {
       throw new Error(
-        `Config: [webui].host="${out.host}" is non-loopback; auth_token is required when [webui].enabled = true`,
+        `Config: [webui].host="${out.host}" is non-loopback; auth_token is required when WebUI is enabled`,
       );
     }
   }

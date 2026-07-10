@@ -120,6 +120,23 @@ audit_dir = "~/audit-only"
     expect(cfg.configPath).toBe(p);
   });
 
+  it('--webui resolves a token from a TOML section whose enabled flag is false', () => {
+    const p = writeToml(tmp, 'cli-webui.toml', `
+[webui]
+enabled = false
+host = "0.0.0.0"
+auth_token = "env:WEBUI_TOKEN"
+`);
+    const cfg = resolveConfig({
+      cliSources: [cliSource('cli')],
+      cliConfigPath: p,
+      env: { WEBUI_TOKEN: 'resolved-token' },
+      webuiEnabled: true,
+    });
+    expect(cfg.webui?.enabled).toBe(false);
+    expect(cfg.webui?.auth_token).toBe('resolved-token');
+  });
+
   it('still rejects a TOML with no [[sources]] when there are NO CLI sources', () => {
     // Without CLI sources the empty-sources tolerance must NOT apply — an
     // otherwise-empty config is a user error.
