@@ -30,6 +30,7 @@ export class OpenSshTransport implements ISshTransport {
 
   private askpassDir?: string;
   private askpassEnvName?: string;
+  private askpassConfigPath?: string;
   private cleanupRegistered = false;
   /**
    * True when the most recent command completed a usable live SSH session (an
@@ -165,6 +166,7 @@ export class OpenSshTransport implements ISshTransport {
       }
       this.askpassDir = undefined;
       this.askpassEnvName = undefined;
+      this.askpassConfigPath = undefined;
     }
   }
 
@@ -196,13 +198,22 @@ export class OpenSshTransport implements ISshTransport {
     const isWindows = process.platform === 'win32';
     const helperName = isWindows ? 'askpass.cmd' : 'askpass.sh';
     const helperPath = path.join(dir, helperName);
+    const configPath = path.join(dir, 'ssh_config');
     const content = renderAskpassHelper(envName, isWindows);
     await fs.writeFile(helperPath, content, { encoding: 'utf8' });
+    // OpenSSH copies variables selected by SendEnv from its own environment to
+    // the remote session. The askpass password must remain in that environment
+    // for the helper, so load the user's normal SSH config and then remove all
+    // SendEnv patterns in a final directive. Passing this file with -F keeps the
+    // rest of the user's SSH settings while preventing a broad `SendEnv *` from
+    // forwarding SSH_MCP_PW_* to the server.
+    await fs.writeFile(configPath, renderAskpassSshConfig(), { encoding: 'utf8' });
     if (!isWindows) {
       await fs.chmod(helperPath, 0o700);
     }
     this.askpassDir = dir;
     this.askpassEnvName = envName;
+    this.askpassConfigPath = configPath;
     (this as any)._askpassPath = helperPath;
     (this as any)._askpassPassword = password;
   }
@@ -218,6 +229,9 @@ export class OpenSshTransport implements ISshTransport {
       '-o', 'BatchMode=no',
       '-p', String(cfg.port),
     ];
+    if (cfg.authMode === 'password' && this.askpassConfigPath) {
+      a.push('-F', this.askpassConfigPath);
+    }
     if (cfg.knownHostsFile) {
       a.push('-o', `UserKnownHostsFile=${cfg.knownHostsFile}`);
     }
@@ -279,7 +293,20 @@ export class OpenSshTransport implements ISshTransport {
   /** Run a single command via `ssh host <cmd>`, collect output, enforce timeout. */
   private runSsh(command: string, opts: ExecOptions): Promise<ExecResult> {
     return new Promise((resolve) => {
-      const args = [...this.buildArgs(opts), command];
+      const nonce = randomBytes(8).toString('hex');
+      const endMark = `__SSH_MCP_END_${nonce}__`;
+      // Keep the user command in a subshell so `exit`/`exec` cannot prevent the
+      // sentinel. The leading newline in printf is an artificial separator;
+      // parsing removes exactly that byte and therefore preserves unterminated
+      // stdout. A random marker distinguishes the remote command's status 255
+      // from ssh(1)'s own transport/auth failure status 255.
+      const wrappedCommand = `(
+${command}
+)
+__ssh_mcp_rc=$?
+printf '\n${endMark}%s\n' "$__ssh_mcp_rc"
+exit 0`;
+      const args = [...this.buildArgs(opts), wrappedCommand];
       let timedOut = false;
       let exited = false;
       let stdout = '';
@@ -325,11 +352,22 @@ export class OpenSshTransport implements ISshTransport {
       child.on('close', (code, signal) => {
         exited = true;
         clearTimeout(timer);
-        const category = timedOut ? 'timeout' : classifyError(code, stderr);
+        const marker = `\n${endMark}`;
+        const markerIdx = stdout.lastIndexOf(marker);
+        const statusText = markerIdx >= 0
+          ? stdout.slice(markerIdx + marker.length).match(/^(\d{1,3})(?:\r?\n|$)/)
+          : null;
+        const remoteExit = statusText ? parseInt(statusText[1], 10) : null;
+        const commandStdout = remoteExit === null ? stdout : stdout.slice(0, markerIdx);
+        const category = timedOut
+          ? 'timeout'
+          : remoteExit === null
+            ? classifyError(code, stderr)
+            : (remoteExit === 0 ? undefined : 'remote_exit');
         resolve({
-          stdout,
+          stdout: commandStdout,
           stderr,
-          exitCode: timedOut ? null : (code ?? null),
+          exitCode: timedOut ? null : (remoteExit ?? code ?? null),
           signal: signal ?? undefined,
           category,
         });
@@ -473,7 +511,9 @@ export class OpenSshTransport implements ISshTransport {
           buffer = '';
           stdoutTail = '';
           // Run the user command inside a subshell, then echo the sentinel and
-          // its exit status on the SAME input line.
+          // its exit status. Newlines are intentional: a trailing shell comment
+          // (including the MCP description suffix) cannot consume the closing
+          // subshell or sentinel command.
           //
           //  - Subshell isolation: a command that exits or exec-replaces its
           //    shell (e.g. `echo ok; exit 0`, `exec true`) only terminates the
@@ -481,10 +521,10 @@ export class OpenSshTransport implements ISshTransport {
           //    the real exit status is reported instead of the close path
           //    mistaking a clean exit for a transport failure and dropping the
           //    output. `$?` after `( ... )` is the subshell's exit status.
-          //  - Same-line sentinel: with `ssh -tt` the sentinel-emit is echoed as
-          //    part of this one input line, so it can never glue onto command
-          //    output that lacks a trailing newline (e.g. `printf foo`).
-          execInput = `( ${command} ); echo ${endMark}$?`;
+          execInput = `(
+${command}
+)
+echo ${endMark}$?`;
           writeLine(execInput);
           return;
         }
@@ -623,6 +663,18 @@ export function renderAskpassHelper(envName: string, isWindows: boolean): string
     );
   }
   return `#!/bin/sh\nprintf '%s\\n' "$${envName}"\n`;
+}
+
+/**
+ * Per-process OpenSSH config used by askpass password authentication.
+ *
+ * `SendEnv` is a multi-value setting, so a command-line `-o SendEnv=-*` is
+ * evaluated before user configuration and cannot remove patterns added later
+ * by `~/.ssh/config`. Including the user config here and placing `SendEnv -*`
+ * last preserves all other settings while reliably clearing the final list.
+ */
+export function renderAskpassSshConfig(): string {
+  return 'Include ~/.ssh/config\nSendEnv -*\n';
 }
 
 /**

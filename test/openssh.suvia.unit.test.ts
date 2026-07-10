@@ -84,6 +84,42 @@ describe('runSuViaPty large output (finding 3: no ~4KB truncation)', () => {
   });
 });
 
+describe('OpenSSH command sentinels', () => {
+  it('puts the su closing subshell and sentinel after a command comment', async () => {
+    const fc = new FakeChild();
+    spawnMock.mockReturnValue(fc);
+    const t = new OpenSshTransport({ host: 'h', port: 22, username: 'u', suPassword: 'pw' });
+    const p = (t as any).runSuViaPty('echo ok # described command', 'pw', { timeoutMs: 60000 });
+
+    const { endMark } = driveToExec(fc);
+    const execInput = fc.writes.at(-1)!;
+    expect(execInput).toContain('echo ok # described command\n)\necho ' + endMark);
+    emit(fc, execInput.replace(/\n$/, '') + '\n' + 'ok\n' + endMark + '0\n');
+    fc.emit('close', 0, null);
+
+    await expect(p).resolves.toMatchObject({ exitCode: 0, stdout: 'ok\n' });
+  });
+
+  it('uses the remote sentinel to classify a command exit 255 as remote_exit', async () => {
+    const fc = new FakeChild();
+    spawnMock.mockReturnValue(fc);
+    const t = new OpenSshTransport({ host: 'h', port: 22, username: 'u' });
+    const p = (t as any).runSsh("echo Permission denied >&2; exit 255", { timeoutMs: 60000 });
+
+    const command = spawnMock.mock.calls[0][1].at(-1) as string;
+    const endMark = command.match(/(__SSH_MCP_END_[0-9a-f]+__)/)![1];
+    fc.stderr.emit('data', Buffer.from('Permission denied\n'));
+    emit(fc, `\n${endMark}255\n`);
+    fc.emit('close', 0, null);
+
+    await expect(p).resolves.toMatchObject({
+      exitCode: 255,
+      category: 'remote_exit',
+      stderr: 'Permission denied\n',
+    });
+  });
+});
+
 describe('runSuViaPty overall deadline (finding 4: timeoutMs is the hard ceiling)', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
@@ -135,10 +171,9 @@ describe('runSuViaPty echo stripping (finding 1: strip echoed PTY input from su 
 
     const { endMark } = driveToExec(fc);
 
-    // The command and sentinel-emit are combined into ONE input line; with
-    // `ssh -tt` the remote PTY echoes exactly that line back onto stdout.
-    const execInput = `( id -un ); echo ${endMark}$?`;
-    emit(fc, execInput + '\r\n');
+    // `ssh -tt` echoes the multiline input written to the root shell.
+    const execInput = fc.writes.find((w) => w.includes(endMark) && w.includes('id -un'))!;
+    emit(fc, execInput.replace(/\n$/, '') + '\r\n');
     emit(fc, 'root\n');
     emit(fc, `${endMark}0\n`);
     fc.emit('close', 0, null);
@@ -165,7 +200,7 @@ describe('runSuViaPty echo stripping (finding 1: strip echoed PTY input from su 
     // terminates the subshell; the control shell survives to emit the sentinel.
     const execInput = fc.writes.find((w) => w.includes(endMark) && w.includes('echo'));
     expect(execInput).toBeDefined();
-    expect(execInput!.trim()).toBe(`( echo ok; exit 0 ); echo ${endMark}$?`);
+    expect(execInput!.trim()).toBe(`(\necho ok; exit 0\n)\necho ${endMark}$?`);
 
     emit(fc, execInput!.replace(/\n$/, '') + '\r\n');
     emit(fc, 'ok\n');
@@ -189,12 +224,10 @@ describe('runSuViaPty echo stripping (finding 1: strip echoed PTY input from su 
 
     const { endMark } = driveToExec(fc);
 
-    // `printf foo` emits no trailing newline, so the echoed sentinel would glue
-    // directly after the real output. With the combined single input line and
-    // the digit-anchored end regex, only the real sentinel output is consumed
-    // and the caller sees exactly `foo` — not `foo__SSH_MCP_END_...$?`.
-    const execInput = `( printf foo ); echo ${endMark}$?`;
-    emit(fc, execInput + '\r\n');
+    // The multiline command wrapper is echoed first. The real `printf foo`
+    // output remains unterminated and therefore glues directly to the marker.
+    const execInput = fc.writes.find((w) => w.includes(endMark) && w.includes('printf foo'))!;
+    emit(fc, execInput.replace(/\n$/, '') + '\r\n');
     emit(fc, `foo${endMark}0\r\n`);
     fc.emit('close', 0, null);
 
