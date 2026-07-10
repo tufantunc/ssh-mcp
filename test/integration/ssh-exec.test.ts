@@ -3,13 +3,14 @@ import { SSHConnection } from '../../src/ssh/connection.js';
 import { resolveCredentials } from '../../src/config/credential-resolver.js';
 import type { Profile } from '../../src/types.js';
 import type { HostKeyMode } from '../../src/ssh/host-key.js';
+import { sshAvailable, SSH_HOST, SSH_PORT } from './helpers.js';
 
 const knownHosts = new Map<string, string>();
 
 const testProfile: Profile = {
   name: 'test',
-  host: '127.0.0.1',
-  port: 2222,
+  host: SSH_HOST,
+  port: SSH_PORT,
   user: 'test',
   auth: 'password',
   tty: false,
@@ -24,8 +25,12 @@ const testProfile: Profile = {
 };
 
 let conn: SSHConnection;
+let savedEnv: NodeJS.ProcessEnv;
+const SSH_AVAILABLE = sshAvailable();
 
 beforeAll(async () => {
+  if (!(await SSH_AVAILABLE)) return;
+  savedEnv = { ...process.env };
   process.env.SSH_MCP_TEST_PASSWORD = 'secret';
   const creds = await resolveCredentials(testProfile);
   conn = new SSHConnection(testProfile, creds, knownHosts, 'insecure' as HostKeyMode);
@@ -34,9 +39,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await conn?.close();
+  if (savedEnv) process.env = savedEnv;
 });
 
-describe('SSHConnection exec', () => {
+describe.skipIf(await SSH_AVAILABLE === false)('SSHConnection exec', () => {
   it('executes a simple command', async () => {
     const result = await conn.exec('echo hello');
     expect(result.exitCode).toBe(0);
@@ -78,7 +84,7 @@ describe('SSHConnection exec', () => {
   });
 });
 
-describe('SSHConnection connection lifecycle', () => {
+describe.skipIf(await SSH_AVAILABLE === false)('SSHConnection connection lifecycle', () => {
   it('reports connected status', () => {
     expect(conn.isConnected()).toBe(true);
   });
@@ -86,8 +92,8 @@ describe('SSHConnection connection lifecycle', () => {
   it('reports connection info', () => {
     const info = conn.toInfo();
     expect(info.profile).toBe('test');
-    expect(info.host).toBe('127.0.0.1');
-    expect(info.port).toBe(2222);
+    expect(info.host).toBe(SSH_HOST);
+    expect(info.port).toBe(SSH_PORT);
     expect(info.status).toBe('connected');
   });
 
