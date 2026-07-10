@@ -203,6 +203,7 @@ export interface WebUIOptions {
   host?: string;
   port?: number;
   authToken?: string;
+  cors?: boolean;
   registry: RegistrySnapshot;
   queue?: ManualApprovalQueue;
   audit?: AuditTail;

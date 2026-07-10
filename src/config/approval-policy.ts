@@ -41,6 +41,12 @@ export function resolveApprovalEngineInput(
     && approvalCfg.llm !== undefined;
   const perSourceOnlyDefault = perSourceModes.length > 0
     && (approvalCfg === undefined || approvalLlmOnly);
+  // An [approval.llm]-only block supplies settings for smart mode but does not
+  // select approval by itself. Keep it inert unless a per-source override uses
+  // it; otherwise the documented default would accidentally activate manual.
+  if (approvalLlmOnly && perSourceModes.length === 0) {
+    return null;
+  }
   return {
     // Resolve the GLOBAL default mode:
     //  - explicit [approval].mode set        -> honor it.

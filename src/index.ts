@@ -214,8 +214,12 @@ export function parseServerConfigJson(raw: string): ServerConfig {
       break;
   }
 
-  if (obj.sudoPassword) cfg.sudoPassword = obj.sudoPassword;
-  if (obj.suPassword) cfg.suPassword = obj.suPassword;
+  for (const field of ['sudoPassword', 'suPassword'] as const) {
+    if (obj[field] !== undefined && typeof obj[field] !== 'string') {
+      throw new Error(`--ssh "${obj.name}" "${field}" must be a string`);
+    }
+    if (obj[field]) cfg[field] = obj[field];
+  }
 
   // gssapiDelegateCredentials: enum-validate and require kerberos auth (the only
   // path that emits GSSAPIDelegateCredentials). An unchecked typo like "maybe"
@@ -245,7 +249,11 @@ export function parseServerConfigJson(raw: string): ServerConfig {
   // drop the requested host-key enforcement — a security downgrade. Mirror the
   // legacy single-host rule ("--knownHostsFile and --strictHostKeyChecking
   // require --transport=openssh") and reject the combination here.
-  if ((obj.knownHostsFile || obj.strictHostKeyChecking) && cfg.transport !== 'openssh') {
+  if (obj.knownHostsFile !== undefined &&
+      (typeof obj.knownHostsFile !== 'string' || obj.knownHostsFile.length === 0)) {
+    throw new Error(`--ssh "${obj.name}" "knownHostsFile" must be a non-empty string`);
+  }
+  if ((obj.knownHostsFile !== undefined || obj.strictHostKeyChecking !== undefined) && cfg.transport !== 'openssh') {
     throw new Error(
       `--ssh "${obj.name}" knownHostsFile/strictHostKeyChecking require "transport": "openssh" (got ${cfg.transport})`
     );
@@ -622,11 +630,16 @@ export async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
   // nonexistent) key file here — otherwise the first tool call fails with
   // ENOENT instead of using the password (Codex 3549295046). Mirrors the eager
   // read's `authMode === 'key'` guard in buildTransportConfig().
+  //
+  // Once this hook loads a keyPath, re-read it on every later init attempt. The
+  // registry retries rejected initialization with the same config object; the
+  // internal marker distinguishes file-loaded contents from an explicit inline
+  // key so a key rotation can recover without a process restart.
   if (
     cfg.authMode === 'key' &&
     cfg.transport === 'ssh2' &&
     cfg.keyPath &&
-    !cfg.privateKey
+    (!cfg.privateKey || cfg.privateKeyDerivedFromKeyPath === true)
   ) {
     const fs = await import('fs/promises');
     cfg.privateKey = await fs.readFile(cfg.keyPath, 'utf8');
@@ -906,13 +919,19 @@ export function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDis
   });
 }
 
+/** Resolve a bare/string boolean CLI switch without treating `--flag=false` as enabled. */
+export function isCliSwitchEnabled(args: Record<string, unknown>, key: string): boolean {
+  if (!(key in args)) return false;
+  const value = args[key];
+  return !(typeof value === 'string' && value.toLowerCase() === 'false');
+}
+
 /** Decide whether the WebUI will be active at boot (TOML or --webui). */
 function isWebUIActive(): boolean {
-  // `--webui` (bare flag) parses to a key present in argvConfig. The WebUI
-  // server itself lands in a later lane; here we only need the boot-time
-  // decision so manual-mode's gate-12 invariant resolves correctly.
-  const cliWebui = 'webui' in argvConfig;
-  return cliWebui || resolvedConfig.webui?.enabled === true;
+  // A bare `--webui` parses as a present key, while `--webui=false` must remain
+  // disabled. The WebUI server itself lands in a later lane; here we only need
+  // the boot-time decision so manual-mode's gate-12 invariant resolves correctly.
+  return isCliSwitchEnabled(argvConfig, 'webui') || resolvedConfig.webui?.enabled === true;
 }
 
 /**
@@ -1250,6 +1269,7 @@ async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined
     host,
     port,
     authToken,
+    cors: tomlWebui?.cors,
     registry: { list: () => registry.list() },
     queue: buildWebUIApprovalQueueAdapter(approvalEngine),
     audit: buildWebUIAuditTailAdapter(auditSink),

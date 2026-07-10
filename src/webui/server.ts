@@ -217,6 +217,18 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
       const pathname = urlObj.pathname;
       const method = (req.method || 'GET').toUpperCase();
 
+      if (opts.cors) {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Auth-Token');
+        res.setHeader('Access-Control-Max-Age', '600');
+        if (method === 'OPTIONS') {
+          res.writeHead(204, { 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+      }
+
       // --- SSE: /events --------------------------------------------------
       if (pathname === '/events') {
         if (method !== 'GET') {

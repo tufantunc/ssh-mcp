@@ -15,6 +15,7 @@ import {
   appendDescriptionComment,
   resolveApprovalEngineInput,
   approvalResolverWarningFromInput,
+  isCliSwitchEnabled,
   prepareKeyContents,
   validateConfig,
   resolveCliConfigPath,
@@ -345,6 +346,19 @@ describe('approval command/context helpers', () => {
     }))?.defaultMode).toBe('yolo');
   });
 
+  it('keeps [approval.llm]-only config inactive without a smart mode selection', () => {
+    expect(resolveApprovalEngineInput(resolvedConfig({
+      approval: { llm: { endpoint: 'https://api.example/v1/c', model: 'm-1' } },
+    }))).toBeNull();
+  });
+
+  it('parses --webui=false as disabled while preserving the bare flag', () => {
+    expect(isCliSwitchEnabled({ webui: 'false' }, 'webui')).toBe(false);
+    expect(isCliSwitchEnabled({ webui: 'FALSE' }, 'webui')).toBe(false);
+    expect(isCliSwitchEnabled({ webui: null }, 'webui')).toBe(true);
+    expect(isCliSwitchEnabled({}, 'webui')).toBe(false);
+  });
+
   it('preserves the documented manual default when a top-level approval option is configured', () => {
     const input = resolveApprovalEngineInput(resolvedConfig({
       approval: { fail_closed: true },
@@ -468,6 +482,9 @@ describe('prepareKeyContents (Codex 3549295046: skip deferred key reads when pas
       await prepareKeyContents(cfg);
       expect(cfg.privateKey).toBe('KEYDATA');
       expect(cfg.privateKeyDerivedFromKeyPath).toBe(true);
+      await fs.writeFile(keyPath, 'ROTATED');
+      await prepareKeyContents(cfg);
+      expect(cfg.privateKey).toBe('ROTATED');
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
