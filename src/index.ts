@@ -693,12 +693,14 @@ export function buildApprovalProfile(
   };
 }
 
-function approvalTargetForConnection(connectionName?: string): { profile: string; approvalProfile: ResolvedSource } {
-  const id = registry.resolveRegisteredName(connectionName);
-  const source = resolvedConfig.sources.find(s => s.name === id);
+export function approvalTargetForConnection(
+  reg: TransportRegistry,
+  connectionName?: string,
+): { profile: string; approvalProfile: ResolvedSource } {
+  const id = reg.resolveRegisteredName(connectionName);
   return {
     profile: id,
-    approvalProfile: buildApprovalProfile(id, resolvedConfig.perSourceApproval ?? {}, source),
+    approvalProfile: reg.profile(id),
   };
 }
 
@@ -1340,7 +1342,7 @@ server.tool(
     try {
       const sanitizedCommand = sanitizeCommand(command);
       commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
-      const target = approvalTargetForConnection(connectionName);
+      const target = approvalTargetForConnection(registry, connectionName);
       profile = target.profile;
       approvalDecision = await gateApproval({
         profile: target.approvalProfile,
@@ -1400,7 +1402,7 @@ if (!DISABLE_SUDO) {
       try {
         const sanitizedCommand = sanitizeCommand(command);
         commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
-        const target = approvalTargetForConnection(connectionName);
+        const target = approvalTargetForConnection(registry, connectionName);
         profile = target.profile;
         approvalDecision = await gateApproval({
           profile: target.approvalProfile,
