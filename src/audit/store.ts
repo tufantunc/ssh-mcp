@@ -215,7 +215,10 @@ export function buildRecord(input: BuildRecordInput): AuditRecord {
     approval: {
       mode: input.approval.mode,
       decision: input.approval.decision,
-      reason: redact(input.approval.reason),
+      // Smart-mode reasons are supplied by an external LLM. Bound them before
+      // JSONL serialization just like captured output so one oversized response
+      // cannot bypass auditMaxBytes or make the general redactor scan megabytes.
+      reason: capThenRedact(input.approval.reason, cap).text,
       decided_at: input.approval.decided_at,
       decided_by: input.approval.decided_by,
     },
