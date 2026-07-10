@@ -33,6 +33,29 @@ import type {
 
 const VALID_AUTH: AuthMode[] = ['kerberos', 'key', 'password'];
 const VALID_APPROVAL_MODE: ApprovalMode[] = ['yolo', 'smart', 'manual'];
+const SECRET_TOML_KEYS = [
+  'password',
+  'sudo_password',
+  'su_password',
+  'private_key',
+  'auth_token',
+  'api_key',
+];
+
+function redactTomlParseMessage(message: string): string {
+  const secretAssignment = new RegExp(
+    `(\\b(?:${SECRET_TOML_KEYS.join('|')})\\s*=\\s*).*$`,
+    'i',
+  );
+  return message
+    .split(/\r?\n/)
+    .map(line => line.replace(secretAssignment, '$1[REDACTED]'))
+    .join('\n');
+}
+
+function isMissingPathError(e: any): boolean {
+  return e?.code === 'ENOENT' || e?.code === 'ENOTDIR';
+}
 
 /** Replace a leading `~` with $HOME (POSIX + Windows). No-op for non-string. */
 export function expandHome(p: string | undefined): string | undefined {
@@ -90,9 +113,20 @@ export function defaultDiscoveryPaths(env: NodeJS.ProcessEnv = process.env): str
 export function discoverConfigPath(env: NodeJS.ProcessEnv = process.env): string | undefined {
   for (const candidate of defaultDiscoveryPaths(env)) {
     try {
-      if (fs.statSync(candidate).isFile()) return candidate;
-    } catch {
-      // not found / permission denied — fall through
+      const st = fs.statSync(candidate);
+      if (st.isFile()) return candidate;
+      if (candidate === env.SSH_MCP_CONFIG) {
+        throw new Error(`Config: cannot access ${candidate}: not a regular file`);
+      }
+    } catch (e: any) {
+      // SSH_MCP_CONFIG is an explicit user/env selection. A missing env path
+      // still falls through to XDG/home discovery for compatibility, but an
+      // unreadable/inaccessible env path must fail closed rather than silently
+      // booting from a lower-precedence config.
+      if (candidate === env.SSH_MCP_CONFIG && !isMissingPathError(e)) {
+        throw new Error(`Config: cannot access ${candidate}: ${e?.message || e}`);
+      }
+      // not found — fall through
     }
   }
   return undefined;
@@ -131,7 +165,8 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
   try {
     parsed = TOML.parse(raw);
   } catch (e: any) {
-    throw new Error(`Config: TOML parse failed: ${e?.message || e}`);
+    const message = redactTomlParseMessage(e?.message || String(e));
+    throw new Error(`Config: TOML parse failed: ${message}`);
   }
 
   const rawSources = Array.isArray(parsed?.sources) ? parsed.sources : [];
@@ -247,7 +282,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     // non-strings unchanged, so a number would reach the SSH/sudo password
     // paths and fail with an opaque runtime type error. Reject it here with a
     // clear, redact-safe config error that names the field but not the value.
-    const requireSecretString = (
+    const requireConfigString = (
       value: unknown,
       field: string,
     ): string | undefined => {
@@ -258,21 +293,31 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       return value;
     };
 
-    const password = resolveEnvRef(
-      requireSecretString(src.password, 'password'),
-      `sources.${src.id}.password`,
-      env,
-    );
-    const sudoPassword = resolveEnvRef(
-      requireSecretString(src.sudo_password, 'sudo_password'),
-      `sources.${src.id}.sudo_password`,
-      env,
-    );
-    const suPassword = resolveEnvRef(
-      requireSecretString(src.su_password, 'su_password'),
-      `sources.${src.id}.su_password`,
-      env,
-    );
+    const passwordValue = src.auth === 'password'
+      ? requireConfigString(src.password, 'password')
+      : undefined;
+    const resolveOptionalElevationPassword = (
+      value: unknown,
+      field: 'sudo_password' | 'su_password',
+    ): string | undefined => {
+      const resolved = resolveEnvRef(
+        requireConfigString(value, field),
+        `sources.${src.id}.${field}`,
+        env,
+      );
+      // Treat an explicitly empty TOML elevation password as unset. Leaving it
+      // as '' makes the OpenSSH sudo path feed a blank line via sudo -S, which
+      // blocks the intended passwordless-sudo / suPassword fallback behavior.
+      return resolved === '' ? undefined : resolved;
+    };
+    const sudoPassword = resolveOptionalElevationPassword(src.sudo_password, 'sudo_password');
+    const suPassword = resolveOptionalElevationPassword(src.su_password, 'su_password');
+    const keyPath = requireConfigString(src.key_path, 'key_path');
+    const privateKey = src.auth === 'key'
+      ? requireConfigString(src.private_key, 'private_key')
+      : undefined;
+    const knownHostsFile = requireConfigString(src.known_hosts_file, 'known_hosts_file');
+    const description = requireConfigString(src.description, 'description');
 
     const out: ServerConfig = {
       name: src.id,
@@ -283,8 +328,8 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       authMode: src.auth,
       transport: resolvedTransport,
     };
-    if (typeof src.description === 'string' && src.description.length > 0) {
-      out.description = src.description;
+    if (description && description.length > 0) {
+      out.description = description;
     }
 
     switch (src.auth) {
@@ -295,15 +340,31 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
         }
         break;
       case 'key':
-        if (src.key_path) out.keyPath = expandHome(src.key_path);
+        if (keyPath) out.keyPath = expandHome(keyPath);
+        // The openssh transport authenticates with `-i <keyPath>` and never
+        // materializes an inline private_key — supplying only private_key on
+        // openssh silently falls back to default-identity pubkey auth. Treat
+        // inline private_key as unsupported on openssh: require key_path and do
+        // not resolve an unused private_key env ref that could fail startup.
+        // (ssh2 reads inline key contents in memory, so inline private_key
+        // remains valid there.)
+        if (resolvedTransport === 'openssh') {
+          if (!out.keyPath) {
+            throw new Error(
+              `Config: sources.${src.id} auth="key" with transport="openssh" requires key_path ` +
+              `(inline private_key is not supported on the openssh transport)`,
+            );
+          }
+          break;
+        }
         // Resolve `env:NAME` for inline private_key the same way password/
         // sudo_password/su_password are resolved. Without this the literal
         // "env:SSH_KEY" placeholder would be copied into ServerConfig.privateKey
         // and the ssh2 transport would try to parse it as key material, failing
         // auth even when the env var is set (Codex 3541772408).
-        if (src.private_key) {
+        if (privateKey !== undefined) {
           out.privateKey = resolveEnvRef(
-            requireSecretString(src.private_key, 'private_key'),
+            privateKey,
             `sources.${src.id}.private_key`,
             env,
           );
@@ -313,20 +374,13 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
             `Config: sources.${src.id} auth="key" requires key_path or private_key`,
           );
         }
-        // The openssh transport authenticates with `-i <keyPath>` and never
-        // materializes an inline private_key — supplying only private_key on
-        // openssh silently falls back to default-identity pubkey auth. Require
-        // an on-disk key_path for openssh key sources so the configured key is
-        // actually used. (ssh2 reads inline key contents in memory, so inline
-        // private_key remains valid there.)
-        if (resolvedTransport === 'openssh' && !out.keyPath) {
-          throw new Error(
-            `Config: sources.${src.id} auth="key" with transport="openssh" requires key_path ` +
-            `(inline private_key is not supported on the openssh transport)`,
-          );
-        }
         break;
-      case 'password':
+      case 'password': {
+        const password = resolveEnvRef(
+          passwordValue,
+          `sources.${src.id}.password`,
+          env,
+        );
         if (!password) {
           throw new Error(
             `Config: sources.${src.id} auth="password" requires "password"`,
@@ -334,6 +388,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
         }
         out.password = password;
         break;
+      }
     }
 
     if (sudoPassword !== undefined) out.sudoPassword = sudoPassword;
@@ -345,14 +400,14 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     // require --transport=openssh") and reject the combination at parse time.
     if (
       resolvedTransport === 'ssh2' &&
-      (src.known_hosts_file || src.strict_host_key_checking)
+      (knownHostsFile !== undefined || src.strict_host_key_checking !== undefined)
     ) {
       throw new Error(
         `Config: sources.${src.id} known_hosts_file/strict_host_key_checking require transport="openssh" ` +
         `(the ssh2 transport does not enforce host keys)`,
       );
     }
-    if (src.known_hosts_file) out.knownHostsFile = expandHome(src.known_hosts_file);
+    if (knownHostsFile !== undefined) out.knownHostsFile = expandHome(knownHostsFile);
     if (src.strict_host_key_checking) out.strictHostKeyChecking = src.strict_host_key_checking;
 
     resolvedSources.push(out);
@@ -375,13 +430,14 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       defaultName = src.id;
     }
 
-    if (src.approval && src.approval.mode) {
-      if (!VALID_APPROVAL_MODE.includes(src.approval.mode)) {
+    if (src.approval?.mode !== undefined) {
+      const mode = src.approval.mode;
+      if (typeof mode !== 'string' || !VALID_APPROVAL_MODE.includes(mode as ApprovalMode)) {
         throw new Error(
           `Config: sources.${src.id}.approval.mode must be one of: ${VALID_APPROVAL_MODE.join(', ')}`,
         );
       }
-      perSourceApproval[src.id] = src.approval.mode;
+      perSourceApproval[src.id] = mode as ApprovalMode;
     }
   }
 
@@ -443,8 +499,10 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv) {
     if (typeof raw.port !== 'number') throw new Error('Config: [webui].port must be a number');
     out.port = raw.port;
   }
-  if (raw.auth_token !== undefined) {
-    out.auth_token = resolveEnvRef(String(raw.auth_token), '[webui].auth_token', env);
+  const webuiEnabled = out.enabled === true;
+  if (raw.auth_token !== undefined && webuiEnabled) {
+    if (typeof raw.auth_token !== 'string') throw new Error('Config: [webui].auth_token must be a string');
+    out.auth_token = resolveEnvRef(raw.auth_token, '[webui].auth_token', env);
   }
   // Cross-field check: a non-loopback bind requires a token — but ONLY when the
   // web UI is actually enabled. With `[webui] enabled = false` the section is
@@ -452,7 +510,7 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv) {
   // section would let an otherwise-off optional block fail SSH startup (Codex
   // 3541772404). When the eventual CLI enable path turns it on, the same check
   // applies against the resolved enabled=true state.
-  if (out.enabled && out.host && out.host !== '127.0.0.1' && out.host !== 'localhost' && out.host !== '::1') {
+  if (webuiEnabled && out.host && out.host !== '127.0.0.1' && out.host !== 'localhost' && out.host !== '::1') {
     if (!out.auth_token) {
       throw new Error(
         `Config: [webui].host="${out.host}" is non-loopback; auth_token is required when [webui].enabled = true`,
@@ -496,8 +554,13 @@ function validateApproval(
       // [approval.llm] settings are otherwise irrelevant in the default/manual
       // mode, so resolving here would fail startup on a missing OPENAI_API_KEY
       // for a user who copied the example config without enabling smart mode.
+      // Defer resolution until top-level smart mode or a per-source smart
+      // override needs the key; leave api_key unresolved otherwise.
       if (out.mode === 'smart' || resolveLlmApiKeyForPerSourceSmart) {
-        resolved.api_key = resolveEnvRef(String(llm.api_key), '[approval.llm].api_key', env);
+        if (typeof llm.api_key !== 'string') {
+          throw new Error('Config: [approval.llm].api_key must be a string');
+        }
+        resolved.api_key = resolveEnvRef(llm.api_key, '[approval.llm].api_key', env);
       }
     }
     if (llm.model !== undefined) {

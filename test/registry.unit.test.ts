@@ -51,6 +51,17 @@ describe('TransportRegistry.register / names / duplicate', () => {
 });
 
 describe('TransportRegistry.resolveName (finding 3: omitted name in multi-host)', () => {
+  it('validates target selection synchronously without initializing a transport', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+
+    expect(r.resolveRegisteredName('b')).toBe('b');
+    expect(() => r.resolveRegisteredName()).toThrow(/connectionName is required when multiple servers are configured: a, b/);
+    expect(() => r.resolveRegisteredName('nope')).toThrow(/Unknown connection name: nope\. Registered: a, b/);
+    expect(createTransportMock).not.toHaveBeenCalled();
+  });
+
   it('throws when name omitted and >1 server configured with no explicit default', async () => {
     const r = new TransportRegistry();
     r.register(makeConfig('a'));

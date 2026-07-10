@@ -22,7 +22,37 @@ const STATIC_MIME: Record<string, string> = {
 };
 
 function isLoopback(host: string): boolean {
-  return host === '127.0.0.1' || host === '::1' || host === 'localhost';
+  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase();
+  return normalized === '127.0.0.1' || normalized === '::1' || normalized === 'localhost';
+}
+
+function hostnameFromAuthority(authority: string | undefined): string | null {
+  if (!authority) return null;
+  try {
+    return new URL(`http://${authority}`).hostname;
+  } catch {
+    return null;
+  }
+}
+
+function isLoopbackHeaderValue(value: string | string[] | undefined): boolean {
+  if (Array.isArray(value)) return false;
+  const hostname = hostnameFromAuthority(value);
+  return hostname !== null && isLoopback(hostname);
+}
+
+function hasLoopbackHostAndOrigin(req: http.IncomingMessage): boolean {
+  // Tokenless mode is a local developer convenience. Do not let a DNS-rebound
+  // page read loopback-only APIs by sending Host/Origin for an attacker domain.
+  if (!isLoopbackHeaderValue(req.headers.host)) return false;
+  const origin = req.headers.origin;
+  if (origin === undefined) return true;
+  if (Array.isArray(origin)) return false;
+  try {
+    return isLoopback(new URL(origin).hostname);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -100,8 +130,9 @@ function checkAuth(opts: { req: http.IncomingMessage; authToken?: string; bind: 
   const loopback = isLoopback(opts.bind);
   if (!opts.authToken) {
     // No token configured. Allowed only on loopback (boot validation prevents
-    // non-loopback bind without a token).
-    return loopback;
+    // non-loopback bind without a token), and only when the request itself uses
+    // a loopback Host/Origin so DNS rebinding cannot read loopback-only APIs.
+    return loopback && hasLoopbackHostAndOrigin(opts.req);
   }
   if (opts.isSse) {
     const t = opts.urlObj.searchParams.get('token');

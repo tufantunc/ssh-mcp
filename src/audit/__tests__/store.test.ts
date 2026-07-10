@@ -158,6 +158,33 @@ describe('audit store', () => {
     expect(out.text).toContain('<redacted>');
   });
 
+  it('redacts an open quoted secret before a cap can persist its prefix', () => {
+    const cap = 64;
+    const secretPrefix = 'S'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 1000);
+    const out = capThenRedact(`run --password="${secretPrefix}" tail`, cap);
+
+    expect(out.text).toContain('--password=<redacted>');
+    expect(out.text).not.toContain('SSSS');
+    expect(Buffer.byteLength(out.text, 'utf8')).toBeLessThanOrEqual(cap);
+    expect(out.truncated).toBe(true);
+  });
+
+  it('caps and redacts profile names before serializing records', () => {
+    const secret = 'ghp_' + 'P'.repeat(36);
+    const rec = buildRecord({
+      now: new Date('2026-05-25T12:00:00Z'),
+      profile: `prod-${secret}-${'x'.repeat(2 * 1024 * 1024)}`,
+      tool: 'exec',
+      command: 'date',
+      approval: yoloApproval(),
+      auditMaxBytes: 64,
+    });
+
+    expect(rec.profile).not.toContain(secret);
+    expect(rec.profile).toContain('<redacted>');
+    expect(Buffer.byteLength(rec.profile, 'utf8')).toBeLessThanOrEqual(1024);
+  });
+
   it('caps the redactor scan window to cap + headroom (does not redact unbounded input)', () => {
     const cap = 16;
     // A secret placed beyond cap + headroom is outside the scan window: it gets
@@ -214,6 +241,14 @@ describe('audit store', () => {
     expect(out.text).not.toContain('eyJbbbb');
     expect(out.text).not.toContain(sig);
     expect(out.text).toContain('<redacted>');
+  });
+
+  it('redacts URL userinfo when the @ delimiter falls past the scan window', () => {
+    const cap = 96;
+    const password = 'p'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 1000);
+    const out = capThenRedact(`clone https://alice:${password}@example.com/repo.git`, cap);
+    expect(out.text).toContain('https://alice:<redacted>@example.com');
+    expect(out.text).not.toContain('pppp');
   });
 
   it('caps a huge rejected command so it cannot bypass the size guard (Codex 3541772945)', () => {
