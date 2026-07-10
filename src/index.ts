@@ -1071,6 +1071,7 @@ async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined
     host,
     port,
     authToken,
+    cors: tomlWebui?.cors,
     registry: { list: () => registry.list() },
     queue: buildWebUIApprovalQueueAdapter(approvalEngine),
     audit: buildWebUIAuditTailAdapter(auditSink),

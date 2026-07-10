@@ -517,6 +517,10 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv, enabledByCli = false) {
     }
     out.port = raw.port;
   }
+  if (raw.cors !== undefined) {
+    if (typeof raw.cors !== 'boolean') throw new Error('Config: [webui].cors must be a boolean');
+    out.cors = raw.cors;
+  }
   const webuiEnabled = out.enabled === true || enabledByCli;
   if (raw.auth_token !== undefined) {
     if (typeof raw.auth_token !== 'string') throw new Error('Config: [webui].auth_token must be a string');

@@ -146,6 +146,7 @@ describe('WebUI server', () => {
   it('GET /api/profiles returns registry snapshot with approval mode', async () => {
     const r = await get(handle, '/api/profiles');
     expect(r.status).toBe(200);
+    expect(r.headers.get('access-control-allow-origin')).toBeNull();
     const j = await r.json();
     expect(j.profiles).toHaveLength(2);
     const prod = j.profiles.find((p: any) => p.id === 'prod');
@@ -163,6 +164,38 @@ describe('WebUI server', () => {
     expect(serialized).not.toContain('super-secret-password');
     expect(serialized).not.toContain('OPENSSH PRIVATE KEY');
     expect(serialized).not.toContain('krb5.keytab');
+  });
+
+  it('emits CORS headers and answers unauthenticated preflight when enabled', async () => {
+    await handle.close();
+    handle = await startWebUI({
+      host: '127.0.0.1',
+      port: 0,
+      authToken: 'secret',
+      cors: true,
+      registry: fakeRegistry,
+    });
+    const base = `http://${handle.address.host}:${handle.address.port}`;
+    const preflight = await fetch(`${base}/api/profiles`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://console.example',
+        'Access-Control-Request-Method': 'GET',
+        'Access-Control-Request-Headers': 'Authorization',
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('access-control-allow-origin')).toBe('*');
+    expect(preflight.headers.get('access-control-allow-headers')).toContain('Authorization');
+
+    const response = await fetch(`${base}/api/profiles`, {
+      headers: {
+        Origin: 'https://console.example',
+        Authorization: 'Bearer secret',
+      },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('access-control-allow-origin')).toBe('*');
   });
 
   it('GET /api/executions returns audit tail and respects limit', async () => {
