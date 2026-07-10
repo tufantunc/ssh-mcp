@@ -437,13 +437,13 @@ export class TransportRegistry {
    * live persistent transport across a reload.
    */
   private connectionParamsEqual(a: ServerConfig, b: ServerConfig): boolean {
-    // For ssh2 key_path sources, privateKey is runtime/lazily derived from the
-    // key file by prepareKeyContents(). A reload reparses the same TOML with the
-    // same keyPath but no privateKey yet; that derived in-memory material must
-    // not make an unchanged source look like a connection-parameter edit. Inline
-    // private_key (no keyPath) is still part of the dial/auth signature.
-    const comparablePrivateKeyA = a.keyPath ? undefined : a.privateKey;
-    const comparablePrivateKeyB = b.keyPath ? undefined : b.privateKey;
+    // For ssh2 key_path sources, privateKey may be runtime/lazily derived from
+    // the key file by prepareKeyContents(). A reload reparses the same TOML with
+    // the same keyPath but no privateKey yet; only that marked derived material
+    // is ignored. An explicitly configured inline private_key remains part of
+    // the dial/auth signature even when key_path is also present.
+    const comparablePrivateKeyA = a.privateKeyDerivedFromKeyPath ? undefined : a.privateKey;
+    const comparablePrivateKeyB = b.privateKeyDerivedFromKeyPath ? undefined : b.privateKey;
     return (
       a.host === b.host &&
       a.port === b.port &&
@@ -586,6 +586,9 @@ export class TransportRegistry {
     for (const cfg of sources) {
       if (!cfg.name) {
         throw new Error('ServerConfig.name is required');
+      }
+      if (cfg.name === '.' || cfg.name === '..') {
+        throw new Error('ServerConfig.name must not be a dot-segment ("." or "..")');
       }
       if (next.has(cfg.name)) {
         throw new Error(`Duplicate server name: ${cfg.name}`);

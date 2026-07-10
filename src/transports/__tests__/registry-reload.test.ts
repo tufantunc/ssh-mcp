@@ -51,6 +51,13 @@ describe('TransportRegistry.replaceAll', () => {
     expect(r.names()).toEqual(['alpha', 'beta']);
   });
 
+  it('rejects dot-segment names before mutating, matching startup registration', () => {
+    const r = seed();
+    expect(() => r.replaceAll([cfg('gamma'), cfg('.')])).toThrow(/dot-segment/);
+    expect(() => r.replaceAll([cfg('gamma'), cfg('..')])).toThrow(/dot-segment/);
+    expect(r.names()).toEqual(['alpha', 'beta']);
+  });
+
   it('rejects an unknown explicit default before mutating', () => {
     const r = seed();
     expect(() => r.replaceAll([cfg('gamma')], 'nope')).toThrow(/unknown server/);

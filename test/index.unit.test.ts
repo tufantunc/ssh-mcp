@@ -18,6 +18,7 @@ import {
   prepareKeyContents,
   validateConfig,
   resolveCliConfigPath,
+  resolveReloadConfig,
   reacquireTransportIfReloaded,
   approveTransportForCurrentConfig,
   buildWebUIApprovalQueueAdapter,
@@ -466,6 +467,7 @@ describe('prepareKeyContents (Codex 3549295046: skip deferred key reads when pas
       };
       await prepareKeyContents(cfg);
       expect(cfg.privateKey).toBe('KEYDATA');
+      expect(cfg.privateKeyDerivedFromKeyPath).toBe(true);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
@@ -582,6 +584,41 @@ describe('resolveCliConfigPath (Codex R2 P2: reject value-less --config)', () =>
     // dropping the intended TOML settings. Fail fast instead.
     expect(() => resolveCliConfigPath({ config: '' }))
       .toThrow(/--config requires a value/);
+  });
+});
+
+describe('reload config resolution', () => {
+  it('reapplies the CLI --webui override during reload validation', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-reload-webui-'));
+    const configPath = path.join(dir, 'config.toml');
+    await fs.writeFile(configPath, `
+[webui]
+enabled = false
+host = "0.0.0.0"
+
+[[sources]]
+id = "prod"
+host = "prod.example.com"
+user = "operator"
+auth = "kerberos"
+`);
+    try {
+      expect(() => resolveReloadConfig({
+        cliSources: [],
+        configPath,
+        cliWebuiEnabled: true,
+        env: {},
+      })).toThrow(/auth_token/);
+
+      expect(resolveReloadConfig({
+        cliSources: [],
+        configPath,
+        cliWebuiEnabled: false,
+        env: {},
+      }).webui?.enabled).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

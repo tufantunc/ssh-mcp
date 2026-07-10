@@ -618,6 +618,7 @@ export async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
   ) {
     const fs = await import('fs/promises');
     cfg.privateKey = await fs.readFile(cfg.keyPath, 'utf8');
+    cfg.privateKeyDerivedFromKeyPath = true;
   }
 }
 
@@ -1135,8 +1136,22 @@ let stopConfigWatcher: (() => void) | null = null;
  * for `--ssh`/legacy CLI), so `cliSources` is empty and TOML wins. Throws on any
  * parse/validation error — the reloader treats a throw as "keep the old config".
  */
-function reloadResolveConfig(): ResolvedConfig {
+export function resolveReloadConfig(params: {
+  cliSources: ServerConfig[];
+  configPath: string;
+  cliWebuiEnabled: boolean;
+  env?: NodeJS.ProcessEnv;
+}): ResolvedConfig {
   return resolveConfig({
+    cliSources: params.cliSources,
+    cliConfigPath: params.configPath,
+    webuiEnabled: params.cliWebuiEnabled,
+    env: params.env,
+  });
+}
+
+function reloadResolveConfig(): ResolvedConfig {
+  return resolveReloadConfig({
     cliSources: cliSourceConfigs,
     // Pin reloads to the EXACT file the boot resolver settled on (the same file
     // the watcher is attached to), NOT the raw `--config` flag. CONFIG_PATH is
@@ -1148,7 +1163,10 @@ function reloadResolveConfig(): ResolvedConfig {
     // `resolvedConfig.configPath` is the absolute path resolved at startup;
     // feeding it back as the highest-precedence input keeps the loader and the
     // watcher pinned to one file for the whole process lifetime.
-    cliConfigPath: resolvedConfig.configPath,
+    configPath: resolvedConfig.configPath!,
+    // Preserve the startup CLI override so reload validation sees the same
+    // effective WebUI state as a fresh boot with --webui.
+    cliWebuiEnabled: 'webui' in argvConfig,
   });
 }
 

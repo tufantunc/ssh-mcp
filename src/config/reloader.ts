@@ -184,7 +184,9 @@ function assertSmartLlmUnchanged(config: ResolvedConfig, engine: ApprovalReloadT
   const changed: string[] = [];
   if ((llm.endpoint ?? undefined) !== live.endpoint) changed.push('endpoint');
   if ((llm.model ?? undefined) !== live.model) changed.push('model');
-  if ((llm.api_key ?? undefined) !== (live.api_key ?? undefined)) changed.push('api_key');
+  if (llm.api_key_unresolved || (llm.api_key ?? undefined) !== (live.api_key ?? undefined)) {
+    changed.push('api_key');
+  }
   if ((llm.timeout_ms ?? undefined) !== (live.timeout_ms ?? undefined)) changed.push('timeout_ms');
   if (nextProvider !== live.provider) changed.push('provider');
   if (nextFailClosed !== live.fail_closed) changed.push('fail_closed');

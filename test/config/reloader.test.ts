@@ -776,6 +776,42 @@ auth = "kerberos"
     expect(registry.names()).toEqual(['alpha', 'beta']);
   });
 
+  it('rejects an unresolved api_key while smart is armed but currently inactive', async () => {
+    const registry = freshRegistry(TOML_A);
+    const engine = new ApprovalDispatcher({
+      defaultMode: 'yolo',
+      smart: { llm: { endpoint: 'http://127.0.0.1:11434/v1/chat/completions', model: 'local-model' } },
+    });
+    const unresolvedKeyWhileYolo = `
+[approval]
+mode = "yolo"
+
+[approval.llm]
+endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+model = "local-model"
+api_key = "env:MISSING_KEY"
+
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+`;
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () => parseTomlConfig(unresolvedKeyWhileYolo, { env: {} }) as ResolvedConfig,
+      log: () => {},
+    });
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/rolled back/);
+    expect(res.reason).toMatch(/api_key/);
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+  });
+
   it('rejects a reload that only rotates the api_key', async () => {
     const registry = freshRegistry(TOML_A);
     const engine = smartArmedEngine();

@@ -147,6 +147,7 @@ describe('TransportRegistry.closeChanged', () => {
         kerberos: false,
         keyPath: '/keys/id_ed25519',
         privateKey: 'lazy-loaded-key-material',
+        privateKeyDerivedFromKeyPath: true,
       }),
     ]);
 
@@ -165,6 +166,32 @@ describe('TransportRegistry.closeChanged', () => {
 
     expect(transports.keyhost.closed).toBe(false);
     expect(((reg as any).transports as Map<string, ISshTransport>).has('keyhost')).toBe(true);
+  });
+
+  it('closes the transport when an explicit inline key changes beside the same keyPath', async () => {
+    const { reg, transports, prevConfigs } = seedWithTransports([
+      cfg('keyhost', {
+        transport: 'ssh2',
+        authMode: 'key',
+        kerberos: false,
+        keyPath: '/keys/id_ed25519',
+        privateKey: 'explicit-inline-key-v1',
+      }),
+    ]);
+
+    reg.replaceAll([
+      cfg('keyhost', {
+        transport: 'ssh2',
+        authMode: 'key',
+        kerberos: false,
+        keyPath: '/keys/id_ed25519',
+        privateKey: 'explicit-inline-key-v2',
+      }),
+    ]);
+    await reg.closeChanged(prevConfigs);
+
+    expect(transports.keyhost.closed).toBe(true);
+    expect(((reg as any).transports as Map<string, ISshTransport>).has('keyhost')).toBe(false);
   });
 
   it('clears pending initializers for changed or removed sources even without cached transports', async () => {
