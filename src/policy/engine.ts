@@ -14,6 +14,24 @@ export interface PolicyRules {
 }
 
 export const DEFAULT_RULES: PolicyRules = {
+  denylist: [
+    'rm\\s+-rf\\s+/(\\s|$)',
+    'mkfs\\.',
+    'dd\\s+.*\\bof=/dev/',
+    '>\\s*/dev/sd',
+    '\\bshutdown\\b',
+    '\\breboot\\b',
+    '\\bhalt\\b',
+    '\\bpoweroff\\b',
+    'curl\\s+.*\\|\\s*(sh|bash|zsh)',
+    'wget\\s+.*\\|\\s*(sh|bash|zsh)',
+    '\\beval\\b',
+    '>\\s*/etc/cron',
+    '>\\s*/etc/systemd',
+    '>\\s*~/.ssh/authorized_keys',
+    '\\biptables\\s+-F\\b',
+    '\\bchmod\\s+-R\\s+777\\s+/',
+  ],
   roleBindings: {
     viewer: {
       prod: ['read-only'],
