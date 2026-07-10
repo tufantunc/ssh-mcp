@@ -45,6 +45,7 @@ interface FakeEl {
   querySelector(): FakeEl | null;
   querySelectorAll(): FakeEl[];
   addEventListener(type: string, fn: () => void): void;
+  focus(): void;
   /** Test helper: synchronously fire a registered listener. */
   fire(type: string): void;
 }
@@ -86,6 +87,7 @@ function makeEl(tag = 'div'): FakeEl {
     addEventListener(type: string, fn: () => void) {
       ((this as FakeEl)._listeners[type] ??= []).push(fn);
     },
+    focus() {},
     fire(type: string) {
       for (const fn of (this as FakeEl)._listeners[type] ?? []) fn();
     },
@@ -105,15 +107,20 @@ interface FetchCall { url: string; method: string; body: unknown }
 async function boot(opts: {
   modes?: { modes: string[]; global: string };
   profiles?: unknown[];
+  sourceEditEnabled?: boolean;
 }): Promise<{
   byId: Map<string, FakeEl>;
   created: FakeEl[];
   calls: FetchCall[];
   emitMode: (data: unknown) => void;
+  intervalCallbacks: Array<() => unknown>;
+  getProfileFetchCount: () => number;
 }> {
   const created: FakeEl[] = [];
   const byId = new Map<string, FakeEl>();
   const calls: FetchCall[] = [];
+  const intervalCallbacks: Array<() => unknown> = [];
+  let profileFetchCount = 0;
   let modeChangedListener: ((ev: { data: string }) => void) | null = null;
 
   const getById = (sel: string) => {
@@ -145,7 +152,13 @@ async function boot(opts: {
       if (!opts.modes) return { status: 503, ok: false, json: async () => ({}) };
       return jsonResp(opts.modes);
     }
-    if (url.startsWith('/api/profiles')) return jsonResp({ profiles: opts.profiles ?? [] });
+    if (url.startsWith('/api/profiles')) {
+      profileFetchCount += 1;
+      return jsonResp({
+        profiles: opts.profiles ?? [],
+        source_edit_enabled: opts.sourceEditEnabled ?? false,
+      });
+    }
     if (url.startsWith('/api/executions')) return jsonResp({ executions: [] });
     if (url.startsWith('/api/approvals')) return jsonResp({ approvals: [] });
     return { status: 404, ok: false, json: async () => ({}) };
@@ -171,7 +184,7 @@ async function boot(opts: {
     history: { replaceState() {} },
     fetch: fetchStub,
     EventSource: FakeEventSource,
-    setInterval: () => 0,
+    setInterval: (fn: () => unknown) => { intervalCallbacks.push(fn); return intervalCallbacks.length; },
     clearInterval: () => {},
     setTimeout: (fn: () => void) => { fn(); return 0; },
     Date,
@@ -194,6 +207,8 @@ async function boot(opts: {
     created,
     calls,
     emitMode: (data: unknown) => modeChangedListener?.({ data: JSON.stringify(data) }),
+    intervalCallbacks,
+    getProfileFetchCount: () => profileFetchCount,
   };
 }
 
@@ -307,5 +322,26 @@ describe('WebUI app.js global mode control (FINDING 2: global switch + SSE)', ()
     const { byId } = await boot({}); // no modes payload -> /api/approval-modes 503
     const host = byId.get('#global-mode-control')!;
     expect(host.children.length).toBe(0);
+  });
+});
+
+describe('WebUI app.js description editor polling', () => {
+  it('does not refresh profiles while an unsaved description draft is open', async () => {
+    const app = await boot({ profiles: [PROFILE], sourceEditEnabled: true });
+    const edit = app.created.find(e => e.tagName === 'button' && e.className === 'desc-edit')!;
+    expect(edit).toBeDefined();
+
+    edit.fire('click');
+    const draft = app.created.find(e => e.tagName === 'textarea' && e.className === 'desc-input')!;
+    expect(draft).toBeDefined();
+    draft.value = 'unsaved operator draft';
+
+    const beforePoll = app.getProfileFetchCount();
+    expect(app.intervalCallbacks).toHaveLength(1);
+    await app.intervalCallbacks[0]();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    expect(app.getProfileFetchCount()).toBe(beforePoll);
+    expect(draft.value).toBe('unsaved operator draft');
   });
 });

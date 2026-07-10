@@ -43,6 +43,13 @@ describe('TransportRegistry.register / names / duplicate', () => {
     expect(() => r.register({ ...makeConfig('x'), name: '' })).toThrow(/name is required/);
   });
 
+  it('rejects dot-segment names that cannot be addressed by WebUI path routes', () => {
+    const r = new TransportRegistry();
+    expect(() => r.register(makeConfig('.'))).toThrow(/dot-segment/);
+    expect(() => r.register(makeConfig('..'))).toThrow(/dot-segment/);
+    expect(r.names()).toEqual([]);
+  });
+
   it('rejects a duplicate server name', () => {
     const r = new TransportRegistry();
     r.register(makeConfig('a'));

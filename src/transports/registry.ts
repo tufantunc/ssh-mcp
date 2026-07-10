@@ -55,6 +55,9 @@ export class TransportRegistry {
     if (!config.name) {
       throw new Error('ServerConfig.name is required');
     }
+    if (config.name === '.' || config.name === '..') {
+      throw new Error('ServerConfig.name must not be a dot-segment ("." or "..")');
+    }
     if (this.configs.has(config.name)) {
       throw new Error(`Duplicate server name: ${config.name}`);
     }
