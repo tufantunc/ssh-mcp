@@ -155,6 +155,41 @@ describe('optional audit seam', () => {
     expect(appended.exec.stderr).toContain('Command exited with status 7');
   });
 
+  it('omits exec details for approval denials because no remote execution ran', async () => {
+    let appended: any;
+    const approval: ApprovalDecision = {
+      decision: 'deny',
+      reason: 'blocked by policy',
+      decided_by: 'manual:user',
+      decided_at: new Date().toISOString(),
+      mode: 'manual',
+    };
+    const sink = await loadAuditSink({}, async () => ({
+      resolveAuditDir: () => '/tmp/ssh-mcp-audit-test',
+      AuditStore: class {
+        append(record: unknown): unknown {
+          appended = record;
+          return record;
+        }
+      },
+    }));
+
+    sink.record({
+      tool: 'exec',
+      profile: 'prod',
+      command: 'systemctl restart sshd',
+      startedAt: Date.now(),
+      error: new Error('approval denied (manual/manual:user): blocked by policy'),
+      approval,
+    });
+
+    expect(appended.approval).toMatchObject({
+      decision: 'deny',
+      decided_by: 'manual:user',
+    });
+    expect(appended.exec).toBeUndefined();
+  });
+
   it('classifies only the optional store module itself as absent', () => {
     const expected = 'file:///repo/build/audit/store.js';
     const absent = Object.assign(

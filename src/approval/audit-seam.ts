@@ -209,30 +209,33 @@ export async function loadAuditSink(
         const approval = input.approval
           ? toApprovalSection(input.approval)
           : approvalNotReachedSection(now, input.error);
+        const exec = input.result
+          ? {
+              stdout: input.result.stdout ?? '',
+              // When resultToMcpContent rejects after the transport already
+              // returned an ExecResult, keep both the raw transport stderr and
+              // the mapped MCP error. Otherwise timeout/auth/host-key/
+              // transport/non-zero results become audit records that only say
+              // "a result existed" and lose the execution failure context.
+              stderr: stderrWithExecutionError(input.result.stderr, input.error),
+              exitCode: input.result.exitCode ?? null,
+              durationMs,
+            }
+          : input.approval?.decision === 'deny'
+            ? undefined
+            : {
+                stdout: '',
+                stderr: errorMessageFromUnknown(input.error),
+                exitCode: null,
+                durationMs,
+              };
         store.append({
           profile: input.profile,
           tool: input.tool,
           command: input.command,
           description: input.description,
           approval,
-          exec: input.result
-            ? {
-                stdout: input.result.stdout ?? '',
-                // When resultToMcpContent rejects after the transport already
-                // returned an ExecResult, keep both the raw transport stderr and
-                // the mapped MCP error. Otherwise timeout/auth/host-key/
-                // transport/non-zero results become audit records that only say
-                // "a result existed" and lose the execution failure context.
-                stderr: stderrWithExecutionError(input.result.stderr, input.error),
-                exitCode: input.result.exitCode ?? null,
-                durationMs,
-              }
-            : {
-                stdout: '',
-                stderr: errorMessageFromUnknown(input.error),
-                exitCode: null,
-                durationMs,
-              },
+          ...(exec ? { exec } : {}),
           now,
         });
       } catch (auditErr: any) {

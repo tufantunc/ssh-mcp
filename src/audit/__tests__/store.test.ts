@@ -243,6 +243,14 @@ describe('audit store', () => {
     expect(out.text).toContain('<redacted>');
   });
 
+  it('redacts URL userinfo when the @ delimiter falls past the scan window', () => {
+    const cap = 96;
+    const password = 'p'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 1000);
+    const out = capThenRedact(`clone https://alice:${password}@example.com/repo.git`, cap);
+    expect(out.text).toContain('https://alice:<redacted>@example.com');
+    expect(out.text).not.toContain('pppp');
+  });
+
   it('caps a huge rejected command so it cannot bypass the size guard (Codex 3541772945)', () => {
     // A multi-MB command (e.g. a rejected over-maxChars payload) must not be
     // persisted verbatim — buildRecord caps command/description to bound the

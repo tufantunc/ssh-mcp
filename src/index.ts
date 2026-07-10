@@ -1205,8 +1205,7 @@ server.tool(
     connectionName: connectionNameSchema,
   },
   async ({ command, description, connectionName }) => {
-    const sanitizedCommand = sanitizeCommand(command);
-    const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
+    let commandWithDescription = String(command ?? '');
     let profile = resolvedProfileName(connectionName);
     // Fallback timestamp for errors raised before the transport call (registry
     // init failure, approval deny). Re-captured immediately before t.exec below
@@ -1216,6 +1215,8 @@ server.tool(
     let audited = false;
     let approvalDecision: ApprovalDecision | undefined;
     try {
+      const sanitizedCommand = sanitizeCommand(command);
+      commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
       const target = approvalTargetForConnection(connectionName);
       profile = target.profile;
       approvalDecision = await gateApproval({
@@ -1264,8 +1265,7 @@ if (!DISABLE_SUDO) {
       connectionName: connectionNameSchema,
     },
     async ({ command, description, connectionName }) => {
-      const sanitizedCommand = sanitizeCommand(command);
-      const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
+      let commandWithDescription = String(command ?? '');
       let profile = resolvedProfileName(connectionName);
       // Fallback timestamp for errors raised before the transport call (registry
       // init failure, approval deny). Re-captured immediately before
@@ -1275,6 +1275,8 @@ if (!DISABLE_SUDO) {
       let audited = false;
       let approvalDecision: ApprovalDecision | undefined;
       try {
+        const sanitizedCommand = sanitizeCommand(command);
+        commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
         const target = approvalTargetForConnection(connectionName);
         profile = target.profile;
         approvalDecision = await gateApproval({
