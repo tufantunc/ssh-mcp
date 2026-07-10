@@ -89,6 +89,34 @@ describe('parseServerConfigJson (round-2: input validation hardening)', () => {
     }))).toThrow(/non-empty string "name"/);
   });
 
+  it('requires host and user aliases to be non-empty strings', () => {
+    const base = { name: 'n', host: 'h', user: 'u', auth: 'password', password: 'pw' };
+    for (const host of [123, {}, '']) {
+      expect(() => parseServerConfigJson(JSON.stringify({ ...base, host })))
+        .toThrow(/required "host".*non-empty string/);
+    }
+    for (const user of [123, {}, '']) {
+      expect(() => parseServerConfigJson(JSON.stringify({ ...base, user })))
+        .toThrow(/required "user".*non-empty string/);
+    }
+    for (const username of [123, {}, '']) {
+      expect(() => parseServerConfigJson(JSON.stringify({ ...base, user: undefined, username })))
+        .toThrow(/required "user".*non-empty string/);
+    }
+  });
+
+  it('requires keyPath and privateKey to be non-empty strings when provided', () => {
+    const base = { name: 'n', host: 'h', user: 'u', auth: 'key' };
+    for (const keyPath of [123, {}, [], '']) {
+      expect(() => parseServerConfigJson(JSON.stringify({ ...base, keyPath })))
+        .toThrow(/"keyPath".*non-empty string/);
+    }
+    for (const privateKey of [123, {}, [], '']) {
+      expect(() => parseServerConfigJson(JSON.stringify({ ...base, privateKey })))
+        .toThrow(/"privateKey".*non-empty string/);
+    }
+  });
+
   it('rejects a non-integer / out-of-range port', () => {
     expect(() => parseServerConfigJson(JSON.stringify({
       name: 'n', host: 'h', user: 'u', auth: 'password', password: 'pw', port: 'abc',
