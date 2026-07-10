@@ -30,6 +30,7 @@ import {
   type ResolvedSource,
 } from './approval/index.js';
 import { loadAuditSink, stderrWithExecutionError, type AuditSink } from './approval/audit-seam.js';
+import { redact } from './audit/redactor.js';
 import { startWebUI } from './webui/server.js';
 import type {
   ManualApprovalQueue,
@@ -881,19 +882,22 @@ async function wireApprovalAndAudit(): Promise<void> {
 }
 
 /** Bridge the in-process approval dispatcher to the read-only WebUI queue shape. */
-function buildWebUIApprovalQueueAdapter(engine: ApprovalDispatcher | null): ManualApprovalQueue | undefined {
+export function buildWebUIApprovalQueueAdapter(engine: ApprovalDispatcher | null): ManualApprovalQueue | undefined {
   if (!engine) return undefined;
 
   const enqWrappers = new Map<Function, (p: any) => void>();
   const resWrappers = new Map<Function, (p: any, d: any) => void>();
-  const toWebUI = (p: any): WebUIPendingApproval => ({
-    id: p.id,
-    profile: p.context?.profile?.id ?? 'default',
-    tool: p.context?.tool ?? 'exec',
-    command: p.context?.command ?? '',
-    description: p.context?.description,
-    enqueuedAt: p.enqueued_at,
-  });
+  const toWebUI = (p: any): WebUIPendingApproval => {
+    const description = p.context?.description;
+    return {
+      id: p.id,
+      profile: p.context?.profile?.id ?? 'default',
+      tool: p.context?.tool ?? 'exec',
+      command: redact(p.context?.command ?? ''),
+      description: description === undefined ? undefined : redact(description),
+      enqueuedAt: p.enqueued_at,
+    };
+  };
 
   return {
     list: () => engine.listPending().map(toWebUI),

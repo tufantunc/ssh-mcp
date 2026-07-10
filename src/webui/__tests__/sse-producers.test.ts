@@ -16,15 +16,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { startWebUI } from '../server.js';
 import type {
   WebUIHandle,
-  ManualApprovalQueue,
   AuditTail,
   RegistrySnapshot,
-  PendingApproval as WebUIPendingApproval,
-  ApprovalDecision as WebUIApprovalDecision,
 } from '../types.js';
 import { AuditStore } from '../../audit/store.js';
 import { ApprovalDispatcher } from '../../approval/engine.js';
-import type { ApprovalDecision } from '../../approval/types.js';
+import { buildWebUIApprovalQueueAdapter } from '../../index.js';
 
 const fakeRegistry: RegistrySnapshot = {
   list: () => [
@@ -41,51 +38,6 @@ const fakeRegistry: RegistrySnapshot = {
     },
   ],
 };
-
-/** Mirror src/index.ts buildWebUIApprovalQueueAdapter — keep tests honest. */
-function buildQueueAdapter(engine: ApprovalDispatcher): ManualApprovalQueue {
-  return {
-    list: () =>
-      engine.listPending().map(p => ({
-        id: p.id,
-        profile: p.context?.profile?.id ?? 'default',
-        tool: p.context?.tool ?? 'exec',
-        command: p.context?.command ?? '',
-        description: p.context?.description,
-        enqueuedAt: p.enqueued_at,
-      })),
-    resolve: (id, d) => engine.resolvePending(id, d.decision, d.reason, d.decided_by),
-    on(event: any, listener: any) {
-      if (event === 'enqueue') {
-        engine.on('enqueue', (p: any) =>
-          listener({
-            id: p.id,
-            profile: p.context?.profile?.id ?? 'default',
-            tool: p.context?.tool ?? 'exec',
-            command: p.context?.command ?? '',
-            description: p.context?.description,
-            enqueuedAt: p.enqueued_at,
-          }),
-        );
-      } else if (event === 'resolve') {
-        engine.on('resolve', (p: any, d: ApprovalDecision) =>
-          listener(
-            {
-              id: p.id,
-              profile: p.context?.profile?.id ?? 'default',
-              tool: p.context?.tool ?? 'exec',
-              command: p.context?.command ?? '',
-              description: p.context?.description,
-              enqueuedAt: p.enqueued_at,
-            },
-            { decision: d.decision, reason: d.reason, decided_by: d.decided_by },
-          ),
-        );
-      }
-    },
-    off() { /* test scope: not exercised */ },
-  };
-}
 
 function buildAuditAdapter(store: AuditStore): AuditTail {
   return {
@@ -146,7 +98,7 @@ describe('WebUI SSE producers (boot-wired adapters)', () => {
       host: '127.0.0.1',
       port: 0,
       registry: fakeRegistry,
-      queue: buildQueueAdapter(engine),
+      queue: buildWebUIApprovalQueueAdapter(engine),
       audit: buildAuditAdapter(store),
     });
   });
@@ -206,13 +158,24 @@ describe('WebUI SSE producers (boot-wired adapters)', () => {
     const decisionPromise = engine.decide({
       profile: { id: 'prod' },
       tool: 'exec',
-      command: 'systemctl restart nginx',
+      command: 'systemctl restart nginx --token=test-credential',
+      description: 'password another-test-credential',
     });
     await Promise.resolve();
 
+    const approvalsResponse = await fetch(
+      `http://${handle.address.host}:${handle.address.port}/api/approvals`,
+    );
+    const approvals = await approvalsResponse.json();
+    expect(approvals.approvals[0].command).toBe('systemctl restart nginx --token=<redacted>');
+    expect(approvals.approvals[0].description).toBe('password <redacted>');
+
     const seen = await readUntil(reader, buf, 'event: pending-approval');
     expect(seen).toContain('"action":"enqueue"');
-    expect(seen).toContain('systemctl restart nginx');
+    expect(seen).toContain('systemctl restart nginx --token=<redacted>');
+    expect(seen).toContain('password <redacted>');
+    expect(seen).not.toContain('test-credential');
+    expect(seen).not.toContain('another-test-credential');
 
     // Resolve via the dispatcher and verify the resolve event also flows.
     const pending = engine.listPending();

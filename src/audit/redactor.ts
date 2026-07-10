@@ -87,6 +87,10 @@ const SHELL_ASSIGN_RE = new RegExp(
 );
 
 // 3. JSON / TOML "key": "value" (case-insensitive).
+const JSON_KV_OPEN_QUOTED_RE = new RegExp(
+  String.raw`("[^"\\]*(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|auth[-_]?token)[^"\\]*"\s*[:=]\s*)${OPEN_DQ_VALUE}`,
+  'gi',
+);
 const JSON_KV_RE =
   /("[^"\\]*(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|auth[-_]?token)[^"\\]*"\s*[:=]\s*)"(?:[^"\\]|\\.)*"/gi;
 
@@ -226,6 +230,7 @@ const RULES: Rule[] = [
   { re: AUTH_HEADER_RE, replace: (_m, hdr, scheme) => `${hdr}${scheme} ${REDACTED}` },
   { re: SHELL_ASSIGN_OPEN_QUOTED_RE, replace: (_m, key) => `${key}${REDACTED}` },
   { re: SHELL_ASSIGN_RE, replace: (_m, key) => `${key}${REDACTED}` },
+  { re: JSON_KV_OPEN_QUOTED_RE, replace: (_m, head) => `${head}"${REDACTED}"` },
   { re: JSON_KV_RE, replace: (_m, head) => `${head}"${REDACTED}"` },
   { re: BARE_KV_OPEN_QUOTED_RE, replace: (_m, head) => `${head}${REDACTED}` },
   { re: BARE_KV_RE, replace: (_m, head) => `${head}${REDACTED}` },
