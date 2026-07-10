@@ -728,23 +728,26 @@ export async function reacquireTransportIfReloaded(
   return { transport, profile: reg.profile(connectionName).id };
 }
 
+/**
+ * Approve and acquire one stable source across config reloads.
+ *
+ * The canonical source id is sampled before the first await. Every attempt gates
+ * that source before registry.get() can initialize/elevate a transport. If a
+ * reload lands during either await, the decision/transport is discarded and the
+ * same source id is re-profiled and re-approved; it is never reinterpreted as a
+ * new default.
+ */
 export async function approveTransportForCurrentConfig(params: {
   reg: Pick<TransportRegistry, 'getReloadGeneration' | 'get' | 'profile'>;
-  connectionName: string | undefined;
-  transport: ISshTransport;
   profile: ResolvedSource;
   gate: (profile: ResolvedSource) => Promise<ApprovalDecision>;
   maxAttempts?: number;
 }): Promise<{ transport: ISshTransport; profile: string; approval: ApprovalDecision }> {
-  let transport = params.transport;
   let effectiveProfile = params.profile;
+  const resolvedName = params.profile.id;
   const maxAttempts = params.maxAttempts ?? 10;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    // Capture immediately before the awaited manual/smart gate. If a reload
-    // completes while the gate is pending, the decision belongs to the OLD
-    // profile/config and must not authorize or deny the freshly re-acquired
-    // transport/profile.
     const generationBeforeApproval = params.reg.getReloadGeneration();
     let approval: ApprovalDecision;
     try {
@@ -753,23 +756,27 @@ export async function approveTransportForCurrentConfig(params: {
       if (params.reg.getReloadGeneration() === generationBeforeApproval) {
         throw err;
       }
-
-      // A reload invalidated the denial/timeout we just received. Re-acquire the
-      // transport/profile from the CURRENT config, then loop so approval is run
-      // again against the current profile before surfacing or executing.
-      transport = await params.reg.get(params.connectionName);
-      effectiveProfile = params.reg.profile(params.connectionName);
+      // The old denial/timeout was invalidated by reload. Re-profile the SAME
+      // canonical source before retrying; a removed source fails closed here.
+      effectiveProfile = params.reg.profile(resolvedName);
       continue;
     }
+
+    if (params.reg.getReloadGeneration() !== generationBeforeApproval) {
+      effectiveProfile = params.reg.profile(resolvedName);
+      continue;
+    }
+
+    // Approval is current, so transport initialization/elevation may proceed.
+    const transport = await params.reg.get(resolvedName);
     if (params.reg.getReloadGeneration() === generationBeforeApproval) {
       return { transport, profile: effectiveProfile.id, approval };
     }
 
-    // A reload invalidated the decision we just received. Re-acquire the
-    // transport/profile from the CURRENT config, then loop so approval is run
-    // again against the current profile before anything executes.
-    transport = await params.reg.get(params.connectionName);
-    effectiveProfile = params.reg.profile(params.connectionName);
+    // A reload landed while get() was initializing. Registry.get() already
+    // discarded/retried stale transport state; loop to authorize the current
+    // transport configuration before execution.
+    effectiveProfile = params.reg.profile(resolvedName);
   }
 
   throw new Error(`config reloaded ${maxAttempts} times during approval; retry command after reloads settle`);
@@ -777,11 +784,9 @@ export async function approveTransportForCurrentConfig(params: {
 
 function approvalTargetForConnection(connectionName?: string): { profile: string; approvalProfile: ResolvedSource } {
   const id = registry.resolveRegisteredName(connectionName);
-  const source = resolvedConfig.sources.find(s => s.name === id);
-  return {
-    profile: id,
-    approvalProfile: buildApprovalProfile(id, resolvedConfig.perSourceApproval ?? {}, source),
-  };
+  // Registry state is the hot-reload source of truth; resolvedConfig is the boot
+  // snapshot and may no longer describe this source.
+  return { profile: id, approvalProfile: registry.profile(id) };
 }
 
 export function appendDescriptionComment(command: string, description?: string): string {
@@ -1484,14 +1489,19 @@ server.tool(
       const sanitizedCommand = sanitizeCommand(command);
       commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
       const target = approvalTargetForConnection(connectionName);
-      profile = target.profile;
-      approvalDecision = await gateApproval({
+      const approved = await approveTransportForCurrentConfig({
+        reg: registry,
         profile: target.approvalProfile,
-        tool: 'exec',
-        command: commandWithDescription,
-        description,
+        gate: (currentProfile) => gateApproval({
+          profile: currentProfile,
+          tool: 'exec',
+          command: commandWithDescription,
+          description,
+        }),
       });
-      const t = await registry.get(target.profile);
+      const t = approved.transport;
+      profile = approved.profile;
+      approvalDecision = approved.approval;
       startedAt = Date.now();
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
       audited = true;
@@ -1544,14 +1554,19 @@ if (!DISABLE_SUDO) {
         const sanitizedCommand = sanitizeCommand(command);
         commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
         const target = approvalTargetForConnection(connectionName);
-        profile = target.profile;
-        approvalDecision = await gateApproval({
+        const approved = await approveTransportForCurrentConfig({
+          reg: registry,
           profile: target.approvalProfile,
-          tool: 'sudo-exec',
-          command: commandWithDescription,
-          description,
+          gate: (currentProfile) => gateApproval({
+            profile: currentProfile,
+            tool: 'sudo-exec',
+            command: commandWithDescription,
+            description,
+          }),
         });
-        const t = await registry.get(target.profile);
+        const t = approved.transport;
+        profile = approved.profile;
+        approvalDecision = approved.approval;
         // Legacy single-host mode may still pass --sudoPassword on CLI; in
         // multi-host mode each ServerConfig carries its own sudoPassword.
         const legacySudo = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined && !isMultiHost)

@@ -330,7 +330,7 @@ export class TransportRegistry {
         // CURRENT registry instead of surfacing a stale key-read/connect error.
         if (this.reloadGeneration !== gen) {
           await t?.close().catch(() => { /* best effort */ });
-          return this.get(name);
+          return this.get(resolved);
         }
         throw initError;
       }
@@ -345,7 +345,7 @@ export class TransportRegistry {
       // the new parameters (or a clear error if `resolved` was removed).
       if (this.reloadGeneration !== gen) {
         await t.close().catch(() => { /* best effort */ });
-        return this.get(name);
+        return this.get(resolved);
       }
       // Cache the live transport only on successful, still-current init.
       this.transports.set(resolved, t);

@@ -655,7 +655,6 @@ describe('approveTransportForCurrentConfig (Codex V4 finding: re-run approval af
 
   it('reruns approval against the CURRENT profile after a reload invalidates the first decision', async () => {
     let generation = 1;
-    const original = stub('pre-reload');
     const fresh = stub('post-reload');
     const approvedProfiles: string[] = [];
     const reg = {
@@ -666,8 +665,6 @@ describe('approveTransportForCurrentConfig (Codex V4 finding: re-run approval af
 
     const result = await approveTransportForCurrentConfig({
       reg: reg as any,
-      connectionName: 'alpha',
-      transport: original,
       profile: reg.profile('alpha') as any,
       gate: async (profile) => {
         approvedProfiles.push(profile.id);
@@ -688,9 +685,90 @@ describe('approveTransportForCurrentConfig (Codex V4 finding: re-run approval af
     expect(result.approval.reason).toBe('current decision');
   });
 
+  it('keeps an omitted request pinned to the sampled profile after reload', async () => {
+    let generation = 1;
+    const fresh = stub('post-reload');
+    const approvedProfiles: string[] = [];
+    const getNames: Array<string | undefined> = [];
+    const reg = {
+      getReloadGeneration: () => generation,
+      get: async (name?: string) => { getNames.push(name); return fresh; },
+      profile: (name?: string) => ({
+        id: name === 'old-default' || generation === 1 ? 'old-default' : 'new-default',
+      } as any),
+    };
+
+    const result = await approveTransportForCurrentConfig({
+      reg: reg as any,
+      profile: reg.profile(undefined) as any,
+      gate: async (profile) => {
+        approvedProfiles.push(profile.id);
+        if (approvedProfiles.length === 1) generation = 2;
+        return allow(approvedProfiles.length === 1 ? 'stale decision' : 'current decision');
+      },
+    });
+
+    expect(getNames).toEqual(['old-default']);
+    expect(approvedProfiles).toEqual(['old-default', 'old-default']);
+    expect(result.profile).toBe('old-default');
+    expect(result.transport).toBe(fresh);
+  });
+
+  it('acquires the transport only after approval is current', async () => {
+    const fresh = stub('post-approval');
+    const order: string[] = [];
+    const reg = {
+      getReloadGeneration: () => 1,
+      get: async (name?: string) => { order.push(`get:${name}`); return fresh; },
+      profile: (name?: string) => ({ id: name ?? 'alpha' } as any),
+    };
+
+    const result = await approveTransportForCurrentConfig({
+      reg: reg as any,
+      profile: reg.profile('alpha') as any,
+      gate: async (profile) => {
+        order.push(`gate:${profile.id}`);
+        return allow('current decision');
+      },
+    });
+
+    expect(order).toEqual(['gate:alpha', 'get:alpha']);
+    expect(result.transport).toBe(fresh);
+    expect(result.profile).toBe('alpha');
+  });
+
+  it('re-approves when a reload lands while transport initialization is pending', async () => {
+    let generation = 1;
+    let getCalls = 0;
+    const fresh = stub('post-reload');
+    const order: string[] = [];
+    const reg = {
+      getReloadGeneration: () => generation,
+      get: async (name?: string) => {
+        getCalls += 1;
+        order.push(`get${getCalls}:${name}`);
+        if (getCalls === 1) generation = 2;
+        return fresh;
+      },
+      profile: (name?: string) => ({ id: name ?? 'alpha' } as any),
+    };
+
+    const result = await approveTransportForCurrentConfig({
+      reg: reg as any,
+      profile: reg.profile('alpha') as any,
+      gate: async (profile) => {
+        order.push(`gate${generation}:${profile.id}`);
+        return allow(`decision-${generation}`);
+      },
+    });
+
+    expect(order).toEqual(['gate1:alpha', 'get1:alpha', 'gate2:alpha', 'get2:alpha']);
+    expect(result.transport).toBe(fresh);
+    expect(result.approval.reason).toBe('decision-2');
+  });
+
   it('retries against the CURRENT profile when a stale pre-reload denial throws', async () => {
     let generation = 1;
-    const original = stub('pre-reload');
     const fresh = stub('post-reload');
     const approvedProfiles: string[] = [];
     const reg = {
@@ -701,8 +779,6 @@ describe('approveTransportForCurrentConfig (Codex V4 finding: re-run approval af
 
     const result = await approveTransportForCurrentConfig({
       reg: reg as any,
-      connectionName: 'alpha',
-      transport: original,
       profile: reg.profile('alpha') as any,
       gate: async (profile) => {
         approvedProfiles.push(profile.id);
@@ -721,7 +797,6 @@ describe('approveTransportForCurrentConfig (Codex V4 finding: re-run approval af
   });
 
   it('preserves a real denial when no reload changed the generation', async () => {
-    const original = stub('pre-reload');
     const reg = {
       getReloadGeneration: () => 1,
       get: async () => { throw new Error('get() must NOT be called for a current denial'); },
@@ -730,8 +805,6 @@ describe('approveTransportForCurrentConfig (Codex V4 finding: re-run approval af
 
     await expect(approveTransportForCurrentConfig({
       reg: reg as any,
-      connectionName: 'alpha',
-      transport: original,
       profile: reg.profile('alpha') as any,
       gate: async () => { throw new Error('approval denied by current profile'); },
     })).rejects.toThrow(/current profile/);

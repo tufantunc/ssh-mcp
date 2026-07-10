@@ -419,6 +419,31 @@ describe('TransportRegistry.get (finding 1: stale in-flight init must not surviv
     expect(r.list().map((x) => x.name)).toEqual(['beta']);
   });
 
+  it('pins an omitted name to its originally resolved source across a reload', async () => {
+    let resolveOldInit: () => void = () => {};
+    const oldInit = vi.fn<() => Promise<void>>().mockImplementation(
+      () => new Promise<void>((res) => { resolveOldInit = res; }),
+    );
+    const oldStub = makeStub(oldInit);
+    oldStub.close = vi.fn().mockResolvedValue(undefined);
+    const newDefaultStub = makeStub(vi.fn().mockResolvedValue(undefined));
+    createTransportMock.mockReturnValueOnce(oldStub).mockReturnValue(newDefaultStub);
+
+    const r = new TransportRegistry();
+    r.register(makeConfig('alpha'));
+
+    // Omitted name resolves to alpha at request start. A reload must not let the
+    // recursive retry reinterpret that omission as the new default, beta.
+    const inflight = r.get();
+    r.replaceAll([makeConfig('beta')]);
+    await r.closeAll();
+    resolveOldInit();
+
+    await expect(inflight).rejects.toThrow(/Unknown connection name: alpha/);
+    expect(oldStub.close).toHaveBeenCalledTimes(1);
+    expect(createTransportMock).toHaveBeenCalledTimes(1);
+  });
+
   it('retries the current config when a stale in-flight init REJECTS after a reload', async () => {
     let rejectOldInit: (err: Error) => void = () => {};
     const oldInit = vi.fn<() => Promise<void>>().mockImplementation(
