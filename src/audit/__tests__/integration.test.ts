@@ -95,6 +95,46 @@ describe('audit integration with exec wrapper', () => {
     }
   });
 
+  it('preserves synthetic failed-ExecResult context in wrapper audit records (Codex 3556038517)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ssh-mcp-audit-wrapper-failed-result-'));
+    try {
+      process.env.SSH_MCP_AUDIT_DIR = dir;
+      process.env.SSH_MCP_DISABLE_MAIN = '1';
+      const { executeAuditedTransportCommand } = await import('../../index.js');
+
+      // Non-zero exit with EMPTY stderr: resultToMcpContent throws the
+      // synthetic "Command exited with status N" detail. The wrapper audit
+      // record must carry that context instead of an empty stderr.
+      const transport: Pick<ISshTransport, 'exec' | 'execElevated'> = {
+        exec: async (): Promise<ExecResult> => ({ stdout: '', stderr: '', exitCode: 3 }),
+        execElevated: async (): Promise<ExecResult> => {
+          throw new Error('not used');
+        },
+      };
+      const store = new AuditStore({ auditDir: dir, auditMaxBytes: 1000 });
+
+      await expect(
+        executeAuditedTransportCommand({
+          transport,
+          store,
+          tool: 'exec',
+          profile: 'p',
+          command: 'false',
+        }),
+      ).rejects.toThrow(/Command exited with status 3/);
+
+      const file = activeFilePath(dir);
+      const records = readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+      // Exactly ONE record: the mapped-error audit must not double-write.
+      expect(records).toHaveLength(1);
+      expect(records[0].exec.exit_code).toBe(3);
+      expect(records[0].exec.stderr).toContain('Command exited with status 3');
+    } finally {
+      delete process.env.SSH_MCP_AUDIT_DIR;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('writes a failure audit record when the transport throws (audit contract covers failure)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ssh-mcp-audit-wrapper-fail-'));
     try {

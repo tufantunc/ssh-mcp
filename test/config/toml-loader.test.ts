@@ -228,6 +228,36 @@ password = "super-secret-value
     expect(() => parseTomlConfig(`[server]\naudit_dir = "/tmp"`)).toThrow(/sources/);
   });
 
+  it('rejects fractional and non-positive audit_max_bytes (Codex 3556038524)', () => {
+    const oneSource = `
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+`;
+    // Fractional byte counts would floor to 0 downstream and silently empty
+    // every stdout/stderr capture; they must be rejected at parse time.
+    expect(() => parseTomlConfig(`
+[server]
+audit_max_bytes = 0.5
+${oneSource}`)).toThrow(/audit_max_bytes must be a positive integer/);
+    expect(() => parseTomlConfig(`
+[server]
+audit_max_bytes = 1024.5
+${oneSource}`)).toThrow(/audit_max_bytes must be a positive integer/);
+    expect(() => parseTomlConfig(`
+[server]
+audit_max_bytes = 0
+${oneSource}`)).toThrow(/audit_max_bytes must be a positive integer/);
+    // A positive integer is still accepted.
+    const cfg = parseTomlConfig(`
+[server]
+audit_max_bytes = 4096
+${oneSource}`);
+    expect(cfg.server?.audit_max_bytes).toBe(4096);
+  });
+
   it('rejects duplicate ids', () => {
     expect(() => parseTomlConfig(`
 [[sources]]

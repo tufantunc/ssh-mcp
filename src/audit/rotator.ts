@@ -73,6 +73,30 @@ export function rotate(filePath: string, retain: number = DEFAULT_RETAIN): void 
 }
 
 /**
+ * Retention cutoff as a UTC YYYYMMDD stamp: `asOf - (retainDays - 1)` days,
+ * so the window always includes today plus the previous `retainDays - 1`
+ * calendar days. Anything whose date stamp is lexicographically < this stamp
+ * is outside the retention window (string comparison is valid because
+ * YYYYMMDD is zero-padded and monotonic). Shared by the on-disk prune below
+ * and the AuditStore in-memory tail filter so both apply the SAME window
+ * (Codex 3556038510).
+ */
+export function retentionCutoffStamp(
+  retainDays: number = DEFAULT_RETAIN,
+  asOf: Date = new Date(),
+): string {
+  const keep = Math.max(1, Math.floor(retainDays));
+  const cutoffDate = new Date(
+    Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth(), asOf.getUTCDate()) -
+      (keep - 1) * 24 * 60 * 60 * 1000,
+  );
+  const cy = cutoffDate.getUTCFullYear().toString().padStart(4, '0');
+  const cm = (cutoffDate.getUTCMonth() + 1).toString().padStart(2, '0');
+  const cd = cutoffDate.getUTCDate().toString().padStart(2, '0');
+  return `${cy}${cm}${cd}`;
+}
+
+/**
  * Prune day-rolled files older than `retainDays` from the audit directory.
  *
  * Retention is by AGE, not by count of distinct dates: a file is removed when
@@ -103,15 +127,7 @@ export function pruneOldDays(
   // Cutoff = asOf - (retainDays - 1) days, as a YYYYMMDD stamp. Files whose
   // date stamp is lexicographically < cutoff are outside the window. String
   // comparison is valid because YYYYMMDD is zero-padded and monotonic.
-  const keep = Math.max(1, Math.floor(retainDays));
-  const cutoffDate = new Date(
-    Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth(), asOf.getUTCDate()) -
-      (keep - 1) * 24 * 60 * 60 * 1000,
-  );
-  const cy = cutoffDate.getUTCFullYear().toString().padStart(4, '0');
-  const cm = (cutoffDate.getUTCMonth() + 1).toString().padStart(2, '0');
-  const cd = cutoffDate.getUTCDate().toString().padStart(2, '0');
-  const cutoffStamp = `${cy}${cm}${cd}`;
+  const cutoffStamp = retentionCutoffStamp(retainDays, asOf);
 
   const removed: string[] = [];
   for (const name of entries) {
