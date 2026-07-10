@@ -72,6 +72,10 @@ function buildUserPrompt(ctx: ApprovalContext): string {
 
 export class SmartApproval implements ApprovalEngine {
   constructor(private readonly opts: SmartApprovalOptions) {
+    const provider = opts.llm?.provider ?? 'openai';
+    if (provider !== 'openai') {
+      throw new Error(`smart approval provider "${provider}" is not supported; use "openai"`);
+    }
     if (!opts.llm?.endpoint) {
       throw new Error('smart approval mode requires [approval.llm].endpoint');
     }
