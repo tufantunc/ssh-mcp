@@ -84,6 +84,18 @@ export async function resolveCredentials(profile: Profile): Promise<ResolvedCred
     }
   }
 
+  if (profile.cert && creds.privateKey) {
+    const certPath = process.env[`${envPrefix}_CERT`]
+      || (keyPath ? `${keyPath.replace(/\.pub$/, '')}-cert.pub` : undefined);
+    if (certPath) {
+      try {
+        creds.certificate = await readFile(resolve(certPath.replace(/^~/, process.env.HOME || '~')), 'utf8');
+      } catch (err: any) {
+        if (err.code !== 'ENOENT') throw err;
+      }
+    }
+  }
+
   if (!creds.password && !creds.privateKey && !creds.agentSocket) {
     throw new Error(
       `No credentials resolved for profile "${profile.name}". ` +

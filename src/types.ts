@@ -134,6 +134,7 @@ export interface PolicyEvaluation {
 export interface ResolvedCredentials {
   password?: string;
   privateKey?: string;
+  certificate?: string;
   passphrase?: string;
   sudoPassword?: string;
   agentSocket?: string;

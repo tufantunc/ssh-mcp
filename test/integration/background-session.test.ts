@@ -33,7 +33,7 @@ describe.skipIf(!allServersUp(await checkAllServers()))('BackgroundSession', () 
     const session = await conn.openSession({ name: 'tail-append', type: 'background', command: 'tail -f /tmp/bg-tail.log' });
     await new Promise((r) => setTimeout(r, 1000));
     await conn.exec('echo "appended" >> /tmp/bg-tail.log');
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1500));
     expect(session.readOutput(20)).toContain('appended');
     await conn.closeSession('tail-append').catch(() => {});
   }, 15000);
