@@ -289,6 +289,41 @@ describe('WebUI server', () => {
     expect(queue.list()).toHaveLength(1);
   });
 
+  it('uses the trimmed auth token for approval mutation checks', async () => {
+    await handle.close();
+    handle = await startWebUI({
+      host: '127.0.0.1',
+      port: 0,
+      authToken: '   ',
+      registry: fakeRegistry,
+      queue,
+      audit,
+      getApprovalMode: name => (name === 'prod' ? 'manual' : 'yolo'),
+    });
+    queue.enqueue({
+      id: 'trimmed-token-guard',
+      profile: 'prod',
+      tool: 'exec',
+      command: 'systemctl restart nginx',
+      enqueuedAt: new Date().toISOString(),
+    });
+
+    const r = await fetch(
+      `http://${handle.address.host}:${handle.address.port}/api/approvals/trimmed-token-guard/allow`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: `http://${handle.address.host}:${handle.address.port + 1}`,
+        },
+        body: '{}',
+      },
+    );
+
+    expect(r.status).toBe(403);
+    expect(queue.list()).toHaveLength(1);
+  });
+
   it('POST approval mutation rejects missing Origin/Referer without a token', async () => {
     queue.enqueue({
       id: 'origin-guard-missing',
