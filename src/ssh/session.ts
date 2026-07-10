@@ -42,6 +42,12 @@ export abstract class Session {
   abstract run(command: string, timeoutMs?: number): Promise<CommandResult>;
   abstract close(): Promise<void>;
 
+  markDisconnected(): void {
+    if (this._status === 'active') {
+      this._status = 'disconnected';
+    }
+  }
+
   toInfo(): SessionInfo {
     return {
       id: this.id,

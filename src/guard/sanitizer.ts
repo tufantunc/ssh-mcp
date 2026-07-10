@@ -32,3 +32,7 @@ export function sanitizeSessionName(name: string): string {
   }
   return name;
 }
+
+export function shellSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}

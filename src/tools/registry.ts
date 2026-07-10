@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ConnectionRegistry } from '../ssh/connection-registry.js';
 import type { PolicyEngine } from '../policy/engine.js';
 import type { AuditStore } from '../audit/store.js';
-import { sanitizeCommand, sanitizeSessionName } from '../guard/sanitizer.js';
+import { sanitizeCommand, sanitizeSessionName, shellSingleQuote } from '../guard/sanitizer.js';
 import { redactText } from '../guard/redactor.js';
 import { requestApproval } from '../guard/elicitation.js';
 import { SftpClient } from '../ssh/sftp.js';
@@ -289,7 +289,7 @@ export function registerTools(
         const { conn, evaluation, approver } = await checkPolicyAndApprove(`sudo ${cleanCmd}`, profileName, 'privileged-command', ctx);
 
         const sudoPassword = conn.getSudoPassword();
-        const wrapped = `sudo -p "" -S sh -c '${cleanCmd.replace(/'/g, "'\\''")}'`;
+        const wrapped = `sudo -p "" -S sh -c ${shellSingleQuote(cleanCmd)}`;
         const result = await conn.exec(wrapped, {
           stdin: sudoPassword ? sudoPassword + '\n' : undefined,
         });
