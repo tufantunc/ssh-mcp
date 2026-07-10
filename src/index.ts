@@ -85,6 +85,9 @@ async function main() {
   const entropyScan = !!argv.auditEntropyScan;
   const tamperEvident = !!argv.auditTamperEvident;
 
+  const { initKeychain } = await import('./config/credential-resolver.js');
+  await initKeychain();
+
   const registry = new ConnectionRegistry(config, hostKeyMode);
   const policy = new PolicyEngine(DEFAULT_RULES);
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);
