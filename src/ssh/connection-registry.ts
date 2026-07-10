@@ -3,6 +3,7 @@ import type { AppConfig, Profile, ConnectionInfo } from '../types.js';
 import { resolveCredentials } from '../config/credential-resolver.js';
 import { SSHConnection } from './connection.js';
 import type { HostKeyMode } from './host-key.js';
+import type { ClientChannel } from 'ssh2';
 
 export class ConnectionRegistry {
   private connections = new Map<string, SSHConnection>();
@@ -32,7 +33,24 @@ export class ConnectionRegistry {
     const promise = (async () => {
       let conn = this.connections.get(profile.name);
       if (!conn) {
-        conn = new SSHConnection(profile, await resolveCredentials(profile), this.knownHostsStore, this.hostKeyMode);
+        let bastionSock: ClientChannel | undefined;
+        if (profile.via) {
+          const bastionConn = await this.getOrCreate(profile.via);
+          const bastionClient = bastionConn.getClient();
+          bastionSock = await new Promise<ClientChannel>((resolve, reject) => {
+            bastionClient.forwardOut('', 0, profile.host, profile.port, (err: Error | undefined, stream: ClientChannel) => {
+              if (err) reject(new Error(`ProxyJump via "${profile.via}" failed: ${err.message}`));
+              else resolve(stream);
+            });
+          });
+        }
+        conn = new SSHConnection(
+          profile,
+          await resolveCredentials(profile),
+          this.knownHostsStore,
+          this.hostKeyMode,
+          bastionSock,
+        );
         this.connections.set(profile.name, conn);
       }
       await conn.ensureConnected();

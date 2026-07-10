@@ -17,17 +17,20 @@ export class SSHConnection {
   private lastActivity = new Date();
   private knownHostsStore: Map<string, string>;
   private hostKeyMode: HostKeyMode;
+  private bastionSock: ClientChannel | null;
 
   constructor(
     profile: Profile,
     credentials: ResolvedCredentials,
     knownHostsStore: Map<string, string>,
     hostKeyMode: HostKeyMode = 'tofu',
+    bastionSock?: ClientChannel,
   ) {
     this.profile = profile;
     this.credentials = credentials;
     this.knownHostsStore = knownHostsStore;
     this.hostKeyMode = hostKeyMode;
+    this.bastionSock = bastionSock ?? null;
   }
 
   async ensureConnected(): Promise<void> {
@@ -121,6 +124,9 @@ export class SSHConnection {
       }
       if (this.credentials.password) {
         connectConfig.password = this.credentials.password;
+      }
+      if (this.bastionSock) {
+        connectConfig.sock = this.bastionSock;
       }
 
       this.client.connect(connectConfig);
