@@ -364,6 +364,23 @@ describe('OpenSshTransport.isConnected (Codex 3541767250: initialized != connect
     expect(t.isConnected()).toBe(false);
   });
 
+  it.each([
+    ['auth', 'Permission denied'],
+    ['host_key', 'Host key verification failed.'],
+    ['connect', 'Connection refused'],
+    ['transport', 'spawn error'],
+    ['timeout', 'timed out'],
+  ] as const)('clears stale connected state after a later %s failure', async (category, stderr) => {
+    const { t, runSsh } = makeTransport({ authMode: 'kerberos' });
+    runSsh
+      .mockResolvedValueOnce({ stdout: 'ok', stderr: '', exitCode: 0 })
+      .mockResolvedValueOnce({ stdout: '', stderr, exitCode: 255, category });
+    await t.exec('true', { timeoutMs: 60000 });
+    expect(t.isConnected()).toBe(true);
+    await t.exec('true', { timeoutMs: 60000 });
+    expect(t.isConnected()).toBe(false);
+  });
+
   it('reports connected once a later command succeeds after an initial connect failure', async () => {
     const { t, runSsh } = makeTransport({ authMode: 'kerberos' });
     runSsh
