@@ -8,10 +8,10 @@ import { sshAvailable, SSH_HOST, SSH_PORT } from './helpers.js';
 const knownHosts = new Map<string, string>();
 
 const testProfile: Profile = {
-  name: 'test',
+  name: 'admin',
   host: SSH_HOST,
   port: SSH_PORT,
-  user: 'test',
+  user: 'admin',
   auth: 'password',
   tty: false,
   timeout: 10000,
@@ -31,7 +31,7 @@ const SSH_AVAILABLE = sshAvailable();
 beforeAll(async () => {
   if (!(await SSH_AVAILABLE)) return;
   savedEnv = { ...process.env };
-  process.env.SSH_MCP_TEST_PASSWORD = 'secret';
+  process.env.SSH_MCP_ADMIN_PASSWORD = 'secret';
   const creds = await resolveCredentials(testProfile);
   conn = new SSHConnection(testProfile, creds, knownHosts, 'insecure' as HostKeyMode);
   await conn.ensureConnected();
@@ -80,7 +80,7 @@ describe.skipIf(await SSH_AVAILABLE === false)('SSHConnection exec', () => {
 
   it('includes profile name in result', async () => {
     const result = await conn.exec('whoami');
-    expect(result.profile).toBe('test');
+    expect(result.profile).toBe('admin');
   });
 });
 
@@ -91,7 +91,7 @@ describe.skipIf(await SSH_AVAILABLE === false)('SSHConnection connection lifecyc
 
   it('reports connection info', () => {
     const info = conn.toInfo();
-    expect(info.profile).toBe('test');
+    expect(info.profile).toBe('admin');
     expect(info.host).toBe(SSH_HOST);
     expect(info.port).toBe(SSH_PORT);
     expect(info.status).toBe('connected');
