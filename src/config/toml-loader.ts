@@ -260,9 +260,6 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     if (src.default !== undefined && typeof src.default !== 'boolean') {
       throw new Error(`Config: sources.${src.id}.default must be a boolean`);
     }
-    if (src.description !== undefined && typeof src.description !== 'string') {
-      throw new Error(`Config: sources.${src.id}.description must be a string`);
-    }
     // GSSAPIDelegateCredentials is only wired in the Kerberos auth branch (see
     // the `case 'kerberos'` below and OpenSshTransport.buildArgs); for key or
     // password auth the option is silently dropped, so a user requesting
