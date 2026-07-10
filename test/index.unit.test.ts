@@ -409,6 +409,9 @@ describe('prepareKeyContents (Codex 3549295046: skip deferred key reads when pas
       };
       await prepareKeyContents(cfg);
       expect(cfg.privateKey).toBe('KEYDATA');
+      await fs.writeFile(keyPath, 'ROTATED');
+      await prepareKeyContents(cfg);
+      expect(cfg.privateKey).toBe('ROTATED');
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
