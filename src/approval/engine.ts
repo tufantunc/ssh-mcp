@@ -67,7 +67,7 @@ export class ApprovalDispatcher extends EventEmitter implements ApprovalEngine {
   private readonly manual?: ManualApproval;
   private readonly modeStore: ApprovalModeStore;
 
-  constructor(private readonly opts: BuildApprovalEngineOptions) {
+  constructor(opts: BuildApprovalEngineOptions) {
     super();
     if (opts.smart) {
       this.smart = new SmartApproval(opts.smart);
@@ -218,7 +218,7 @@ export class ApprovalDispatcher extends EventEmitter implements ApprovalEngine {
    * genuinely-enforced default instead of guessing a different fallback.
    */
   get defaultMode(): ApprovalMode {
-    return this.opts.defaultMode;
+    return this.modeStore.getGlobal();
   }
 
   listPending(): PendingApproval[] {
