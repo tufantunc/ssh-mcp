@@ -91,15 +91,20 @@ export class OpenSshTransport implements ISshTransport {
   }
 
   /**
-   * Update everConnected from a completed exec result. A command that reached
-   * the remote host — success, a non-zero remote exit, or an auth/host-key
-   * rejection (all of which require a completed TCP+SSH handshake) — proves the
-   * host is live. Only connect/transport-layer failures (TCP refused, DNS
-   * failure, ssh spawn error) and a bare timeout leave the flag unchanged,
-   * since they do not prove the host ever answered.
+   * Update everConnected from a completed exec result. Only a usable remote
+   * session — success or a remote command's own non-zero exit — proves this
+   * OpenSSH transport can run commands. Authentication and host-key rejections
+   * may reach the server, but they do not establish a usable session and should
+   * not make list-servers report the server as connected.
    */
   private recordLiveness(result: ExecResult): void {
-    if (result.category === 'connect' || result.category === 'transport' || result.category === 'timeout') {
+    if (
+      result.category === 'auth' ||
+      result.category === 'host_key' ||
+      result.category === 'connect' ||
+      result.category === 'transport' ||
+      result.category === 'timeout'
+    ) {
       return;
     }
     this.everConnected = true;

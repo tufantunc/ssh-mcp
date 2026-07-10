@@ -44,6 +44,7 @@ describe('ApprovalDispatcher — global hot-swap', () => {
     });
 
     // Initially yolo -> allow immediately.
+    expect(d.defaultMode).toBe('yolo');
     const first = await d.decide(ctxFor('lab'));
     expect(first.mode).toBe('yolo');
 
@@ -52,6 +53,7 @@ describe('ApprovalDispatcher — global hot-swap', () => {
     expect(ev.scope).toBe('global');
     expect(ev.mode).toBe('manual');
     expect(d.getGlobalMode()).toBe('manual');
+    expect(d.defaultMode).toBe('manual');
 
     // Now a new decision queues (manual) instead of auto-allowing.
     const pending = d.decide(ctxFor('lab'));

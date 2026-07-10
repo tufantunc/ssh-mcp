@@ -9,7 +9,8 @@ import {
   expandHome,
   resolveEnvRef,
   defaultDiscoveryPaths,
-} from '../toml-loader.js';
+  discoverConfigPath,
+} from '../../src/config/toml-loader.js';
 
 describe('expandHome', () => {
   it('expands a leading ~ alone', () => {
@@ -63,6 +64,24 @@ describe('defaultDiscoveryPaths', () => {
     const paths = defaultDiscoveryPaths({ XDG_CONFIG_HOME: '/x/conf' });
     expect(paths).toContain('/x/conf/ssh-mcp/config.toml');
     expect(paths[paths.length - 1].endsWith(path.join('.ssh-mcp', 'config.toml'))).toBe(true);
+  });
+
+  it('rejects a non-file SSH_MCP_CONFIG instead of falling through (Codex 3551117478)', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-mcp-discover-'));
+    try {
+      const envDir = path.join(tmp, 'env-config-dir');
+      const xdgRoot = path.join(tmp, 'xdg');
+      fs.mkdirSync(envDir, { recursive: true });
+      fs.mkdirSync(path.join(xdgRoot, 'ssh-mcp'), { recursive: true });
+      fs.writeFileSync(path.join(xdgRoot, 'ssh-mcp', 'config.toml'), '[[sources]]\n');
+
+      expect(() => discoverConfigPath({
+        SSH_MCP_CONFIG: envDir,
+        XDG_CONFIG_HOME: xdgRoot,
+      })).toThrow(/not a regular file|cannot access/);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 
@@ -156,6 +175,20 @@ sudo_password = "env:LAB_SUDO"
     expect(cfg.sources[0].sudoPassword).toBe('secret-sudo');
   });
 
+  it('treats an empty TOML sudo_password as unset instead of feeding blank sudo stdin (Codex 3551304734)', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+sudo_password = ""
+su_password = "root-pw"
+`);
+    expect(cfg.sources[0].sudoPassword).toBeUndefined();
+    expect(cfg.sources[0].suPassword).toBe('root-pw');
+  });
+
   it('errors when env var missing', () => {
     expect(() => parseTomlConfig(
       `
@@ -172,8 +205,57 @@ password = "env:NOT_SET"
 });
 
 describe('parseTomlConfig: validation', () => {
+  it('redacts secret assignment lines from TOML parser errors (Codex 3549260449)', () => {
+    try {
+      parseTomlConfig(`
+[[sources]]
+id = "p"
+host = "h"
+user = "u"
+auth = "password"
+password = "super-secret-value
+`);
+      throw new Error('should have thrown');
+    } catch (e: any) {
+      expect(e.message).toMatch(/TOML parse failed/);
+      expect(e.message).toContain('password');
+      expect(e.message).toContain('[REDACTED]');
+      expect(e.message).not.toContain('super-secret-value');
+    }
+  });
+
   it('rejects empty source list', () => {
     expect(() => parseTomlConfig(`[server]\naudit_dir = "/tmp"`)).toThrow(/sources/);
+  });
+
+  it('rejects fractional and non-positive audit_max_bytes (Codex 3556038524)', () => {
+    const oneSource = `
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+`;
+    // Fractional byte counts would floor to 0 downstream and silently empty
+    // every stdout/stderr capture; they must be rejected at parse time.
+    expect(() => parseTomlConfig(`
+[server]
+audit_max_bytes = 0.5
+${oneSource}`)).toThrow(/audit_max_bytes must be a positive integer/);
+    expect(() => parseTomlConfig(`
+[server]
+audit_max_bytes = 1024.5
+${oneSource}`)).toThrow(/audit_max_bytes must be a positive integer/);
+    expect(() => parseTomlConfig(`
+[server]
+audit_max_bytes = 0
+${oneSource}`)).toThrow(/audit_max_bytes must be a positive integer/);
+    // A positive integer is still accepted.
+    const cfg = parseTomlConfig(`
+[server]
+audit_max_bytes = 4096
+${oneSource}`);
+    expect(cfg.server?.audit_max_bytes).toBe(4096);
   });
 
   it('rejects duplicate ids', () => {
@@ -200,6 +282,17 @@ host = "h"
 user = "u"
 auth = "bogus"
 `)).toThrow(/auth/);
+  });
+
+  it('rejects a non-string source description instead of silently dropping it', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+description = 123
+`)).toThrow(/sources\.x\.description must be a quoted string/);
   });
 
   it('rejects key auth with no key_path or private_key', () => {
@@ -347,6 +440,38 @@ port = 8080
     expect(cfg.webui?.auth_token).toBeUndefined();
   });
 
+  it('does NOT resolve auth_token env refs when webui is disabled (Codex 3551117490)', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[webui]
+enabled = false
+host = "0.0.0.0"
+auth_token = "env:WEBUI_TOKEN_UNSET"
+`, { env: {} });
+    expect(cfg.webui?.enabled).toBe(false);
+    expect(cfg.webui?.auth_token).toBeUndefined();
+  });
+
+  it('still resolves auth_token env refs when webui is enabled', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[webui]
+enabled = true
+host = "127.0.0.1"
+auth_token = "env:WEBUI_TOKEN_UNSET"
+`, { env: {} })).toThrow(/WEBUI_TOKEN_UNSET/);
+  });
+
   it('does NOT require auth_token for a non-loopback webui with enabled omitted (defaults off)', () => {
     // [webui] with a host but no `enabled` key is off by default, so the token
     // gate must not fire.
@@ -439,6 +564,19 @@ mode = "yolo"
     // lands on source "x" with the captured mode — not merely that the map
     // object exists (it is always initialized to `{}`).
     expect(cfg.perSourceApproval).toEqual({ x: 'yolo' });
+  });
+
+  it('rejects an empty per-source approval override mode (Codex 3549260472)', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[sources.approval]
+mode = ""
+`)).toThrow(/sources\.x\.approval\.mode must be one of/);
   });
 });
 
@@ -546,6 +684,17 @@ strict_host_key_checking = "accept-new"
     expect(cfg.sources[0].strictHostKeyChecking).toBe('accept-new');
   });
 
+  it('rejects an unquoted numeric known_hosts_file before home expansion (Codex 3551117485)', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u@EX"
+auth = "kerberos"
+known_hosts_file = 123
+`)).toThrow(/known_hosts_file must be a quoted string/);
+  });
+
   it('accepts host-key fields on a kerberos source (implies openssh)', () => {
     const cfg = parseTomlConfig(`
 [[sources]]
@@ -584,6 +733,50 @@ key_path = "/k"
 `);
     expect(cfg.sources[0].keyPath).toBe('/k');
     expect(cfg.sources[0].transport).toBe('openssh');
+  });
+
+  it('ignores unsupported openssh private_key env refs when key_path is present (Codex 3551117493)', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "key"
+transport = "openssh"
+key_path = "/k"
+private_key = "env:SSH_KEY_UNSET"
+`, { env: {} });
+    expect(cfg.sources[0].keyPath).toBe('/k');
+    expect(cfg.sources[0].privateKey).toBeUndefined();
+  });
+
+  it('reports the openssh key_path requirement before resolving unsupported private_key env refs', () => {
+    try {
+      parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "key"
+transport = "openssh"
+private_key = "env:SSH_KEY_UNSET"
+`, { env: {} });
+      throw new Error('should have thrown');
+    } catch (e: any) {
+      expect(e.message).toMatch(/requires key_path/);
+      expect(e.message).not.toContain('SSH_KEY_UNSET');
+    }
+  });
+
+  it('rejects an unquoted numeric key_path before home expansion (Codex 3549260462)', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "key"
+key_path = 123
+`)).toThrow(/key_path must be a quoted string/);
   });
 
   it('still accepts inline private_key on the ssh2 transport', () => {
@@ -650,6 +843,31 @@ password = 987654
       expect(e.message).toContain('sources.p.password');
       expect(e.message).not.toContain('987654');
     }
+  });
+
+  it('does not resolve inactive password env refs on key or kerberos sources (Codex 3551117501)', () => {
+    const keyCfg = parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u"
+auth = "key"
+key_path = "/k"
+password = "env:PASSWORD_UNSET"
+`, { env: {} });
+    expect(keyCfg.sources[0].authMode).toBe('key');
+    expect(keyCfg.sources[0].password).toBeUndefined();
+
+    const kerberosCfg = parseTomlConfig(`
+[[sources]]
+id = "krb"
+host = "h"
+user = "u@EX"
+auth = "kerberos"
+password = "env:PASSWORD_UNSET"
+`, { env: {} });
+    expect(kerberosCfg.sources[0].authMode).toBe('kerberos');
+    expect(kerberosCfg.sources[0].password).toBeUndefined();
   });
 
   it('allowEmptySources tolerates a TOML with only top-level sections', () => {
@@ -832,9 +1050,11 @@ endpoint = "https://api.openai.com/v1/chat/completions"
 api_key = "env:MISSING_KEY"
 model = "gpt-4o-mini"
 `, { env: {} });
-    // No throw (manual is active, smart only pre-armed); key stays unresolved.
+    // No throw (manual is active), but retain that the configured key was
+    // unavailable so the engine builder does not pre-arm/advertise smart.
     expect(cfg.approval?.mode).toBe('manual');
     expect(cfg.approval?.llm?.api_key).toBeUndefined();
+    expect(cfg.approval?.llm?.api_key_unresolved).toBe(true);
   });
 
   it('resolves api_key when smart mode is only enabled by a per-source override', () => {
@@ -886,6 +1106,38 @@ mode = "smart"
 api_key = "env:KEY"
 `, { env: { KEY: 'sk-xyz' } });
     expect(cfg.approval?.llm?.api_key).toBe('sk-xyz');
+  });
+
+  it('rejects a non-string smart approval api_key instead of coercing it (Codex 3551304740)', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[approval]
+mode = "smart"
+
+[approval.llm]
+api_key = 123
+`)).toThrow(/api_key must be a string/);
+  });
+
+  it('rejects array-shaped smart approval api_key env refs instead of coercing them (Codex 3551304740)', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[approval]
+mode = "smart"
+
+[approval.llm]
+api_key = ["env:KEY"]
+`, { env: { KEY: 'sk-xyz' } })).toThrow(/api_key must be a string/);
   });
 
   // Finding: ignoreSources skips validating suppressed [[sources]] entirely.

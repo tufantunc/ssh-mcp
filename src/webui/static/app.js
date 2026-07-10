@@ -46,7 +46,11 @@
     else { el.textContent = state; }
   }
 
-  async function fetchProfiles() {
+  async function fetchProfiles(force = false) {
+    // The table renderer replaces every row. A background poll/SSE refresh while
+    // the description editor is open would therefore destroy the operator's
+    // unsaved textarea draft. Save/cancel explicitly force a refresh.
+    if (descriptionEditorOpen && !force) return;
     try {
       const r = await fetch('/api/profiles', { headers: authHeaders() });
       if (r.status === 401) { setConnStatus('error'); return; }
@@ -126,6 +130,10 @@
   }
 
   function openDescriptionEditor(wrap, sourceId, current) {
+    // Keep one active editor so background profile refreshes can be suspended
+    // without another row's draft being accidentally discarded.
+    if (descriptionEditorOpen) return;
+    descriptionEditorOpen = true;
     wrap.innerHTML = '';
     const ta = document.createElement('textarea');
     ta.className = 'desc-input';
@@ -143,7 +151,10 @@
 
     save.addEventListener('click', () => saveDescription(sourceId, ta.value, save));
     revert.addEventListener('click', () => saveDescription(sourceId, null, revert));
-    cancel.addEventListener('click', () => fetchProfiles());
+    cancel.addEventListener('click', () => {
+      descriptionEditorOpen = false;
+      fetchProfiles(true);
+    });
 
     actions.appendChild(save);
     actions.appendChild(revert);
@@ -159,16 +170,16 @@
   async function saveDescription(sourceId, description, btn) {
     if (btn) btn.disabled = true;
     try {
-      const r = await fetch('/api/sources/' + encodeURIComponent(sourceId) + '/description', {
+      await fetch('/api/sources/' + encodeURIComponent(sourceId) + '/description', {
         method: 'PUT',
         headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
         body: JSON.stringify({ description }),
       });
-      // On success or failure, re-sync from server truth.
-      fetchProfiles();
     } catch (_) {
-      fetchProfiles();
+      // The forced refresh below restores server truth after a failed request.
     } finally {
+      descriptionEditorOpen = false;
+      fetchProfiles(true);
       if (btn) btn.disabled = false;
     }
   }
@@ -230,6 +241,9 @@
   // Detected at bootstrap from /api/profiles' `source_edit_enabled` flag;
   // false => read-only description cells (the read-only WebUI case).
   let sourceEditEnabled = false;
+  // While true, background polling/SSE profile refreshes are suspended so the
+  // active textarea cannot be replaced and lose its unsaved draft.
+  let descriptionEditorOpen = false;
 
   async function fetchModes() {
     try {
@@ -341,7 +355,11 @@
 
   function renderExecutions(rows) {
     const list = $('#exec-list');
-    const visibleRows = rows.slice(0, MAX_EXECUTION_ROWS);
+    // /api/executions returns the tail oldest-first, while live SSE events are
+    // inserted at the top by prependExecution. Keep the newest rows and render
+    // them newest-first so the initial feed matches the live ordering and
+    // "Recent executions" stays consistent (Codex 3556038523).
+    const visibleRows = rows.slice(-MAX_EXECUTION_ROWS).reverse();
     $('#exec-count').textContent = String(visibleRows.length);
     list.innerHTML = '';
     for (const r of visibleRows) {

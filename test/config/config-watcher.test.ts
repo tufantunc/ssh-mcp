@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
-import { startConfigWatcher, DEFAULT_DEBOUNCE_MS } from '../config-watcher.js';
+import { startConfigWatcher, DEFAULT_DEBOUNCE_MS } from '../../src/config/config-watcher.js';
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 

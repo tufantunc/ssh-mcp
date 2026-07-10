@@ -32,6 +32,8 @@ export interface ResolverInputs {
   cliConfigPath?: string;
   /** Override env for tests; defaults to process.env. */
   env?: NodeJS.ProcessEnv;
+  /** CLI `--webui` override; makes TOML WebUI secrets/checks active at load. */
+  webuiEnabled?: boolean;
 }
 
 export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
@@ -42,8 +44,8 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
   // discoverConfigPath(env), which probes SSH_MCP_CONFIG first and then the
   // XDG/home candidates, returning the first that actually EXISTS. Reading
   // env.SSH_MCP_CONFIG directly here would diverge from that discovery
-  // contract: a set-but-missing SSH_MCP_CONFIG would hard-fail in loadTomlFile
-  // instead of falling through to the XDG/home paths the way an unset var does.
+  // contract: a set-but-missing SSH_MCP_CONFIG falls through to XDG/home,
+  // while an inaccessible SSH_MCP_CONFIG fails closed in discovery.
   const tomlPath: string | undefined =
     inputs.cliConfigPath ?? discoverConfigPath(env);
 
@@ -60,6 +62,7 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
   const fromToml: ResolvedConfig | undefined = tomlPath
     ? loadTomlFile(tomlPath, {
         env,
+        webuiEnabled: inputs.webuiEnabled,
         allowEmptySources: hasCliSources,
         ignoreSources: hasCliSources,
       })

@@ -15,13 +15,13 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 
-import { ConfigReloader } from '../reloader.js';
-import type { ConfigReloadedEvent } from '../reloader.js';
-import { parseTomlConfig } from '../toml-loader.js';
-import type { ResolvedConfig } from '../types.js';
-import { TransportRegistry } from '../../transports/registry.js';
-import type { ServerConfig } from '../../transports/types.js';
-import { ApprovalDispatcher } from '../../approval/engine.js';
+import { ConfigReloader } from '../../src/config/reloader.js';
+import type { ConfigReloadedEvent } from '../../src/config/reloader.js';
+import { parseTomlConfig } from '../../src/config/toml-loader.js';
+import type { ResolvedConfig } from '../../src/config/types.js';
+import { TransportRegistry } from '../../src/transports/registry.js';
+import type { ServerConfig } from '../../src/transports/types.js';
+import { ApprovalDispatcher } from '../../src/approval/engine.js';
 
 const TOML_A = `
 [approval]

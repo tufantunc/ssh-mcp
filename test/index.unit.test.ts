@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
+import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   resultToMcpContent,
+  isFailedExecResult,
   resolveAuthMode,
   buildTransportConfig,
   hasLegacyCliFlags,
@@ -12,18 +14,76 @@ import {
   appendDescriptionComment,
   resolveApprovalEngineInput,
   approvalResolverWarningFromInput,
+  prepareKeyContents,
   validateConfig,
   resolveCliConfigPath,
   reacquireTransportIfReloaded,
   approveTransportForCurrentConfig,
+  buildWebUIApprovalQueueAdapter,
 } from '../src/index';
-import type { ExecResult, ISshTransport } from '../src/transports/types';
+import { ApprovalDispatcher } from '../src/approval/engine';
+import type { ExecResult, ISshTransport, ServerConfig } from '../src/transports/types';
 import type { ResolvedConfig } from '../src/config/types';
 
 // Pure-function unit tests for the CLI config/result mapping layer. These
 // import from src/index, which is safe because the test runner sets
 // SSH_MCP_DISABLE_MAIN=1 (isCliEnabled=false) so no server/CLI side effects run
 // on import.
+
+function runCliStartup(args: string[], envOverrides: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.SSH_MCP_DISABLE_MAIN;
+  delete env.SSH_MCP_TEST;
+  for (const [key, value] of Object.entries(envOverrides)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts', ...args], {
+      cwd: process.cwd(),
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`CLI startup did not exit within timeout. stdout=${stdout} stderr=${stderr}`));
+    }, 10000);
+
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.on('error', (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timeout);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+describe('CLI bootstrap validation order', () => {
+  it('reports incomplete legacy CLI args before loading auto-discovered TOML (Codex 3551304743)', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-cli-order-'));
+    const badToml = path.join(dir, 'bad.toml');
+    await fs.writeFile(badToml, '[[sources]]\nid = "broken"\npassword = "unterminated\n');
+    try {
+      const result = await runCliStartup(['--host=h'], {
+        SSH_MCP_CONFIG: badToml,
+        XDG_CONFIG_HOME: path.join(dir, 'xdg'),
+        HOME: dir,
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain('Missing required --user');
+      expect(result.stderr).not.toContain('TOML parse failed');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('resultToMcpContent (finding 1: exit-0 stderr must not error)', () => {
   it('treats exit 0 as success even when stderr carries an OpenSSH host-key warning', () => {
@@ -127,6 +187,13 @@ describe('resultToMcpContent (finding 1: exit-0 stderr must not error)', () => {
     expect(() =>
       resultToMcpContent({ stdout: '', stderr: '', exitCode: null, category: 'timeout' }),
     ).toThrow(/timed out after \d+ms/);
+  });
+
+  it('classifies mapper-throwing ExecResult values as audit failures, not successes', () => {
+    expect(isFailedExecResult({ stdout: '', stderr: '', exitCode: 0 })).toBe(false);
+    expect(isFailedExecResult({ stdout: '', stderr: '', exitCode: 1 })).toBe(true);
+    expect(isFailedExecResult({ stdout: '', stderr: '', exitCode: null, category: 'timeout' })).toBe(true);
+    expect(isFailedExecResult({ stdout: '', stderr: 'auth failed', exitCode: 0, category: 'auth' })).toBe(true);
   });
 });
 
@@ -259,6 +326,33 @@ describe('approval command/context helpers', () => {
     expect(input?.defaultMode).toBeUndefined();
     expect(input?.fail_closed).toBe(true);
   });
+
+  it('redacts pending command and description text before WebUI list and enqueue exposure', async () => {
+    const engine = new ApprovalDispatcher({
+      defaultMode: 'manual',
+      manual: { webuiEnabled: true, timeout_ms: 5000 },
+    });
+    const queue = buildWebUIApprovalQueueAdapter(engine)!;
+    let enqueued: ReturnType<typeof queue.list>[number] | undefined;
+    queue.on('enqueue', pending => { enqueued = pending; });
+
+    const decision = engine.decide({
+      profile: { id: 'prod' },
+      tool: 'exec',
+      command: 'deploy --token=live-credential',
+      description: 'password another-credential',
+    });
+    await Promise.resolve();
+
+    const listed = queue.list()[0];
+    expect(listed.command).toBe('deploy --token=<redacted>');
+    expect(listed.description).toBe('password <redacted>');
+    expect(enqueued?.command).toBe(listed.command);
+    expect(enqueued?.description).toBe(listed.description);
+
+    engine.resolvePending(listed.id, 'deny', 'test cleanup', 'test');
+    await decision;
+  });
 });
 
 describe('hasLegacyCliFlags (finding 2: --disableSudo is not a legacy trigger)', () => {
@@ -311,6 +405,53 @@ describe('buildTransportConfig (Codex 3541767256: deferKeyRead keeps legacy key 
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('prepareKeyContents (Codex 3549295046: skip deferred key reads when password auth wins)', () => {
+  it('does NOT read a stale keyPath when the resolved authMode is password', async () => {
+    // The registry hook must mirror buildTransportConfig()'s eager-read guard:
+    // a `--password=... --key=/stale` config records keyPath but authMode is
+    // 'password', so the first tool call must use the password, not ENOENT on
+    // the stale/nonexistent key file.
+    const cfg: ServerConfig = {
+      name: 'n',
+      host: 'h',
+      port: 22,
+      username: 'u',
+      authMode: 'password',
+      transport: 'ssh2',
+      password: 'pw',
+      keyPath: '/nonexistent/path/to/stale-key',
+    };
+    await prepareKeyContents(cfg);
+    expect(cfg.privateKey).toBeUndefined();
+    expect(cfg.password).toBe('pw');
+  });
+
+  it('reads the ssh2 keyPath when the resolved authMode is key', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-test-'));
+    const keyPath = path.join(dir, 'id_test');
+    await fs.writeFile(keyPath, 'KEYDATA');
+    try {
+      const cfg: ServerConfig = {
+        name: 'n', host: 'h', port: 22, username: 'u',
+        authMode: 'key', transport: 'ssh2', keyPath,
+      };
+      await prepareKeyContents(cfg);
+      expect(cfg.privateKey).toBe('KEYDATA');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not read the key for an openssh key config (uses -i path instead)', async () => {
+    const cfg: ServerConfig = {
+      name: 'n', host: 'h', port: 22, username: 'u',
+      authMode: 'key', transport: 'openssh', keyPath: '/nonexistent/path/to/key',
+    };
+    await prepareKeyContents(cfg);
+    expect(cfg.privateKey).toBeUndefined();
   });
 });
 
@@ -394,6 +535,11 @@ describe('resolveCliConfigPath (Codex R2 P2: reject value-less --config)', () =>
   it('returns the path for --config=<path>', () => {
     expect(resolveCliConfigPath({ config: '/etc/ssh-mcp/config.toml' }))
       .toBe('/etc/ssh-mcp/config.toml');
+  });
+
+  it('expands a leading home marker for --config=~/... (Codex 3549260475)', () => {
+    expect(resolveCliConfigPath({ config: '~/ssh-mcp/config.toml' }))
+      .toBe(path.join(os.homedir(), 'ssh-mcp/config.toml'));
   });
 
   it('rejects a present-but-value-less --config (parsed as null) instead of silently ignoring it', () => {

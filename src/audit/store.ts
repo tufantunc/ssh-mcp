@@ -31,14 +31,26 @@ import {
   DEFAULT_RETAIN,
 } from './types.js';
 import { redact, preRedactUnboundedTokens } from './redactor.js';
-import { rotateIfNeeded, pruneOldDays } from './rotator.js';
+import { rotateIfNeeded, pruneOldDays, retentionCutoffStamp } from './rotator.js';
 
-/** Resolve audit directory, expanding `~` and honoring env override. */
+/**
+ * Resolve audit directory, expanding `~` and honoring env override.
+ *
+ * An empty / whitespace-only value (a `[server].audit_dir = ""` typo or
+ * `SSH_MCP_AUDIT_DIR=""`) must NOT fall through to `path.resolve('')`, which
+ * resolves to the process working directory — the AuditStore constructor
+ * would then mkdir/chmod 0700 the service/repo cwd and write
+ * `executions-*.jsonl` there. Treat empty as "not configured" and continue
+ * down the fallback chain to the default `~/.ssh-mcp` (Codex 3556038508).
+ */
 export function resolveAuditDir(override?: string | null): string {
-  const raw =
-    override ??
-    process.env.SSH_MCP_AUDIT_DIR ??
-    path.join(os.homedir(), '.ssh-mcp');
+  let raw: string | undefined;
+  for (const candidate of [override, process.env.SSH_MCP_AUDIT_DIR]) {
+    if (typeof candidate !== 'string' || candidate.trim() === '') continue;
+    raw = candidate;
+    break;
+  }
+  raw = raw ?? path.join(os.homedir(), '.ssh-mcp');
   if (raw.startsWith('~')) {
     return path.join(os.homedir(), raw.slice(1));
   }
@@ -104,6 +116,14 @@ export const REDACT_SCAN_HEADROOM_BYTES = 4096;
  * realistic command line, while still bounding a genuine multi-MB DoS payload.
  */
 export const AUDIT_COMMAND_MIN_CAP_BYTES = 16384;
+
+/**
+ * Hard cap for short audit metadata labels such as `profile` / connectionName.
+ * These fields originate from user-provided config or tool arguments on some
+ * error paths, so cap+redact them before JSONL serialization to avoid a
+ * rejected unknown-name request appending multi-MB records.
+ */
+export const AUDIT_PROFILE_MAX_BYTES = 1024;
 
 /**
  * Bound, then redact, then cap — in that order.
@@ -200,14 +220,17 @@ export function buildRecord(input: BuildRecordInput): AuditRecord {
   const rec: AuditRecord = {
     ts: now.toISOString(),
     id: newRecordId(now),
-    profile: input.profile,
+    profile: capThenRedact(input.profile, AUDIT_PROFILE_MAX_BYTES).text,
     tool: input.tool,
     command,
     description,
     approval: {
       mode: input.approval.mode,
       decision: input.approval.decision,
-      reason: redact(input.approval.reason),
+      // Smart-mode reasons are supplied by an external LLM. Bound them before
+      // JSONL serialization just like captured output so one oversized response
+      // cannot bypass auditMaxBytes or make the general redactor scan megabytes.
+      reason: capThenRedact(input.approval.reason, cap).text,
       decided_at: input.approval.decided_at,
       decided_by: input.approval.decided_by,
     },
@@ -252,7 +275,17 @@ export class AuditStore extends EventEmitter {
     // silently empties output, NaN maxFileBytes rotates on every append, and
     // retain <= 0 breaks rotation/prune. Fall back to the documented default
     // for anything non-finite, and floor to a safe minimum otherwise.
-    this.auditMaxBytes = clampInt(cfg.auditMaxBytes, DEFAULT_AUDIT_MAX_BYTES, 0);
+    this.auditMaxBytes =
+      typeof cfg.auditMaxBytes === 'number' && !Number.isInteger(cfg.auditMaxBytes)
+        ? // A fractional cap must not floor: a value in (0, 1) would become 0
+          // and silently empty every capture, conflating with the explicit
+          // "capture nothing" 0. Byte counts are integer-only, so any
+          // non-integer falls back to the documented default (Codex
+          // 3556038524). The TOML loader also rejects fractional
+          // [server].audit_max_bytes at parse time; this guards direct
+          // AuditStore callers.
+          DEFAULT_AUDIT_MAX_BYTES
+        : clampInt(cfg.auditMaxBytes, DEFAULT_AUDIT_MAX_BYTES, 0);
     this.maxFileBytes = clampInt(cfg.maxFileBytes, DEFAULT_MAX_FILE_BYTES, 1);
     this.retain = clampInt(cfg.retain, DEFAULT_RETAIN, 1);
     this.tailBufferSize = cfg.tailBufferSize ?? DEFAULT_TAIL_BUFFER;
@@ -307,6 +340,12 @@ export class AuditStore extends EventEmitter {
       } catch {
         // best-effort
       }
+      // Mirror the on-disk prune in the in-memory tail: records already
+      // copied into tailBuffer would otherwise stay visible through
+      // /api/executions past the retain window that just removed them from
+      // disk (Codex 3556038510). tail() also filters at read time, so this
+      // is a memory-hygiene sweep, not the only guard.
+      this.dropExpiredFromTail(now);
     }
     // Notify WebUI SSE subscribers after the line is flushed to disk so an
     // event only fires for records that were actually persisted.
@@ -321,11 +360,33 @@ export class AuditStore extends EventEmitter {
 
   /** Read the most-recent records from the in-memory tail, optionally filtered by profile. */
   async tail(opts: { profile?: string; limit: number }): Promise<AuditRecord[]> {
+    // Apply retention at read time as well as at prune time: the day-boundary
+    // prune only fires on an append, so a long-lived low-traffic server could
+    // otherwise keep serving expired records through /api/executions until
+    // the next write arrives (Codex 3556038510).
+    this.dropExpiredFromTail(new Date());
     const rows = opts.profile
       ? this.tailBuffer.filter(r => r.profile === opts.profile)
       : this.tailBuffer.slice();
     const limit = Math.max(1, opts.limit);
     return rows.slice(-limit);
+  }
+
+  /**
+   * Remove records older than the retention window from the in-memory tail,
+   * using the SAME cutoff stamp as the on-disk `pruneOldDays` so the WebUI
+   * tail can never outlive the JSONL files backing it.
+   */
+  private dropExpiredFromTail(asOf: Date): void {
+    const cutoffStamp = retentionCutoffStamp(this.retain, asOf);
+    for (let i = this.tailBuffer.length - 1; i >= 0; i--) {
+      // Record ts is `Date.toISOString()` (UTC), so the first 10 chars are
+      // YYYY-MM-DD; strip the dashes to compare against the YYYYMMDD stamp.
+      const recStamp = this.tailBuffer[i].ts.slice(0, 10).replace(/-/g, '');
+      if (recStamp < cutoffStamp) {
+        this.tailBuffer.splice(i, 1);
+      }
+    }
   }
 
   /** Path to the active file (today's UTC date). For tests + diagnostics. */

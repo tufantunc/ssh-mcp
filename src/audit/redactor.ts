@@ -22,27 +22,52 @@
 
 const REDACTED = '<redacted>';
 
+const SECRET_FLAG = String.raw`(?:password|passwd|pass|secret|token|api[-_]?key|access[-_]?key|client[-_]?secret|auth[-_]?token|bearer)`;
+const SECRET_KEY = String.raw`[A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|auth[-_]?token)[A-Za-z0-9_.-]*`;
+const SHELL_SECRET_KEY = String.raw`[A-Z][A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|APIKEY|API_KEY|ACCESS_KEY|PRIVATE_KEY|CLIENT_SECRET)[A-Z0-9_]*`;
+const DQ_VALUE = String.raw`"(?:[^"\\]|\\.)*"`;
+const SQ_VALUE = String.raw`'(?:[^'\\]|\\.)*'`;
+const OPEN_DQ_VALUE = String.raw`"(?:[^"\\]|\\.)*$`;
+const OPEN_SQ_VALUE = String.raw`'(?:[^'\\]|\\.)*$`;
+
 // 1a. --password=VALUE (and friends), value can be quoted or bare.
-const CLI_LONG_EQ_RE =
-  /(--(?:password|passwd|pass|secret|token|api[-_]?key|access[-_]?key|client[-_]?secret|auth[-_]?token|bearer)\s*=)\s*(?:"[^"]*"|'[^']*'|\S+)/gi;
+// Open-quoted fallbacks must run before the normal rules: if a cap removes the
+// closing delimiter, the normal `\S+` fallback would redact only the first
+// whitespace-delimited chunk and leave the rest of the secret prefix persisted.
+const CLI_LONG_EQ_OPEN_QUOTED_RE = new RegExp(
+  String.raw`(--${SECRET_FLAG}\s*=)\s*(?:${OPEN_DQ_VALUE}|${OPEN_SQ_VALUE})`,
+  'gi',
+);
+const CLI_LONG_EQ_RE = new RegExp(
+  String.raw`(--${SECRET_FLAG}\s*=)\s*(?:${DQ_VALUE}|${SQ_VALUE}|\S+)`,
+  'gi',
+);
 
 // 1b. --password VALUE (space-separated)
-const CLI_LONG_SPACE_RE =
-  /(--(?:password|passwd|pass|secret|token|api[-_]?key|access[-_]?key|client[-_]?secret|auth[-_]?token|bearer))\s+(?:"[^"]*"|'[^']*'|\S+)/gi;
+const CLI_LONG_SPACE_OPEN_QUOTED_RE = new RegExp(
+  String.raw`(--${SECRET_FLAG})\s+(?:${OPEN_DQ_VALUE}|${OPEN_SQ_VALUE})`,
+  'gi',
+);
+const CLI_LONG_SPACE_RE = new RegExp(
+  String.raw`(--${SECRET_FLAG})\s+(?:${DQ_VALUE}|${SQ_VALUE}|\S+)`,
+  'gi',
+);
 
 // 1c. -p VALUE  (MySQL-style short flag).
-const CLI_SHORT_P_RE = /(^|\s)(-p)\s+(?:"[^"]*"|'[^']*'|[^\s]+)/g;
+const CLI_SHORT_P_RE = new RegExp(String.raw`(^|\s)(-p)\s+(?:${DQ_VALUE}|${SQ_VALUE}|[^\s]+)`, 'g');
 
 // 1d. -p"VALUE" / -p'VALUE' — quote *after* -p, value may contain whitespace.
 //     `mysql -p"secret with space"` / `mysql -p'secret with space'`. The
 //     attached rule below only accepts non-space chars, so quoted attached
 //     values with spaces would otherwise bypass redaction.
-const CLI_SHORT_P_ATTACHED_QUOTED_VALUE_RE =
-  /(^|\s)-p("(?:[^"\\]|\\.)*"|'[^']*')/g;
+const CLI_SHORT_P_ATTACHED_QUOTED_VALUE_RE = new RegExp(
+  String.raw`(^|\s)-p(${DQ_VALUE}|${SQ_VALUE})`,
+  'g',
+);
 
 // 1e. "-pVALUE" / '-pVALUE' — whole arg quoted (quote *before* -p), value may
 //     contain whitespace. `mysql '-psecret with space'` / `"-psecret with space"`.
-const CLI_SHORT_P_QUOTED_ARG_RE = /(^|\s)(["'])-p[^"']*\2/g;
+const CLI_SHORT_P_QUOTED_ARG_RE = /(^|\s)("-p(?:[^"\\]|\\.)*"|'-p(?:[^'\\]|\\.)*')/g;
 
 // 1f. -pVALUE / "-pVALUE" / '-pVALUE' (MySQL attached password form, no space).
 const CLI_SHORT_P_ATTACHED_RE = /(^|\s)(["']?)-p([^\s"']+)(\2)/g;
@@ -52,20 +77,42 @@ const AUTH_HEADER_RE =
   /(Authorization\s*:\s*)(Bearer|Basic|Token)\s+([A-Za-z0-9_\-\.=+\/]+)/gi;
 
 // 2. Shell env-style assignment, e.g. MY_PASSWORD=foo or API_TOKEN='x y'.
-const SHELL_ASSIGN_RE =
-  /\b([A-Z][A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|APIKEY|API_KEY|ACCESS_KEY|PRIVATE_KEY|CLIENT_SECRET)[A-Z0-9_]*)=(?:"[^"]*"|'[^']*'|\S+)/g;
+const SHELL_ASSIGN_OPEN_QUOTED_RE = new RegExp(
+  String.raw`\b(${SHELL_SECRET_KEY}=)\s*(?:${OPEN_DQ_VALUE}|${OPEN_SQ_VALUE})`,
+  'g',
+);
+const SHELL_ASSIGN_RE = new RegExp(
+  String.raw`\b(${SHELL_SECRET_KEY}=)(?:${DQ_VALUE}|${SQ_VALUE}|\S+)`,
+  'g',
+);
 
 // 3. JSON / TOML "key": "value" (case-insensitive).
+const JSON_KV_OPEN_QUOTED_RE = new RegExp(
+  String.raw`("[^"\\]*(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|auth[-_]?token)[^"\\]*"\s*[:=]\s*)${OPEN_DQ_VALUE}`,
+  'gi',
+);
 const JSON_KV_RE =
   /("[^"\\]*(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|auth[-_]?token)[^"\\]*"\s*[:=]\s*)"(?:[^"\\]|\\.)*"/gi;
 
 // 3b. TOML / dotenv bare keys: password = "value", token='value'.
-const BARE_KV_RE =
-  /\b([A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|auth[-_]?token)[A-Za-z0-9_.-]*\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)/gi;
+const BARE_KV_OPEN_QUOTED_RE = new RegExp(
+  String.raw`\b(${SECRET_KEY}\s*[:=]\s*)(?:${OPEN_DQ_VALUE}|${OPEN_SQ_VALUE})`,
+  'gi',
+);
+const BARE_KV_RE = new RegExp(
+  String.raw`\b(${SECRET_KEY}\s*[:=]\s*)(?:${DQ_VALUE}|${SQ_VALUE}|\S+)`,
+  'gi',
+);
 
 // 3c. Human prose: "password hunter2", "token abc".
-const SIMPLE_SECRET_WORD_RE =
-  /\b(password|passwd|secret|token)\s+(?:"[^"]*"|'[^']*'|\S+)/gi;
+const SIMPLE_SECRET_WORD_OPEN_QUOTED_RE = new RegExp(
+  String.raw`\b(password|passwd|secret|token)\s+(?:${OPEN_DQ_VALUE}|${OPEN_SQ_VALUE})`,
+  'gi',
+);
+const SIMPLE_SECRET_WORD_RE = new RegExp(
+  String.raw`\b(password|passwd|secret|token)\s+(?:${DQ_VALUE}|${SQ_VALUE}|\S+)`,
+  'gi',
+);
 
 // 4. PEM private-key blocks.
 const PEM_RE =
@@ -99,12 +146,70 @@ const SLACK_TOKEN_RE = /\bxox[abprs]-[A-Za-z0-9\-]{10,}\b/g;
 const GOOGLE_API_KEY_RE = /\bAIza[0-9A-Za-z_\-]{35}\b/g;
 
 // 11. URL userinfo credentials, e.g. https://alice:hunter2@example.com/repo.git
-//     or postgres://user:pass@db:5432/app. Redact ONLY the password component,
+//     or postgres://user:***@db:5432/app. Redact ONLY the password component,
 //     preserving scheme, username, and host so the audited URL stays
-//     recognizable. The password is any run of non-`@`, non-`/`, non-`:`,
-//     non-whitespace chars between the `:` after the username and the `@`.
-const URL_USERINFO_RE =
-  /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]+:)([^\s/@]+)(@)/g;
+//     recognizable. Implemented as a linear scanner instead of a greedy regex:
+//     pre-redaction may run over multi-MB strings, and a regex like
+//     `[A-Za-z][A-Za-z0-9+.-]*://` can become O(n^2) on long alphabetic text
+//     with no URL delimiter.
+function isSchemeChar(ch: string): boolean {
+  return /[A-Za-z0-9+.-]/.test(ch);
+}
+
+function isValidScheme(scheme: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9+.-]*$/.test(scheme);
+}
+
+function isAuthorityBoundary(ch: string): boolean {
+  return ch === '/' || ch === '?' || ch === '#' || /\s/.test(ch);
+}
+
+function redactUrlUserinfo(input: string): string {
+  let cursor = 0;
+  let searchFrom = 0;
+  let out = '';
+
+  while (true) {
+    const sep = input.indexOf('://', searchFrom);
+    if (sep === -1) break;
+
+    let schemeStart = sep - 1;
+    while (schemeStart >= 0 && isSchemeChar(input[schemeStart])) schemeStart--;
+    schemeStart += 1;
+    const scheme = input.slice(schemeStart, sep);
+    if (!isValidScheme(scheme)) {
+      searchFrom = sep + 3;
+      continue;
+    }
+
+    const authorityStart = sep + 3;
+    let at = -1;
+    for (let i = authorityStart; i < input.length; i++) {
+      const ch = input[i];
+      if (ch === '@') {
+        at = i;
+        break;
+      }
+      if (isAuthorityBoundary(ch)) break;
+    }
+    if (at === -1) {
+      searchFrom = authorityStart;
+      continue;
+    }
+
+    const colon = input.indexOf(':', authorityStart);
+    if (colon === -1 || colon > at) {
+      searchFrom = at + 1;
+      continue;
+    }
+
+    out += input.slice(cursor, colon + 1) + REDACTED + '@';
+    cursor = at + 1;
+    searchFrom = at + 1;
+  }
+
+  return cursor === 0 ? input : out + input.slice(cursor);
+}
 
 interface Rule {
   re: RegExp;
@@ -112,20 +217,24 @@ interface Rule {
 }
 
 const RULES: Rule[] = [
+  { re: CLI_LONG_EQ_OPEN_QUOTED_RE, replace: (_m, key) => `${key}${REDACTED}` },
   { re: CLI_LONG_EQ_RE, replace: (_m, key) => `${key}${REDACTED}` },
+  { re: CLI_LONG_SPACE_OPEN_QUOTED_RE, replace: (_m, key) => `${key} ${REDACTED}` },
   { re: CLI_LONG_SPACE_RE, replace: (_m, key) => `${key} ${REDACTED}` },
   { re: CLI_SHORT_P_RE, replace: (_m, lead, flag) => `${lead}${flag} ${REDACTED}` },
   // Quoted attached -p forms (value may contain whitespace) must run before the
   // plain attached rule, which only consumes non-space chars.
   { re: CLI_SHORT_P_ATTACHED_QUOTED_VALUE_RE, replace: (_m, lead, val) => `${lead}-p${val[0]}${REDACTED}${val[0]}` },
-  { re: CLI_SHORT_P_QUOTED_ARG_RE, replace: (_m, lead, quote) => `${lead}${quote}-p${REDACTED}${quote}` },
+  { re: CLI_SHORT_P_QUOTED_ARG_RE, replace: (_m, lead, arg) => `${lead}${arg[0]}-p${REDACTED}${arg[0]}` },
   { re: CLI_SHORT_P_ATTACHED_RE, replace: (_m, lead, quote) => `${lead}${quote}-p${REDACTED}${quote}` },
   { re: AUTH_HEADER_RE, replace: (_m, hdr, scheme) => `${hdr}${scheme} ${REDACTED}` },
-  // URL userinfo password: keep scheme://user, drop the password, keep @host.
-  { re: URL_USERINFO_RE, replace: (_m, head, _pw, at) => `${head}${REDACTED}${at}` },
-  { re: SHELL_ASSIGN_RE, replace: (_m, key) => `${key}=${REDACTED}` },
+  { re: SHELL_ASSIGN_OPEN_QUOTED_RE, replace: (_m, key) => `${key}${REDACTED}` },
+  { re: SHELL_ASSIGN_RE, replace: (_m, key) => `${key}${REDACTED}` },
+  { re: JSON_KV_OPEN_QUOTED_RE, replace: (_m, head) => `${head}"${REDACTED}"` },
   { re: JSON_KV_RE, replace: (_m, head) => `${head}"${REDACTED}"` },
+  { re: BARE_KV_OPEN_QUOTED_RE, replace: (_m, head) => `${head}${REDACTED}` },
   { re: BARE_KV_RE, replace: (_m, head) => `${head}${REDACTED}` },
+  { re: SIMPLE_SECRET_WORD_OPEN_QUOTED_RE, replace: (_m, word) => `${word} ${REDACTED}` },
   { re: SIMPLE_SECRET_WORD_RE, replace: (_m, word) => `${word} ${REDACTED}` },
   // Complete PEM blocks first, then any dangling BEGIN with no reachable END
   // (truncated pasted key / here-doc). Applying the dangling rule in the main
@@ -143,7 +252,7 @@ const RULES: Rule[] = [
 
 export function redact(input: string | undefined | null): string {
   if (!input) return '';
-  let out = input;
+  let out = redactUrlUserinfo(input);
   for (const rule of RULES) {
     out = out.replace(rule.re as RegExp, rule.replace as any);
   }
@@ -185,18 +294,20 @@ export function redactPemBlocks(input: string | undefined | null): string {
  *     END terminator falls past the window.
  *   - JWTs, whose signature/claims (cert chains, large payloads) can push the
  *     third segment past the 4 KiB headroom (Codex 3541772953).
- * Both are matched here over the whole input first, so their full extent is
+ *   - URL userinfo credentials, whose `@` delimiter can fall beyond the bounded
+ *     scan window (Codex 3549282015).
+ * These are matched here over the whole input first, so their full extent is
  * replaced with `<redacted>` regardless of where the cap lands. The full scan
- * is cheap when neither shape is present (fast literal prefix scan); the cost
- * is paid only when key/token material actually exists — exactly when it must
- * be redacted.
+ * is cheap when none of the shapes are present (fast literal prefix scan); the
+ * cost is paid only when secret material actually exists — exactly when it
+ * must be redacted.
  */
 export function preRedactUnboundedTokens(input: string | undefined | null): string {
   if (!input) return '';
-  return input
+  return redactUrlUserinfo(input
     .replace(PEM_RE, REDACTED)
     .replace(PEM_OPEN_RE, REDACTED)
-    .replace(JWT_RE, REDACTED);
+    .replace(JWT_RE, REDACTED));
 }
 
 export const REDACTED_PLACEHOLDER = REDACTED;

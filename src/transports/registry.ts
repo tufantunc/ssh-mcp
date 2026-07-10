@@ -103,6 +103,9 @@ export class TransportRegistry {
     if (!config.name) {
       throw new Error('ServerConfig.name is required');
     }
+    if (config.name === '.' || config.name === '..') {
+      throw new Error('ServerConfig.name must not be a dot-segment ("." or "..")');
+    }
     if (this.configs.has(config.name)) {
       throw new Error(`Duplicate server name: ${config.name}`);
     }
@@ -232,12 +235,16 @@ export class TransportRegistry {
     // caller asked for, not a sentinel).
     if (name) return name;
     if (this.defaultName === null) return 'default';
-    if (this.configs.size > 1 && !this.defaultExplicit) return '(unresolved)';
+    if (this.wouldRejectOmittedName()) return '(unresolved)';
     return this.defaultName;
   }
 
-  /** Resolve name argument → canonical name. Falls back to default. */
-  private resolveName(name?: string): string {
+  /**
+   * Resolve name argument → canonical name without initializing a transport.
+   * Useful when a caller must validate target selection before doing other
+   * work (for example, before prompting for approval).
+   */
+  resolveRegisteredName(name?: string): string {
     if (name && this.configs.has(name)) return name;
     if (name && !this.configs.has(name)) {
       throw new Error(
@@ -259,6 +266,11 @@ export class TransportRegistry {
       );
     }
     return this.defaultName;
+  }
+
+  /** Resolve name argument → canonical name. Falls back to default. */
+  private resolveName(name?: string): string {
+    return this.resolveRegisteredName(name);
   }
 
   /** Get (or lazily create+init) the transport for a given name. */

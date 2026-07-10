@@ -149,9 +149,9 @@ describe('WebUI description-edit routes (controller wired)', () => {
       body: JSON.stringify(body),
     });
     const r = await req(handle, '/api/sources/prod/description', evilPut({ description: 'hijacked' }));
-    expect(r.status).toBe(403);
+    expect(r.status).toBe(401);
     const j = await r.json();
-    expect(j.error).toMatch(/same-origin loopback/);
+    expect(j.error).toMatch(/unauthorized/);
     // State untouched.
     expect(controller.getEffectiveDescription('prod')).toBe('production bastion');
   });

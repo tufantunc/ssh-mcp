@@ -43,6 +43,13 @@ describe('TransportRegistry.register / names / duplicate', () => {
     expect(() => r.register({ ...makeConfig('x'), name: '' })).toThrow(/name is required/);
   });
 
+  it('rejects dot-segment names that cannot be addressed by WebUI path routes', () => {
+    const r = new TransportRegistry();
+    expect(() => r.register(makeConfig('.'))).toThrow(/dot-segment/);
+    expect(() => r.register(makeConfig('..'))).toThrow(/dot-segment/);
+    expect(r.names()).toEqual([]);
+  });
+
   it('rejects a duplicate server name', () => {
     const r = new TransportRegistry();
     r.register(makeConfig('a'));
@@ -51,6 +58,17 @@ describe('TransportRegistry.register / names / duplicate', () => {
 });
 
 describe('TransportRegistry.resolveName (finding 3: omitted name in multi-host)', () => {
+  it('validates target selection synchronously without initializing a transport', () => {
+    const r = new TransportRegistry();
+    r.register(makeConfig('a'));
+    r.register(makeConfig('b'));
+
+    expect(r.resolveRegisteredName('b')).toBe('b');
+    expect(() => r.resolveRegisteredName()).toThrow(/connectionName is required when multiple servers are configured: a, b/);
+    expect(() => r.resolveRegisteredName('nope')).toThrow(/Unknown connection name: nope\. Registered: a, b/);
+    expect(createTransportMock).not.toHaveBeenCalled();
+  });
+
   it('throws when name omitted and >1 server configured with no explicit default', async () => {
     const r = new TransportRegistry();
     r.register(makeConfig('a'));

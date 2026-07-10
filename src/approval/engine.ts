@@ -69,7 +69,7 @@ export class ApprovalDispatcher extends EventEmitter implements ApprovalEngine {
   private readonly manual?: ManualApproval;
   private readonly modeStore: ApprovalModeStore;
 
-  constructor(private readonly opts: BuildApprovalEngineOptions) {
+  constructor(opts: BuildApprovalEngineOptions) {
     super();
     if (opts.smart) {
       this.smart = new SmartApproval(opts.smart);
@@ -86,6 +86,13 @@ export class ApprovalDispatcher extends EventEmitter implements ApprovalEngine {
     }
     // Eager validate: default mode must have its engine wired.
     this.requireEngineFor(opts.defaultMode);
+    // Direct callers can bypass buildApprovalEngineFromConfig and provide
+    // static overrides themselves. Validate every seeded mode before exposing
+    // it through getEffectiveMode/decide so an unavailable engine fails at
+    // construction instead of on the first command for that profile.
+    for (const mode of Object.values(opts.staticOverrides ?? {})) {
+      this.requireEngineFor(mode);
+    }
     // In-memory mutable mode state (Decision D3). Global seeds from the boot
     // default; statics seed from TOML [sources.approval]. Live switches mutate
     // only the store, never disk.
@@ -263,7 +270,7 @@ export class ApprovalDispatcher extends EventEmitter implements ApprovalEngine {
    * genuinely-enforced default instead of guessing a different fallback.
    */
   get defaultMode(): ApprovalMode {
-    return this.opts.defaultMode;
+    return this.modeStore.getGlobal();
   }
 
   listPending(): PendingApproval[] {
@@ -296,6 +303,8 @@ export interface BuildEngineFromConfigInput {
   llm?: {
     endpoint?: string;
     api_key?: string;
+    /** Configured key could not be resolved while smart was inactive. */
+    api_key_unresolved?: true;
     model?: string;
     timeout_ms?: number;
     provider?: 'openai' | string;
@@ -343,18 +352,24 @@ export function buildApprovalEngineFromConfig(
   // live-switch into it without a restart — arming an unused-but-configured
   // engine is harmless (it only resolves decisions when selected).
   const llm = approval?.llm;
-  const llmConfigured = !!(llm?.endpoint && llm?.model);
+  // An explicitly configured key that could not be resolved is different from
+  // an omitted optional key (some local endpoints need no auth). Do not pre-arm
+  // smart in the unresolved case: advertising it would switch into an engine
+  // guaranteed to omit the operator's configured authorization.
+  const llmConfigured = !!(llm?.endpoint && llm?.model && !llm?.api_key_unresolved);
   if (usedModes.has('smart') && !llmConfigured) {
+    if (llm?.api_key_unresolved) {
+      throw new Error('approval mode "smart" requires the configured [approval.llm].api_key to resolve');
+    }
     throw new Error('approval mode "smart" requires [approval.llm].endpoint and .model');
   }
   if (llmConfigured) {
     built.smart = {
       llm: {
         endpoint: llm!.endpoint!,
-        // api_key is preserved by validateApproval() whenever the LLM block is
-        // fully configured (endpoint+model), even when smart is only PRE-ARMED
-        // and not the active mode — so a live WebUI switch to smart still
-        // authenticates instead of silently sending unauthenticated requests.
+        // validateApproval() preserves a configured key when it resolves. If a
+        // configured env key was unavailable, llmConfigured above stays false,
+        // so smart is never advertised with silently missing authorization.
         api_key: llm!.api_key,
         model: llm!.model!,
         timeout_ms: llm!.timeout_ms,

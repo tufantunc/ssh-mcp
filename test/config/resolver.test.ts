@@ -3,8 +3,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { resolveConfig } from '../resolver.js';
-import type { ServerConfig } from '../../transports/types.js';
+import { resolveConfig } from '../../src/config/resolver.js';
+import type { ServerConfig } from '../../src/transports/types.js';
 
 function cliSource(name = 'cli'): ServerConfig {
   return {
@@ -120,6 +120,23 @@ audit_dir = "~/audit-only"
     expect(cfg.configPath).toBe(p);
   });
 
+  it('--webui resolves a token from a TOML section whose enabled flag is false', () => {
+    const p = writeToml(tmp, 'cli-webui.toml', `
+[webui]
+enabled = false
+host = "0.0.0.0"
+auth_token = "env:WEBUI_TOKEN"
+`);
+    const cfg = resolveConfig({
+      cliSources: [cliSource('cli')],
+      cliConfigPath: p,
+      env: { WEBUI_TOKEN: 'resolved-token' },
+      webuiEnabled: true,
+    });
+    expect(cfg.webui?.enabled).toBe(false);
+    expect(cfg.webui?.auth_token).toBe('resolved-token');
+  });
+
   it('still rejects a TOML with no [[sources]] when there are NO CLI sources', () => {
     // Without CLI sources the empty-sources tolerance must NOT apply — an
     // otherwise-empty config is a user error.
@@ -162,6 +179,54 @@ auth = "kerberos"
     const cfg = resolveConfig({ cliSources: [], env: { SSH_MCP_CONFIG: envPath } });
     expect(cfg.sources[0].name).toBe('env');
     expect(cfg.configPath).toBe(envPath);
+  });
+
+  it('fails closed when SSH_MCP_CONFIG points to a directory instead of falling through (Codex 3551117478)', () => {
+    const envDir = path.join(tmp, 'env-config-dir');
+    fs.mkdirSync(envDir, { recursive: true });
+    const xdgRoot = path.join(tmp, 'xdg-readable');
+    writeToml(xdgRoot, 'ssh-mcp/config.toml', `
+[[sources]]
+id = "xdg"
+host = "xdg.example"
+user = "u"
+auth = "kerberos"
+`);
+
+    expect(() => resolveConfig({
+      cliSources: [],
+      env: { SSH_MCP_CONFIG: envDir, XDG_CONFIG_HOME: xdgRoot },
+    })).toThrow(/not a regular file|cannot access/);
+  });
+
+  it('fails closed when SSH_MCP_CONFIG is inaccessible instead of falling through (Codex 3549260453)', () => {
+    const blockedDir = path.join(tmp, 'blocked');
+    fs.mkdirSync(blockedDir, { recursive: true });
+    const blockedPath = writeToml(blockedDir, 'config.toml', `
+[[sources]]
+id = "blocked"
+host = "blocked.example"
+user = "u"
+auth = "kerberos"
+`);
+    const xdgRoot = path.join(tmp, 'xdg-readable');
+    writeToml(xdgRoot, 'ssh-mcp/config.toml', `
+[[sources]]
+id = "xdg"
+host = "xdg.example"
+user = "u"
+auth = "kerberos"
+`);
+
+    fs.chmodSync(blockedDir, 0o000);
+    try {
+      expect(() => resolveConfig({
+        cliSources: [],
+        env: { SSH_MCP_CONFIG: blockedPath, XDG_CONFIG_HOME: xdgRoot },
+      })).toThrow(/cannot access|cannot read|EACCES|permission/i);
+    } finally {
+      fs.chmodSync(blockedDir, 0o700);
+    }
   });
 
   it('a set-but-missing SSH_MCP_CONFIG falls through to XDG discovery instead of hard-failing', () => {
