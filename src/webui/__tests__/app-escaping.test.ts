@@ -218,6 +218,32 @@ describe('WebUI app.js XSS escaping', () => {
     expect(html).toContain('class="pill allowimgsrcxonerroralert1"');
   });
 
+  it('renders the initial execution rows newest-first to match live SSE prepends (Codex 3556038523)', async () => {
+    // /api/executions returns the tail oldest-first; the initial render must
+    // reverse it so the feed starts newest-at-top, consistent with
+    // prependExecution's live inserts.
+    const mk = (i: number) => ({
+      ts: new Date(2026, 0, 1, 0, 0, i).toISOString(),
+      profile: 'p',
+      tool: 'exec',
+      command: `uptime ${i}`,
+      approval: { decision: 'allow' },
+    });
+    const { byId, eventSources } = await renderWith({
+      executions: [mk(0), mk(1), mk(2)],
+    });
+    const list = byId.get('#exec-list')!;
+    expect(list.children).toHaveLength(3);
+    expect(list.children[0].innerHTML).toContain('uptime 2');
+    expect(list.children[2].innerHTML).toContain('uptime 0');
+    expect(byId.get('#exec-count')!.textContent).toBe('3');
+
+    // A live SSE event lands on top and the ordering stays newest-first.
+    eventSources[0].emit('execution', mk(3));
+    expect(list.children[0].innerHTML).toContain('uptime 3');
+    expect(list.children[1].innerHTML).toContain('uptime 2');
+  });
+
   it('caps the live SSE execution list', async () => {
     const { byId, eventSources } = await renderWith({ executions: [] });
     const source = eventSources[0];

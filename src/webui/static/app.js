@@ -256,7 +256,11 @@
 
   function renderExecutions(rows) {
     const list = $('#exec-list');
-    const visibleRows = rows.slice(0, MAX_EXECUTION_ROWS);
+    // /api/executions returns the tail oldest-first, while live SSE events are
+    // inserted at the top by prependExecution. Keep the newest rows and render
+    // them newest-first so the initial feed matches the live ordering and
+    // "Recent executions" stays consistent (Codex 3556038523).
+    const visibleRows = rows.slice(-MAX_EXECUTION_ROWS).reverse();
     $('#exec-count').textContent = String(visibleRows.length);
     list.innerHTML = '';
     for (const r of visibleRows) {
