@@ -140,17 +140,55 @@ user = "deploy"
 auth = "agent"                      # agent | key | password | keychain
 keyRef = "~/.ssh/id_ed25519"        # for auth=key
 keychainEntry = "ssh-mcp/prod"      # for auth=keychain (requires @napi-rs/keyring)
-via = "bastion"                     # ProxyJump profile
+via = "bastion"                     # ProxyJump — route through bastion profile
 workdir = "/var/www"
 trustedHostKey = "SHA256:..."       # Pin host key (optional)
 tty = false
 role = "operator"                   # viewer | operator | admin
 readOnly = false
 approvalPolicy = "ask-all"
-cert = false
+cert = false                        # SSH CA cert auth — auto-detects keyRef-cert.pub
 sessionMaxPerConnection = 3         # per-profile override
 sessionIdleTimeoutMs = 300000       # stricter for prod
 ```
+
+### ProxyJump (Bastion)
+
+Reach internal hosts behind a bastion/jump server. The `via` field specifies a profile name to tunnel through:
+
+```toml
+[[profiles]]
+name = "bastion"
+host = "bastion.example.com"
+user = "deploy"
+auth = "agent"
+
+[[profiles]]
+name = "internal-db"
+host = "10.0.1.50"                 # private IP — not directly reachable
+user = "dbadmin"
+auth = "key"
+keyRef = "~/.ssh/db_key"
+via = "bastion"                     # tunnel through bastion
+```
+
+No agent forwarding — only a TCP tunnel via `forwardOut`. The bastion stays connected and reusable for multiple internal hosts.
+
+### SSH CA Certificates
+
+For enterprise setups with a central SSH Certificate Authority:
+
+```toml
+[[profiles]]
+name = "prod-db"
+host = "db.internal"
+user = "admin"
+auth = "key"
+keyRef = "~/.ssh/id_ed25519"
+cert = true                         # enable CA cert auth
+```
+
+The certificate file is auto-detected using OpenSSH convention (`keyRef` + `-cert.pub`, e.g. `~/.ssh/id_ed25519-cert.pub`). You can override the path with `SSH_MCP_<NAME>_CERT` env var. The cert is concatenated with the private key per ssh2 convention.
 
 ### Credential Resolution Order
 
@@ -191,11 +229,45 @@ Every command is classified before execution:
 
 ### External Policy Engine (OPA)
 
+For organizations that standardize on Open Policy Agent / Rego:
+
 ```bash
 ssh-mcp --opaUrl=http://localhost:8181
 ```
 
-Connects to an Open Policy Agent instance for Rego-based authorization. Falls back to built-in YAML engine if OPA is unreachable.
+When `--opaUrl` is set, every command is additionally evaluated by OPA after the built-in policy engine. The request shape follows the AuthZEN Access Evaluation contract:
+
+```json
+{
+  "input": {
+    "subject": { "role": "operator", "profile": "prod-web-1" },
+    "action": { "tool": "run-command", "commandClass": "destructive" },
+    "resource": { "command": "rm -rf /tmp/cache", "binary": "rm", "host": "10.0.1.50" },
+    "context": { "readOnly": false }
+  }
+}
+```
+
+OPA responds with `{ "result": true/false }`. If OPA denies (`result: false`), the command is blocked even if the built-in engine allows it. If OPA is unreachable, the built-in engine's decision stands (fail-open to avoid locking out access).
+
+Example Rego policy (`ssh-mcp.rego`):
+```rego
+package ssh.mcp
+
+default allow := false
+
+# Admins can run anything on dev hosts
+allow if {
+  input.subject.role == "admin"
+  startswith(input.subject.profile, "dev")
+}
+
+# Deny all destructive commands on prod
+deny if {
+  input.action.commandClass == "destructive"
+  startswith(input.subject.profile, "prod")
+}
+```
 
 ---
 
