@@ -108,9 +108,13 @@ export function parseServerConfigJson(raw: string): ServerConfig {
   if (typeof obj.name !== 'string' || obj.name.length === 0) {
     throw new Error('--ssh JSON requires a non-empty string "name"');
   }
-  if (!obj.host) throw new Error(`--ssh "${obj.name}" missing required "host"`);
+  if (typeof obj.host !== 'string' || obj.host.length === 0) {
+    throw new Error(`--ssh "${obj.name}" missing required "host" (expected a non-empty string)`);
+  }
   const user = obj.user ?? obj.username;
-  if (!user) throw new Error(`--ssh "${obj.name}" missing required "user" (or "username")`);
+  if (typeof user !== 'string' || user.length === 0) {
+    throw new Error(`--ssh "${obj.name}" missing required "user" (or "username") (expected a non-empty string)`);
+  }
   const auth: AuthMode | undefined = obj.auth;
   if (!auth || !['kerberos', 'key', 'password'].includes(auth)) {
     throw new Error(`--ssh "${obj.name}" requires "auth": "kerberos" | "key" | "password"`);
@@ -159,6 +163,14 @@ export function parseServerConfigJson(raw: string): ServerConfig {
       // a credential-less key config (Codex 3541767246).
       if (obj.key !== undefined) {
         throw new Error(`--ssh "${obj.name}" auth "key" uses "keyPath" (or "privateKey" for ssh2), not "key"`);
+      }
+      if (obj.keyPath !== undefined &&
+          (typeof obj.keyPath !== 'string' || obj.keyPath.length === 0)) {
+        throw new Error(`--ssh "${obj.name}" "keyPath" must be a non-empty string`);
+      }
+      if (obj.privateKey !== undefined &&
+          (typeof obj.privateKey !== 'string' || obj.privateKey.length === 0)) {
+        throw new Error(`--ssh "${obj.name}" "privateKey" must be a non-empty string`);
       }
       // OpenSshTransport.buildArgs only passes cfg.keyPath via `-i`; an inline
       // privateKey would be silently ignored and ssh would fall back to

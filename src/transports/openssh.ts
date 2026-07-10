@@ -32,14 +32,13 @@ export class OpenSshTransport implements ISshTransport {
   private askpassEnvName?: string;
   private cleanupRegistered = false;
   /**
-   * True once at least one command has completed a live SSH session (an exec
-   * whose failure, if any, was not a connect/transport-layer failure). OpenSSH
-   * has no persistent connection — init() only verifies the local ssh binary —
-   * so this is the only proof the configured host is actually reachable.
-   * list-servers reads it via isConnected() so it does not report a merely
-   * initialized transport as "connected" when the host has never answered.
+   * True when the most recent command completed a usable live SSH session (an
+   * exec whose failure, if any, was the remote command's own non-zero exit).
+   * OpenSSH has no persistent connection — init() only verifies the local ssh
+   * binary — so list-servers must reflect the latest session attempt rather
+   * than retain historical success after a later auth/transport failure.
    */
-  private everConnected = false;
+  private lastSessionUsable = false;
 
   constructor(private cfg: TransportConfig) {}
 
@@ -73,7 +72,7 @@ export class OpenSshTransport implements ISshTransport {
   }
 
   /**
-   * Update everConnected from a completed exec result. Only a usable remote
+   * Update lastSessionUsable from a completed exec result. Only a usable remote
    * session — success or a remote command's own non-zero exit — proves this
    * OpenSSH transport can run commands. Authentication and host-key rejections
    * may reach the server, but they do not establish a usable session and should
@@ -87,19 +86,20 @@ export class OpenSshTransport implements ISshTransport {
       result.category === 'transport' ||
       result.category === 'timeout'
     ) {
+      this.lastSessionUsable = false;
       return;
     }
-    this.everConnected = true;
+    this.lastSessionUsable = true;
   }
 
   /**
-   * OpenSSH has no persistent connection; report a live connection only after a
-   * command has actually completed a session (see everConnected). This keeps
-   * list-servers from advertising a merely-initialized transport as connected
-   * when the host has never answered (Codex 3541767250).
+   * OpenSSH has no persistent connection; report a live connection only when the
+   * most recent command completed a usable session (see lastSessionUsable). This
+   * keeps list-servers from advertising a merely-initialized transport as
+   * connected or retaining stale success after a later connection failure.
    */
   isConnected(): boolean {
-    return this.everConnected;
+    return this.lastSessionUsable;
   }
 
   async execElevated(command: string, opts: ExecElevatedOptions): Promise<ExecResult> {
