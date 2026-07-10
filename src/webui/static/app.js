@@ -55,6 +55,9 @@
       const r = await fetch('/api/profiles', { headers: authHeaders() });
       if (r.status === 401) { setConnStatus('error'); return; }
       const data = await r.json();
+      // A request can start before the editor opens and finish after it. Re-check
+      // after the async boundary so that stale snapshots cannot replace the draft.
+      if (descriptionEditorOpen && !force) return;
       sourceEditEnabled = !!data.source_edit_enabled;
       renderProfiles(data.profiles || []);
     } catch (e) { /* ignore polling glitches */ }
@@ -170,16 +173,17 @@
   async function saveDescription(sourceId, description, btn) {
     if (btn) btn.disabled = true;
     try {
-      await fetch('/api/sources/' + encodeURIComponent(sourceId) + '/description', {
+      const r = await fetch('/api/sources/' + encodeURIComponent(sourceId) + '/description', {
         method: 'PUT',
         headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
         body: JSON.stringify({ description }),
       });
-    } catch (_) {
-      // The forced refresh below restores server truth after a failed request.
-    } finally {
+      if (!r.ok) return;
       descriptionEditorOpen = false;
       fetchProfiles(true);
+    } catch (_) {
+      // Preserve the active editor and draft so the operator can retry.
+    } finally {
       if (btn) btn.disabled = false;
     }
   }

@@ -782,11 +782,14 @@ export async function approveTransportForCurrentConfig(params: {
   throw new Error(`config reloaded ${maxAttempts} times during approval; retry command after reloads settle`);
 }
 
-function approvalTargetForConnection(connectionName?: string): { profile: string; approvalProfile: ResolvedSource } {
-  const id = registry.resolveRegisteredName(connectionName);
+export function approvalTargetForConnection(
+  reg: TransportRegistry,
+  connectionName?: string,
+): { profile: string; approvalProfile: ResolvedSource } {
+  const id = reg.resolveRegisteredName(connectionName);
   // Registry state is the hot-reload source of truth; resolvedConfig is the boot
   // snapshot and may no longer describe this source.
-  return { profile: id, approvalProfile: registry.profile(id) };
+  return { profile: id, approvalProfile: reg.profile(id) };
 }
 
 export function appendDescriptionComment(command: string, description?: string): string {
@@ -1488,7 +1491,7 @@ server.tool(
     try {
       const sanitizedCommand = sanitizeCommand(command);
       commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
-      const target = approvalTargetForConnection(connectionName);
+      const target = approvalTargetForConnection(registry, connectionName);
       const approved = await approveTransportForCurrentConfig({
         reg: registry,
         profile: target.approvalProfile,
@@ -1553,7 +1556,7 @@ if (!DISABLE_SUDO) {
       try {
         const sanitizedCommand = sanitizeCommand(command);
         commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
-        const target = approvalTargetForConnection(connectionName);
+        const target = approvalTargetForConnection(registry, connectionName);
         const approved = await approveTransportForCurrentConfig({
           reg: registry,
           profile: target.approvalProfile,

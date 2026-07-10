@@ -11,6 +11,7 @@ import {
   buildTransportConfig,
   hasLegacyCliFlags,
   buildApprovalProfile,
+  approvalTargetForConnection,
   appendDescriptionComment,
   resolveApprovalEngineInput,
   approvalResolverWarningFromInput,
@@ -22,6 +23,7 @@ import {
   buildWebUIApprovalQueueAdapter,
 } from '../src/index';
 import { ApprovalDispatcher } from '../src/approval/engine';
+import { TransportRegistry } from '../src/transports/registry';
 import type { ExecResult, ISshTransport, ServerConfig } from '../src/transports/types';
 import type { ResolvedConfig } from '../src/config/types';
 
@@ -281,6 +283,30 @@ describe('approval command/context helpers', () => {
       id: 'prod',
       description: 'production host; maintenance window required',
       approval: { mode: 'manual' },
+    });
+  });
+
+  it('uses the live registry description when building the command approval target', () => {
+    const registry = new TransportRegistry();
+    registry.register({
+      name: 'prod',
+      host: 'prod.example.com',
+      port: 22,
+      username: 'operator',
+      transport: 'openssh',
+      authMode: 'kerberos',
+      description: 'boot policy',
+      approval: { mode: 'manual' },
+    });
+    registry.setDescription('prod', 'live edited policy');
+
+    expect(approvalTargetForConnection(registry, 'prod')).toEqual({
+      profile: 'prod',
+      approvalProfile: {
+        id: 'prod',
+        description: 'live edited policy',
+        approval: { mode: 'manual' },
+      },
     });
   });
 

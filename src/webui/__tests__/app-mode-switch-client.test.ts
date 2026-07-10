@@ -108,6 +108,7 @@ async function boot(opts: {
   modes?: { modes: string[]; global: string };
   profiles?: unknown[];
   sourceEditEnabled?: boolean;
+  descriptionSaveStatus?: number;
 }): Promise<{
   byId: Map<string, FakeEl>;
   created: FakeEl[];
@@ -115,12 +116,15 @@ async function boot(opts: {
   emitMode: (data: unknown) => void;
   intervalCallbacks: Array<() => unknown>;
   getProfileFetchCount: () => number;
+  deferNextProfileResponse: () => () => void;
 }> {
   const created: FakeEl[] = [];
   const byId = new Map<string, FakeEl>();
   const calls: FetchCall[] = [];
   const intervalCallbacks: Array<() => unknown> = [];
   let profileFetchCount = 0;
+  let nextProfileGate: Promise<void> | null = null;
+  let releaseNextProfile: (() => void) | null = null;
   let modeChangedListener: ((ev: { data: string }) => void) | null = null;
 
   const getById = (sel: string) => {
@@ -146,6 +150,10 @@ async function boot(opts: {
       let body: unknown = undefined;
       try { body = init?.body ? JSON.parse(String(init.body)) : undefined; } catch { /* ignore */ }
       calls.push({ url, method, body });
+      if (url.includes('/description')) {
+        const status = opts.descriptionSaveStatus ?? 200;
+        return { status, ok: status >= 200 && status < 300, json: async () => ({}) };
+      }
       return jsonResp({ ok: true });
     }
     if (url.startsWith('/api/approval-modes')) {
@@ -154,6 +162,11 @@ async function boot(opts: {
     }
     if (url.startsWith('/api/profiles')) {
       profileFetchCount += 1;
+      if (nextProfileGate) {
+        const gate = nextProfileGate;
+        nextProfileGate = null;
+        await gate;
+      }
       return jsonResp({
         profiles: opts.profiles ?? [],
         source_edit_enabled: opts.sourceEditEnabled ?? false,
@@ -209,6 +222,13 @@ async function boot(opts: {
     emitMode: (data: unknown) => modeChangedListener?.({ data: JSON.stringify(data) }),
     intervalCallbacks,
     getProfileFetchCount: () => profileFetchCount,
+    deferNextProfileResponse: () => {
+      nextProfileGate = new Promise<void>(resolve => { releaseNextProfile = resolve; });
+      return () => {
+        releaseNextProfile?.();
+        releaseNextProfile = null;
+      };
+    },
   };
 }
 
@@ -343,5 +363,52 @@ describe('WebUI app.js description editor polling', () => {
 
     expect(app.getProfileFetchCount()).toBe(beforePoll);
     expect(draft.value).toBe('unsaved operator draft');
+  });
+
+  it('keeps the editor and draft open when the description save is rejected', async () => {
+    const app = await boot({
+      profiles: [PROFILE],
+      sourceEditEnabled: true,
+      descriptionSaveStatus: 422,
+    });
+    const edit = app.created.find(e => e.tagName === 'button' && e.className === 'desc-edit')!;
+    edit.fire('click');
+    const draft = app.created.find(e => e.tagName === 'textarea' && e.className === 'desc-input')!;
+    const save = app.created.find(e => e.tagName === 'button' && e.className === 'desc-save')!;
+    draft.value = 'draft that must survive a rejected save';
+
+    save.fire('click');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    const beforePoll = app.getProfileFetchCount();
+    await app.intervalCallbacks[0]();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(app.getProfileFetchCount()).toBe(beforePoll);
+    expect(draft.value).toBe('draft that must survive a rejected save');
+    expect(save.disabled).toBe(false);
+  });
+
+  it('does not render a profile response that finishes after the editor opens', async () => {
+    const app = await boot({ profiles: [PROFILE], sourceEditEnabled: true });
+    const releaseProfileResponse = app.deferNextProfileResponse();
+    const inFlightPoll = app.intervalCallbacks[0]();
+    await Promise.resolve();
+
+    const edit = app.created.find(e => e.tagName === 'button' && e.className === 'desc-edit')!;
+    edit.fire('click');
+    const draft = app.created.find(e => e.tagName === 'textarea' && e.className === 'desc-input')!;
+    draft.value = 'draft opened while fetch was in flight';
+    const editorsBeforeResponse = app.created.filter(
+      e => e.tagName === 'button' && e.className === 'desc-edit',
+    ).length;
+
+    releaseProfileResponse();
+    await inFlightPoll;
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    expect(app.created.filter(
+      e => e.tagName === 'button' && e.className === 'desc-edit',
+    )).toHaveLength(editorsBeforeResponse);
+    expect(draft.value).toBe('draft opened while fetch was in flight');
   });
 });
