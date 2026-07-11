@@ -116,6 +116,7 @@ async function main() {
       port: parseInt(argv.httpPort as string) || 3000,
       host: (argv.httpHost as string) || '127.0.0.1',
       bearerToken: argv.bearerToken as string | undefined,
+      rateLimit: parseInt(argv.rateLimit as string) || 0,
       registry,
       audit,
     });
