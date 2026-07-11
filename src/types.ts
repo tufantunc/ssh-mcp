@@ -98,6 +98,7 @@ export interface ExecOpts {
   timeoutMs?: number;
   profile?: string;
   session?: string;
+  onProgress?: (bytesReceived: number, recentOutput: string) => void;
 }
 
 export interface CommandResult {
