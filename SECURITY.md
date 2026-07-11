@@ -60,3 +60,49 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 - [ ] Error messages use fixed strings, not `${buffer}` interpolations
 - [ ] New tools declare MCP annotations (`readOnlyHint`, `destructiveHint`)
 - [ ] Tests cover the security boundary (property tests for sanitizers)
+
+## Compliance Mapping
+
+SSH MCP Server v2 implements controls that map to common security frameworks. This mapping documents which features support specific control requirements — it does **not** constitute formal certification. The **deployer** is responsible for the full deployment's compliance posture.
+
+### SOC 2 (AICPA Trust Services Criteria)
+
+| Control | Description | SSH MCP v2 Feature |
+|---------|-------------|-------------------|
+| CC6.1 | Logical and physical access controls | Policy engine with RBAC (viewer/operator/admin), per-profile `readOnly` flag, denylist enforcement |
+| CC6.6 | Network access security | TOFU host key verification, RFC 9142 algorithm allow-list, `via` ProxyJump without agent forwarding |
+| CC7.1 | System monitoring | Audit log (JSONL + ECS fields), 3-layer output redaction (field/regex/entropy) |
+| CC7.2 | Detection of security events | Command classification (read-only/safe/destructive/privileged), policy denial logging |
+| CC8.1 | Change management | `approvalPolicy` modes (auto/ask-destructive/ask-all/deny), MCP elicitation for destructive commands |
+| CC9.1 | Risk mitigation | Credential cascade (agent > keychain > env, never CLI args), config file permission checks (0600) |
+
+### PCI-DSS v4.0
+
+| Requirement | Description | SSH MCP v2 Feature |
+|-------------|-------------|-------------------|
+| Req. 6.5 | Secure coding | Command sanitizer (CR/LF/NUL stripping), error message hygiene (no secret leakage), property tests |
+| Req. 7.2 | Least privilege | Per-profile RBAC, `readOnly` profiles, command-specific denylist |
+| Req. 8.3 | Authentication | SSH agent / key / keychain auth, SSH CA certificate support, no plaintext CLI credentials |
+| Req. 10.2 | Audit trails | Append-only JSONL audit log, MCP requestId correlation, optional tamper-evident hash-chain |
+| Req. 10.4 | Audit log protection | 3-layer redaction (field/regex/entropy), log rotation, audit file 0600 permissions |
+
+### ISO/IEC 27001:2022
+
+| Annex A Control | Description | SSH MCP v2 Feature |
+|-----------------|-------------|-------------------|
+| A.8.2 | Privileged access rights | RBAC roles, policy engine, approval modes, denylist |
+| A.8.5 | Secure authentication | Credential cascade, no CLI-arg secrets, keychain + SSH agent + CA cert support |
+| A.8.23 | Web filtering | `--transport http` requires bearer auth, rate limiting (planned) |
+| A.12.4 | Logging and monitoring | Audit log with ECS fields, hash-chain option, redaction |
+| A.13.1 | Network security controls | Host key verification, frozen algorithms, ProxyJump tunnel |
+| A.14.2 | Security in development | Property tests (fast-check), SAST (Semgrep), secret scanning (gitleaks), npm provenance |
+
+### HIPAA (45 CFR §164.312)
+
+| Requirement | Description | SSH MCP v2 Feature |
+|-------------|-------------|-------------------|
+| §164.312(a)(1) | Access control | Policy engine RBAC, per-profile readOnly, session limits |
+| §164.312(b) | Audit controls | JSONL audit log with command/user/host/decision, hash-chain tamper-evidence |
+| §164.312(c)(1) | Integrity | Redaction pipeline prevents PHI leakage in logs, error hygiene |
+| §164.312(d) | Person or entity authentication | Credential cascade (agent/keychain/key/CA cert), host key verification |
+| §164.312(e)(1) | Transmission security | SSH with RFC 9142 algorithms, TOFU host key verification, no agent forwarding |
