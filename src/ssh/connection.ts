@@ -192,6 +192,8 @@ export class SSHConnection {
         let stdout = '';
         let stderr = '';
         const maxOutput = 1_048_576; // 1MB cap
+        let lastProgressSent = 0;
+        const PROGRESS_INTERVAL = 500;
 
         if (opts.stdin) {
           try { stream.write(opts.stdin); } catch { /* */ }
@@ -200,6 +202,11 @@ export class SSHConnection {
 
         stream.on('data', (data: Buffer) => {
           if (stdout.length < maxOutput) stdout += data.toString();
+          if (opts.onProgress && Date.now() - lastProgressSent >= PROGRESS_INTERVAL) {
+            lastProgressSent = Date.now();
+            const tail = stdout.split('\n').filter(Boolean).slice(-3).join('\n');
+            opts.onProgress(stdout.length, tail);
+          }
         });
         stream.stderr.on('data', (data: Buffer) => {
           if (stderr.length < maxOutput) stderr += data.toString();
