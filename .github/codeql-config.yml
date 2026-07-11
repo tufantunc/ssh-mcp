@@ -1,0 +1,14 @@
+name: "CodeQL Config"
+
+queries:
+  - uses: security-and-quality
+  - uses: security-extended
+
+paths:
+  - src
+
+paths-ignore:
+  - node_modules
+  - build
+  - test
+  - docs
