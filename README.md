@@ -317,9 +317,19 @@ For remote/web clients behind a reverse proxy with TLS:
 
 ```bash
 ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret
+ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret --rateLimit=60
 ```
 
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--bearerToken` | required | Bearer token for authentication |
+| `--httpPort` | 3000 | HTTP listen port |
+| `--httpHost` | 127.0.0.1 | Bind address |
+| `--rateLimit` | 0 (off) | Max requests per minute (0 = unlimited) |
+
 Endpoints: `POST /` (MCP Streamable HTTP), `GET /status`, `GET /health`
+
+When rate limit is exceeded, the server returns HTTP 429 with `Retry-After` header and a JSON-RPC error body so MCP clients can handle it gracefully.
 
 **Always terminate TLS at a reverse proxy** (Caddy/nginx). The server listens on `127.0.0.1` only.
 
