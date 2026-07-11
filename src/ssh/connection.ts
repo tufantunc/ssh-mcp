@@ -200,6 +200,18 @@ export class SSHConnection {
         }
         try { stream.end(); } catch { /* */ }
 
+        if (opts.abortSignal) {
+          opts.abortSignal.addEventListener('abort', () => {
+            if (!resolved) {
+              try { stream.signal('INT'); } catch { /* */ }
+              setTimeout(() => {
+                try { stream.signal('TERM'); } catch { /* */ }
+                setTimeout(() => { try { stream.close(); } catch { /* */ } }, 1000);
+              }, 1000);
+            }
+          }, { once: true });
+        }
+
         stream.on('data', (data: Buffer) => {
           if (stdout.length < maxOutput) stdout += data.toString();
           if (opts.onProgress && Date.now() - lastProgressSent >= PROGRESS_INTERVAL) {

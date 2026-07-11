@@ -99,6 +99,7 @@ export interface ExecOpts {
   profile?: string;
   session?: string;
   onProgress?: (bytesReceived: number, recentOutput: string) => void;
+  abortSignal?: AbortSignal;
 }
 
 export interface CommandResult {
