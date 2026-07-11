@@ -124,17 +124,18 @@ export function registerTools(
       failureClass: CommandClass;
       profile?: string;
       extra: any;
-      exec: (conn: Awaited<ReturnType<typeof resolveConn>>, onProgress?: (bytes: number, tail: string) => void) => Promise<CommandResult>;
+      exec: (conn: Awaited<ReturnType<typeof resolveConn>>, onProgress?: (bytes: number, tail: string) => void, abortSignal?: AbortSignal) => Promise<CommandResult>;
     },
   ) {
     const ctx = makeCtx(opts.extra, opts.profile);
     const profileName = defaultProfileName(opts.profile);
     const profile = registry.getProfile(profileName);
     const onProgress = makeProgressSender(opts.extra);
+    const abortSignal = opts.extra?.signal;
     const cleanCmd = sanitizeCommand(command, profile.maxChars);
     try {
       const { conn, evaluation, approver } = await checkPolicyAndApprove(cleanCmd, profileName, opts.toolName, ctx);
-      const result = await opts.exec(conn, onProgress);
+      const result = await opts.exec(conn, onProgress, abortSignal);
       await auditResult(ctx, profileName, cleanCmd, evaluation, result, approver);
       return textResult(redactText(result.stdout));
     } catch (err: any) {
@@ -266,7 +267,7 @@ export function registerTools(
         failureClass: 'read-only',
         profile,
         extra,
-        exec: (conn, onProgress) => conn.exec(command, { onProgress }),
+        exec: (conn, onProgress, abortSignal) => conn.exec(command, { onProgress, abortSignal }),
       });
     },
   );
@@ -295,7 +296,7 @@ export function registerTools(
           if (!sess) throw new Error(`Session "${session}" not found`);
           result = await sess.run(cleanCmd);
         } else {
-          result = await conn.exec(cleanCmd, { tty, onProgress: makeProgressSender(extra) });
+          result = await conn.exec(cleanCmd, { tty, onProgress: makeProgressSender(extra), abortSignal: extra?.signal });
         }
 
         await auditResult(ctx, profileName, cleanCmd, evaluation, result, approver);
@@ -328,6 +329,7 @@ export function registerTools(
         const result = await conn.exec(wrapped, {
           stdin: sudoPassword ? sudoPassword + '\n' : undefined,
           onProgress: makeProgressSender(extra),
+          abortSignal: extra?.signal,
         });
 
         await auditResult(ctx, profileName, `sudo ${cleanCmd}`, evaluation, result, approver);
