@@ -80,6 +80,13 @@ async function buildAppConfig(argv: Record<string, string | null>): Promise<AppC
 
 async function main() {
   const argv = parseArgv();
+
+  if (argv.dumpToolHashes !== undefined) {
+    const { getToolHashes } = await import('./tools/registry.js');
+    console.log(JSON.stringify(getToolHashes(), null, 2));
+    return;
+  }
+
   const config = await buildAppConfig(argv);
   const hostKeyMode: HostKeyMode = argv.insecureHostKey ? 'insecure' : 'tofu';
   const entropyScan = !!argv.auditEntropyScan;

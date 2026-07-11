@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { createHash } from 'crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ConnectionRegistry } from '../ssh/connection-registry.js';
 import type { PolicyEngine } from '../policy/engine.js';
@@ -9,6 +10,28 @@ import { requestApproval } from '../guard/elicitation.js';
 import { SftpClient } from '../ssh/sftp.js';
 import { BackgroundSession } from '../ssh/session.js';
 import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass } from '../types.js';
+
+export const TOOL_METADATA = [
+  { name: 'list-connections', description: 'List all configured SSH profiles and their connection status. Use this to discover available hosts before running commands.' },
+  { name: 'list-sessions', description: 'List active sessions for a given SSH profile.' },
+  { name: 'open-session', description: 'Open a named session on a remote host. Use type="interactive" for stateful shell (CWD/env persists between commands) or type="background" for long-running processes.' },
+  { name: 'close-session', description: 'Close a named session, releasing its resources.' },
+  { name: 'read-session-output', description: 'Read recent output from a background session (e.g., tail -f logs).' },
+  { name: 'read-command', description: 'Execute a READ-ONLY command from an allowlist (ls, cat, grep, find, stat, df, etc.). This tool does NOT modify the system. Prefer this tool for all read operations.' },
+  { name: 'run-command', description: 'Execute an arbitrary shell command on the remote server. May modify the system. Destructive commands require user approval.' },
+  { name: 'privileged-command', description: 'Execute a command with sudo elevation. ALWAYS requires user approval. The sudo password is piped via stdin (never visible in process list).' },
+  { name: 'sftp-upload', description: 'Upload a file to the remote server via SFTP (secure file transfer, not shell-based).' },
+  { name: 'sftp-download', description: 'Download a file from the remote server via SFTP.' },
+  { name: 'signal-process', description: 'Send a signal (INT, TERM, KILL) to a remote process by PID.' },
+] as const;
+
+export function getToolHashes(): Record<string, string> {
+  const hashes: Record<string, string> = {};
+  for (const tool of TOOL_METADATA) {
+    hashes[tool.name] = createHash('sha256').update(tool.description).digest('hex').slice(0, 16);
+  }
+  return hashes;
+}
 
 function deniedEvaluation(commandClass: CommandClass): PolicyEvaluation {
   return { decision: 'deny', commandClass, binary: '', ruleId: 'error' };

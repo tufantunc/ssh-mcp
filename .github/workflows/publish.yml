@@ -37,6 +37,9 @@ jobs:
       - name: Generate SBOM (CycloneDX)
         run: npx @cyclonedx/cyclonedx-npm --output-file sbom.json --output-format json || true
 
+      - name: Generate tool-description hashes
+        run: node build/index.js --dumpToolHashes > tool-hashes.json
+
       - name: Publish to npm with provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -45,4 +48,6 @@ jobs:
       - name: Upload SBOM to release
         uses: softprops/action-gh-release@v2
         with:
-          files: sbom.json
+          files: |
+            sbom.json
+            tool-hashes.json
