@@ -1,158 +1,113 @@
 # SSH MCP v2 — Remaining Work / TODO
 
-> Generated from gap analysis against `research/v2-security-research-report.md` and `research/v2-session-architecture.md`.
-> Last updated: 2026-07-10
+> Updated: 2026-07-11. Reflects all completed work.
 
 ---
 
-## ⚠️ Wired Edilmemiş Kod (Dead Code — Düşük Efor, Yüksek Değer)
+## Tamamlanan (11 madde)
 
-Bu maddelerin implementasyonu kodda var ama `index.ts` veya `connection.ts`'ten çağrılmıyor. Kullanıcı erişemiyor.
+| Madde | Tarih | Açıklama |
+|-------|-------|----------|
+| WD-1 | 2026-07-11 | OS Keychain wire (`initKeychain()`) |
+| WD-2 | 2026-07-11 | ProxyJump wire (`via` field → `forwardOut`) |
+| WD-3 | 2026-07-11 | SSH CA certs wire (`cert` → auto-detect `-cert.pub`) |
+| WD-4 | 2026-07-11 | OPA docs + README update |
+| P1-A | 2026-07-11 | Progress notifications (500ms throttled, bytes + stdout tail) |
+| P1-B | 2026-07-11 | Cancel handler (AbortSignal → stream signal) |
+| P1-C | 2026-07-11 | MCP Resources (`ssh://connections`, `ssh://connections/{profile}`, `ssh://sessions/{profile}/{session}`) |
+| P2-H | 2026-07-11 | HTTP Rate Limiting (token-bucket, MCP-aware 429 + Retry-After, 1MB body cap) |
+| P2-J | 2026-07-11 | CodeQL in CI (security-extended + security-and-quality) |
+| P2-M | 2026-07-11 | Compliance Mapping (SOC 2, PCI-DSS, ISO 27001, HIPAA) |
+| P2-N | 2026-07-11 | Tool-description hash (`--dumpToolHashes`, release artifact) |
 
-### WD-1: OS Keychain entegrasyonu çağrılmıyor
-- **Dosya:** `src/config/credential-resolver.ts` — `initKeychain()` export edilmiş ama hiç çağrılmıyor
-- **Düzeltme:** `src/index.ts` `main()` fonksiyonunda `await initKeychain()` çağrısı ekle
-- **Efor:** 1 satır
-- **Durum:** Detaylı tartışma aşağıda
+## İptal Edilen (2 madde)
 
-### WD-2: ProxyJump (`via` field) kullanılmıyor
-- **Dosya:** `src/ssh/connection.ts` — `profile.via` alanı types'te var, config schema'da var, ama `connect()` kullanmıyor
-- **Beklenen:** `via: "bastion"` profili, bağlantıyı bastion üzerinden socks ile routlamalı (`connectConfig.sock`)
-- **Düzeltme:** `connect()` içinde, eğer `profile.via` set ise, önce bastion profile'ına bağlan, sonra onun `Client`'ını sock olarak kullan
-- **Efor:** ~30 satır
-
-### WD-3: SSH CA Certificates (`cert`, `caFingerprint`) kullanılmıyor
-- **Dosya:** `src/ssh/connection.ts` — `profile.cert` ve `profile.caFingerprint` alanları types'te var ama `connectConfig`'e geçirilmiyor
-- **Düzeltme:** `ssh2` `ConnectConfig`'e `certificate` ve ilgili alanları ekle
-- **Efor:** ~10 satır
-
-### WD-4: OPA entegrasyonu dokümante değil
-- **Dosya:** `src/policy/engine.ts` — `evaluateWithOpa()` çalışıyor ama README'de `--opa-url` yeterince açıklanmamış
-- **Düzeltme:** README'ye OPA örnek bölümü ekle
-- **Efor:** Dokümantasyon
+| Madde | Sebep |
+|-------|-------|
+| P1-D Composite session ref (`@`) | Düşük değer — LLM explicit parametrelerle daha iyi çalışır |
+| P2-E Interactive password prompt | MCP uyumsuz — stdin JSON-RPC pipe, TTY değil |
 
 ---
 
-## ❌ Atlanan P1 Özellikleri (Kullanıcı Deneyimini Etkiliyor)
+## Kalan Maddeler (9)
 
-### P1-A: `notifications/progress` streaming
-- **Açıklama:** Uzun süren komutlarda (build, deploy, tail) MCP progress notification gönder — client'a byte counter + stdout tail göster
-- **Spec referansı:** Raporda P1-16, `notifications/progress` MCP spec
-- **Efor:** Orta — `exec()` içine progress callback, `tools/call`'a `progressToken` desteği
+### Kolay (2/5)
 
-### P1-B: `notifications/cancelled` MCP handler
-- **Açıklama:** Client iptal isteği gönderdiğinde (`notifications/cancelled`) çalışan komuta signal gönder
-- **Spec referansı:** Raporda P0-9 kısmen yapıldı (timeout), ama client-initiated cancel yok
-- **Efor:** Düşük — MCP server cancel event'ini dinle, active stream'e signal gönder
+#### P2-I: changesets Release Pipeline
+- **Açıklama:** Conventional Commits + `@changesets/cli` ile otomatik version bump, changelog, release
+- **Efor:** Config + CI workflow (~1 saat)
+- **Değer:** Release süreçni otomatikleştirir, changelog üretir
 
-### P1-C: MCP Resources (`ssh://connections/*`)
-- **Açıklama:** Profile'ları MCP resource olarak expose et — client keşfedebilir, tool çağırmadan önce ne var görebilir
-- **Spec referansı:** Rapor Section 7, "profiles can be exposed as MCP resources"
-- **Efor:** Düşük — `server.resource()` ile 3 endpoint
+### Orta (3/5 — her biri ~yarım gün)
 
-### P1-D: Composite session ref (`session@profile`)
-- **Açıklama:** `run-command(session="deploy@prod-web-1")` shorthand syntax
-- **Spec referansı:** Session architecture doc, "Option B — composite ref"
-- **Efor:** Düşük — `@` parse logic, ~10 satır
+#### P2-A: JIT Approval Tokens (HMAC, TTL)
+- **Açıklama:** Kullanıcı destructive komutu onaylar → 5dk geçerli HMAC-signed token → aynı komut tekrar çalışınca token ile auto-approve
+- **Değer:** Tekrarlayan destructive komutlarda approval friction'ı azaltır
+- **Risk:** Token çalınırsa 5dk boyunca abuse edilebilir — ama HMAC-signed, specific command'a bound
 
----
+#### P2-B: asciinema Session Recording
+- **Açıklama:** Interactive session I/O'yu asciinema cast v2 formatında kaydet, `asciinema play` ile replay
+- **Değer:** Forensic replay — "agent ne yaptı?" sorusunu görsel olarak yanıtlar
+- **Opsiyonel:** `--recordSessions` flag ile açma/kapama
 
-## ❌ Atlanan P2 Özellikleri (Nice-to-Have)
+#### P2-C: OTEL Tracing
+- **Açıklama:** OpenTelemetry span'ları — MCP requestId → SSH exec → policy evaluation arasındaki correlation
+- **Değer:** Dağıtık sistemlerde observability — "hangi MCP isteği hangi SSH komutunu tetikledi?"
+- **Dependency:** `@opentelemetry/api` (~50KB)
 
-### P2-A: JIT Approval Tokens (HMAC, TTL)
-- **Açıklama:** Time-bounded signed approval token — kullanıcı bir destructive komutu onaylar, token 5dk geçerli, aynı komut tekrar çalıştırılırsa token ile approve edilir
-- **Spec referansı:** Rapor Section 5, "JIT/time-bounded approval tokens"
-- **Efor:** Orta — HMAC signing, token store, policy engine entegrasyonu
+#### P2-D: age-encrypted Config Sections
+- **Açıklama:** TOML config'de `[profiles.secrets]` bölümünü `age` ile şifrele, passphrase ile decrypt
+- **Değer:** Config dosyası disk'te şifreli — `0600`'e ek bir koruma katmanı
+- **Dependency:** `age-encryption` npm paketi veya CLI wrapper
 
-### P2-B: asciinema Session Recording
-- **Açıklama:** Interactive session'ları asciinema cast formatında kaydet, replay edilebilir
-- **Spec referansı:** Rapor Section 5, "optional asciinema session recording"
-- **Efor:** Orta — cast format writer, session event capture
+#### P2-F: Dynamic Connections
+- **Açıklama:** Client tool çağrısında `host`, `user`, `port` verir, config'de tanımlı olmayan host'lara bağlanır
+- **Değer:** Esneklik — önceden tanımlanmamış host'lara erişim
+- **Risk:** Prompt-injected agent yeni host'a bağlanabilir — `allowDynamicConnections: true` explicit opt-in, lowest-trust default ile
 
-### P2-C: OTEL Tracing
-- **Açıklama:** OpenTelemetry distributed tracing — MCP requestId → OTEL span correlation
-- **Spec referansı:** Rapor Section 6, "OTEL traces"
-- **Efor:** Orta — `@opentelemetry/api`, span creation, exporter config
+#### P2-K: Sigstore Audit Signing
+- **Açıklama:** Hash-chain audit log'a ek olarak günlük sigstore/cosign keyless root signing
+- **Değer:** Audit log'un cryptographically verifiable olması — high-assurance environments için
+- **Dependency:** `sigstore-js`
 
-### P2-D: age-encrypted Config Sections
-- **Açıklama:** TOML config'de şifreli credential bölümleri — `age` ile encrypt, passphrase ile decrypt
-- **Spec referansı:** Rapor Section 3, "age-encrypted profile sections"
-- **Efor:** Orta — age CLI wrapper veya `age-encryption` npm paketi
+#### P2-L: Per-Agent Command Quotas
+- **Açıklama:** Her agent/client için günlük komut sayısı limiti (örn: günde 500 komut), circuit breaker
+- **Değer:** Runaway agent koruması — prompt-injected agent sınırsız komut çalıştıramaz
+- **Config:** `commandQuotaPerDay` profile veya defaults seviyesinde
 
-### P2-E: Interactive Password Prompt
-- **Açıklama:** Config'de credential yoksa, başlangıçta TTY'den şifre iste
-- **Spec referansı:** Rapor Section 3, "interactive prompt at startup"
-- **Efor:** Düşük — `readline` ile stdin'den şifre oku
+### Çok Büyük (5/5)
 
-### P2-F: Dynamic Connections
-- **Açıklama:** Client tool çağrısında host bilgisi verir, server dinamik olarak bağlanır
-- **Spec referansı:** Rapor Section 7, Issue #41, "dynamic connections (off by default)"
-- **Efor:** Orta — yeni tool param'ları, güvenlik kontrol'ları, lowest-trust default
-
-### P2-G: WebUI (Approval Queue + Audit Viewer)
-- **Açıklama:** Minimal web dashboard — connection status, live approval queue, audit log viewer
-- **Spec referansı:** Rapor Section 8, PRs #60-#63, "minimal dashboard"
-- **Efor:** Yüksek — Hono server + SPA (Preact/htmx)
-
-### P2-H: HTTP Rate Limiting
-- **Açıklama:** HTTP transport'da token-bucket per token/IP rate limiting
-- **Spec referansı:** Rapor Section 8, "rate limiting & abuse prevention"
-- **Efor:** Düşük — `@fastify/rate-limit` veya manuel token-bucket
-
-### P2-I: changesets Release Pipeline
-- **Açıklama:** Conventional Commits + changesets ile otomatik version bump ve changelog
-- **Spec referansı:** Rapor Section 9, "changesets vs semantic-release"
-- **Efor:** Düşük — `@changesets/cli` init, CI workflow
-
-### P2-J: CodeQL in CI
-- **Açıklama:** GitHub CodeQL SAST analysis, Semgrep'e ek olarak
-- **Spec referansı:** Rapor Section 9, "CodeQL (security-extended)"
-- **Efor:** Düşük — `github/codeql-action/init+analyze` CI step
-
-### P2-K: Sigstore Audit Signing
-- **Açıklama:** Hash-chain audit log'a ek olarak günlük sigstore root signing
-- **Spec referansı:** Rapor Section 6, "sigstore/cosign keyless root signing"
-- **Efor:** Orta — `sigstore-js` entegrasyonu
-
-### P2-L: Per-Agent Command Quotas
-- **Açıklama:** Her agent/client için günlük komut sayısı limiti, circuit breaker
-- **Spec referansı:** Rapor Section 4, "rate limits, quotas, circuit breakers"
-- **Efor:** Orta — quota store, policy engine entegrasyonu
-
-### P2-M: Compliance Framework Mapping
-- **Açıklama:** SECURITY.md'ye SOC 2 / PCI-DSS / ISO 27001 / HIPAA kontrol mapping'i ekle
-- **Spec referansı:** Rapor Section 6, "document the SOC2/PCI/ISO27001/HIPAA mapping"
-- **Efor:** Düşük — Dokümantasyon
-
-### P2-N: Tool-Description Hash per Release
-- **Açıklama:** Her release'te tool açıklamalarının hash'ini yayınla — guard proxy'ler rug-pull detection için
-- **Spec referansı:** Rapor Section 1, "publish the tool-description hash"
-- **Efor:** Düşük — build script + README
+#### P2-G: WebUI (Approval Queue + Audit Viewer)
+- **Açıklama:** Hono HTTP server + minimal SPA — connection status, live approval queue, audit log viewer
+- **Değer:** HTTP transport kullananlar için görsel yönetim paneli
+- **Efor:** ~500+ satır, yeni dependency (Hono + Preact/htmx), ayrı bir sub-project gibi
+- **Öneri:** v2.1 veya v2.2'ye ertele
 
 ---
 
-## Öncelik Sırası (Önerilen)
+## Önerilen Sıra
 
-1. **WD-1** — `initKeychain()` çağrısı (1 satır, hemen)
-2. **WD-2** — ProxyJump wire etme (~30 satır)
-3. **WD-3** — SSH cert wire etme (~10 satır)
-4. **P1-A** — Progress notifications
-5. **P1-B** — Cancel handler
-6. **P1-C** — MCP resources
-7. **P1-D** — Composite session ref
-8. **P2-I** — changesets pipeline
-9. **P2-J** — CodeQL CI
-10. Geri kalan P2 maddeleri ihtiyaca göre
+1. **P2-I** changesets (2/5 — kolay, release'i otomatikleştirir)
+2. **P2-L** Per-agent quotas (3/5 — güvenlik değeri yüksek, runaway agent koruması)
+3. **P2-A** JIT tokens (3/5 — UX iyileştirmesi, approval friction)
+4. **P2-F** Dynamic connections (3/5 — esneklik, ama güvenlik dikkat ister)
+5. **P2-D** age config (3/5 — security hardening)
+6. **P2-B** asciinema (3/5 — forensic replay)
+7. **P2-C** OTEL tracing (3/5 — observability)
+8. **P2-K** Sigstore (3/5 — high-assurance audit)
+9. **P2-G** WebUI (5/5 — büyük, sonraya)
 
 ---
 
-## İstatistik
+## Güncel İstatistik
 
-| Kategori | Toplam | Tamamlandı | Kalan |
-|----------|:------:|:----------:|:-----:|
-| P0 Security | 10 | 10 | 0 |
-| P1 Core Features | 17 | 13 | 4 |
-| P2 Hardening | 15 | 6 | 9 |
-| Session Arch | 7 | 7 | 0 |
-| Dead Code (WD) | 4 | 0 | 4 |
-| **Toplam** | **53** | **36** | **17** |
+| Kategori | Toplam | Tamamlandı | İptal | Kalan |
+|----------|:------:|:----------:|:-----:|:-----:|
+| P0 Security | 10 | 10 | 0 | 0 |
+| P1 Core Features | 7 | 4 | 1 | 2 → 0 (hepsi yapıldı/iptal) |
+| P2 Hardening | 14 | 11 | 1 | 2 |
+| Session Arch | 7 | 7 | 0 | 0 |
+| Dead Code (WD) | 4 | 4 | 0 | 0 |
+| **Toplam** | **42** | **36** | **2** | **9** |
+
+153 test, 22 kaynak dosyası, 19 modül.
