@@ -12,8 +12,12 @@ import {
   hasLegacyCliFlags,
   buildApprovalProfile,
   approvalTargetForConnection,
+  buildProductionApprovalEngine,
+  makeApprovalModeLookup,
   appendDescriptionComment,
   resolveApprovalEngineInput,
+  resolveConfiguredApprovalMode,
+  preResolutionProfileName,
   approvalResolverWarningFromInput,
   isCliSwitchEnabled,
   prepareKeyContents,
@@ -23,6 +27,7 @@ import {
   reacquireTransportIfReloaded,
   approveTransportForCurrentConfig,
   buildWebUIApprovalQueueAdapter,
+  validateSshCliFlag,
 } from '../src/index';
 import { ApprovalDispatcher } from '../src/approval/engine';
 import { TransportRegistry } from '../src/transports/registry';
@@ -86,6 +91,103 @@ describe('CLI bootstrap validation order', () => {
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('rejects bare --ssh before falling back to an auto-discovered TOML source', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-cli-bare-ssh-'));
+    const validToml = path.join(dir, 'config.toml');
+    await fs.writeFile(validToml, `
+[[sources]]
+id = "toml-fallback"
+host = "toml.example"
+user = "u"
+auth = "kerberos"
+`);
+    try {
+      const result = await runCliStartup(['--ssh'], {
+        SSH_MCP_CONFIG: validToml,
+        XDG_CONFIG_HOME: path.join(dir, 'xdg'),
+        HOME: dir,
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain('--ssh requires a value (--ssh=<JSON>)');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+  it('treats --webui=false as disabled while validating TOML WebUI settings', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-cli-webui-false-'));
+    const config = path.join(dir, 'config.toml');
+    await fs.writeFile(config, `
+[webui]
+enabled = false
+host = "0.0.0.0"
+auth_token = "env:WEBUI_TOKEN_MISSING"
+
+[approval]
+mode = "manual"
+
+[[sources]]
+id = "test"
+host = "test.example"
+user = "u"
+auth = "kerberos"
+`);
+    try {
+      const result = await runCliStartup([`--config=${config}`, '--webui=false'], {
+        WEBUI_TOKEN_MISSING: undefined,
+        XDG_CONFIG_HOME: path.join(dir, 'xdg'),
+        HOME: dir,
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain('manual approval mode requires WebUI to be enabled');
+      expect(result.stderr).not.toContain('WEBUI_TOKEN_MISSING');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lets explicit --webui=false override TOML enabled=true before boot validation', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-cli-webui-override-'));
+    const config = path.join(dir, 'config.toml');
+    await fs.writeFile(config, `
+[webui]
+enabled = true
+host = "0.0.0.0"
+auth_token = "env:WEBUI_TOKEN_MISSING"
+
+[approval]
+mode = "manual"
+
+[[sources]]
+id = "test"
+host = "test.example"
+user = "u"
+auth = "kerberos"
+`);
+    try {
+      const result = await runCliStartup([`--config=${config}`, '--webui=false'], {
+        WEBUI_TOKEN_MISSING: undefined,
+        XDG_CONFIG_HOME: path.join(dir, 'xdg'),
+        HOME: dir,
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain('manual approval mode requires WebUI to be enabled');
+      expect(result.stderr).not.toContain('WEBUI_TOKEN_MISSING');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('validateSshCliFlag', () => {
+  it('rejects the null marker produced by a bare --ssh', () => {
+    expect(() => validateSshCliFlag({ ssh: null }))
+      .toThrow(/--ssh requires a value/);
+  });
+
+  it('leaves absent --ssh handling to the selected legacy or TOML mode', () => {
+    expect(() => validateSshCliFlag({})).not.toThrow();
   });
 });
 
@@ -317,6 +419,52 @@ describe('approval command/context helpers', () => {
     expect(profile).toEqual({ id: 'default' });
   });
 
+  it('does not treat inherited Object.prototype members as approval overrides', () => {
+    expect(buildApprovalProfile('constructor', {})).toEqual({ id: 'constructor' });
+    expect(buildApprovalProfile('toString', {})).toEqual({ id: 'toString' });
+  });
+
+  it('WebUI approval-mode lookup ignores inherited Object.prototype keys (Codex 3568536828)', () => {
+    const engine = { defaultMode: 'smart' as const };
+    const lookup = makeApprovalModeLookup({
+      perSourceApproval: { prod: 'manual' },
+      getEngine: () => engine,
+    });
+    // Own override wins; anything else falls back to the engine default —
+    // including profiles named after Object.prototype members, which the old
+    // `perSource[name] ?? default` read as inherited functions.
+    expect(lookup('prod')).toBe('manual');
+    expect(lookup('staging')).toBe('smart');
+    expect(lookup('toString')).toBe('smart');
+    expect(lookup('constructor')).toBe('smart');
+    expect(lookup('hasOwnProperty')).toBe('smart');
+    // No engine wired -> legacy no-engine allow path is advertised as yolo.
+    const noEngine = makeApprovalModeLookup({
+      perSourceApproval: {},
+      getEngine: () => null,
+    });
+    expect(noEngine('toString')).toBe('yolo');
+  });
+
+  it('reads a profile mode mutation from the live WebUI controller on the next lookup', () => {
+    const engine = buildProductionApprovalEngine(true, resolvedConfig({
+      approval: { mode: 'yolo' },
+      perSourceApproval: { prod: 'yolo' },
+    }))!;
+    const modeController = {
+      getEffectiveMode: (profileId: string) => engine.getEffectiveMode(profileId),
+    };
+    const lookup = makeApprovalModeLookup({
+      perSourceApproval: { prod: 'yolo' },
+      getEngine: () => engine,
+      modeController,
+    });
+
+    expect(lookup('prod')).toBe('yolo');
+    engine.setProfileMode('prod', 'manual');
+    expect(lookup('prod')).toBe('manual');
+  });
+
   it('neutralizes description newlines before appending the shell comment', () => {
     const assembled = appendDescriptionComment('true', 'safe note\nrm -rf /tmp/should-not-run # nested');
     expect(assembled).toMatch(/^true # /);
@@ -350,6 +498,23 @@ describe('approval command/context helpers', () => {
     expect(resolveApprovalEngineInput(resolvedConfig({
       approval: { llm: { endpoint: 'https://api.example/v1/c', model: 'm-1' } },
     }))).toBeNull();
+  });
+
+  it('builds an LLM-only WebUI engine with a yolo baseline and live smart switching', () => {
+    const engine = buildProductionApprovalEngine(true, resolvedConfig({
+      approval: {
+        llm: {
+          endpoint: 'https://api.example/v1/c',
+          model: 'm-1',
+        },
+      },
+    }));
+
+    expect(engine).not.toBeNull();
+    expect(engine!.getGlobalMode()).toBe('yolo');
+    expect(engine!.availableModes()).toContain('smart');
+    engine!.setGlobalMode('smart');
+    expect(engine!.getGlobalMode()).toBe('smart');
   });
 
   it('parses --webui=false as disabled while preserving the bare flag', () => {
@@ -393,6 +558,55 @@ describe('approval command/context helpers', () => {
 
     engine.resolvePending(listed.id, 'deny', 'test cleanup', 'test');
     await decision;
+  });
+
+  it('bounds pending command and description text before WebUI list and enqueue exposure', async () => {
+    const engine = new ApprovalDispatcher({
+      defaultMode: 'manual',
+      manual: { webuiEnabled: true, timeout_ms: 5000 },
+    });
+    const queue = buildWebUIApprovalQueueAdapter(engine)!;
+    const secret = 'ghp_' + 'S'.repeat(36);
+    const hugeCommand = `deploy --token=${secret} ${'c'.repeat(2 * 1024 * 1024)}`;
+    const hugeDescription = `password ${secret} ${'d'.repeat(2 * 1024 * 1024)}`;
+    let enqueued: ReturnType<typeof queue.list>[number] | undefined;
+    queue.on('enqueue', pending => { enqueued = pending; });
+
+    const decision = engine.decide({
+      profile: { id: 'prod' },
+      tool: 'exec',
+      command: hugeCommand,
+      description: hugeDescription,
+    });
+    await Promise.resolve();
+
+    const listed = queue.list()[0];
+    expect(Buffer.byteLength(listed.command, 'utf8')).toBeLessThanOrEqual(16 * 1024);
+    expect(Buffer.byteLength(listed.description ?? '', 'utf8')).toBeLessThanOrEqual(16 * 1024);
+    expect(listed.command).not.toContain(secret);
+    expect(listed.description).not.toContain(secret);
+    expect(enqueued).toEqual(listed);
+
+    engine.resolvePending(listed.id, 'deny', 'test cleanup', 'test');
+    await decision;
+  });
+
+  it('resolves the effective configured mode for audit failures before the gate decides', () => {
+    const config = resolvedConfig({
+      approval: { mode: 'smart' },
+      perSourceApproval: { lab: 'yolo' },
+    });
+
+    expect(resolveConfiguredApprovalMode('lab', config)).toBe('yolo');
+    expect(resolveConfiguredApprovalMode('unknown', config)).toBe('smart');
+    expect(resolveConfiguredApprovalMode('constructor', config)).toBe('smart');
+    expect(resolveConfiguredApprovalMode('legacy', resolvedConfig())).toBe('yolo');
+  });
+
+  it('keeps a whitespace connection name unresolved instead of attributing it to the default profile', () => {
+    expect(preResolutionProfileName('   ', 'prod', false)).toBe('   ');
+    expect(preResolutionProfileName('', 'prod', false)).toBe('prod');
+    expect(preResolutionProfileName(undefined, 'prod', true)).toBe('(unresolved)');
   });
 });
 

@@ -348,22 +348,25 @@ export function buildApprovalEngineFromConfig(
   };
 
   // Smart: required-by-config when any used mode is 'smart'. Additionally,
-  // PRE-ARM smart whenever the LLM is fully configured so the WebUI can
-  // live-switch into it without a restart — arming an unused-but-configured
-  // engine is harmless (it only resolves decisions when selected).
+  // PRE-ARM smart whenever a supported LLM is fully configured so the WebUI
+  // can live-switch into it without a restart. Reserved provider configs stay
+  // inert until selected; constructing them eagerly would make an unused future
+  // provider fatal at boot.
   const llm = approval?.llm;
   // An explicitly configured key that could not be resolved is different from
   // an omitted optional key (some local endpoints need no auth). Do not pre-arm
   // smart in the unresolved case: advertising it would switch into an engine
   // guaranteed to omit the operator's configured authorization.
   const llmConfigured = !!(llm?.endpoint && llm?.model && !llm?.api_key_unresolved);
-  if (usedModes.has('smart') && !llmConfigured) {
+  const smartRequired = usedModes.has('smart');
+  const smartProviderSupported = llm?.provider === undefined || llm.provider === 'openai';
+  if (smartRequired && !llmConfigured) {
     if (llm?.api_key_unresolved) {
       throw new Error('approval mode "smart" requires the configured [approval.llm].api_key to resolve');
     }
     throw new Error('approval mode "smart" requires [approval.llm].endpoint and .model');
   }
-  if (llmConfigured) {
+  if (llmConfigured && (smartRequired || smartProviderSupported)) {
     built.smart = {
       llm: {
         endpoint: llm!.endpoint!,

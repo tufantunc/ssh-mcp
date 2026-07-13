@@ -135,10 +135,9 @@ export function discoverConfigPath(env: NodeJS.ProcessEnv = process.env): string
 interface LoadOptions {
   env?: NodeJS.ProcessEnv;
   /**
-   * Treat [webui] as enabled while validating top-level WebUI settings. The
-   * boot resolver sets this for the CLI `--webui` override so deferred secrets
-   * and cross-field checks use the effective enabled state, not only the TOML
-   * `enabled` key.
+   * Explicit CLI override for [webui].enabled. `true` enables token resolution
+   * and cross-field checks; `false` disables them even when TOML says enabled;
+   * `undefined` delegates to the TOML value.
    */
   webuiEnabled?: boolean;
   /**
@@ -327,6 +326,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       ? requireConfigString(src.private_key, 'private_key')
       : undefined;
     const knownHostsFile = requireConfigString(src.known_hosts_file, 'known_hosts_file');
+    if (knownHostsFile !== undefined && knownHostsFile.length === 0) {
+      throw new Error(`Config: sources.${src.id}.known_hosts_file must be a non-empty string`);
+    }
     const description = requireConfigString(src.description, 'description');
 
     const out: ServerConfig = {
@@ -453,11 +455,11 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     }
   }
 
-  const server = parsed.server ? validateServerSection(parsed.server) : undefined;
-  const webui = parsed.webui
-    ? validateWebUI(parsed.webui, env, opts.webuiEnabled === true)
+  const server = parsed.server !== undefined ? validateServerSection(parsed.server) : undefined;
+  const webui = parsed.webui !== undefined
+    ? validateWebUI(parsed.webui, env, opts.webuiEnabled)
     : undefined;
-  const approval = parsed.approval
+  const approval = parsed.approval !== undefined
     ? validateApproval(parsed.approval, env, Object.values(perSourceApproval).includes('smart'))
     : undefined;
 
@@ -479,6 +481,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
 }
 
 function validateServerSection(raw: any) {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('Config: [server] must be a table');
+  }
   const out: TomlConfig['server'] = {};
   if (raw.audit_dir !== undefined) {
     if (typeof raw.audit_dir !== 'string') throw new Error('Config: [server].audit_dir must be a string');
@@ -506,7 +511,10 @@ function validateServerSection(raw: any) {
   return out;
 }
 
-function validateWebUI(raw: any, env: NodeJS.ProcessEnv, enabledByCli = false) {
+function validateWebUI(raw: any, env: NodeJS.ProcessEnv, cliEnabledOverride?: boolean) {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('Config: [webui] must be a table');
+  }
   const out: TomlConfig['webui'] = {};
   if (raw.enabled !== undefined) {
     if (typeof raw.enabled !== 'boolean') throw new Error('Config: [webui].enabled must be a boolean');
@@ -526,7 +534,7 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv, enabledByCli = false) {
     if (typeof raw.cors !== 'boolean') throw new Error('Config: [webui].cors must be a boolean');
     out.cors = raw.cors;
   }
-  const webuiEnabled = out.enabled === true || enabledByCli;
+  const webuiEnabled = cliEnabledOverride ?? out.enabled === true;
   if (raw.auth_token !== undefined) {
     if (typeof raw.auth_token !== 'string') throw new Error('Config: [webui].auth_token must be a string');
     if (webuiEnabled) {
@@ -534,11 +542,11 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv, enabledByCli = false) {
     }
   }
   // Cross-field check: a non-loopback bind requires a token — but ONLY when the
-  // web UI is actually enabled. With `[webui] enabled = false` the section is
-  // inert (parsed/reserved, never served), so demanding a token for a disabled
-  // section would let an otherwise-off optional block fail SSH startup (Codex
-  // 3541772404). When the eventual CLI enable path turns it on, the same check
-  // applies against the resolved enabled=true state.
+  // WebUI is effectively enabled after CLI precedence. A disabled section is
+  // inert (parsed/reserved, never served), so demanding a token for it would let
+  // an otherwise-off optional block fail SSH startup (Codex 3541772404). Bare
+  // `--webui` enables these checks; explicit `--webui=false` suppresses them
+  // even when TOML says enabled=true (Codex 3568934447).
   if (webuiEnabled && out.host && out.host !== '127.0.0.1' && out.host !== 'localhost' && out.host !== '::1') {
     if (!out.auth_token) {
       throw new Error(
@@ -554,6 +562,9 @@ function validateApproval(
   env: NodeJS.ProcessEnv,
   resolveLlmApiKeyForPerSourceSmart = false,
 ): ApprovalSection {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('Config: [approval] must be a table');
+  }
   const out: ApprovalSection = {};
   if (raw.mode !== undefined) {
     if (!VALID_APPROVAL_MODE.includes(raw.mode)) {
@@ -588,11 +599,12 @@ function validateApproval(
       }
       const smartActive = out.mode === 'smart' || resolveLlmApiKeyForPerSourceSmart;
       // The LLM block is "fully configured" once it carries endpoint + model.
-      // buildApprovalEngineFromConfig pre-arms smart in that case (so the WebUI
-      // can live-switch into smart without a restart), and SmartApproval needs
-      // the configured api_key to authenticate that live switch. Preserve the
-      // resolved key when the block is fully configured. A missing env remains
-      // non-fatal while smart is inactive, matching deferred resolution.
+      // buildApprovalEngineFromConfig pre-arms smart for supported providers in
+      // that case (so the WebUI can live-switch into smart without a restart),
+      // and SmartApproval needs the configured api_key to authenticate that live
+      // switch. Preserve the resolved key when the block is fully configured. A
+      // missing env remains non-fatal while smart is inactive, matching deferred
+      // resolution.
       const fullyConfigured =
         typeof llm.endpoint === 'string' && typeof llm.model === 'string';
       if (smartActive) {

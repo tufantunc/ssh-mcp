@@ -84,13 +84,13 @@ describe('optional audit seam', () => {
       // ...but the failure was surfaced.
       expect(errSpy).toHaveBeenCalled();
       const logged = errSpy.mock.calls.map(c => String(c[0])).join('\n');
-      expect(logged).toMatch(/audit store initialization failed/i);
+      expect(logged).toMatch(/audit module present but failed to initialize/i);
     } finally {
       errSpy.mockRestore();
     }
   });
 
-  it('uses an explicit not-run marker instead of yolo allow when no approval decision exists', async () => {
+  it('preserves the configured mode in the not-run marker when no approval decision exists', async () => {
     let appended: any;
     const sink = await loadAuditSink({}, async () => ({
       resolveAuditDir: () => '/tmp/ssh-mcp-audit-test',
@@ -108,10 +108,11 @@ describe('optional audit seam', () => {
       command: 'uptime',
       startedAt: Date.now(),
       error: new Error('transport init failed before approval'),
+      approvalMode: 'smart',
     });
 
     expect(appended.approval).toMatchObject({
-      mode: 'manual',
+      mode: 'smart',
       decision: 'deny',
       decided_by: 'approval:not-run',
     });
@@ -220,6 +221,43 @@ describe('optional audit seam', () => {
       const sink = await loadAuditSink({}, async () => { throw err; });
       expect(typeof sink.record).toBe('function');
       expect(spy).toHaveBeenCalledWith(expect.stringContaining('audit module present but failed to load'));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it.each([
+    ['missing resolveAuditDir', {
+      AuditStore: class { append(): void {} },
+    }],
+    ['throwing resolveAuditDir', {
+      resolveAuditDir: () => { throw new Error('bad audit dir'); },
+      AuditStore: class { append(): void {} },
+    }],
+    ['throwing AuditStore constructor', {
+      resolveAuditDir: () => '/tmp/ssh-mcp-audit-test',
+      AuditStore: class { constructor() { throw new Error('store init failed'); } },
+    }],
+    ['store without append', {
+      resolveAuditDir: () => '/tmp/ssh-mcp-audit-test',
+      AuditStore: class {},
+    }],
+  ])('degrades an invalid audit module/store shape to a no-op: %s', async (_label, moduleShape) => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const sink = await loadAuditSink({}, async () => moduleShape);
+      expect(typeof sink.record).toBe('function');
+      expect(spy).toHaveBeenCalledWith(
+        expect.stringContaining('audit module present but failed to initialize'),
+      );
+      expect(() => sink.record({
+        tool: 'exec',
+        profile: 'default',
+        command: 'uptime',
+        startedAt: Date.now(),
+        error: new Error('pre-gate failure'),
+        approvalMode: 'yolo',
+      })).not.toThrow();
     } finally {
       spy.mockRestore();
     }

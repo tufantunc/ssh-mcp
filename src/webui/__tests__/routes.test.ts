@@ -322,41 +322,6 @@ describe('WebUI server', () => {
     expect(queue.list()).toHaveLength(1);
   });
 
-  it('uses the trimmed auth token for approval mutation checks', async () => {
-    await handle.close();
-    handle = await startWebUI({
-      host: '127.0.0.1',
-      port: 0,
-      authToken: '   ',
-      registry: fakeRegistry,
-      queue,
-      audit,
-      getApprovalMode: name => (name === 'prod' ? 'manual' : 'yolo'),
-    });
-    queue.enqueue({
-      id: 'trimmed-token-guard',
-      profile: 'prod',
-      tool: 'exec',
-      command: 'systemctl restart nginx',
-      enqueuedAt: new Date().toISOString(),
-    });
-
-    const r = await fetch(
-      `http://${handle.address.host}:${handle.address.port}/api/approvals/trimmed-token-guard/allow`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Origin: `http://${handle.address.host}:${handle.address.port + 1}`,
-        },
-        body: '{}',
-      },
-    );
-
-    expect(r.status).toBe(403);
-    expect(queue.list()).toHaveLength(1);
-  });
-
   it('POST approval mutation rejects missing Origin/Referer without a token', async () => {
     queue.enqueue({
       id: 'origin-guard-missing',
@@ -439,6 +404,13 @@ describe('WebUI server', () => {
     expect(r.headers.get('content-type') || '').toMatch(/text\/html/);
   });
 
+  it('static UI responses cannot be embedded in a frame', async () => {
+    const r = await get(handle, '/');
+    expect(r.status).toBe(200);
+    expect(r.headers.get('x-frame-options')).toBe('DENY');
+    expect(r.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+  });
+
   it('unknown api route returns 404', async () => {
     const r = await get(handle, '/api/does-not-exist');
     expect(r.status).toBe(404);
@@ -462,6 +434,12 @@ describe('WebUI auth', () => {
   it('refuses a whitespace-only auth_token on a non-loopback bind', async () => {
     await expect(
       startWebUI({ host: '0.0.0.0', port: 0, registry: fakeRegistry, authToken: ' \t\n ' }),
+    ).rejects.toThrow(/auth_token/i);
+  });
+
+  it('refuses a provided whitespace-only auth_token on a loopback bind', async () => {
+    await expect(
+      startWebUI({ host: '127.0.0.1', port: 0, registry: fakeRegistry, authToken: ' \t\n ' }),
     ).rejects.toThrow(/auth_token/i);
   });
 
