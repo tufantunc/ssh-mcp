@@ -37,6 +37,8 @@ export interface AuditExecInput {
   error?: unknown;
   /** The real decision from `gateApproval`, when one was produced. */
   approval?: ApprovalDecision;
+  /** Effective configured mode, retained when a failure occurs before the gate decides. */
+  approvalMode?: ApprovalDecision['mode'];
 }
 
 /** The seam surface the rest of the server depends on. Always safe to call. */
@@ -106,10 +108,14 @@ function errorMessageFromUnknown(error: unknown): string {
   return error instanceof Error ? error.message : String(error ?? 'unknown error');
 }
 
-function approvalNotReachedSection(now: Date, error: unknown) {
+function approvalNotReachedSection(
+  now: Date,
+  error: unknown,
+  mode: ApprovalDecision['mode'],
+) {
   const message = errorMessageFromUnknown(error);
   return {
-    mode: 'manual',
+    mode,
     decision: 'deny',
     reason: `approval gate was not reached: ${message}`,
     decided_at: now.toISOString(),
@@ -157,15 +163,29 @@ export async function loadAuditSink(
     console.error(`[ssh-mcp][audit-seam] audit module present but failed to load; auditing disabled: ${message}`);
     return NO_OP_SINK; // audit module unusable → visible warning + no-op
   }
-  if (!mod || typeof mod.AuditStore !== 'function') {
+  let store: { append(record: unknown): unknown };
+  try {
+    if (
+      !mod
+      || typeof mod.AuditStore !== 'function'
+      || typeof mod.resolveAuditDir !== 'function'
+    ) {
+      throw new TypeError('expected callable AuditStore and resolveAuditDir exports');
+    }
+
+    const auditDir = mod.resolveAuditDir(config.auditDir);
+    store = new mod.AuditStore({
+      auditDir,
+      auditMaxBytes: config.auditMaxBytes ?? 10_000,
+    });
+    if (!store || typeof store.append !== 'function') {
+      throw new TypeError('AuditStore instance must expose append(record)');
+    }
+  } catch (err) {
+    const message = (err as { message?: string })?.message ?? String(err);
+    console.error(`[ssh-mcp][audit-seam] audit module present but failed to initialize; auditing disabled: ${message}`);
     return NO_OP_SINK;
   }
-
-  const auditDir = mod.resolveAuditDir(config.auditDir);
-  const store = new mod.AuditStore({
-    auditDir,
-    auditMaxBytes: config.auditMaxBytes ?? 10_000,
-  });
 
   return {
     record(input: AuditExecInput): void {
@@ -177,7 +197,7 @@ export async function loadAuditSink(
         // decision: record an explicit not-run denial marker instead.
         const approval = input.approval
           ? toApprovalSection(input.approval)
-          : approvalNotReachedSection(now, input.error);
+          : approvalNotReachedSection(now, input.error, input.approvalMode ?? 'yolo');
         store.append({
           profile: input.profile,
           tool: input.tool,

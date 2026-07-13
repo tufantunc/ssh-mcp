@@ -709,7 +709,9 @@ export function buildApprovalProfile(
   perSourceApproval: Record<string, ApprovalMode> = {},
   source?: { description?: string },
 ): ResolvedSource {
-  const mode = perSourceApproval[id];
+  const mode = Object.prototype.hasOwnProperty.call(perSourceApproval, id)
+    ? perSourceApproval[id]
+    : undefined;
   return {
     id,
     ...(source?.description ? { description: source.description } : {}),
@@ -800,6 +802,20 @@ export function resolveApprovalEngineInput(
     llm: approvalCfg?.llm,
     perSourceModes,
   };
+}
+
+/** Effective configured mode used when audit must record a pre-gate failure. */
+export function resolveConfiguredApprovalMode(
+  profileId: string,
+  config: ResolvedConfig = resolvedConfig,
+): ApprovalMode {
+  const input = resolveApprovalEngineInput(config);
+  if (input === null) return 'yolo';
+  const profile = buildApprovalProfile(
+    profileId,
+    config.perSourceApproval ?? {},
+  );
+  return profile.approval?.mode ?? input.defaultMode ?? 'manual';
 }
 
 export function approvalResolverWarningFromInput(
@@ -1008,6 +1024,7 @@ server.tool(
     const sanitizedCommand = sanitizeCommand(command);
     const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
     let profile = resolvedProfileName(connectionName);
+    let approvalMode = resolveConfiguredApprovalMode(profile);
     // Fallback timestamp for errors raised before the transport call (registry
     // init failure, approval deny). Re-captured immediately before t.exec below
     // so a SUCCESSFUL command's audit durationMs measures command runtime only,
@@ -1018,6 +1035,7 @@ server.tool(
     try {
       const target = approvalTargetForConnection(connectionName);
       profile = target.profile;
+      approvalMode = resolveConfiguredApprovalMode(profile);
       approvalDecision = await gateApproval({
         profile: target.approvalProfile,
         tool: 'exec',
@@ -1035,6 +1053,7 @@ server.tool(
         description,
         startedAt,
         approval: approvalDecision,
+        approvalMode,
       }, result);
       return response;
     } catch (err: any) {
@@ -1047,6 +1066,7 @@ server.tool(
         startedAt,
         error: err,
         approval: approvalDecision,
+        approvalMode,
       });
       if (err instanceof McpError) throw err;
       throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
@@ -1067,6 +1087,7 @@ if (!DISABLE_SUDO) {
       const sanitizedCommand = sanitizeCommand(command);
       const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
       let profile = resolvedProfileName(connectionName);
+      let approvalMode = resolveConfiguredApprovalMode(profile);
       // Fallback timestamp for errors raised before the transport call (registry
       // init failure, approval deny). Re-captured immediately before
       // t.execElevated below so a SUCCESSFUL command's audit durationMs measures
@@ -1077,6 +1098,7 @@ if (!DISABLE_SUDO) {
       try {
         const target = approvalTargetForConnection(connectionName);
         profile = target.profile;
+        approvalMode = resolveConfiguredApprovalMode(profile);
         approvalDecision = await gateApproval({
           profile: target.approvalProfile,
           tool: 'sudo-exec',
@@ -1103,6 +1125,7 @@ if (!DISABLE_SUDO) {
           description,
           startedAt,
           approval: approvalDecision,
+          approvalMode,
         }, result);
         return response;
       } catch (err: any) {
@@ -1115,6 +1138,7 @@ if (!DISABLE_SUDO) {
           startedAt,
           error: err,
           approval: approvalDecision,
+          approvalMode,
         });
         if (err instanceof McpError) throw err;
         throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);

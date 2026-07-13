@@ -13,6 +13,7 @@ import {
   buildApprovalProfile,
   appendDescriptionComment,
   resolveApprovalEngineInput,
+  resolveConfiguredApprovalMode,
   approvalResolverWarningFromInput,
   isCliSwitchEnabled,
   prepareKeyContents,
@@ -321,6 +322,11 @@ describe('approval command/context helpers', () => {
     expect(profile).toEqual({ id: 'default' });
   });
 
+  it('does not treat inherited Object.prototype members as approval overrides', () => {
+    expect(buildApprovalProfile('constructor', {})).toEqual({ id: 'constructor' });
+    expect(buildApprovalProfile('toString', {})).toEqual({ id: 'toString' });
+  });
+
   it('neutralizes description newlines before appending the shell comment', () => {
     const assembled = appendDescriptionComment('true', 'safe note\nrm -rf /tmp/should-not-run # nested');
     expect(assembled).toMatch(/^true # /);
@@ -370,6 +376,18 @@ describe('approval command/context helpers', () => {
     }));
     expect(input?.defaultMode).toBeUndefined();
     expect(input?.fail_closed).toBe(true);
+  });
+
+  it('resolves the effective configured mode for audit failures before the gate decides', () => {
+    const config = resolvedConfig({
+      approval: { mode: 'smart' },
+      perSourceApproval: { lab: 'yolo' },
+    });
+
+    expect(resolveConfiguredApprovalMode('lab', config)).toBe('yolo');
+    expect(resolveConfiguredApprovalMode('unknown', config)).toBe('smart');
+    expect(resolveConfiguredApprovalMode('constructor', config)).toBe('smart');
+    expect(resolveConfiguredApprovalMode('legacy', resolvedConfig())).toBe('yolo');
   });
 });
 
