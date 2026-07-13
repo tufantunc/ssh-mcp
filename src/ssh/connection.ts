@@ -4,6 +4,8 @@ import { FROZEN_ALGORITHMS } from './algorithms.js';
 import { verifyHostKey, fingerprintPublicKey, type HostKeyMode } from './host-key.js';
 import { InteractiveSession, BackgroundSession, type Session } from './session.js';
 import { randomUUID } from 'crypto';
+import { tracer } from '../observability/tracer.js';
+import { redactText } from '../guard/redactor.js';
 
 export class SSHConnection {
   readonly profile: Profile;
@@ -154,6 +156,11 @@ export class SSHConnection {
     const timeoutMs = opts.timeoutMs ?? this.profile.timeout;
     const startTime = Date.now();
 
+    const span = tracer.startSpan('ssh.exec');
+    span.setAttribute('ssh.host', this.profile.host);
+    span.setAttribute('ssh.port', this.profile.port);
+    span.setAttribute('ssh.command', redactText(command));
+
     return new Promise((resolve, reject) => {
       let activeStream: ClientChannel | null = null;
       let resolved = false;
@@ -238,6 +245,9 @@ export class SSHConnection {
               profile: this.profile.name,
               signal: signal || undefined,
             });
+            span.setAttribute('ssh.exitCode', code);
+            if (signal) span.setAttribute('ssh.signal', signal);
+            span.end();
           }
         });
       });

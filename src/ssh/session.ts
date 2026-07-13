@@ -1,5 +1,6 @@
 import type { ClientChannel } from 'ssh2';
 import type { CommandResult, SessionInfo, SessionStatus } from '../types.js';
+import { tracer } from '../observability/tracer.js';
 
 const ANSI_REGEX = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r/g;
 
@@ -81,6 +82,10 @@ export class InteractiveSession extends Session {
       throw new Error(`Session ${this.name} is not active (status: ${this._status})`);
     }
 
+    const span = tracer.startSpan('ssh.session.run');
+    span.setAttribute('session.id', this.id);
+    span.setAttribute('session.name', this.name);
+
     const marker = this.generateMarker();
     const sentinel = `SSHMCP_END_${marker}`;
     const startTime = Date.now();
@@ -145,6 +150,8 @@ export class InteractiveSession extends Session {
             sessionId: this.id,
             profile: this.profile,
           });
+          span.setAttribute('ssh.exitCode', exitCode);
+          span.end();
         }
       };
 

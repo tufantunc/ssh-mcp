@@ -5,6 +5,7 @@ import { join, dirname } from 'path';
 import { randomUUID, createHash } from 'crypto';
 import type { AuditRecord } from '../types.js';
 import { redactText } from '../guard/redactor.js';
+import { tracer } from '../observability/tracer.js';
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 const MAX_FILES = 10;
@@ -52,11 +53,14 @@ export class AuditStore {
   }
 
   async record(entry: Omit<AuditRecord, 'timestamp' | 'eventId'>): Promise<void> {
-    const record: AuditRecord = {
-      ...entry,
-      timestamp: new Date().toISOString(),
-      eventId: randomUUID(),
-    };
+    const span = tracer.startSpan('audit.record');
+    span.setAttribute('audit.tamperEvident', this.tamperEvident);
+    try {
+      const record: AuditRecord = {
+        ...entry,
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+      };
 
     const redactedCommand = redactText(record.command, { entropyScan: this.entropyScan });
     const redactedError = record.error ? redactText(record.error, { entropyScan: this.entropyScan }) : undefined;
@@ -82,7 +86,11 @@ export class AuditStore {
       stream.write(line, (err) => err ? reject(err) : resolve());
     });
 
+    span.setAttribute('audit.bytes', line.length);
     this.recordCount++;
+    } finally {
+      span.end();
+    }
   }
 
   private async loadLastHash(): Promise<void> {
