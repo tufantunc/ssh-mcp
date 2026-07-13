@@ -14,6 +14,7 @@ import {
   appendDescriptionComment,
   resolveApprovalEngineInput,
   resolveConfiguredApprovalMode,
+  preResolutionProfileName,
   approvalResolverWarningFromInput,
   isCliSwitchEnabled,
   prepareKeyContents,
@@ -388,6 +389,12 @@ describe('approval command/context helpers', () => {
     expect(resolveConfiguredApprovalMode('unknown', config)).toBe('smart');
     expect(resolveConfiguredApprovalMode('constructor', config)).toBe('smart');
     expect(resolveConfiguredApprovalMode('legacy', resolvedConfig())).toBe('yolo');
+  });
+
+  it('keeps a whitespace connection name unresolved instead of attributing it to the default profile', () => {
+    expect(preResolutionProfileName('   ', 'prod', false)).toBe('   ');
+    expect(preResolutionProfileName('', 'prod', false)).toBe('prod');
+    expect(preResolutionProfileName(undefined, 'prod', true)).toBe('(unresolved)');
   });
 });
 

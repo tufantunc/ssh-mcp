@@ -443,9 +443,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     }
   }
 
-  const server = parsed.server ? validateServerSection(parsed.server) : undefined;
-  const webui = parsed.webui ? validateWebUI(parsed.webui, env) : undefined;
-  const approval = parsed.approval
+  const server = parsed.server !== undefined ? validateServerSection(parsed.server) : undefined;
+  const webui = parsed.webui !== undefined ? validateWebUI(parsed.webui, env) : undefined;
+  const approval = parsed.approval !== undefined
     ? validateApproval(parsed.approval, env, Object.values(perSourceApproval).includes('smart'))
     : undefined;
 
@@ -467,6 +467,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
 }
 
 function validateServerSection(raw: any) {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('Config: [server] must be a table');
+  }
   const out: TomlConfig['server'] = {};
   if (raw.audit_dir !== undefined) {
     if (typeof raw.audit_dir !== 'string') throw new Error('Config: [server].audit_dir must be a string');
@@ -488,6 +491,9 @@ function validateServerSection(raw: any) {
 }
 
 function validateWebUI(raw: any, env: NodeJS.ProcessEnv) {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('Config: [webui] must be a table');
+  }
   const out: TomlConfig['webui'] = {};
   if (raw.enabled !== undefined) {
     if (typeof raw.enabled !== 'boolean') throw new Error('Config: [webui].enabled must be a boolean');
@@ -527,6 +533,9 @@ function validateApproval(
   env: NodeJS.ProcessEnv,
   resolveLlmApiKeyForPerSourceSmart = false,
 ): ApprovalSection {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('Config: [approval] must be a table');
+  }
   const out: ApprovalSection = {};
   if (raw.mode !== undefined) {
     if (!VALID_APPROVAL_MODE.includes(raw.mode)) {

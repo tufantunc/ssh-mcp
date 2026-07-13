@@ -17,6 +17,7 @@ import {
   ApprovalEngine,
   SmartApprovalOptions,
 } from './types.js';
+import { redactApprovalText } from './redactor.js';
 
 interface LlmJudgement {
   allow: boolean;
@@ -61,11 +62,13 @@ function buildUserPrompt(ctx: ApprovalContext): string {
   const profileBlock = ctx.profile.description
     ? `Profile: ${ctx.profile.id}\nDescription: ${ctx.profile.description}`
     : `Profile: ${ctx.profile.id}`;
-  const descBlock = ctx.description ? `\nCommand intent: ${ctx.description}` : '';
+  const command = redactApprovalText(ctx.command);
+  const description = redactApprovalText(ctx.description);
+  const descBlock = description ? `\nCommand intent: ${description}` : '';
   return [
     profileBlock,
     `Tool: ${ctx.tool}`,
-    `Command:\n${ctx.command}${descBlock}`,
+    `Command:\n${command}${descBlock}`,
     'Respond with the JSON object only.',
   ].join('\n\n');
 }
@@ -86,6 +89,15 @@ export class SmartApproval implements ApprovalEngine {
 
   async decide(ctx: ApprovalContext): Promise<ApprovalDecision> {
     const fail_closed = this.opts.fail_closed !== false; // default true
+    const fetchImpl = this.opts.fetchImpl ?? (globalThis.fetch as any);
+    if (!fetchImpl) {
+      return this.failClosedDecision(
+        fail_closed,
+        'smart approval: no fetch implementation available',
+        'smart-llm:no-fetch',
+      );
+    }
+
     const timeoutMs = this.opts.llm.timeout_ms ?? 8000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -105,15 +117,6 @@ export class SmartApproval implements ApprovalEngine {
     };
     if (this.opts.llm.api_key) {
       headers['Authorization'] = `Bearer ${this.opts.llm.api_key}`;
-    }
-
-    const fetchImpl = this.opts.fetchImpl ?? (globalThis.fetch as any);
-    if (!fetchImpl) {
-      return this.failClosedDecision(
-        fail_closed,
-        'smart approval: no fetch implementation available',
-        'smart-llm:no-fetch',
-      );
     }
 
     let phase: 'request' | 'body' = 'request';

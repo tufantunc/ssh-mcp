@@ -686,22 +686,36 @@ export function applyRegistryConnectionPolicy(
   }
 }
 
-/** Effective profile/connection name for gating + audit attribution. */
-function resolvedProfileName(connectionName?: string): string {
-  // Treat an empty/blank connectionName as "omitted", mirroring
-  // TransportRegistry.resolveName() (which routes `''` to the default host).
-  // Otherwise gating + audit attribution would be computed for the literal
-  // profile id '' while the command actually ran against the default host,
-  // silently bypassing that host's per-source approval policy.
-  const name = connectionName && connectionName.trim() !== '' ? connectionName : undefined;
-  if (name) return name;
+/**
+ * Profile label used before registry target resolution succeeds.
+ *
+ * Match TransportRegistry.resolveRegisteredName() exactly: only a falsy name
+ * is omitted. In particular, whitespace is a supplied (invalid) name, so a
+ * rejected call must remain attributed to that unresolved value instead of a
+ * real default host.
+ */
+export function preResolutionProfileName(
+  connectionName: string | undefined,
+  defaultName: string | null,
+  wouldRejectOmittedName: boolean,
+): string {
+  if (connectionName) return connectionName;
   // An omitted/blank name that the registry would REJECT (multi-source, no
   // explicit default, guard on) never lands on a host: resolveName() throws
   // before selection. Attributing that rejected call to getDefaultName() (the
   // first-registered host) would corrupt audit profile for exactly the guard
   // case. Mirror the guard and label it unresolved instead of a real host.
-  if (registry.wouldRejectOmittedName()) return '(unresolved)';
-  return registry.getDefaultName() ?? 'default';
+  if (wouldRejectOmittedName) return '(unresolved)';
+  return defaultName ?? 'default';
+}
+
+/** Effective profile/connection name for gating + audit attribution. */
+function resolvedProfileName(connectionName?: string): string {
+  return preResolutionProfileName(
+    connectionName,
+    registry.getDefaultName(),
+    registry.wouldRejectOmittedName(),
+  );
 }
 
 export function buildApprovalProfile(
