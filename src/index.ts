@@ -495,10 +495,11 @@ const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
   ? resolveConfig({
       cliSources: cliSourceConfigs,
       cliConfigPath: resolveCliConfigPath(argvConfig),
-      // `--webui` overrides a disabled/omitted TOML enabled flag. Tell the
-      // loader now so it resolves auth_token and applies the non-loopback gate
-      // against the effective boot state rather than dropping the token.
-      webuiEnabled: isCliSwitchEnabled(argvConfig, 'webui'),
+      // An explicit CLI switch overrides TOML in either direction. Preserve
+      // `undefined` when the switch is absent so the loader can still honor
+      // `[webui].enabled`; bare `--webui` forces true and `--webui=false`
+      // forces false before token resolution and boot validation.
+      webuiEnabled: cliSwitchOverride(argvConfig, 'webui'),
     })
   : { sources: [], perSourceApproval: {}, defaultExplicit: false };
 
@@ -878,19 +879,25 @@ function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher
   });
 }
 
-/** Resolve a bare/string boolean CLI switch without treating `--flag=false` as enabled. */
-export function isCliSwitchEnabled(args: Record<string, unknown>, key: string): boolean {
-  if (!(key in args)) return false;
+/** Return the explicit value of a bare/string boolean CLI switch, or undefined when absent. */
+function cliSwitchOverride(args: Record<string, unknown>, key: string): boolean | undefined {
+  if (!(key in args)) return undefined;
   const value = args[key];
   return !(typeof value === 'string' && value.toLowerCase() === 'false');
 }
 
+/** Resolve a bare/string boolean CLI switch without treating `--flag=false` as enabled. */
+export function isCliSwitchEnabled(args: Record<string, unknown>, key: string): boolean {
+  return cliSwitchOverride(args, key) === true;
+}
+
 /** Decide whether the WebUI will be active at boot (TOML or --webui). */
 function isWebUIActive(): boolean {
-  // A bare `--webui` parses as a present key, while `--webui=false` must remain
-  // disabled. The WebUI server itself lands in a later lane; here we only need
-  // the boot-time decision so manual-mode's gate-12 invariant resolves correctly.
-  return isCliSwitchEnabled(argvConfig, 'webui') || resolvedConfig.webui?.enabled === true;
+  // CLI presence wins in either direction: bare `--webui` enables the server,
+  // while explicit `--webui=false` suppresses even TOML enabled=true. Only an
+  // absent CLI switch delegates to the TOML setting.
+  return cliSwitchOverride(argvConfig, 'webui')
+    ?? (resolvedConfig.webui?.enabled === true);
 }
 
 /**

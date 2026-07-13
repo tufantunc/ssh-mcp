@@ -315,6 +315,24 @@ export class AuditStore extends EventEmitter {
     const rec = buildRecord({ ...input, now, auditMaxBytes: this.auditMaxBytes });
     const filePath = activeFilePath(this.auditDir, now);
 
+    // Tighten an existing active file BEFORE rotation. Otherwise a permissive
+    // legacy/operator-created active file can be renamed to `.1` first and keep
+    // its world/group-readable mode indefinitely while only the new active file
+    // is corrected after append (Codex 3568934450).
+    let existingMode: number | null = null;
+    try {
+      existingMode = fs.statSync(filePath).mode & 0o777;
+      if (existingMode !== 0o600) {
+        try {
+          fs.chmodSync(filePath, 0o600);
+        } catch {
+          // best-effort: file may live on a filesystem that ignores chmod
+        }
+      }
+    } catch {
+      // File does not exist yet — created by the append below.
+    }
+
     rotateIfNeeded({
       filePath,
       maxFileBytes: this.maxFileBytes,
@@ -322,19 +340,10 @@ export class AuditStore extends EventEmitter {
     });
 
     const line = JSON.stringify(rec) + '\n';
-    // Owner-only (0600). The mode option only applies when the file is
-    // created, and is masked by umask; chmod enforces it on first create AND
-    // on files that already exist with a permissive mode — a file pre-created
-    // by an operator or left 0644 by an older setup must not keep that mode
-    // while new records with commands/output are appended (Codex 3568536819).
-    // The pre-append stat replaces the previous existence probe, so the hot
-    // path costs no extra syscall; chmod only fires when the mode is wrong.
-    let existingMode: number | null = null;
-    try {
-      existingMode = fs.statSync(filePath).mode & 0o777;
-    } catch {
-      // File does not exist yet — created by the append below.
-    }
+    // Owner-only (0600). The mode option applies on create and chmod covers a
+    // pre-existing permissive active file. `existingMode` is deliberately kept
+    // from the pre-rotation check above: when that file rotated (or did not
+    // exist), a non-0600/null value also tightens the freshly-created active file.
     fs.appendFileSync(filePath, line, { encoding: 'utf8', mode: 0o600 });
     if (existingMode !== 0o600) {
       try {

@@ -135,10 +135,9 @@ export function discoverConfigPath(env: NodeJS.ProcessEnv = process.env): string
 interface LoadOptions {
   env?: NodeJS.ProcessEnv;
   /**
-   * Treat [webui] as enabled while validating top-level WebUI settings. The
-   * boot resolver sets this for the CLI `--webui` override so deferred secrets
-   * and cross-field checks use the effective enabled state, not only the TOML
-   * `enabled` key.
+   * Explicit CLI override for [webui].enabled. `true` enables token resolution
+   * and cross-field checks; `false` disables them even when TOML says enabled;
+   * `undefined` delegates to the TOML value.
    */
   webuiEnabled?: boolean;
   /**
@@ -453,7 +452,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
 
   const server = parsed.server !== undefined ? validateServerSection(parsed.server) : undefined;
   const webui = parsed.webui !== undefined
-    ? validateWebUI(parsed.webui, env, opts.webuiEnabled === true)
+    ? validateWebUI(parsed.webui, env, opts.webuiEnabled)
     : undefined;
   const approval = parsed.approval !== undefined
     ? validateApproval(parsed.approval, env, Object.values(perSourceApproval).includes('smart'))
@@ -507,7 +506,7 @@ function validateServerSection(raw: any) {
   return out;
 }
 
-function validateWebUI(raw: any, env: NodeJS.ProcessEnv, enabledByCli = false) {
+function validateWebUI(raw: any, env: NodeJS.ProcessEnv, cliEnabledOverride?: boolean) {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     throw new Error('Config: [webui] must be a table');
   }
@@ -526,7 +525,7 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv, enabledByCli = false) {
     }
     out.port = raw.port;
   }
-  const webuiEnabled = out.enabled === true || enabledByCli;
+  const webuiEnabled = cliEnabledOverride ?? out.enabled === true;
   if (raw.auth_token !== undefined) {
     if (typeof raw.auth_token !== 'string') throw new Error('Config: [webui].auth_token must be a string');
     if (webuiEnabled) {
@@ -534,11 +533,11 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv, enabledByCli = false) {
     }
   }
   // Cross-field check: a non-loopback bind requires a token — but ONLY when the
-  // web UI is actually enabled. With `[webui] enabled = false` the section is
-  // inert (parsed/reserved, never served), so demanding a token for a disabled
-  // section would let an otherwise-off optional block fail SSH startup (Codex
-  // 3541772404). When the eventual CLI enable path turns it on, the same check
-  // applies against the resolved enabled=true state.
+  // WebUI is effectively enabled after CLI precedence. A disabled section is
+  // inert (parsed/reserved, never served), so demanding a token for it would let
+  // an otherwise-off optional block fail SSH startup (Codex 3541772404). Bare
+  // `--webui` enables these checks; explicit `--webui=false` suppresses them
+  // even when TOML says enabled=true (Codex 3568934447).
   if (webuiEnabled && out.host && out.host !== '127.0.0.1' && out.host !== 'localhost' && out.host !== '::1') {
     if (!out.auth_token) {
       throw new Error(

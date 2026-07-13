@@ -18,6 +18,7 @@
  *   8. GitHub PATs (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`).
  *   9. Slack tokens (`xox[abprs]-...`).
  *  10. Google API keys (`AIza...`, 39 chars).
+ *  11. OpenAI API keys (`sk-...`, including `sk-proj-...`).
  */
 
 const REDACTED = '<redacted>';
@@ -150,7 +151,14 @@ const SLACK_TOKEN_RE = /\bxox[abprs]-[A-Za-z0-9\-]{10,}\b/g;
 // 10. Google API keys
 const GOOGLE_API_KEY_RE = /\bAIza[0-9A-Za-z_\-]{35}\b/g;
 
-// 11. URL userinfo credentials, e.g. https://alice:hunter2@example.com/repo.git
+// 11. OpenAI API keys. Preserve the leading delimiter instead of relying on
+// word boundaries: OpenAI keys permit `_`/`-`, both of which make `\b`
+// unreliable at token edges. The minimum avoids redacting short prose such as
+// `sk-test`; current legacy and project-scoped keys are comfortably longer.
+const OPENAI_API_KEY_RE =
+  /(^|[^A-Za-z0-9_-])sk-(?:proj-)?[A-Za-z0-9_-]{20,255}(?=$|[^A-Za-z0-9_-])/g;
+
+// 12. URL userinfo credentials, e.g. https://alice:hunter2@example.com/repo.git
 //     or postgres://user:***@db:5432/app. Redact ONLY the password component,
 //     preserving scheme, username, and host so the audited URL stays
 //     recognizable. Implemented as a linear scanner instead of a greedy regex:
@@ -254,6 +262,7 @@ const RULES: Rule[] = [
   { re: GITHUB_TOKEN_RE, replace: REDACTED },
   { re: SLACK_TOKEN_RE, replace: REDACTED },
   { re: GOOGLE_API_KEY_RE, replace: REDACTED },
+  { re: OPENAI_API_KEY_RE, replace: (_m, lead) => `${lead}${REDACTED}` },
 ];
 
 export function redact(input: string | undefined | null): string {

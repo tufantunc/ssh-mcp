@@ -136,6 +136,31 @@ describe('audit store', () => {
     }
   });
 
+  it('re-tightens a permissive active file before rotating it to history', () => {
+    const dir = join(tmpAuditDir(), 'nested');
+    try {
+      const now = new Date('2026-05-25T12:00:00Z');
+      mkdirSync(dir, { recursive: true });
+      const file = activeFilePath(dir, now);
+      writeFileSync(file, 'already-full', { encoding: 'utf8' });
+      chmodSync(file, 0o644);
+
+      const store = new AuditStore({
+        auditDir: dir,
+        auditMaxBytes: 100,
+        maxFileBytes: 1,
+        retain: 2,
+      });
+      store.append({ now, profile: 'p', tool: 'exec', command: 'date', approval: yoloApproval(now), exec: { stdout: 'x', stderr: '', exitCode: 0, durationMs: 1 } });
+
+      expect(readFileSync(`${file}.1`, 'utf8')).toBe('already-full');
+      expect(statSync(`${file}.1`).mode & 0o777).toBe(0o600);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('redacts a secret that lands far past the cap before truncating (large output)', () => {
     const dir = tmpAuditDir();
     try {

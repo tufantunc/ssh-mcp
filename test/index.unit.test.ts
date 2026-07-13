@@ -140,6 +140,38 @@ auth = "kerberos"
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
+
+  it('lets explicit --webui=false override TOML enabled=true before boot validation', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-cli-webui-override-'));
+    const config = path.join(dir, 'config.toml');
+    await fs.writeFile(config, `
+[webui]
+enabled = true
+host = "0.0.0.0"
+auth_token = "env:WEBUI_TOKEN_MISSING"
+
+[approval]
+mode = "manual"
+
+[[sources]]
+id = "test"
+host = "test.example"
+user = "u"
+auth = "kerberos"
+`);
+    try {
+      const result = await runCliStartup([`--config=${config}`, '--webui=false'], {
+        WEBUI_TOKEN_MISSING: undefined,
+        XDG_CONFIG_HOME: path.join(dir, 'xdg'),
+        HOME: dir,
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain('manual approval mode requires WebUI to be enabled');
+      expect(result.stderr).not.toContain('WEBUI_TOKEN_MISSING');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('validateSshCliFlag', () => {

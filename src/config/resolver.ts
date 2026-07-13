@@ -32,7 +32,7 @@ export interface ResolverInputs {
   cliConfigPath?: string;
   /** Override env for tests; defaults to process.env. */
   env?: NodeJS.ProcessEnv;
-  /** CLI `--webui` override; makes TOML WebUI secrets/checks active at load. */
+  /** Explicit CLI `--webui` override; undefined delegates to TOML enabled. */
   webuiEnabled?: boolean;
 }
 

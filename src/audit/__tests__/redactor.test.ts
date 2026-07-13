@@ -162,6 +162,16 @@ describe('audit redactor', () => {
     expect((out.match(/<redacted>/g) ?? []).length).toBeGreaterThanOrEqual(2);
   });
 
+  it('redacts bare legacy and project-scoped OpenAI API keys', () => {
+    const legacy = 'sk-' + 'A'.repeat(48);
+    const project = 'sk-proj-' + 'B'.repeat(80);
+    const out = redact(`stdout=${legacy}\nstderr=${project}`);
+
+    expect(out).not.toContain(legacy);
+    expect(out).not.toContain(project);
+    expect((out.match(/<redacted>/g) ?? []).length).toBe(2);
+  });
+
   it('redacts a fine-grained PAT embedded in a remote URL', () => {
     const fineGrained = 'github_pat_' + 'D'.repeat(22) + '_' + 'E'.repeat(59);
     const url = 'https://' + 'x-access-token' + ':' + fineGrained + '@' + 'github.com/owner/repo.git';
