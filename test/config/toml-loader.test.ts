@@ -649,6 +649,17 @@ known_hosts_file = 123
 `)).toThrow(/known_hosts_file must be a quoted string/);
   });
 
+  it('rejects an empty known_hosts_file instead of silently dropping host-key pinning', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "k"
+host = "h"
+user = "u@EX"
+auth = "kerberos"
+known_hosts_file = ""
+`)).toThrow(/known_hosts_file must be a non-empty string/);
+  });
+
   it('accepts host-key fields on a kerberos source (implies openssh)', () => {
     const cfg = parseTomlConfig(`
 [[sources]]

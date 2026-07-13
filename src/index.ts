@@ -300,6 +300,18 @@ export function hasLegacyCliFlags(config: Record<string, string | null>): boolea
   return legacyFlagNames.some(f => config[f] !== undefined);
 }
 
+/**
+ * Reject a present-but-value-less --ssh before TOML discovery can provide a
+ * lower-precedence source. parseArgv records bare `--ssh` (including the first
+ * half of a space-separated `--ssh JSON` invocation) as null, while valid
+ * repeatable `--ssh=<JSON>` arguments are collected separately.
+ */
+export function validateSshCliFlag(config: Record<string, string | null>): void {
+  if ('ssh' in config && config.ssh === null) {
+    throw new Error('Configuration error:\n--ssh requires a value (--ssh=<JSON>)');
+  }
+}
+
 function validateConfig(config: Record<string, string | null>, multiHost = false) {
   const errors: string[] = [];
 
@@ -382,6 +394,7 @@ const hasLegacyCli = hasLegacyCliFlags(argvConfig);
 // TOML file and report that TOML's parse/env error before the real missing
 // `--user` legacy CLI error.
 if (isCliEnabled || isTestMode) {
+  validateSshCliFlag(argvConfig);
   if (isMultiHost) {
     validateConfig(argvConfig, true);
   } else if (hasLegacyCli) {
