@@ -158,10 +158,20 @@ function reloadSelectsSmart(config: ResolvedConfig): boolean {
  */
 function assertSmartLlmUnchanged(config: ResolvedConfig, engine: ApprovalReloadTarget): void {
   const live = engine.describeSmartLlm();
-  if (live === null) return; // unarmed smart → handled elsewhere (rejected if selected).
+  const llm = config.approval?.llm;
+  if (live === null) {
+    if (!llm) return;
+    // An inactive LLM block still changes the set of modes a fresh boot can
+    // expose. reloadPolicy() only reseeds modes and cannot construct the missing
+    // SmartApproval sub-engine, so accepting this would partially apply the file:
+    // sources/policy would move forward while `smart` remained unavailable until
+    // restart. Reject the whole transaction instead.
+    throw new Error(
+      'new approval [approval.llm] config cannot be hot-reloaded while the smart engine is not armed ' +
+      '(the smart engine is built once at boot) — restart to apply',
+    );
+  }
 
-  const input = resolveApprovalEngineInput(config);
-  const llm = input?.llm;
   if (!llm) {
     // The reloaded file has REMOVED the `[approval.llm]` block (or the whole
     // `[approval]` section) while a smart sub-engine is still armed from boot.

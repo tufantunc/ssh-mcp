@@ -819,7 +819,7 @@ describe('resolveCliConfigPath (Codex R2 P2: reject value-less --config)', () =>
 });
 
 describe('reload config resolution', () => {
-  it('reapplies the CLI --webui override during reload validation', async () => {
+  it('preserves explicit --webui=false while validating a reload', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-reload-webui-'));
     const configPath = path.join(dir, 'config.toml');
     await fs.writeFile(configPath, `
@@ -837,14 +837,14 @@ auth = "kerberos"
       expect(() => resolveReloadConfig({
         cliSources: [],
         configPath,
-        cliWebuiEnabled: true,
+        cliArgs: { webui: null },
         env: {},
       })).toThrow(/auth_token/);
 
       expect(resolveReloadConfig({
         cliSources: [],
         configPath,
-        cliWebuiEnabled: false,
+        cliArgs: { webui: 'false' },
         env: {},
       }).webui?.enabled).toBe(false);
     } finally {

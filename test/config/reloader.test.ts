@@ -719,6 +719,46 @@ auth = "kerberos"
     });
   }
 
+  it('rejects an inactive LLM addition when smart was not armed at boot', async () => {
+    const registry = freshRegistry(TOML_A);
+    // Mirrors a WebUI-enabled yolo/manual process: an approval dispatcher exists,
+    // but no SmartApproval sub-engine was constructed at boot.
+    const engine = freshEngine();
+    expect(engine.availableModes()).not.toContain('smart');
+    const inactiveLlmAddition = `
+[approval]
+mode = "yolo"
+
+[approval.llm]
+endpoint = "https://llm.new/v1/chat/completions"
+model = "gpt-new"
+api_key = "new-key"
+
+[[sources]]
+id = "gamma"
+host = "gamma.example"
+user = "root"
+auth = "kerberos"
+`;
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () => parseTomlConfig(inactiveLlmAddition) as ResolvedConfig,
+      log: () => {},
+    });
+    const events: ConfigReloadedEvent[] = [];
+    reloader.on('config-reloaded', e => events.push(e));
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/\[approval\.llm\].*cannot be hot-reloaded/);
+    expect(res.reason).toMatch(/smart engine is not armed/);
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+    expect(engine.availableModes()).not.toContain('smart');
+    expect(events).toHaveLength(0);
+  });
+
   it('rejects + rolls back a reload that changes the LLM endpoint', async () => {
     const registry = freshRegistry(TOML_A);
     const engine = smartArmedEngine();

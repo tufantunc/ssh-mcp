@@ -1257,13 +1257,15 @@ let stopConfigWatcher: (() => void) | null = null;
 export function resolveReloadConfig(params: {
   cliSources: ServerConfig[];
   configPath: string;
-  cliWebuiEnabled: boolean;
+  cliArgs: Record<string, unknown>;
   env?: NodeJS.ProcessEnv;
 }): ResolvedConfig {
   return resolveConfig({
     cliSources: params.cliSources,
     cliConfigPath: params.configPath,
-    webuiEnabled: params.cliWebuiEnabled,
+    // Keep the CLI switch tri-state identical to startup: absent delegates to
+    // TOML, a bare --webui forces true, and --webui=false forces false.
+    webuiEnabled: cliSwitchOverride(params.cliArgs, 'webui'),
     env: params.env,
   });
 }
@@ -1282,9 +1284,12 @@ function reloadResolveConfig(): ResolvedConfig {
     // feeding it back as the highest-precedence input keeps the loader and the
     // watcher pinned to one file for the whole process lifetime.
     configPath: resolvedConfig.configPath!,
-    // Preserve the startup CLI override so reload validation sees the same
-    // effective WebUI state as a fresh boot with --webui.
-    cliWebuiEnabled: 'webui' in argvConfig,
+    // Preserve the startup CLI override in BOTH directions so reload validation
+    // sees the same effective WebUI state as a fresh boot. Passing the parsed
+    // argv through the shared tri-state parser is load-bearing: key presence
+    // alone would misread --webui=false as enabled, while coercing an absent
+    // switch to false would suppress TOML enabled=true.
+    cliArgs: argvConfig,
   });
 }
 

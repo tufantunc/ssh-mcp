@@ -114,6 +114,7 @@ async function boot(opts: {
   created: FakeEl[];
   calls: FetchCall[];
   emitMode: (data: unknown) => void;
+  emitConfigReloaded: (data: unknown) => void;
   intervalCallbacks: Array<() => unknown>;
   getProfileFetchCount: () => number;
   deferNextProfileResponse: () => () => void;
@@ -126,6 +127,7 @@ async function boot(opts: {
   let nextProfileGate: Promise<void> | null = null;
   let releaseNextProfile: (() => void) | null = null;
   let modeChangedListener: ((ev: { data: string }) => void) | null = null;
+  let configReloadedListener: ((ev: { data: string }) => void) | null = null;
 
   const getById = (sel: string) => {
     let el = byId.get(sel);
@@ -182,6 +184,7 @@ async function boot(opts: {
     onerror: (() => void) | null = null;
     addEventListener(type: string, fn: (ev: { data: string }) => void) {
       if (type === 'mode-changed') modeChangedListener = fn;
+      if (type === 'config-reloaded') configReloadedListener = fn;
     }
     close() {}
   }
@@ -220,6 +223,7 @@ async function boot(opts: {
     created,
     calls,
     emitMode: (data: unknown) => modeChangedListener?.({ data: JSON.stringify(data) }),
+    emitConfigReloaded: (data: unknown) => configReloadedListener?.({ data: JSON.stringify(data) }),
     intervalCallbacks,
     getProfileFetchCount: () => profileFetchCount,
     deferNextProfileResponse: () => {
@@ -363,6 +367,24 @@ describe('WebUI app.js description editor polling', () => {
 
     expect(app.getProfileFetchCount()).toBe(beforePoll);
     expect(draft.value).toBe('unsaved operator draft');
+  });
+
+  it('forces a profile refresh when config-reloaded arrives during description editing', async () => {
+    const app = await boot({
+      modes: { modes: ['yolo', 'manual'], global: 'yolo' },
+      profiles: [PROFILE],
+      sourceEditEnabled: true,
+    });
+    const edit = app.created.find(e => e.tagName === 'button' && e.className === 'desc-edit')!;
+    edit.fire('click');
+    const draft = app.created.find(e => e.tagName === 'textarea' && e.className === 'desc-input')!;
+    draft.value = 'stale after the TOML source set changes';
+
+    const beforeReload = app.getProfileFetchCount();
+    app.emitConfigReloaded({ sources: ['prod'], defaultName: 'prod', at: new Date().toISOString() });
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+
+    expect(app.getProfileFetchCount()).toBe(beforeReload + 1);
   });
 
   it('keeps the editor and draft open when the description save is rejected', async () => {

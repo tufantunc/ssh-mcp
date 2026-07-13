@@ -471,7 +471,10 @@
       // dashboard renders). (The MCP tool list is NOT part of a reload —
       // Decision D4 — so nothing about the SSE stream changes.)
       try { JSON.parse(ev.data); } catch (_) {}
-      fetchModes().then(() => fetchProfiles());
+      // A config reload invalidates the editor's source snapshot itself (the
+      // source may have been renamed/removed), so unlike background polls this
+      // refresh must replace an open draft and converge on server truth.
+      fetchModes().then(() => fetchProfiles(true));
     });
   }
 
