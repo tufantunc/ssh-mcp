@@ -317,6 +317,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       ? requireConfigString(src.private_key, 'private_key')
       : undefined;
     const knownHostsFile = requireConfigString(src.known_hosts_file, 'known_hosts_file');
+    if (knownHostsFile !== undefined && knownHostsFile.length === 0) {
+      throw new Error(`Config: sources.${src.id}.known_hosts_file must be a non-empty string`);
+    }
 
     const out: ServerConfig = {
       name: src.id,

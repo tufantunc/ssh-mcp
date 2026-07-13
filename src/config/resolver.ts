@@ -56,6 +56,7 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
   // or another source-only error would otherwise abort startup even though only
   // the top-level sections survive. ignoreSources handles both.
   const hasCliSources = inputs.cliSources.length > 0;
+  const hasExplicitCliConfig = inputs.cliConfigPath !== undefined;
 
   const fromToml: ResolvedConfig | undefined = tomlPath
     ? loadTomlFile(tomlPath, {
@@ -103,10 +104,15 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
     defaultName,
     defaultExplicit,
     perSourceApproval: hasCliSources ? {} : (fromToml?.perSourceApproval ?? {}),
-    // require_connection is a top-level safety knob: honor a TOML [server]
-    // value even when CLI sources are in charge (mirrors how [webui]/[approval]
-    // survive CLI source suppression). Absent any TOML, default to safe (true).
-    requireConnection: fromToml?.requireConnection ?? true,
+    // An auto-discovered TOML must not weaken the connectionName guard for
+    // explicit CLI sources. In particular, a stale default config containing
+    // require_connection=false must not make a multi-`--ssh` invocation silently
+    // route omitted connectionName calls to its first CLI host. The opt-out is
+    // honored with CLI sources only when the user explicitly supplied --config;
+    // every other path resolves to the safe, fully-defined default (true).
+    requireConnection: hasCliSources && !hasExplicitCliConfig
+      ? true
+      : (fromToml?.requireConnection ?? true),
     server: fromToml?.server,
     webui: fromToml?.webui,
     approval: fromToml?.approval,
