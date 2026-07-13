@@ -594,11 +594,12 @@ function validateApproval(
       }
       const smartActive = out.mode === 'smart' || resolveLlmApiKeyForPerSourceSmart;
       // The LLM block is "fully configured" once it carries endpoint + model.
-      // buildApprovalEngineFromConfig pre-arms smart in that case (so the WebUI
-      // can live-switch into smart without a restart), and SmartApproval needs
-      // the configured api_key to authenticate that live switch. Preserve the
-      // resolved key when the block is fully configured. A missing env remains
-      // non-fatal while smart is inactive, matching deferred resolution.
+      // buildApprovalEngineFromConfig pre-arms smart for supported providers in
+      // that case (so the WebUI can live-switch into smart without a restart),
+      // and SmartApproval needs the configured api_key to authenticate that live
+      // switch. Preserve the resolved key when the block is fully configured. A
+      // missing env remains non-fatal while smart is inactive, matching deferred
+      // resolution.
       const fullyConfigured =
         typeof llm.endpoint === 'string' && typeof llm.model === 'string';
       if (smartActive) {

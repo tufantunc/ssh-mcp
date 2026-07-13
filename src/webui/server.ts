@@ -311,7 +311,7 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
         }
 
         if (pathname === '/api/approval-mode' && method === 'PUT') {
-          if (!checkApprovalMutationAuth({ req, authToken: opts.authToken })) {
+          if (!checkApprovalMutationAuth({ req, authToken })) {
             sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
             return;
           }
@@ -327,7 +327,7 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
 
         const modeMatch = pathname.match(/^\/api\/profiles\/([^/]+)\/approval-mode$/);
         if (modeMatch && method === 'PUT') {
-          if (!checkApprovalMutationAuth({ req, authToken: opts.authToken })) {
+          if (!checkApprovalMutationAuth({ req, authToken })) {
             sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
             return;
           }

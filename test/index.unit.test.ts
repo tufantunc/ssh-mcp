@@ -11,6 +11,7 @@ import {
   buildTransportConfig,
   hasLegacyCliFlags,
   buildApprovalProfile,
+  buildProductionApprovalEngine,
   makeApprovalModeLookup,
   appendDescriptionComment,
   resolveApprovalEngineInput,
@@ -449,6 +450,23 @@ describe('approval command/context helpers', () => {
     expect(resolveApprovalEngineInput(resolvedConfig({
       approval: { llm: { endpoint: 'https://api.example/v1/c', model: 'm-1' } },
     }))).toBeNull();
+  });
+
+  it('builds an LLM-only WebUI engine with a yolo baseline and live smart switching', () => {
+    const engine = buildProductionApprovalEngine(true, resolvedConfig({
+      approval: {
+        llm: {
+          endpoint: 'https://api.example/v1/c',
+          model: 'm-1',
+        },
+      },
+    }));
+
+    expect(engine).not.toBeNull();
+    expect(engine!.getGlobalMode()).toBe('yolo');
+    expect(engine!.availableModes()).toContain('smart');
+    engine!.setGlobalMode('smart');
+    expect(engine!.getGlobalMode()).toBe('smart');
   });
 
   it('parses --webui=false as disabled while preserving the bare flag', () => {

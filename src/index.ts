@@ -870,36 +870,41 @@ export function approvalResolverWarningFromInput(
  *   - manual mode requested but WebUI disabled (gate-12 invariant)
  *   - smart mode requested but [approval.llm] missing endpoint or model
  */
-export function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
-  const approvalCfg = resolvedConfig.approval;
-  const perSourceApproval = resolvedConfig.perSourceApproval ?? {};
+export function buildProductionApprovalEngine(
+  webuiActive: boolean,
+  config: ResolvedConfig = resolvedConfig,
+): ApprovalDispatcher | null {
+  const approvalCfg = config.approval;
+  const perSourceApproval = config.perSourceApproval ?? {};
   const perSourceModes: ApprovalMode[] = Object.values(perSourceApproval);
-  // A "bare" engine has no [approval] section and no per-source overrides — the
-  // only reason it exists at all is that the WebUI is active and wants a
-  // live-switchable engine (otherwise the gate keeps its legacy no-engine allow
-  // and there's nothing to switch).
-  const isBareWebUIEngine = approvalCfg === undefined && perSourceModes.length === 0;
+  const approvalLlmOnly = approvalCfg !== undefined
+    && approvalCfg.mode === undefined
+    && approvalCfg.fail_closed === undefined
+    && approvalCfg.llm !== undefined;
+  // A synthetic engine has no selected approval mode. It exists only while the
+  // WebUI is active so operators can live-switch from the legacy yolo baseline.
+  // Preserve an LLM-only block on that engine so a supported smart provider is
+  // switchable without turning the otherwise-inert config into a boot-time mode.
+  const isSyntheticWebUIEngine = perSourceModes.length === 0
+    && (approvalCfg === undefined || approvalLlmOnly);
 
   // Resolve config through the SHARED helper so the engine we build and the
   // manual-without-resolver boot warning (wireApprovalAndAudit) can never
   // disagree about the effective default/per-source modes. It returns null on
-  // the legacy CLI path (no [approval], no per-source overrides); keep that
-  // no-engine allow UNLESS the WebUI is active and wants a live-switchable
-  // bare engine.
-  const resolved = resolveApprovalEngineInput();
-  if (resolved === null && !(isBareWebUIEngine && webuiActive)) {
+  // the legacy CLI and LLM-only paths; keep that no-engine allow UNLESS the
+  // WebUI is active and wants a live-switchable synthetic engine.
+  const resolved = resolveApprovalEngineInput(config);
+  if (resolved === null && !(isSyntheticWebUIEngine && webuiActive)) {
     return null;
   }
   const input: BuildEngineFromConfigInput = {
-    ...(resolved ?? {}),
-    // For the bare WebUI-only engine, pass an explicit `yolo` baseline. Leaving
+    ...(resolved ?? (approvalLlmOnly ? { llm: approvalCfg?.llm } : {})),
+    // For a synthetic WebUI engine, pass an explicit `yolo` baseline. Leaving
     // this undefined makes buildApprovalEngineFromConfig coerce it to `manual`,
-    // which would enqueue/block every exec even though no approval was
-    // configured — regressing the legacy read-only WebUI/status case and
-    // contradicting the yolo baseline that makeApprovalModeLookup already
-    // reports for an unconfigured global default. Per-source-only and explicit
-    // [approval].mode configs keep the resolved default from the shared helper.
-    defaultMode: resolved?.defaultMode ?? (isBareWebUIEngine ? 'yolo' : undefined),
+    // which would enqueue/block every exec even though no approval mode was
+    // configured. Per-source and explicit [approval].mode configs keep the
+    // resolved default from the shared helper.
+    defaultMode: resolved?.defaultMode ?? (isSyntheticWebUIEngine ? 'yolo' : undefined),
     // Seed per-source static overrides into the live mode store so a live mode
     // switch starts from the operator's configured baseline (mode-switch lane).
     staticOverrides: perSourceApproval,
