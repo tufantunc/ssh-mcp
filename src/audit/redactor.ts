@@ -22,9 +22,9 @@
 
 const REDACTED = '<redacted>';
 
-const SECRET_FLAG = String.raw`(?:password|passwd|pass|secret|token|api[-_]?key|access[-_]?key|client[-_]?secret|auth[-_]?token|bearer)`;
-const SECRET_KEY = String.raw`[A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|auth[-_]?token)[A-Za-z0-9_.-]*`;
-const SHELL_SECRET_KEY = String.raw`[A-Z][A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|APIKEY|API_KEY|ACCESS_KEY|PRIVATE_KEY|CLIENT_SECRET)[A-Z0-9_]*`;
+const SECRET_FLAG = String.raw`(?:password|passwd|passphrase|pass|secret|token|api[-_]?key|access[-_]?key|client[-_]?secret|auth[-_]?token|bearer)`;
+const SECRET_KEY = String.raw`[A-Za-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|auth[-_]?token)[A-Za-z0-9_.-]*`;
+const SHELL_SECRET_KEY = String.raw`[A-Z][A-Z0-9_]*(?:PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|APIKEY|API_KEY|ACCESS_KEY|PRIVATE_KEY|CLIENT_SECRET)[A-Z0-9_]*`;
 const DQ_VALUE = String.raw`"(?:[^"\\]|\\.)*"`;
 const SQ_VALUE = String.raw`'(?:[^'\\]|\\.)*'`;
 const OPEN_DQ_VALUE = String.raw`"(?:[^"\\]|\\.)*$`;
@@ -60,6 +60,10 @@ const CLI_SHORT_P_RE = new RegExp(String.raw`(^|\s)(-p)\s+(?:${DQ_VALUE}|${SQ_VA
 //     `mysql -p"secret with space"` / `mysql -p'secret with space'`. The
 //     attached rule below only accepts non-space chars, so quoted attached
 //     values with spaces would otherwise bypass redaction.
+const CLI_SHORT_P_ATTACHED_OPEN_QUOTED_VALUE_RE = new RegExp(
+  String.raw`(^|\s)-p(?:${OPEN_DQ_VALUE}|${OPEN_SQ_VALUE})`,
+  'g',
+);
 const CLI_SHORT_P_ATTACHED_QUOTED_VALUE_RE = new RegExp(
   String.raw`(^|\s)-p(${DQ_VALUE}|${SQ_VALUE})`,
   'g',
@@ -74,7 +78,7 @@ const CLI_SHORT_P_ATTACHED_RE = /(^|\s)(["']?)-p([^\s"']+)(\2)/g;
 
 // 1g. Authorization: Bearer ***  / Authorization: Basic ***
 const AUTH_HEADER_RE =
-  /(Authorization\s*:\s*)(Bearer|Basic|Token)\s+([A-Za-z0-9_\-\.=+\/]+)/gi;
+  /(Authorization\s*:\s*)(Bearer|Basic|Token)\s+([A-Za-z0-9_~\-\.=+\/]+)/gi;
 
 // 2. Shell env-style assignment, e.g. MY_PASSWORD=foo or API_TOKEN='x y'.
 const SHELL_ASSIGN_OPEN_QUOTED_RE = new RegExp(
@@ -88,11 +92,11 @@ const SHELL_ASSIGN_RE = new RegExp(
 
 // 3. JSON / TOML "key": "value" (case-insensitive).
 const JSON_KV_OPEN_QUOTED_RE = new RegExp(
-  String.raw`("[^"\\]*(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|auth[-_]?token)[^"\\]*"\s*[:=]\s*)${OPEN_DQ_VALUE}`,
+  String.raw`("[^"\\]*(?:password|passwd|passphrase|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|auth[-_]?token)[^"\\]*"\s*[:=]\s*)${OPEN_DQ_VALUE}`,
   'gi',
 );
 const JSON_KV_RE =
-  /("[^"\\]*(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|auth[-_]?token)[^"\\]*"\s*[:=]\s*)"(?:[^"\\]|\\.)*"/gi;
+  /("[^"\\]*(?:password|passwd|passphrase|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|auth[-_]?token)[^"\\]*"\s*[:=]\s*)"(?:[^"\\]|\\.)*"/gi;
 
 // 3b. TOML / dotenv bare keys: password = "value", token='value'.
 const BARE_KV_OPEN_QUOTED_RE = new RegExp(
@@ -106,11 +110,11 @@ const BARE_KV_RE = new RegExp(
 
 // 3c. Human prose: "password hunter2", "token abc".
 const SIMPLE_SECRET_WORD_OPEN_QUOTED_RE = new RegExp(
-  String.raw`\b(password|passwd|secret|token)\s+(?:${OPEN_DQ_VALUE}|${OPEN_SQ_VALUE})`,
+  String.raw`\b(password|passwd|passphrase|secret|token)\s+(?:${OPEN_DQ_VALUE}|${OPEN_SQ_VALUE})`,
   'gi',
 );
 const SIMPLE_SECRET_WORD_RE = new RegExp(
-  String.raw`\b(password|passwd|secret|token)\s+(?:${DQ_VALUE}|${SQ_VALUE}|\S+)`,
+  String.raw`\b(password|passwd|passphrase|secret|token)\s+(?:${DQ_VALUE}|${SQ_VALUE}|\S+)`,
   'gi',
 );
 
@@ -224,6 +228,7 @@ const RULES: Rule[] = [
   { re: CLI_SHORT_P_RE, replace: (_m, lead, flag) => `${lead}${flag} ${REDACTED}` },
   // Quoted attached -p forms (value may contain whitespace) must run before the
   // plain attached rule, which only consumes non-space chars.
+  { re: CLI_SHORT_P_ATTACHED_OPEN_QUOTED_VALUE_RE, replace: (_m, lead) => `${lead}-p${REDACTED}` },
   { re: CLI_SHORT_P_ATTACHED_QUOTED_VALUE_RE, replace: (_m, lead, val) => `${lead}-p${val[0]}${REDACTED}${val[0]}` },
   { re: CLI_SHORT_P_QUOTED_ARG_RE, replace: (_m, lead, arg) => `${lead}${arg[0]}-p${REDACTED}${arg[0]}` },
   { re: CLI_SHORT_P_ATTACHED_RE, replace: (_m, lead, quote) => `${lead}${quote}-p${REDACTED}${quote}` },
@@ -287,7 +292,7 @@ export function redactPemBlocks(input: string | undefined | null): string {
  *
  * `capThenRedact` bounds the bytes the general redaction rules scan to
  * `cap + REDACT_SCAN_HEADROOM_BYTES` so a multi-MB stdout doesn't pay full
- * regex cost. But two secret shapes can legitimately exceed that headroom and
+ * But three secret shapes can legitimately exceed that headroom and
  * would be sliced mid-token — leaking a prefix — if only matched inside the
  * bounded window:
  *   - PEM private-key blocks (BEGIN...END), including a dangling BEGIN whose
@@ -296,7 +301,7 @@ export function redactPemBlocks(input: string | undefined | null): string {
  *     third segment past the 4 KiB headroom (Codex 3541772953).
  *   - URL userinfo credentials, whose `@` delimiter can fall beyond the bounded
  *     scan window (Codex 3549282015).
- * These are matched here over the whole input first, so their full extent is
+ * All three are matched here over the whole input first, so their full extent is
  * replaced with `<redacted>` regardless of where the cap lands. The full scan
  * is cheap when none of the shapes are present (fast literal prefix scan); the
  * cost is paid only when secret material actually exists — exactly when it
@@ -304,10 +309,11 @@ export function redactPemBlocks(input: string | undefined | null): string {
  */
 export function preRedactUnboundedTokens(input: string | undefined | null): string {
   if (!input) return '';
-  return redactUrlUserinfo(input
+  const tokensRedacted = input
     .replace(PEM_RE, REDACTED)
     .replace(PEM_OPEN_RE, REDACTED)
-    .replace(JWT_RE, REDACTED));
+    .replace(JWT_RE, REDACTED);
+  return redactUrlUserinfo(tokensRedacted);
 }
 
 export const REDACTED_PLACEHOLDER = REDACTED;
