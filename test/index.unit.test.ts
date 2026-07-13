@@ -108,6 +108,37 @@ auth = "kerberos"
       await fs.rm(dir, { recursive: true, force: true });
     }
   });
+  it('treats --webui=false as disabled while validating TOML WebUI settings', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-cli-webui-false-'));
+    const config = path.join(dir, 'config.toml');
+    await fs.writeFile(config, `
+[webui]
+enabled = false
+host = "0.0.0.0"
+auth_token = "env:WEBUI_TOKEN_MISSING"
+
+[approval]
+mode = "manual"
+
+[[sources]]
+id = "test"
+host = "test.example"
+user = "u"
+auth = "kerberos"
+`);
+    try {
+      const result = await runCliStartup([`--config=${config}`, '--webui=false'], {
+        WEBUI_TOKEN_MISSING: undefined,
+        XDG_CONFIG_HOME: path.join(dir, 'xdg'),
+        HOME: dir,
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain('manual approval mode requires WebUI to be enabled');
+      expect(result.stderr).not.toContain('WEBUI_TOKEN_MISSING');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('validateSshCliFlag', () => {
@@ -403,6 +434,37 @@ describe('approval command/context helpers', () => {
     expect(listed.description).toBe('password <redacted>');
     expect(enqueued?.command).toBe(listed.command);
     expect(enqueued?.description).toBe(listed.description);
+
+    engine.resolvePending(listed.id, 'deny', 'test cleanup', 'test');
+    await decision;
+  });
+
+  it('bounds pending command and description text before WebUI list and enqueue exposure', async () => {
+    const engine = new ApprovalDispatcher({
+      defaultMode: 'manual',
+      manual: { webuiEnabled: true, timeout_ms: 5000 },
+    });
+    const queue = buildWebUIApprovalQueueAdapter(engine)!;
+    const secret = 'ghp_' + 'S'.repeat(36);
+    const hugeCommand = `deploy --token=${secret} ${'c'.repeat(2 * 1024 * 1024)}`;
+    const hugeDescription = `password ${secret} ${'d'.repeat(2 * 1024 * 1024)}`;
+    let enqueued: ReturnType<typeof queue.list>[number] | undefined;
+    queue.on('enqueue', pending => { enqueued = pending; });
+
+    const decision = engine.decide({
+      profile: { id: 'prod' },
+      tool: 'exec',
+      command: hugeCommand,
+      description: hugeDescription,
+    });
+    await Promise.resolve();
+
+    const listed = queue.list()[0];
+    expect(Buffer.byteLength(listed.command, 'utf8')).toBeLessThanOrEqual(16 * 1024);
+    expect(Buffer.byteLength(listed.description ?? '', 'utf8')).toBeLessThanOrEqual(16 * 1024);
+    expect(listed.command).not.toContain(secret);
+    expect(listed.description).not.toContain(secret);
+    expect(enqueued).toEqual(listed);
 
     engine.resolvePending(listed.id, 'deny', 'test cleanup', 'test');
     await decision;

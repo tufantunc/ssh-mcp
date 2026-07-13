@@ -30,7 +30,7 @@ import {
   type ResolvedSource,
 } from './approval/index.js';
 import { loadAuditSink, stderrWithExecutionError, type AuditSink } from './approval/audit-seam.js';
-import { redact } from './audit/redactor.js';
+import { AUDIT_COMMAND_MIN_CAP_BYTES, capThenRedact } from './audit/store.js';
 import { startWebUI } from './webui/server.js';
 import type {
   ManualApprovalQueue,
@@ -498,7 +498,7 @@ const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
       // `--webui` overrides a disabled/omitted TOML enabled flag. Tell the
       // loader now so it resolves auth_token and applies the non-loopback gate
       // against the effective boot state rather than dropping the token.
-      webuiEnabled: 'webui' in argvConfig,
+      webuiEnabled: isCliSwitchEnabled(argvConfig, 'webui'),
     })
   : { sources: [], perSourceApproval: {}, defaultExplicit: false };
 
@@ -942,14 +942,16 @@ export function buildWebUIApprovalQueueAdapter(engine: ApprovalDispatcher | null
 
   const enqWrappers = new Map<Function, (p: any) => void>();
   const resWrappers = new Map<Function, (p: any, d: any) => void>();
+  const toBoundedWebUIText = (value: string): string =>
+    capThenRedact(value, AUDIT_COMMAND_MIN_CAP_BYTES).text;
   const toWebUI = (p: any): WebUIPendingApproval => {
     const description = p.context?.description;
     return {
       id: p.id,
       profile: p.context?.profile?.id ?? 'default',
       tool: p.context?.tool ?? 'exec',
-      command: redact(p.context?.command ?? ''),
-      description: description === undefined ? undefined : redact(description),
+      command: toBoundedWebUIText(p.context?.command ?? ''),
+      description: description === undefined ? undefined : toBoundedWebUIText(description),
       enqueuedAt: p.enqueued_at,
     };
   };

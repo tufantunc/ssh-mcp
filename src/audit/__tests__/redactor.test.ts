@@ -140,6 +140,19 @@ describe('audit redactor', () => {
     expect((out.match(/<redacted>/g) ?? []).length).toBeGreaterThanOrEqual(3);
   });
 
+  it('redacts JWTs whose claims segment is short or does not start with eyJ', () => {
+    const header = 'eyJhbGciOiJIUzI1NiJ9';
+    const signature = 's'.repeat(43);
+    const emptyObjectClaims = `${header}.e30.${signature}`;
+    const arrayClaims = `${header}.W10.${signature}`;
+
+    const out = redact(`first ${emptyObjectClaims} second ${arrayClaims}`);
+
+    expect(out).not.toContain(emptyObjectClaims);
+    expect(out).not.toContain(arrayClaims);
+    expect((out.match(/<redacted>/g) ?? []).length).toBe(2);
+  });
+
   it('redacts classic and fine-grained GitHub PATs', () => {
     const classic = 'ghp_' + 'A'.repeat(36);
     const fineGrained = 'github_pat_' + 'B'.repeat(22) + '_' + 'C'.repeat(59);

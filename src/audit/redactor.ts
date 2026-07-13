@@ -135,8 +135,9 @@ const AWS_ACCESS_KEY_RE = /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g;
 const AWS_SECRET_HINT_RE =
   /(aws[_-]?secret[_-]?access[_-]?key\s*[:=]?\s*["']?)([A-Za-z0-9/+]{40})(["']?)/gi;
 
-// 7. JWT (three base64url segments).
-const JWT_RE = /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
+// 7. JWT (three base64url segments). Claims need not start with `eyJ`: a
+// valid compact JWT whose payload is `{}` uses the short segment `e30`.
+const JWT_RE = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{8,}\b/g;
 
 // 8. GitHub PATs — classic (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) and
 //    fine-grained (`github_pat_...`, which embeds underscores in its body).
