@@ -194,6 +194,7 @@ function checkApprovalMutationAuth(opts: { req: http.IncomingMessage; authToken?
  * Start the WebUI HTTP server.
  *
  * Throws synchronously (before listen) if configuration is invalid:
+ *   - a provided authToken is empty after trimming
  *   - non-loopback host without authToken
  */
 export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
@@ -201,6 +202,9 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
   const port = opts.port ?? 0;
   const authToken = opts.authToken?.trim();
 
+  if (opts.authToken !== undefined && !authToken) {
+    throw new Error('[webui] auth_token must not be empty or whitespace-only');
+  }
   if (!isLoopback(host) && !authToken) {
     throw new Error(
       `[webui] non-loopback bind (${host}) requires auth_token; refusing to start without one`,

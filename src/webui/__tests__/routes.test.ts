@@ -432,6 +432,12 @@ describe('WebUI auth', () => {
     ).rejects.toThrow(/auth_token/i);
   });
 
+  it('refuses a provided whitespace-only auth_token on a loopback bind', async () => {
+    await expect(
+      startWebUI({ host: '127.0.0.1', port: 0, registry: fakeRegistry, authToken: ' \t\n ' }),
+    ).rejects.toThrow(/auth_token/i);
+  });
+
   it('loopback without token allows api access (no token configured)', async () => {
     handle = await startWebUI({ host: '127.0.0.1', port: 0, registry: fakeRegistry });
     const r = await get(handle, '/api/profiles');

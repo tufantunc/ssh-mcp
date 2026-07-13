@@ -67,6 +67,16 @@ describe('audit redactor', () => {
     expect(mixed).toContain(`mysqldump -p${R}`);
   });
 
+  it('redacts unterminated quoted attached -p passwords', () => {
+    const doubleQuoted = redact('mysql -p"unterminated double quote');
+    expect(doubleQuoted).toContain(`mysql -p${R}`);
+    expect(doubleQuoted).not.toContain('unterminated');
+
+    const singleQuoted = redact("mariadb -p'unterminated single quote");
+    expect(singleQuoted).toContain(`mariadb -p${R}`);
+    expect(singleQuoted).not.toContain('unterminated');
+  });
+
   it('redacts JSON/TOML-ish secret values', () => {
     const out = redact('{"password":"pw","nested_token":"tok","safe":"ok"}\napi_key = "abc"\ntoken abc');
     expect(out).toContain(`"password":"${R}"`);
@@ -74,6 +84,29 @@ describe('audit redactor', () => {
     expect(out).toContain(`api_key = ${R}`);
     expect(out).toContain(`token ${R}`);
     expect(out).toContain('"safe":"ok"');
+  });
+
+  it('treats passphrase flags, fields, assignments, and prose as secrets', () => {
+    const input = [
+      '--passphrase=flag-value',
+      'SSH_PASSPHRASE=env-value',
+      'key_passphrase = "field-value"',
+      '{"passphrase":"json-value"}',
+      'passphrase prose-value',
+    ].join(' ');
+    const out = redact(input);
+
+    expect((out.match(/<redacted>/g) ?? []).length).toBeGreaterThanOrEqual(5);
+    for (const value of ['flag-value', 'env-value', 'field-value', 'json-value', 'prose-value']) {
+      expect(out).not.toContain(value);
+    }
+  });
+
+  it('consumes tildes as part of bearer tokens', () => {
+    const out = redact('Authorization: Bearer abc~def~ghi next');
+    expect(out).toContain(`Authorization: Bearer ${R} next`);
+    expect(out).not.toContain('~def');
+    expect(out).not.toContain('~ghi');
   });
 
   it('redacts PEM private keys', () => {
@@ -107,6 +140,19 @@ describe('audit redactor', () => {
     expect((out.match(/<redacted>/g) ?? []).length).toBeGreaterThanOrEqual(3);
   });
 
+  it('redacts JWTs whose claims segment is short or does not start with eyJ', () => {
+    const header = 'eyJhbGciOiJIUzI1NiJ9';
+    const signature = 's'.repeat(43);
+    const emptyObjectClaims = `${header}.e30.${signature}`;
+    const arrayClaims = `${header}.W10.${signature}`;
+
+    const out = redact(`first ${emptyObjectClaims} second ${arrayClaims}`);
+
+    expect(out).not.toContain(emptyObjectClaims);
+    expect(out).not.toContain(arrayClaims);
+    expect((out.match(/<redacted>/g) ?? []).length).toBe(2);
+  });
+
   it('redacts classic and fine-grained GitHub PATs', () => {
     const classic = 'ghp_' + 'A'.repeat(36);
     const fineGrained = 'github_pat_' + 'B'.repeat(22) + '_' + 'C'.repeat(59);
@@ -114,6 +160,16 @@ describe('audit redactor', () => {
     expect(out).not.toContain(classic);
     expect(out).not.toContain(fineGrained);
     expect((out.match(/<redacted>/g) ?? []).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('redacts bare legacy and project-scoped OpenAI API keys', () => {
+    const legacy = 'sk-' + 'A'.repeat(48);
+    const project = 'sk-proj-' + 'B'.repeat(80);
+    const out = redact(`stdout=${legacy}\nstderr=${project}`);
+
+    expect(out).not.toContain(legacy);
+    expect(out).not.toContain(project);
+    expect((out.match(/<redacted>/g) ?? []).length).toBe(2);
   });
 
   it('redacts a fine-grained PAT embedded in a remote URL', () => {

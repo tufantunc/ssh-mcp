@@ -32,7 +32,7 @@ export interface ResolverInputs {
   cliConfigPath?: string;
   /** Override env for tests; defaults to process.env. */
   env?: NodeJS.ProcessEnv;
-  /** CLI `--webui` override; makes TOML WebUI secrets/checks active at load. */
+  /** Explicit CLI `--webui` override; undefined delegates to TOML enabled. */
   webuiEnabled?: boolean;
 }
 
@@ -58,6 +58,7 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
   // or another source-only error would otherwise abort startup even though only
   // the top-level sections survive. ignoreSources handles both.
   const hasCliSources = inputs.cliSources.length > 0;
+  const hasExplicitCliConfig = inputs.cliConfigPath !== undefined;
 
   const fromToml: ResolvedConfig | undefined = tomlPath
     ? loadTomlFile(tomlPath, {
@@ -106,9 +107,14 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
     defaultName,
     defaultExplicit,
     perSourceApproval: hasCliSources ? {} : (fromToml?.perSourceApproval ?? {}),
-    // require_connection is a top-level [server] knob, so it survives even when
-    // CLI sources suppress the TOML source list (like server/webui/approval).
-    requireConnection: fromToml?.requireConnection,
+    // An auto-discovered TOML must not weaken the connectionName guard for
+    // explicit CLI sources. In particular, a stale default config containing
+    // require_connection=false must not make a multi-`--ssh` invocation silently
+    // route omitted connectionName calls to its first CLI host. The opt-out is
+    // honored with CLI sources only when the user explicitly supplied --config.
+    requireConnection: hasCliSources && !hasExplicitCliConfig
+      ? undefined
+      : fromToml?.requireConnection,
     server: fromToml?.server,
     webui: fromToml?.webui,
     approval: fromToml?.approval,
