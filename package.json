@@ -11,6 +11,8 @@
     "prepare": "npm run build",
     "build": "tsc && shx chmod +x build/*.js",
     "inspect": "npx @modelcontextprotocol/inspector node build/index.js",
+    "changeset": "changeset",
+    "version": "changeset version",
     "test": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run",
     "test:unit": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/unit/ test/property/",
     "test:integration": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/integration/",
@@ -38,6 +40,8 @@
     "zod-to-json-schema": "3.24.6"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^0.7.0",
+    "@changesets/cli": "^2.31.0",
     "@types/node": "^24.5.2",
     "@types/ssh2": "^1.15.5",
     "cross-env": "^7.0.3",
