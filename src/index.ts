@@ -902,6 +902,14 @@ export function resolveConfiguredApprovalMode(
   return profile.approval?.mode ?? input.defaultMode ?? 'manual';
 }
 
+/** Effective live mode used when audit must record a pre-gate failure. */
+export function resolveLiveApprovalMode(
+  profileId: string,
+  engine: Pick<ApprovalDispatcher, 'getEffectiveMode'> | null,
+): ApprovalMode {
+  return engine?.getEffectiveMode(profileId) ?? 'yolo';
+}
+
 export function approvalResolverWarningFromInput(
   input: BuildEngineFromConfigInput | null,
   params: { webuiEnabled: boolean; resolverWired: boolean },
@@ -1624,7 +1632,7 @@ server.tool(
   async ({ command, description, connectionName }) => {
     let commandWithDescription = String(command ?? '');
     let profile = resolvedProfileName(connectionName);
-    let approvalMode = resolveConfiguredApprovalMode(profile);
+    let approvalMode = resolveLiveApprovalMode(profile, approvalEngine);
     // Fallback timestamp for errors raised before the transport call (registry
     // init failure, approval deny). Re-captured immediately before t.exec below
     // so a SUCCESSFUL command's audit durationMs measures command runtime only,
@@ -1637,7 +1645,7 @@ server.tool(
       commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
       const target = approvalTargetForConnection(registry, connectionName);
       profile = target.profile;
-      approvalMode = resolveConfiguredApprovalMode(profile);
+      approvalMode = resolveLiveApprovalMode(profile, approvalEngine);
       const approved = await approveTransportForCurrentConfig({
         reg: registry,
         profile: target.approvalProfile,
@@ -1694,7 +1702,7 @@ if (!DISABLE_SUDO) {
     async ({ command, description, connectionName }) => {
       let commandWithDescription = String(command ?? '');
       let profile = resolvedProfileName(connectionName);
-      let approvalMode = resolveConfiguredApprovalMode(profile);
+      let approvalMode = resolveLiveApprovalMode(profile, approvalEngine);
       // Fallback timestamp for errors raised before the transport call (registry
       // init failure, approval deny). Re-captured immediately before
       // t.execElevated below so a SUCCESSFUL command's audit durationMs measures
@@ -1707,7 +1715,7 @@ if (!DISABLE_SUDO) {
         commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
         const target = approvalTargetForConnection(registry, connectionName);
         profile = target.profile;
-        approvalMode = resolveConfiguredApprovalMode(profile);
+        approvalMode = resolveLiveApprovalMode(profile, approvalEngine);
         const approved = await approveTransportForCurrentConfig({
           reg: registry,
           profile: target.approvalProfile,

@@ -7,7 +7,7 @@
  * to exactly one trailing reload (re-entrancy guard); a throwing callback must
  * not kill the watcher; an empty path is a no-op (CLI mode).
  */
-import { mkdtempSync, rmSync, writeFileSync, renameSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, renameSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -229,6 +229,39 @@ describe('startConfigWatcher', () => {
     renameSync(tmp2, cfgPath);
     await sleep(160);
     expect(calls).toBe(3);
+  });
+
+  it('watches the real target when configPath is a symlink', async () => {
+    const linkDir = join(dir, 'links');
+    const targetDir = join(dir, 'real');
+    mkdirSync(linkDir);
+    mkdirSync(targetDir);
+    const targetPath = join(targetDir, 'actual.toml');
+    const symlinkPath = join(linkDir, 'config.toml');
+    writeFileSync(targetPath, 'sources = []\n# initial\n');
+    symlinkSync(targetPath, symlinkPath);
+
+    let calls = 0;
+    stop = startConfigWatcher({
+      configPath: symlinkPath,
+      debounceMs: 60,
+      onChange: () => { calls++; },
+      log: () => {},
+    });
+    expect(stop).toBeTypeOf('function');
+
+    // Editing the target does not touch the symlink entry's directory. The
+    // watcher must subscribe to the resolved target directory as well.
+    writeFileSync(targetPath, 'sources = []\n# target-in-place\n');
+    await sleep(160);
+    expect(calls).toBe(1);
+
+    // Atomic replacement in the target directory must remain observable too.
+    const replacement = join(targetDir, '.actual.toml.tmp');
+    writeFileSync(replacement, 'sources = []\n# target-replaced\n');
+    renameSync(replacement, targetPath);
+    await sleep(160);
+    expect(calls).toBe(2);
   });
 
   it('ignores changes to OTHER files in the watched directory', async () => {

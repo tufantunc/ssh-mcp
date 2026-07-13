@@ -325,6 +325,13 @@ export interface BuildEngineFromConfigOptions {
   smartFetchImpl?: SmartApprovalOptions['fetchImpl'];
 }
 
+/** True when an inactive LLM block would make smart switchable on a fresh boot. */
+export function isSmartLlmPreArmable(llm: BuildEngineFromConfigInput['llm']): boolean {
+  const configured = !!(llm?.endpoint && llm?.model && !llm?.api_key_unresolved);
+  const providerSupported = llm?.provider === undefined || llm.provider === 'openai';
+  return configured && providerSupported;
+}
+
 export function buildApprovalEngineFromConfig(
   approval: BuildEngineFromConfigInput | undefined,
   options: BuildEngineFromConfigOptions,
@@ -359,14 +366,14 @@ export function buildApprovalEngineFromConfig(
   // guaranteed to omit the operator's configured authorization.
   const llmConfigured = !!(llm?.endpoint && llm?.model && !llm?.api_key_unresolved);
   const smartRequired = usedModes.has('smart');
-  const smartProviderSupported = llm?.provider === undefined || llm.provider === 'openai';
+  const smartPreArmable = isSmartLlmPreArmable(llm);
   if (smartRequired && !llmConfigured) {
     if (llm?.api_key_unresolved) {
       throw new Error('approval mode "smart" requires the configured [approval.llm].api_key to resolve');
     }
     throw new Error('approval mode "smart" requires [approval.llm].endpoint and .model');
   }
-  if (llmConfigured && (smartRequired || smartProviderSupported)) {
+  if (llmConfigured && (smartRequired || smartPreArmable)) {
     built.smart = {
       llm: {
         endpoint: llm!.endpoint!,

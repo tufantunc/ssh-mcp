@@ -110,38 +110,55 @@ export function startConfigWatcher(options: ConfigWatcherOptions): (() => void) 
   // to the old inode (`fs.watch(configPath)`) receives the first rename and is
   // then attached to a unlinked inode, so subsequent edits to the new file are
   // never seen — the README "watches that file and hot-reloads on change"
-  // contract silently breaks after one save. A directory watcher survives the
-  // rename because the directory inode is stable, and still sees plain in-place
-  // writes (filename === basename). This mirrors dbhub's chokidar behaviour
-  // using only Node's built-in fs.watch.
-  const dir = path.dirname(configPath);
-  const base = path.basename(configPath);
-
-  let watcher: fs.FSWatcher;
+  // contract silently breaks after one save. Directory watchers survive the
+  // rename because their inodes are stable and still see plain in-place writes.
+  //
+  // A configured path may itself be a symlink. Watching only its lexical parent
+  // misses every direct or atomic-replace edit in the real target directory, so
+  // subscribe to both paths (deduplicated by directory + basename).
+  const candidatePaths = new Set<string>([path.resolve(configPath)]);
   try {
-    watcher = fs.watch(dir, (eventType, filename) => {
-      // Most platforms emit 'change'; some emit 'rename' on save-via-replace
-      // or temp-file churn. Treat both as "the watched file might have changed"
-      // and let the parse step in onChange be the real validator. fs.watch on a
-      // directory reports the affected entry in `filename`; when the platform
-      // omits it (rare) we conservatively schedule a reload rather than miss an
-      // edit. Events for OTHER files in the directory are ignored.
-      if (eventType !== 'change' && eventType !== 'rename') return;
-      if (filename != null && path.basename(filename.toString()) !== base) return;
-      scheduleReload();
-    });
+    candidatePaths.add(fs.realpathSync(configPath));
+  } catch {
+    // The lexical directory watcher still observes a config file created later.
+  }
+  const watchedEntries = new Map<string, Set<string>>();
+  for (const candidate of candidatePaths) {
+    const dir = path.dirname(candidate);
+    const names = watchedEntries.get(dir) ?? new Set<string>();
+    names.add(path.basename(candidate));
+    watchedEntries.set(dir, names);
+  }
+
+  const watchers: fs.FSWatcher[] = [];
+  try {
+    for (const [dir, basenames] of watchedEntries) {
+      const watcher = fs.watch(dir, (eventType, filename) => {
+        // Most platforms emit 'change'; some emit 'rename' on save-via-replace
+        // or temp-file churn. Treat both as "the watched file might have changed"
+        // and let the parse step in onChange be the real validator. fs.watch on a
+        // directory reports the affected entry in `filename`; when the platform
+        // omits it (rare) we conservatively schedule a reload rather than miss an
+        // edit. Events for OTHER files in the directory are ignored.
+        if (eventType !== 'change' && eventType !== 'rename') return;
+        if (filename != null && !basenames.has(path.basename(filename.toString()))) return;
+        scheduleReload();
+      });
+      watchers.push(watcher);
+      watcher.unref?.();
+      watcher.on('error', (err: Error) => {
+        log(`Config watcher: file watch error in ${dir}: ${err?.message || err}`);
+      });
+    }
   } catch (err: any) {
+    for (const watcher of watchers) {
+      try { watcher.close(); } catch { /* best effort */ }
+    }
     log(`Config watcher: failed to watch ${configPath}: ${err?.message || err}`);
     return null;
   }
 
-  // Don't block process exit on the watcher.
-  watcher.unref?.();
-  watcher.on('error', (err: Error) => {
-    log(`Config watcher: file watch error on ${configPath}: ${err?.message || err}`);
-  });
-
-  log(`Watching ${configPath} for changes (hot reload enabled)`);
+  log(`Watching ${[...candidatePaths].join(', ')} for changes (hot reload enabled)`);
 
   return () => {
     // Mark closed FIRST so any reload still in-flight won't re-schedule from its
@@ -151,6 +168,8 @@ export function startConfigWatcher(options: ConfigWatcherOptions): (() => void) 
       clearTimeout(debounceTimer);
       debounceTimer = null;
     }
-    try { watcher.close(); } catch { /* best effort */ }
+    for (const watcher of watchers) {
+      try { watcher.close(); } catch { /* best effort */ }
+    }
   };
 }

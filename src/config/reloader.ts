@@ -31,6 +31,7 @@ import type { ServerConfig } from '../transports/types.js';
 import type { RegistryStateSnapshot } from '../transports/registry.js';
 import type { ModeStoreState } from '../approval/mode-store.js';
 import type { SmartLlmSnapshot } from '../approval/smart.js';
+import { isSmartLlmPreArmable } from '../approval/engine.js';
 
 /** The registry surface the reloader drives (subset of TransportRegistry). */
 export interface RegistryReloadTarget {
@@ -156,16 +157,16 @@ function reloadSelectsSmart(config: ResolvedConfig): boolean {
  * smart policy is still handled by assertSmartPolicyHasCurrentLlm +
  * reloadPolicy's assertSwitchable.
  */
-function assertSmartLlmUnchanged(config: ResolvedConfig, engine: ApprovalReloadTarget): void {
-  const live = engine.describeSmartLlm();
+function assertSmartLlmUnchanged(config: ResolvedConfig, engine?: ApprovalReloadTarget): void {
+  const live = engine?.describeSmartLlm() ?? null;
   const llm = config.approval?.llm;
   if (live === null) {
-    if (!llm) return;
-    // An inactive LLM block still changes the set of modes a fresh boot can
-    // expose. reloadPolicy() only reseeds modes and cannot construct the missing
-    // SmartApproval sub-engine, so accepting this would partially apply the file:
-    // sources/policy would move forward while `smart` remained unavailable until
-    // restart. Reject the whole transaction instead.
+    // Preserve inert blocks that would also leave smart unavailable on a fresh
+    // boot (unsupported provider, incomplete settings, or an unresolved key).
+    // They do not change the live mode set, so source/description edits can be
+    // applied safely. A newly pre-armable block is different: fresh boot would
+    // expose smart while this process cannot construct it, so reject atomically.
+    if (!isSmartLlmPreArmable(llm)) return;
     throw new Error(
       'new approval [approval.llm] config cannot be hot-reloaded while the smart engine is not armed ' +
       '(the smart engine is built once at boot) — restart to apply',
@@ -265,6 +266,13 @@ export class ConfigReloader extends EventEmitter {
 
     // --- 3. Swap, validate-before-commit per layer, rollback on any error. --
     try {
+      // Whether an approval dispatcher exists or not, a newly pre-armable LLM
+      // block cannot be applied without constructing a smart sub-engine. Keep
+      // selected-smart validation first so an incomplete current block reports
+      // the direct boot-parity error before the broader stale-engine guard.
+      if (this.engine) assertSmartPolicyHasCurrentLlm(next);
+      assertSmartLlmUnchanged(next, this.engine);
+
       // Security guard (no-engine path): when the server booted WITHOUT an
       // approval engine (no [approval] policy + WebUI disabled), gateApproval
       // falls back to `legacy:no-engine` allow — effectively yolo. A reload
@@ -334,8 +342,6 @@ export class ConfigReloader extends EventEmitter {
       // file still selects smart must also carry a complete current LLM block so
       // fresh boot and hot reload enforce the same config validity.
       if (this.engine) {
-        assertSmartPolicyHasCurrentLlm(next);
-        assertSmartLlmUnchanged(next, this.engine);
         this.engine.reloadPolicy({
           // Resolve the effective global default the SAME way boot does
           // (resolveEffectiveDefaultMode): a bare/knob-only [approval] block

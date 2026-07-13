@@ -17,6 +17,7 @@ import {
   appendDescriptionComment,
   resolveApprovalEngineInput,
   resolveConfiguredApprovalMode,
+  resolveLiveApprovalMode,
   preResolutionProfileName,
   approvalResolverWarningFromInput,
   isCliSwitchEnabled,
@@ -601,6 +602,26 @@ describe('approval command/context helpers', () => {
     expect(resolveConfiguredApprovalMode('unknown', config)).toBe('smart');
     expect(resolveConfiguredApprovalMode('constructor', config)).toBe('smart');
     expect(resolveConfiguredApprovalMode('legacy', resolvedConfig())).toBe('yolo');
+  });
+
+  it('resolves pre-gate audit mode from the live dispatcher after policy reload', () => {
+    const staleBootConfig = resolvedConfig({
+      approval: { mode: 'yolo' },
+      perSourceApproval: { lab: 'yolo' },
+    });
+    const engine = new ApprovalDispatcher({
+      defaultMode: 'yolo',
+      manual: { webuiEnabled: true, timeout_ms: 1000 },
+    });
+    engine.reloadPolicy({ defaultMode: 'manual', staticOverrides: { lab: 'yolo' } });
+
+    // The boot snapshot is stale after hot reload; pre-gate failures must report
+    // the same live mode that the dispatcher would enforce for a new decision.
+    expect(resolveConfiguredApprovalMode('unknown', staleBootConfig)).toBe('yolo');
+    expect(resolveLiveApprovalMode('unknown', engine)).toBe('manual');
+    expect(resolveLiveApprovalMode('lab', engine)).toBe('yolo');
+    expect(resolveLiveApprovalMode('constructor', engine)).toBe('manual');
+    expect(resolveLiveApprovalMode('legacy', null)).toBe('yolo');
   });
 
   it('keeps a whitespace connection name unresolved instead of attributing it to the default profile', () => {

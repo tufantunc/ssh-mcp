@@ -719,6 +719,91 @@ auth = "kerberos"
     });
   }
 
+  it('allows an unchanged inert LLM block when smart was not armed at boot', async () => {
+    const inertLlmPrefix = `
+[approval]
+mode = "yolo"
+
+[approval.llm]
+provider = "anthropic"
+endpoint = "https://api.anthropic.com/v1/messages"
+model = "claude-test"
+`;
+    const bootToml = `${inertLlmPrefix}
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+
+[[sources]]
+id = "beta"
+host = "beta.example"
+user = "root"
+auth = "kerberos"
+`;
+    const nextToml = `${inertLlmPrefix}
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+
+[[sources]]
+id = "gamma"
+host = "gamma.example"
+user = "root"
+auth = "kerberos"
+`;
+    const registry = freshRegistry(bootToml);
+    const engine = freshEngine();
+    expect(engine.availableModes()).not.toContain('smart');
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () => parseTomlConfig(nextToml) as ResolvedConfig,
+      log: () => {},
+    });
+    const events: ConfigReloadedEvent[] = [];
+    reloader.on('config-reloaded', e => events.push(e));
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(true);
+    expect(registry.names()).toEqual(['alpha', 'gamma']);
+    expect(engine.availableModes()).not.toContain('smart');
+    expect(events).toHaveLength(1);
+  });
+
+  it('rejects a pre-armable LLM addition when no approval engine exists', async () => {
+    const registry = freshRegistry(TOML_A);
+    const preArmableLlmAddition = `
+[approval]
+mode = "yolo"
+
+[approval.llm]
+endpoint = "https://llm.new/v1/chat/completions"
+model = "gpt-new"
+
+[[sources]]
+id = "gamma"
+host = "gamma.example"
+user = "root"
+auth = "kerberos"
+`;
+    const reloader = new ConfigReloader({
+      registry,
+      loadConfig: () => parseTomlConfig(preArmableLlmAddition) as ResolvedConfig,
+      log: () => {},
+    });
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/\[approval\.llm\].*cannot be hot-reloaded/);
+    expect(registry.names()).toEqual(['alpha', 'beta']);
+  });
+
   it('rejects an inactive LLM addition when smart was not armed at boot', async () => {
     const registry = freshRegistry(TOML_A);
     // Mirrors a WebUI-enabled yolo/manual process: an approval dispatcher exists,
