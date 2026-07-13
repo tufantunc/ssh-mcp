@@ -28,6 +28,18 @@ Thank you for your interest in contributing to ssh-mcp! Your help is greatly app
 - Ensure your PR is up to date with the latest `main` branch.
 - Reference related issues in your PR description (e.g., `Closes #12`).
 - Be responsive to feedback and requested changes.
+- **Add a changeset:** Run `npm run changeset` before pushing. Select the bump type (patch/minor/major) and write a short changelog entry. This ensures your change appears in the release notes.
+
+### Changeset Example
+
+```bash
+npm run changeset
+# Select ssh-mcp
+# Select minor (for new features) or patch (for fixes)
+# Write: "Add ProxyJump support for bastion connections"
+```
+
+This creates a file in `.changeset/` — commit it with your PR. When the PR merges, the changesets bot opens a "Version Packages" PR that bumps the version, updates CHANGELOG.md, and publishes to npm.
 
 ## Code of Conduct
 - Be respectful and inclusive in all interactions.
