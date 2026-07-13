@@ -1035,8 +1035,16 @@ function buildWebUIAuditTailAdapter(sink: AuditSink): WebUIAuditTail | undefined
   };
 }
 
-function makeApprovalModeLookup(): (profileName: string) => string {
-  const perSource = resolvedConfig.perSourceApproval ?? {};
+export function makeApprovalModeLookup(
+  deps: {
+    perSourceApproval?: Record<string, ApprovalMode>;
+    getEngine?: () => Pick<ApprovalDispatcher, 'defaultMode'> | null;
+  } = {},
+): (profileName: string) => string {
+  const perSource = deps.perSourceApproval ?? resolvedConfig.perSourceApproval ?? {};
+  // Engine read stays lazy (per lookup, like the previous module-level read)
+  // so the adapter never caches a stale null/instance across engine wiring.
+  const getEngine = deps.getEngine ?? (() => approvalEngine);
   // Mirror exactly what ApprovalDispatcher.decide() enforces so the WebUI
   // never advertises a gate that is not actually applied:
   //   - no engine wired        -> gateApproval() takes the legacy no-engine
@@ -1047,8 +1055,16 @@ function makeApprovalModeLookup(): (profileName: string) => string {
   //   - otherwise               -> decide() falls back to the engine's own
   //                               resolved default mode.
   return (name: string): string => {
-    if (!approvalEngine) return 'yolo';
-    return perSource[name] ?? approvalEngine.defaultMode;
+    const engine = getEngine();
+    if (!engine) return 'yolo';
+    // Own-property check like buildApprovalProfile(): a profile named
+    // `toString`/`constructor`/another Object.prototype key must not read the
+    // inherited member off the plain override object — /api/profiles would
+    // then serialize a function/object instead of falling back to the
+    // engine's default mode that decide() actually enforces (Codex 3568536828).
+    return Object.prototype.hasOwnProperty.call(perSource, name)
+      ? perSource[name]
+      : engine.defaultMode;
   };
 }
 

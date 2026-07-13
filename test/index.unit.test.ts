@@ -11,6 +11,7 @@ import {
   buildTransportConfig,
   hasLegacyCliFlags,
   buildApprovalProfile,
+  makeApprovalModeLookup,
   appendDescriptionComment,
   resolveApprovalEngineInput,
   resolveConfiguredApprovalMode,
@@ -359,6 +360,28 @@ describe('approval command/context helpers', () => {
   it('does not treat inherited Object.prototype members as approval overrides', () => {
     expect(buildApprovalProfile('constructor', {})).toEqual({ id: 'constructor' });
     expect(buildApprovalProfile('toString', {})).toEqual({ id: 'toString' });
+  });
+
+  it('WebUI approval-mode lookup ignores inherited Object.prototype keys (Codex 3568536828)', () => {
+    const engine = { defaultMode: 'smart' as const };
+    const lookup = makeApprovalModeLookup({
+      perSourceApproval: { prod: 'manual' },
+      getEngine: () => engine,
+    });
+    // Own override wins; anything else falls back to the engine default —
+    // including profiles named after Object.prototype members, which the old
+    // `perSource[name] ?? default` read as inherited functions.
+    expect(lookup('prod')).toBe('manual');
+    expect(lookup('staging')).toBe('smart');
+    expect(lookup('toString')).toBe('smart');
+    expect(lookup('constructor')).toBe('smart');
+    expect(lookup('hasOwnProperty')).toBe('smart');
+    // No engine wired -> legacy no-engine allow path is advertised as yolo.
+    const noEngine = makeApprovalModeLookup({
+      perSourceApproval: {},
+      getEngine: () => null,
+    });
+    expect(noEngine('toString')).toBe('yolo');
   });
 
   it('neutralizes description newlines before appending the shell comment', () => {

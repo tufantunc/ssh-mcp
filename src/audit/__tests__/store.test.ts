@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, rmSync, existsSync, readdirSync, statSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync, readdirSync, statSync, writeFileSync, chmodSync, mkdirSync } from 'fs';
 import { tmpdir, homedir } from 'os';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -110,6 +110,28 @@ describe('audit store', () => {
       expect(fileMode).toBe(0o600);
     } finally {
       process.umask(prevMask);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('re-tightens a pre-existing permissive audit file to 0600 on append (Codex 3568536819)', () => {
+    const dir = join(tmpAuditDir(), 'nested');
+    try {
+      const now = new Date('2026-05-25T12:00:00Z');
+      // Simulate a file pre-created by an operator / older permissive setup:
+      // it already exists as 0644 BEFORE the store ever writes to it.
+      mkdirSync(dir, { recursive: true });
+      const file = activeFilePath(dir, now);
+      writeFileSync(file, '', { encoding: 'utf8' });
+      chmodSync(file, 0o644);
+      expect(statSync(file).mode & 0o777).toBe(0o644);
+
+      const store = new AuditStore({ auditDir: dir, auditMaxBytes: 100 });
+      store.append({ now, profile: 'p', tool: 'exec', command: 'date', approval: yoloApproval(now), exec: { stdout: 'x', stderr: '', exitCode: 0, durationMs: 1 } });
+
+      // The append must not leave command/output records world-readable.
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -457,6 +479,29 @@ describe('audit store', () => {
       expect(resolveAuditDir(undefined)).toBe('/tmp/ssh-mcp-audit-env');
       // ...and an explicit non-empty override wins over env.
       expect(resolveAuditDir('/tmp/ssh-mcp-audit-override')).toBe('/tmp/ssh-mcp-audit-override');
+    } finally {
+      if (savedEnv === undefined) delete process.env.SSH_MCP_AUDIT_DIR;
+      else process.env.SSH_MCP_AUDIT_DIR = savedEnv;
+    }
+  });
+
+  it('expands only current-home tilde forms, leaving ~user/literal ~names alone (Codex 3568536833)', () => {
+    const savedEnv = process.env.SSH_MCP_AUDIT_DIR;
+    try {
+      delete process.env.SSH_MCP_AUDIT_DIR;
+      // Current-user home forms expand, matching the TOML loader's expandHome().
+      expect(resolveAuditDir('~')).toBe(homedir());
+      expect(resolveAuditDir('~/audit')).toBe(join(homedir(), 'audit'));
+      // `~user` forms must NOT be rewritten under the current user's home —
+      // they resolve as literal relative paths, same as after expandHome().
+      expect(resolveAuditDir('~root/ssh-mcp')).toBe(resolve('~root/ssh-mcp'));
+      // The old permissive slice would have produced ~/root/ssh-mcp.
+      expect(resolveAuditDir('~root/ssh-mcp')).not.toBe(join(homedir(), 'root/ssh-mcp'));
+      // A literal directory named `~logs` is preserved, not home-expanded.
+      expect(resolveAuditDir('~logs')).toBe(resolve('~logs'));
+      // The same discipline applies to the env override path.
+      process.env.SSH_MCP_AUDIT_DIR = '~alice/audit';
+      expect(resolveAuditDir(undefined)).toBe(resolve('~alice/audit'));
     } finally {
       if (savedEnv === undefined) delete process.env.SSH_MCP_AUDIT_DIR;
       else process.env.SSH_MCP_AUDIT_DIR = savedEnv;
