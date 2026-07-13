@@ -120,6 +120,42 @@ audit_dir = "~/audit-only"
     expect(cfg.configPath).toBe(p);
   });
 
+  it('does not inherit require_connection=false from auto-discovered TOML for CLI sources', () => {
+    const xdgRoot = path.join(tmp, 'xdg-cli-guard');
+    const discovered = writeToml(xdgRoot, 'ssh-mcp/config.toml', `
+[server]
+require_connection = false
+
+[[sources]]
+id = "stale-toml"
+host = "stale.example"
+user = "u"
+auth = "kerberos"
+`);
+    const cfg = resolveConfig({
+      cliSources: [cliSource('a'), cliSource('b')],
+      env: { XDG_CONFIG_HOME: xdgRoot },
+    });
+    expect(cfg.sources.map(s => s.name)).toEqual(['a', 'b']);
+    expect(cfg.configPath).toBe(discovered);
+    expect(cfg.server?.require_connection).toBe(false);
+    expect(cfg.requireConnection).toBeUndefined();
+  });
+
+  it('honors require_connection=false from an explicit --config with CLI sources', () => {
+    const p = writeToml(tmp, 'explicit-cli-optout.toml', `
+[server]
+require_connection = false
+`);
+    const cfg = resolveConfig({
+      cliSources: [cliSource('a'), cliSource('b')],
+      cliConfigPath: p,
+      env: {},
+    });
+    expect(cfg.sources.map(s => s.name)).toEqual(['a', 'b']);
+    expect(cfg.requireConnection).toBe(false);
+  });
+
   it('still rejects a TOML with no [[sources]] when there are NO CLI sources', () => {
     // Without CLI sources the empty-sources tolerance must NOT apply — an
     // otherwise-empty config is a user error.

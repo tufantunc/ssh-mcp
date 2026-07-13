@@ -300,6 +300,18 @@ export function hasLegacyCliFlags(config: Record<string, string | null>): boolea
   return legacyFlagNames.some(f => config[f] !== undefined);
 }
 
+/**
+ * Reject a present-but-value-less --ssh before TOML discovery can provide a
+ * lower-precedence source. parseArgv records bare `--ssh` (including the first
+ * half of a space-separated `--ssh JSON` invocation) as null, while valid
+ * repeatable `--ssh=<JSON>` arguments are collected separately.
+ */
+export function validateSshCliFlag(config: Record<string, string | null>): void {
+  if ('ssh' in config && config.ssh === null) {
+    throw new Error('Configuration error:\n--ssh requires a value (--ssh=<JSON>)');
+  }
+}
+
 function validateConfig(config: Record<string, string | null>, multiHost = false) {
   const errors: string[] = [];
 
@@ -382,6 +394,7 @@ const hasLegacyCli = hasLegacyCliFlags(argvConfig);
 // TOML file and report that TOML's parse/env error before the real missing
 // `--user` legacy CLI error.
 if (isCliEnabled || isTestMode) {
+  validateSshCliFlag(argvConfig);
   if (isMultiHost) {
     validateConfig(argvConfig, true);
   } else if (hasLegacyCli) {
@@ -673,12 +686,46 @@ export function applyRegistryConnectionPolicy(
   }
 }
 
+/**
+ * Profile label used before registry target resolution succeeds.
+ *
+ * Match TransportRegistry.resolveRegisteredName() exactly: only a falsy name
+ * is omitted. In particular, whitespace is a supplied (invalid) name, so a
+ * rejected call must remain attributed to that unresolved value instead of a
+ * real default host.
+ */
+export function preResolutionProfileName(
+  connectionName: string | undefined,
+  defaultName: string | null,
+  wouldRejectOmittedName: boolean,
+): string {
+  if (connectionName) return connectionName;
+  // An omitted/blank name that the registry would REJECT (multi-source, no
+  // explicit default, guard on) never lands on a host: resolveName() throws
+  // before selection. Attributing that rejected call to getDefaultName() (the
+  // first-registered host) would corrupt audit profile for exactly the guard
+  // case. Mirror the guard and label it unresolved instead of a real host.
+  if (wouldRejectOmittedName) return '(unresolved)';
+  return defaultName ?? 'default';
+}
+
+/** Effective profile/connection name for gating + audit attribution. */
+function resolvedProfileName(connectionName?: string): string {
+  return preResolutionProfileName(
+    connectionName,
+    registry.getDefaultName(),
+    registry.wouldRejectOmittedName(),
+  );
+}
+
 export function buildApprovalProfile(
   id: string,
   perSourceApproval: Record<string, ApprovalMode> = {},
   source?: { description?: string },
 ): ResolvedSource {
-  const mode = perSourceApproval[id];
+  const mode = Object.prototype.hasOwnProperty.call(perSourceApproval, id)
+    ? perSourceApproval[id]
+    : undefined;
   return {
     id,
     ...(source?.description ? { description: source.description } : {}),
@@ -760,6 +807,20 @@ export function resolveApprovalEngineInput(
     llm: approvalCfg?.llm,
     perSourceModes,
   };
+}
+
+/** Effective configured mode used when audit must record a pre-gate failure. */
+export function resolveConfiguredApprovalMode(
+  profileId: string,
+  config: ResolvedConfig = resolvedConfig,
+): ApprovalMode {
+  const input = resolveApprovalEngineInput(config);
+  if (input === null) return 'yolo';
+  const profile = buildApprovalProfile(
+    profileId,
+    config.perSourceApproval ?? {},
+  );
+  return profile.approval?.mode ?? input.defaultMode ?? 'manual';
 }
 
 export function approvalResolverWarningFromInput(
@@ -967,18 +1028,8 @@ server.tool(
   async ({ command, description, connectionName }) => {
     const sanitizedCommand = sanitizeCommand(command);
     const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
-    // Audit attribution starts as unresolved and is pinned to the canonical
-    // host name via registry.profile() — a pure name resolution that does NOT
-    // connect. Pinning it BEFORE registry.get() (which lazily inits the
-    // transport and can reject on bad credentials, host-key rejection, or an
-    // unreachable host) keeps pre-command init failures audited under the real
-    // host identity when the target is unambiguous. When the name is genuinely
-    // ambiguous/unknown (omitted connectionName in multi-host mode without an
-    // explicit default, or an unregistered name) registry.profile() throws and
-    // the audit keeps the raw '(unresolved)'/bad-name attribution. A
-    // blank/whitespace name is treated as omitted, mirroring
-    // TransportRegistry.resolveName().
-    let profile = connectionName && connectionName.trim() !== '' ? connectionName : '(unresolved)';
+    let profile = resolvedProfileName(connectionName);
+    let approvalMode = resolveConfiguredApprovalMode(profile);
     // Fallback timestamp for errors raised before the transport call (registry
     // init failure, approval deny). Re-captured immediately before t.exec below
     // so a SUCCESSFUL command's audit durationMs measures command runtime only,
@@ -989,6 +1040,7 @@ server.tool(
     try {
       const resolvedProfile = registry.profile(connectionName);
       profile = resolvedProfile.id;
+      approvalMode = resolveConfiguredApprovalMode(profile);
       approvalDecision = await gateApproval({
         profile: resolvedProfile,
         tool: 'exec',
@@ -1006,6 +1058,7 @@ server.tool(
         description,
         startedAt,
         approval: approvalDecision,
+        approvalMode,
       }, result);
       return response;
     } catch (err: any) {
@@ -1018,6 +1071,7 @@ server.tool(
         startedAt,
         error: err,
         approval: approvalDecision,
+        approvalMode,
       });
       if (err instanceof McpError) throw err;
       throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
@@ -1037,18 +1091,8 @@ if (!DISABLE_SUDO) {
     async ({ command, description, connectionName }) => {
       const sanitizedCommand = sanitizeCommand(command);
       const commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
-      // Audit attribution starts as unresolved and is pinned to the canonical
-      // host name via registry.profile() — a pure name resolution that does NOT
-      // connect. Pinning it BEFORE registry.get() (which lazily inits the
-      // transport and can reject on bad credentials, host-key rejection, or an
-      // unreachable host) keeps pre-command init failures audited under the real
-      // host identity when the target is unambiguous. When the name is genuinely
-      // ambiguous/unknown (omitted connectionName in multi-host mode without an
-      // explicit default, or an unregistered name) registry.profile() throws and
-      // the audit keeps the raw '(unresolved)'/bad-name attribution. A
-      // blank/whitespace name is treated as omitted, mirroring
-      // TransportRegistry.resolveName().
-      let profile = connectionName && connectionName.trim() !== '' ? connectionName : '(unresolved)';
+      let profile = resolvedProfileName(connectionName);
+      let approvalMode = resolveConfiguredApprovalMode(profile);
       // Fallback timestamp for errors raised before the transport call (registry
       // init failure, approval deny). Re-captured immediately before
       // t.execElevated below so a SUCCESSFUL command's audit durationMs measures
@@ -1059,6 +1103,7 @@ if (!DISABLE_SUDO) {
       try {
         const resolvedProfile = registry.profile(connectionName);
         profile = resolvedProfile.id;
+        approvalMode = resolveConfiguredApprovalMode(profile);
         approvalDecision = await gateApproval({
           profile: resolvedProfile,
           tool: 'sudo-exec',
@@ -1085,6 +1130,7 @@ if (!DISABLE_SUDO) {
           description,
           startedAt,
           approval: approvalDecision,
+          approvalMode,
         }, result);
         return response;
       } catch (err: any) {
@@ -1097,6 +1143,7 @@ if (!DISABLE_SUDO) {
           startedAt,
           error: err,
           approval: approvalDecision,
+          approvalMode,
         });
         if (err instanceof McpError) throw err;
         throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
