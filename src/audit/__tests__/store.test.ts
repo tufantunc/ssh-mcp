@@ -169,6 +169,38 @@ describe('audit store', () => {
     expect(out.truncated).toBe(true);
   });
 
+  it('redacts an open quoted JSON secret before a cap can persist its prefix', () => {
+    const cap = 64;
+    const value = 'J'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 1000);
+    const out = capThenRedact(`{"nested":{"api_token":"${value}"}}`, cap);
+
+    expect(out.text).toContain('"api_token":"<redacted>"');
+    expect(out.text).not.toContain('JJJJ');
+    expect(Buffer.byteLength(out.text, 'utf8')).toBeLessThanOrEqual(cap);
+    expect(out.truncated).toBe(true);
+  });
+
+  it('redacts a quoted attached -p password whose closing quote falls past the scan window', () => {
+    const cap = 64;
+    const value = 'M'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 1000);
+    const out = capThenRedact(`mysql -p"${value}"`, cap);
+
+    expect(out.text).toContain('mysql -p<redacted>');
+    expect(out.text).not.toContain('MMMM');
+    expect(Buffer.byteLength(out.text, 'utf8')).toBeLessThanOrEqual(cap);
+    expect(out.truncated).toBe(true);
+  });
+
+  it('redacts a URL userinfo password whose at-sign falls past the scan window', () => {
+    const cap = 64;
+    const password = 'U'.repeat(cap + REDACT_SCAN_HEADROOM_BYTES + 1000);
+    const out = capThenRedact(`clone https://alice:${password}@example.com/repo.git`, cap);
+
+    expect(out.text).toContain('https://alice:<redacted>@example.com');
+    expect(out.text).not.toContain('UUUU');
+    expect(Buffer.byteLength(out.text, 'utf8')).toBeLessThanOrEqual(cap);
+  });
+
   it('caps and redacts profile names before serializing records', () => {
     const secret = 'ghp_' + 'P'.repeat(36);
     const rec = buildRecord({
