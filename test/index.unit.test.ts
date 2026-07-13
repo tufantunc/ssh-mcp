@@ -12,6 +12,7 @@ import {
   prepareKeyContents,
   validateConfig,
   resolveCliConfigPath,
+  validateSshCliFlag,
 } from '../src/index';
 import type { ExecResult, ServerConfig } from '../src/transports/types';
 
@@ -72,6 +73,40 @@ describe('CLI bootstrap validation order', () => {
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('rejects bare --ssh before falling back to an auto-discovered TOML source', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-cli-bare-ssh-'));
+    const validToml = path.join(dir, 'config.toml');
+    await fs.writeFile(validToml, `
+[[sources]]
+id = "toml-fallback"
+host = "toml.example"
+user = "u"
+auth = "kerberos"
+`);
+    try {
+      const result = await runCliStartup(['--ssh'], {
+        SSH_MCP_CONFIG: validToml,
+        XDG_CONFIG_HOME: path.join(dir, 'xdg'),
+        HOME: dir,
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain('--ssh requires a value (--ssh=<JSON>)');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('validateSshCliFlag', () => {
+  it('rejects the null marker produced by a bare --ssh', () => {
+    expect(() => validateSshCliFlag({ ssh: null }))
+      .toThrow(/--ssh requires a value/);
+  });
+
+  it('leaves absent --ssh handling to the selected legacy or TOML mode', () => {
+    expect(() => validateSshCliFlag({})).not.toThrow();
   });
 });
 
