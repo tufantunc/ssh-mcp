@@ -95,6 +95,11 @@ async function main() {
   const { initKeychain } = await import('./config/credential-resolver.js');
   await initKeychain();
 
+  if (argv.otelEndpoint) {
+    const { initTracing } = await import('./observability/tracer.js');
+    await initTracing(argv.otelEndpoint as string, (argv.otelServiceName as string) || 'ssh-mcp');
+  }
+
   const registry = new ConnectionRegistry(config, hostKeyMode);
   const policy = new PolicyEngine(DEFAULT_RULES);
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);

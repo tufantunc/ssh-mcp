@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { createHash } from 'crypto';
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { tracer } from '../observability/tracer.js';
 import type { ConnectionRegistry } from '../ssh/connection-registry.js';
 import type { PolicyEngine } from '../policy/engine.js';
 import type { AuditStore } from '../audit/store.js';
@@ -58,22 +59,32 @@ export function registerTools(
     toolName: string,
     ctx: ToolContext,
   ) {
-    const conn = await resolveConn(profileName);
-    const evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName);
+    const span = tracer.startSpan('policy.evaluate');
+    span.setAttribute('tool.name', toolName);
+    span.setAttribute('ssh.profile', profileName);
+    try {
+      const conn = await resolveConn(profileName);
+      const evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName);
+      span.setAttribute('policy.decision', evaluation.decision);
+      span.setAttribute('command.class', evaluation.commandClass);
+      span.setAttribute('command.binary', evaluation.binary);
 
-    if (evaluation.decision === 'deny') {
-      throw new Error(`POLICY_DENIED: ${evaluation.reason || 'Command not allowed'}`);
-    }
-
-    if (evaluation.decision === 'require-approval') {
-      const approval = await requestApproval(server, command, conn.profile.name, evaluation);
-      if (!approval.approved) {
-        throw new Error('APPROVAL_DENIED: User did not approve this command');
+      if (evaluation.decision === 'deny') {
+        throw new Error(`POLICY_DENIED: ${evaluation.reason || 'Command not allowed'}`);
       }
-      return { conn, evaluation, approver: approval.approver };
-    }
 
-    return { conn, evaluation, approver: undefined };
+      if (evaluation.decision === 'require-approval') {
+        const approval = await requestApproval(server, command, conn.profile.name, evaluation);
+        if (!approval.approved) {
+          throw new Error('APPROVAL_DENIED: User did not approve this command');
+        }
+        return { conn, evaluation, approver: approval.approver };
+      }
+
+      return { conn, evaluation, approver: undefined };
+    } finally {
+      span.end();
+    }
   }
 
   async function auditResult(
