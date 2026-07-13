@@ -30,7 +30,7 @@ import {
   type ResolvedSource,
 } from './approval/index.js';
 import { loadAuditSink, stderrWithExecutionError, type AuditSink } from './approval/audit-seam.js';
-import { redact } from './audit/redactor.js';
+import { AUDIT_COMMAND_MIN_CAP_BYTES, capThenRedact } from './audit/store.js';
 import { startWebUI } from './webui/server.js';
 import type {
   ManualApprovalQueue,
@@ -312,6 +312,18 @@ export function hasLegacyCliFlags(config: Record<string, string | null>): boolea
   return legacyFlagNames.some(f => config[f] !== undefined);
 }
 
+/**
+ * Reject a present-but-value-less --ssh before TOML discovery can provide a
+ * lower-precedence source. parseArgv records bare `--ssh` (including the first
+ * half of a space-separated `--ssh JSON` invocation) as null, while valid
+ * repeatable `--ssh=<JSON>` arguments are collected separately.
+ */
+export function validateSshCliFlag(config: Record<string, string | null>): void {
+  if ('ssh' in config && config.ssh === null) {
+    throw new Error('Configuration error:\n--ssh requires a value (--ssh=<JSON>)');
+  }
+}
+
 function validateConfig(config: Record<string, string | null>, multiHost = false) {
   const errors: string[] = [];
 
@@ -394,6 +406,7 @@ const hasLegacyCli = hasLegacyCliFlags(argvConfig);
 // TOML file and report that TOML's parse/env error before the real missing
 // `--user` legacy CLI error.
 if (isCliEnabled || isTestMode) {
+  validateSshCliFlag(argvConfig);
   if (isMultiHost) {
     validateConfig(argvConfig, true);
   } else if (hasLegacyCli) {
@@ -485,10 +498,11 @@ const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
   ? resolveConfig({
       cliSources: cliSourceConfigs,
       cliConfigPath: resolveCliConfigPath(argvConfig),
-      // `--webui` overrides a disabled/omitted TOML enabled flag. Tell the
-      // loader now so it resolves auth_token and applies the non-loopback gate
-      // against the effective boot state rather than dropping the token.
-      webuiEnabled: 'webui' in argvConfig,
+      // An explicit CLI switch overrides TOML in either direction. Preserve
+      // `undefined` when the switch is absent so the loader can still honor
+      // `[webui].enabled`; bare `--webui` forces true and `--webui=false`
+      // forces false before token resolution and boot validation.
+      webuiEnabled: cliSwitchOverride(argvConfig, 'webui'),
     })
   : { sources: [], perSourceApproval: {}, defaultExplicit: false };
 
@@ -689,22 +703,36 @@ export function applyRegistryConnectionPolicy(
   }
 }
 
-/** Effective profile/connection name for gating + audit attribution. */
-function resolvedProfileName(connectionName?: string): string {
-  // Treat an empty/blank connectionName as "omitted", mirroring
-  // TransportRegistry.resolveName() (which routes `''` to the default host).
-  // Otherwise gating + audit attribution would be computed for the literal
-  // profile id '' while the command actually ran against the default host,
-  // silently bypassing that host's per-source approval policy.
-  const name = connectionName && connectionName.trim() !== '' ? connectionName : undefined;
-  if (name) return name;
+/**
+ * Profile label used before registry target resolution succeeds.
+ *
+ * Match TransportRegistry.resolveRegisteredName() exactly: only a falsy name
+ * is omitted. In particular, whitespace is a supplied (invalid) name, so a
+ * rejected call must remain attributed to that unresolved value instead of a
+ * real default host.
+ */
+export function preResolutionProfileName(
+  connectionName: string | undefined,
+  defaultName: string | null,
+  wouldRejectOmittedName: boolean,
+): string {
+  if (connectionName) return connectionName;
   // An omitted/blank name that the registry would REJECT (multi-source, no
   // explicit default, guard on) never lands on a host: resolveName() throws
   // before selection. Attributing that rejected call to getDefaultName() (the
   // first-registered host) would corrupt audit profile for exactly the guard
   // case. Mirror the guard and label it unresolved instead of a real host.
-  if (registry.wouldRejectOmittedName()) return '(unresolved)';
-  return registry.getDefaultName() ?? 'default';
+  if (wouldRejectOmittedName) return '(unresolved)';
+  return defaultName ?? 'default';
+}
+
+/** Effective profile/connection name for gating + audit attribution. */
+function resolvedProfileName(connectionName?: string): string {
+  return preResolutionProfileName(
+    connectionName,
+    registry.getDefaultName(),
+    registry.wouldRejectOmittedName(),
+  );
 }
 
 export function buildApprovalProfile(
@@ -712,7 +740,9 @@ export function buildApprovalProfile(
   perSourceApproval: Record<string, ApprovalMode> = {},
   source?: { description?: string },
 ): ResolvedSource {
-  const mode = perSourceApproval[id];
+  const mode = Object.prototype.hasOwnProperty.call(perSourceApproval, id)
+    ? perSourceApproval[id]
+    : undefined;
   return {
     id,
     ...(source?.description ? { description: source.description } : {}),
@@ -808,6 +838,20 @@ export function resolveApprovalEngineInput(
   };
 }
 
+/** Effective configured mode used when audit must record a pre-gate failure. */
+export function resolveConfiguredApprovalMode(
+  profileId: string,
+  config: ResolvedConfig = resolvedConfig,
+): ApprovalMode {
+  const input = resolveApprovalEngineInput(config);
+  if (input === null) return 'yolo';
+  const profile = buildApprovalProfile(
+    profileId,
+    config.perSourceApproval ?? {},
+  );
+  return profile.approval?.mode ?? input.defaultMode ?? 'manual';
+}
+
 export function approvalResolverWarningFromInput(
   input: BuildEngineFromConfigInput | null,
   params: { webuiEnabled: boolean; resolverWired: boolean },
@@ -830,36 +874,41 @@ export function approvalResolverWarningFromInput(
  *   - manual mode requested but WebUI disabled (gate-12 invariant)
  *   - smart mode requested but [approval.llm] missing endpoint or model
  */
-export function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
-  const approvalCfg = resolvedConfig.approval;
-  const perSourceApproval = resolvedConfig.perSourceApproval ?? {};
+export function buildProductionApprovalEngine(
+  webuiActive: boolean,
+  config: ResolvedConfig = resolvedConfig,
+): ApprovalDispatcher | null {
+  const approvalCfg = config.approval;
+  const perSourceApproval = config.perSourceApproval ?? {};
   const perSourceModes: ApprovalMode[] = Object.values(perSourceApproval);
-  // A "bare" engine has no [approval] section and no per-source overrides — the
-  // only reason it exists at all is that the WebUI is active and wants a
-  // live-switchable engine (otherwise the gate keeps its legacy no-engine allow
-  // and there's nothing to switch).
-  const isBareWebUIEngine = approvalCfg === undefined && perSourceModes.length === 0;
+  const approvalLlmOnly = approvalCfg !== undefined
+    && approvalCfg.mode === undefined
+    && approvalCfg.fail_closed === undefined
+    && approvalCfg.llm !== undefined;
+  // A synthetic engine has no selected approval mode. It exists only while the
+  // WebUI is active so operators can live-switch from the legacy yolo baseline.
+  // Preserve an LLM-only block on that engine so a supported smart provider is
+  // switchable without turning the otherwise-inert config into a boot-time mode.
+  const isSyntheticWebUIEngine = perSourceModes.length === 0
+    && (approvalCfg === undefined || approvalLlmOnly);
 
   // Resolve config through the SHARED helper so the engine we build and the
   // manual-without-resolver boot warning (wireApprovalAndAudit) can never
   // disagree about the effective default/per-source modes. It returns null on
-  // the legacy CLI path (no [approval], no per-source overrides); keep that
-  // no-engine allow UNLESS the WebUI is active and wants a live-switchable
-  // bare engine.
-  const resolved = resolveApprovalEngineInput();
-  if (resolved === null && !(isBareWebUIEngine && webuiActive)) {
+  // the legacy CLI and LLM-only paths; keep that no-engine allow UNLESS the
+  // WebUI is active and wants a live-switchable synthetic engine.
+  const resolved = resolveApprovalEngineInput(config);
+  if (resolved === null && !(isSyntheticWebUIEngine && webuiActive)) {
     return null;
   }
   const input: BuildEngineFromConfigInput = {
-    ...(resolved ?? {}),
-    // For the bare WebUI-only engine, pass an explicit `yolo` baseline. Leaving
+    ...(resolved ?? (approvalLlmOnly ? { llm: approvalCfg?.llm } : {})),
+    // For a synthetic WebUI engine, pass an explicit `yolo` baseline. Leaving
     // this undefined makes buildApprovalEngineFromConfig coerce it to `manual`,
-    // which would enqueue/block every exec even though no approval was
-    // configured — regressing the legacy read-only WebUI/status case and
-    // contradicting the yolo baseline that makeApprovalModeLookup already
-    // reports for an unconfigured global default. Per-source-only and explicit
-    // [approval].mode configs keep the resolved default from the shared helper.
-    defaultMode: resolved?.defaultMode ?? (isBareWebUIEngine ? 'yolo' : undefined),
+    // which would enqueue/block every exec even though no approval mode was
+    // configured. Per-source and explicit [approval].mode configs keep the
+    // resolved default from the shared helper.
+    defaultMode: resolved?.defaultMode ?? (isSyntheticWebUIEngine ? 'yolo' : undefined),
     // Seed per-source static overrides into the live mode store so a live mode
     // switch starts from the operator's configured baseline (mode-switch lane).
     staticOverrides: perSourceApproval,
@@ -869,19 +918,25 @@ export function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDis
   });
 }
 
-/** Resolve a bare/string boolean CLI switch without treating `--flag=false` as enabled. */
-export function isCliSwitchEnabled(args: Record<string, unknown>, key: string): boolean {
-  if (!(key in args)) return false;
+/** Return the explicit value of a bare/string boolean CLI switch, or undefined when absent. */
+function cliSwitchOverride(args: Record<string, unknown>, key: string): boolean | undefined {
+  if (!(key in args)) return undefined;
   const value = args[key];
   return !(typeof value === 'string' && value.toLowerCase() === 'false');
 }
 
+/** Resolve a bare/string boolean CLI switch without treating `--flag=false` as enabled. */
+export function isCliSwitchEnabled(args: Record<string, unknown>, key: string): boolean {
+  return cliSwitchOverride(args, key) === true;
+}
+
 /** Decide whether the WebUI will be active at boot (TOML or --webui). */
 function isWebUIActive(): boolean {
-  // A bare `--webui` parses as a present key, while `--webui=false` must remain
-  // disabled. The WebUI server itself lands in a later lane; here we only need
-  // the boot-time decision so manual-mode's gate-12 invariant resolves correctly.
-  return isCliSwitchEnabled(argvConfig, 'webui') || resolvedConfig.webui?.enabled === true;
+  // CLI presence wins in either direction: bare `--webui` enables the server,
+  // while explicit `--webui=false` suppresses even TOML enabled=true. Only an
+  // absent CLI switch delegates to the TOML setting.
+  return cliSwitchOverride(argvConfig, 'webui')
+    ?? (resolvedConfig.webui?.enabled === true);
 }
 
 /**
@@ -930,14 +985,16 @@ export function buildWebUIApprovalQueueAdapter(engine: ApprovalDispatcher | null
 
   const enqWrappers = new Map<Function, (p: any) => void>();
   const resWrappers = new Map<Function, (p: any, d: any) => void>();
+  const toBoundedWebUIText = (value: string): string =>
+    capThenRedact(value, AUDIT_COMMAND_MIN_CAP_BYTES).text;
   const toWebUI = (p: any): WebUIPendingApproval => {
     const description = p.context?.description;
     return {
       id: p.id,
       profile: p.context?.profile?.id ?? 'default',
       tool: p.context?.tool ?? 'exec',
-      command: redact(p.context?.command ?? ''),
-      description: description === undefined ? undefined : redact(description),
+      command: toBoundedWebUIText(p.context?.command ?? ''),
+      description: description === undefined ? undefined : toBoundedWebUIText(description),
       enqueuedAt: p.enqueued_at,
     };
   };
@@ -1021,14 +1078,44 @@ function buildWebUIAuditTailAdapter(sink: AuditSink): WebUIAuditTail | undefined
   };
 }
 
-function makeApprovalModeLookup(): (profileName: string) => string {
-  const staticDefaultMode: ApprovalMode = resolvedConfig.approval?.mode ?? 'yolo';
-  const staticPerSource = resolvedConfig.perSourceApproval ?? {};
-  return (name: string) => {
-    // Prefer the live engine so the WebUI reflects runtime switches; fall back
-    // to the static TOML resolution when no engine is wired (legacy path).
-    if (approvalEngine) return approvalEngine.getEffectiveMode(name);
-    return staticPerSource[name] ?? staticDefaultMode;
+export function makeApprovalModeLookup(
+  deps: {
+    perSourceApproval?: Record<string, ApprovalMode>;
+    getEngine?: () => Pick<ApprovalDispatcher, 'defaultMode'> | null;
+    modeController?: Pick<WebUIModeController, 'getEffectiveMode'>;
+  } = {},
+): (profileName: string) => string {
+  const perSource = deps.perSourceApproval ?? resolvedConfig.perSourceApproval ?? {};
+  // Engine read stays lazy (per lookup, like the previous module-level read)
+  // so the adapter never caches a stale null/instance across engine wiring.
+  const getEngine = deps.getEngine ?? (() => approvalEngine);
+  // Production passes the same live controller used by the mutation routes.
+  // Its dispatcher-backed lookup observes in-memory profile/global changes made
+  // after startup instead of falling back to the static TOML snapshot below.
+  const modeController = deps.modeController;
+  if (modeController) {
+    return (name: string): string => modeController.getEffectiveMode(name);
+  }
+  // Mirror exactly what ApprovalDispatcher.decide() enforces so the WebUI
+  // never advertises a gate that is not actually applied:
+  //   - no engine wired        -> gateApproval() takes the legacy no-engine
+  //                               allow path (yolo-equivalent);
+  //   - per-source override set -> decide() honors ctx.profile.approval.mode,
+  //                               which the handlers thread in via
+  //                               approvalProfileForConnection();
+  //   - otherwise               -> decide() falls back to the engine's own
+  //                               resolved default mode.
+  return (name: string): string => {
+    const engine = getEngine();
+    if (!engine) return 'yolo';
+    // Own-property check like buildApprovalProfile(): a profile named
+    // `toString`/`constructor`/another Object.prototype key must not read the
+    // inherited member off the plain override object — /api/profiles would
+    // then serialize a function/object instead of falling back to the
+    // engine's default mode that decide() actually enforces (Codex 3568536828).
+    return Object.prototype.hasOwnProperty.call(perSource, name)
+      ? perSource[name]
+      : engine.defaultMode;
   };
 }
 
@@ -1107,6 +1194,7 @@ async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined
   const port = tomlWebui?.port ?? 8088;
   const authToken = tomlWebui?.auth_token;
 
+  const modeController = buildWebUIModeController(approvalEngine);
   const handle = await startWebUI({
     host,
     port,
@@ -1115,8 +1203,8 @@ async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined
     registry: { list: () => registry.list() },
     queue: buildWebUIApprovalQueueAdapter(approvalEngine),
     audit: buildWebUIAuditTailAdapter(auditSink),
-    getApprovalMode: makeApprovalModeLookup(),
-    modeController: buildWebUIModeController(approvalEngine),
+    getApprovalMode: makeApprovalModeLookup({ modeController }),
+    modeController,
     sourceController: buildWebUISourceController(registry),
   });
   const tokenStatus = authToken ? 'token required' : 'anonymous loopback';
@@ -1372,6 +1460,7 @@ server.tool(
   async ({ command, description, connectionName }) => {
     let commandWithDescription = String(command ?? '');
     let profile = resolvedProfileName(connectionName);
+    let approvalMode = resolveConfiguredApprovalMode(profile);
     // Fallback timestamp for errors raised before the transport call (registry
     // init failure, approval deny). Re-captured immediately before t.exec below
     // so a SUCCESSFUL command's audit durationMs measures command runtime only,
@@ -1384,6 +1473,7 @@ server.tool(
       commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
       const target = approvalTargetForConnection(registry, connectionName);
       profile = target.profile;
+      approvalMode = resolveConfiguredApprovalMode(profile);
       approvalDecision = await gateApproval({
         profile: target.approvalProfile,
         tool: 'exec',
@@ -1401,6 +1491,7 @@ server.tool(
         description,
         startedAt,
         approval: approvalDecision,
+        approvalMode,
       }, result);
       return response;
     } catch (err: any) {
@@ -1413,6 +1504,7 @@ server.tool(
         startedAt,
         error: err,
         approval: approvalDecision,
+        approvalMode,
       });
       if (err instanceof McpError) throw err;
       throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);
@@ -1432,6 +1524,7 @@ if (!DISABLE_SUDO) {
     async ({ command, description, connectionName }) => {
       let commandWithDescription = String(command ?? '');
       let profile = resolvedProfileName(connectionName);
+      let approvalMode = resolveConfiguredApprovalMode(profile);
       // Fallback timestamp for errors raised before the transport call (registry
       // init failure, approval deny). Re-captured immediately before
       // t.execElevated below so a SUCCESSFUL command's audit durationMs measures
@@ -1444,6 +1537,7 @@ if (!DISABLE_SUDO) {
         commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
         const target = approvalTargetForConnection(registry, connectionName);
         profile = target.profile;
+        approvalMode = resolveConfiguredApprovalMode(profile);
         approvalDecision = await gateApproval({
           profile: target.approvalProfile,
           tool: 'sudo-exec',
@@ -1470,6 +1564,7 @@ if (!DISABLE_SUDO) {
           description,
           startedAt,
           approval: approvalDecision,
+          approvalMode,
         }, result);
         return response;
       } catch (err: any) {
@@ -1482,6 +1577,7 @@ if (!DISABLE_SUDO) {
           startedAt,
           error: err,
           approval: approvalDecision,
+          approvalMode,
         });
         if (err instanceof McpError) throw err;
         throw new McpError(ErrorCode.InternalError, `Unexpected error: ${err?.message || err}`);

@@ -51,8 +51,17 @@ export function resolveAuditDir(override?: string | null): string {
     break;
   }
   raw = raw ?? path.join(os.homedir(), '.ssh-mcp');
-  if (raw.startsWith('~')) {
-    return path.join(os.homedir(), raw.slice(1));
+  // Expand ONLY the current-user home forms (`~`, `~/...`, `~\...`) —
+  // mirroring the TOML loader's stricter expandHome(). A `~user/...` form or
+  // a literal directory named e.g. `~logs` must NOT be silently rewritten
+  // under the current user's home; it resolves as a literal path instead,
+  // matching how the same value behaves when it passes through expandHome()
+  // during TOML loading (Codex 3568536833).
+  if (raw === '~') {
+    return os.homedir();
+  }
+  if (raw.startsWith('~/') || raw.startsWith('~\\')) {
+    return path.join(os.homedir(), raw.slice(2));
   }
   return path.resolve(raw);
 }
@@ -306,6 +315,24 @@ export class AuditStore extends EventEmitter {
     const rec = buildRecord({ ...input, now, auditMaxBytes: this.auditMaxBytes });
     const filePath = activeFilePath(this.auditDir, now);
 
+    // Tighten an existing active file BEFORE rotation. Otherwise a permissive
+    // legacy/operator-created active file can be renamed to `.1` first and keep
+    // its world/group-readable mode indefinitely while only the new active file
+    // is corrected after append (Codex 3568934450).
+    let existingMode: number | null = null;
+    try {
+      existingMode = fs.statSync(filePath).mode & 0o777;
+      if (existingMode !== 0o600) {
+        try {
+          fs.chmodSync(filePath, 0o600);
+        } catch {
+          // best-effort: file may live on a filesystem that ignores chmod
+        }
+      }
+    } catch {
+      // File does not exist yet — created by the append below.
+    }
+
     rotateIfNeeded({
       filePath,
       maxFileBytes: this.maxFileBytes,
@@ -313,13 +340,12 @@ export class AuditStore extends EventEmitter {
     });
 
     const line = JSON.stringify(rec) + '\n';
-    // Owner-only (0600). The mode option only applies when the file is
-    // created, and is masked by umask; chmod on first create enforces it
-    // even under a permissive umask. Existing files keep their mode across
-    // appends (no per-append chmod syscall on the hot path).
-    const existedBefore = fs.existsSync(filePath);
+    // Owner-only (0600). The mode option applies on create and chmod covers a
+    // pre-existing permissive active file. `existingMode` is deliberately kept
+    // from the pre-rotation check above: when that file rotated (or did not
+    // exist), a non-0600/null value also tightens the freshly-created active file.
     fs.appendFileSync(filePath, line, { encoding: 'utf8', mode: 0o600 });
-    if (!existedBefore) {
+    if (existingMode !== 0o600) {
       try {
         fs.chmodSync(filePath, 0o600);
       } catch {

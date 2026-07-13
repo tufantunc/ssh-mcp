@@ -41,4 +41,18 @@ model = "gpt-4o-mini"
     expect(dispatcher.availableModes()).toEqual(['yolo']);
     expect(() => dispatcher.setGlobalMode('smart')).toThrow(ModeUnavailableError);
   });
+
+  it('keeps a configured unsupported smart provider inert while yolo is selected', () => {
+    const dispatcher = buildApprovalEngineFromConfig({
+      defaultMode: 'yolo',
+      llm: {
+        provider: 'anthropic',
+        endpoint: 'https://api.anthropic.com/v1/messages',
+        model: 'claude-test',
+      },
+    }, { manualOpts: { webuiEnabled: false } });
+
+    expect(dispatcher.availableModes()).toEqual(['yolo']);
+    expect(() => dispatcher.setGlobalMode('smart')).toThrow(ModeUnavailableError);
+  });
 });

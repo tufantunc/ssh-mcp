@@ -74,9 +74,54 @@ describe('SmartApproval — happy paths', () => {
     expect(call[1].headers['Authorization']).toBe('Bearer test-key');
     expect(call[1].headers['Content-Type']).toBe('application/json');
   });
+
+  it('redacts command and intent secrets before sending them to the external LLM', async () => {
+    const fetchImpl = vi.fn(() =>
+      makeOkResponse(JSON.stringify({ allow: true, reason: 'ok' })),
+    );
+    const command = [
+      "curl -H 'Authorization: Bearer bearer-secret' https://example.invalid",
+      'mysql -uroot -pdatabase-secret',
+      'API_TOKEN=environment-secret deploy',
+      'git clone https://alice:url-secret@example.invalid/repo.git',
+    ].join(' && ');
+    const s = new SmartApproval(makeOpts({ fetchImpl: fetchImpl as any }));
+
+    await s.decide({ ...ctx, command, description: 'password intent-secret' });
+
+    const call: any = (fetchImpl as any).mock.calls[0];
+    const userPrompt = JSON.parse(call[1].body).messages
+      .find((message: any) => message.role === 'user').content as string;
+    expect(userPrompt).toContain('<redacted>');
+    for (const secret of [
+      'bearer-secret',
+      'database-secret',
+      'environment-secret',
+      'url-secret',
+      'intent-secret',
+    ]) {
+      expect(userPrompt).not.toContain(secret);
+    }
+    expect(command).toContain('database-secret');
+  });
 });
 
 describe('SmartApproval — fail-closed (default)', () => {
+  it('does not schedule an abort timer when no fetch implementation exists', async () => {
+    vi.stubGlobal('fetch', undefined);
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      const s = new SmartApproval(makeOpts());
+      const d = await s.decide(ctx);
+      expect(d.decision).toBe('deny');
+      expect(d.decided_by).toBe('smart-llm:no-fetch');
+      expect(setTimeoutSpy).not.toHaveBeenCalled();
+    } finally {
+      setTimeoutSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('denies on non-200 HTTP', async () => {
     const fetchImpl = vi.fn(() =>
       Promise.resolve({ ok: false, status: 500, text: () => Promise.resolve('') }),

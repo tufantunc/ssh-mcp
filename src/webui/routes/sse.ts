@@ -47,6 +47,25 @@ export class SseHub {
     }
   }
 
+  private removeClient(client: SseClient): void {
+    clearInterval(client.timer);
+    this.clients.delete(client);
+  }
+
+  private dropClient(client: SseClient): void {
+    if (!this.clients.has(client)) return;
+    this.removeClient(client);
+    try { client.res.destroy(); } catch { /* ignore */ }
+  }
+
+  private writeToClient(client: SseClient, data: string): boolean {
+    try {
+      if (client.res.write(data)) return true;
+    } catch { /* drop below */ }
+    this.dropClient(client);
+    return false;
+  }
+
   attach(res: ServerResponse): SseClient {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -54,30 +73,29 @@ export class SseHub {
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
-    res.write(`: connected ${new Date().toISOString()}\n\n`);
-
+    let client!: SseClient;
     const timer = setInterval(() => {
-      try { res.write(`: heartbeat\n\n`); } catch { /* ignore */ }
+      this.writeToClient(client, `: heartbeat\n\n`);
     }, 25000);
     // Don't block process exit on the heartbeat timer.
     if (typeof (timer as any).unref === 'function') (timer as any).unref();
 
-    const client: SseClient = { res, timer };
+    client = { res, timer };
     this.clients.add(client);
 
     const cleanup = () => {
-      clearInterval(timer);
-      this.clients.delete(client);
+      this.removeClient(client);
     };
     res.on('close', cleanup);
     res.on('error', cleanup);
+    this.writeToClient(client, `: connected ${new Date().toISOString()}\n\n`);
     return client;
   }
 
   broadcast(event: string, payload: unknown): void {
     const data = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
     for (const c of this.clients) {
-      try { c.res.write(data); } catch { /* drop */ }
+      this.writeToClient(c, data);
     }
   }
 
