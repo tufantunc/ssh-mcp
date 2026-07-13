@@ -21,6 +21,11 @@ const STATIC_MIME: Record<string, string> = {
   '.json': 'application/json; charset=utf-8',
 };
 
+const STATIC_SECURITY_HEADERS = {
+  'Content-Security-Policy': "frame-ancestors 'none'",
+  'X-Frame-Options': 'DENY',
+} as const;
+
 function isLoopback(host: string): boolean {
   const normalized = host.replace(/^\[|\]$/g, '').toLowerCase();
   return normalized === '127.0.0.1' || normalized === '::1' || normalized === 'localhost';
@@ -107,6 +112,7 @@ async function serveStatic(res: http.ServerResponse, urlPath: string): Promise<b
       'Content-Type': ct,
       'Content-Length': data.byteLength,
       'Cache-Control': 'no-store',
+      ...STATIC_SECURITY_HEADERS,
     });
     res.end(data);
     return true;

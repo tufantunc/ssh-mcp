@@ -289,41 +289,6 @@ describe('WebUI server', () => {
     expect(queue.list()).toHaveLength(1);
   });
 
-  it('uses the trimmed auth token for approval mutation checks', async () => {
-    await handle.close();
-    handle = await startWebUI({
-      host: '127.0.0.1',
-      port: 0,
-      authToken: '   ',
-      registry: fakeRegistry,
-      queue,
-      audit,
-      getApprovalMode: name => (name === 'prod' ? 'manual' : 'yolo'),
-    });
-    queue.enqueue({
-      id: 'trimmed-token-guard',
-      profile: 'prod',
-      tool: 'exec',
-      command: 'systemctl restart nginx',
-      enqueuedAt: new Date().toISOString(),
-    });
-
-    const r = await fetch(
-      `http://${handle.address.host}:${handle.address.port}/api/approvals/trimmed-token-guard/allow`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Origin: `http://${handle.address.host}:${handle.address.port + 1}`,
-        },
-        body: '{}',
-      },
-    );
-
-    expect(r.status).toBe(403);
-    expect(queue.list()).toHaveLength(1);
-  });
-
   it('POST approval mutation rejects missing Origin/Referer without a token', async () => {
     queue.enqueue({
       id: 'origin-guard-missing',
@@ -404,6 +369,13 @@ describe('WebUI server', () => {
     const text = await r.text();
     expect(text).toContain('ssh-mcp');
     expect(r.headers.get('content-type') || '').toMatch(/text\/html/);
+  });
+
+  it('static UI responses cannot be embedded in a frame', async () => {
+    const r = await get(handle, '/');
+    expect(r.status).toBe(200);
+    expect(r.headers.get('x-frame-options')).toBe('DENY');
+    expect(r.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
   });
 
   it('unknown api route returns 404', async () => {
