@@ -417,6 +417,25 @@ describe('approval command/context helpers', () => {
     expect(noEngine('toString')).toBe('yolo');
   });
 
+  it('reads a profile mode mutation from the live WebUI controller on the next lookup', () => {
+    const engine = buildProductionApprovalEngine(true, resolvedConfig({
+      approval: { mode: 'yolo' },
+      perSourceApproval: { prod: 'yolo' },
+    }))!;
+    const modeController = {
+      getEffectiveMode: (profileId: string) => engine.getEffectiveMode(profileId),
+    };
+    const lookup = makeApprovalModeLookup({
+      perSourceApproval: { prod: 'yolo' },
+      getEngine: () => engine,
+      modeController,
+    });
+
+    expect(lookup('prod')).toBe('yolo');
+    engine.setProfileMode('prod', 'manual');
+    expect(lookup('prod')).toBe('manual');
+  });
+
   it('neutralizes description newlines before appending the shell comment', () => {
     const assembled = appendDescriptionComment('true', 'safe note\nrm -rf /tmp/should-not-run # nested');
     expect(assembled).toMatch(/^true # /);

@@ -1078,12 +1078,20 @@ export function makeApprovalModeLookup(
   deps: {
     perSourceApproval?: Record<string, ApprovalMode>;
     getEngine?: () => Pick<ApprovalDispatcher, 'defaultMode'> | null;
+    modeController?: Pick<WebUIModeController, 'getEffectiveMode'>;
   } = {},
 ): (profileName: string) => string {
   const perSource = deps.perSourceApproval ?? resolvedConfig.perSourceApproval ?? {};
   // Engine read stays lazy (per lookup, like the previous module-level read)
   // so the adapter never caches a stale null/instance across engine wiring.
   const getEngine = deps.getEngine ?? (() => approvalEngine);
+  // Production passes the same live controller used by the mutation routes.
+  // Its dispatcher-backed lookup observes in-memory profile/global changes made
+  // after startup instead of falling back to the static TOML snapshot below.
+  const modeController = deps.modeController;
+  if (modeController) {
+    return (name: string): string => modeController.getEffectiveMode(name);
+  }
   // Mirror exactly what ApprovalDispatcher.decide() enforces so the WebUI
   // never advertises a gate that is not actually applied:
   //   - no engine wired        -> gateApproval() takes the legacy no-engine
@@ -1146,6 +1154,7 @@ async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined
   const port = tomlWebui?.port ?? 8088;
   const authToken = tomlWebui?.auth_token;
 
+  const modeController = buildWebUIModeController(approvalEngine);
   const handle = await startWebUI({
     host,
     port,
@@ -1154,8 +1163,8 @@ async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined
     registry: { list: () => registry.list() },
     queue: buildWebUIApprovalQueueAdapter(approvalEngine),
     audit: buildWebUIAuditTailAdapter(auditSink),
-    getApprovalMode: makeApprovalModeLookup(),
-    modeController: buildWebUIModeController(approvalEngine),
+    getApprovalMode: makeApprovalModeLookup({ modeController }),
+    modeController,
   });
   const tokenStatus = authToken ? 'token required' : 'anonymous loopback';
   console.error(`SSH MCP WebUI running on http://${handle.address.host}:${handle.address.port}/ — ${tokenStatus}`);
