@@ -114,6 +114,7 @@ async function boot(opts: {
   created: FakeEl[];
   calls: FetchCall[];
   emitMode: (data: unknown) => void;
+  emitConfigReloaded: (data: unknown) => void;
   intervalCallbacks: Array<() => unknown>;
   getProfileFetchCount: () => number;
   deferNextProfileResponse: () => () => void;
@@ -126,6 +127,7 @@ async function boot(opts: {
   let nextProfileGate: Promise<void> | null = null;
   let releaseNextProfile: (() => void) | null = null;
   let modeChangedListener: ((ev: { data: string }) => void) | null = null;
+  let configReloadedListener: ((ev: { data: string }) => void) | null = null;
 
   const getById = (sel: string) => {
     let el = byId.get(sel);
@@ -182,6 +184,7 @@ async function boot(opts: {
     onerror: (() => void) | null = null;
     addEventListener(type: string, fn: (ev: { data: string }) => void) {
       if (type === 'mode-changed') modeChangedListener = fn;
+      if (type === 'config-reloaded') configReloadedListener = fn;
     }
     close() {}
   }
@@ -220,6 +223,7 @@ async function boot(opts: {
     created,
     calls,
     emitMode: (data: unknown) => modeChangedListener?.({ data: JSON.stringify(data) }),
+    emitConfigReloaded: (data: unknown) => configReloadedListener?.({ data: JSON.stringify(data) }),
     intervalCallbacks,
     getProfileFetchCount: () => profileFetchCount,
     deferNextProfileResponse: () => {
@@ -363,6 +367,60 @@ describe('WebUI app.js description editor polling', () => {
 
     expect(app.getProfileFetchCount()).toBe(beforePoll);
     expect(draft.value).toBe('unsaved operator draft');
+  });
+
+  it('forces a profile refresh when config-reloaded arrives during description editing', async () => {
+    const app = await boot({
+      modes: { modes: ['yolo', 'manual'], global: 'yolo' },
+      profiles: [PROFILE],
+      sourceEditEnabled: true,
+    });
+    const edit = app.created.find(e => e.tagName === 'button' && e.className === 'desc-edit')!;
+    edit.fire('click');
+    const draft = app.created.find(e => e.tagName === 'textarea' && e.className === 'desc-input')!;
+    draft.value = 'stale after the TOML source set changes';
+
+    const beforeReload = app.getProfileFetchCount();
+    app.emitConfigReloaded({ sources: ['prod'], defaultName: 'prod', at: new Date().toISOString() });
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+
+    expect(app.getProfileFetchCount()).toBe(beforeReload + 1);
+  });
+
+  it('clears the editor state when config-reloaded lands mid-edit so the dashboard stays editable', async () => {
+    // Codex finding 3575258569: the forced refresh replaced the editor's DOM
+    // but left descriptionEditorOpen === true, so background polling stayed
+    // suppressed forever and every later edit click was ignored.
+    const app = await boot({
+      modes: { modes: ['yolo', 'manual'], global: 'yolo' },
+      profiles: [PROFILE],
+      sourceEditEnabled: true,
+    });
+    const edit = app.created.find(e => e.tagName === 'button' && e.className === 'desc-edit')!;
+    edit.fire('click');
+    const draft = app.created.find(e => e.tagName === 'textarea' && e.className === 'desc-input')!;
+    draft.value = 'draft that the reload replaces';
+
+    app.emitConfigReloaded({ sources: ['prod'], defaultName: 'prod', at: new Date().toISOString() });
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+
+    // Background polling must run again (a stale open-editor flag suppresses it).
+    const afterReload = app.getProfileFetchCount();
+    await app.intervalCallbacks[0]();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(app.getProfileFetchCount()).toBe(afterReload + 1);
+
+    // And a NEW editor can be opened on the re-rendered table: the fresh edit
+    // button creates a fresh textarea (openDescriptionEditor is not ignored).
+    const textareasBefore = app.created.filter(
+      e => e.tagName === 'textarea' && e.className === 'desc-input').length;
+    const editButtons = app.created.filter(
+      e => e.tagName === 'button' && e.className === 'desc-edit');
+    editButtons[editButtons.length - 1].fire('click');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const textareasAfter = app.created.filter(
+      e => e.tagName === 'textarea' && e.className === 'desc-input').length;
+    expect(textareasAfter).toBe(textareasBefore + 1);
   });
 
   it('keeps the editor and draft open when the description save is rejected', async () => {

@@ -27,9 +27,20 @@ export interface ModeStoreSnapshot {
   overrides: Record<string, ApprovalMode>;
 }
 
+/**
+ * Full capture of every mutable layer (global + static + live), used by the
+ * config hot-reload path (PR-9) to roll back a re-seed that fails downstream
+ * validation. In-memory only.
+ */
+export interface ModeStoreState {
+  global: ApprovalMode;
+  staticOverrides: Record<string, ApprovalMode>;
+  liveOverrides: Record<string, ApprovalMode>;
+}
+
 export class ApprovalModeStore {
   private global: ApprovalMode;
-  private readonly staticOverrides: Map<string, ApprovalMode>;
+  private staticOverrides: Map<string, ApprovalMode>;
   private readonly liveOverrides = new Map<string, ApprovalMode>();
 
   constructor(globalDefault: ApprovalMode, staticOverrides?: Record<string, ApprovalMode>) {
@@ -90,5 +101,38 @@ export class ApprovalModeStore {
       global: this.global,
       overrides: Object.fromEntries(this.liveOverrides),
     };
+  }
+
+  /**
+   * Re-seed the global default and the static (TOML-derived) override layer
+   * from a freshly-loaded config (PR-9 hot reload), and CLEAR every live
+   * runtime override. Rationale: a config-file edit re-establishes the file as
+   * the source of truth, exactly as the registry drops its description
+   * overrides on reload — the operator's on-disk policy wins again. In-memory
+   * only; no disk surface.
+   */
+  reseed(globalDefault: ApprovalMode, staticOverrides?: Record<string, ApprovalMode>): void {
+    this.global = globalDefault;
+    this.staticOverrides = new Map(Object.entries(staticOverrides ?? {}));
+    this.liveOverrides.clear();
+  }
+
+  /** Full capture of all three layers, for rollback of a failed reload. */
+  capture(): ModeStoreState {
+    return {
+      global: this.global,
+      staticOverrides: Object.fromEntries(this.staticOverrides),
+      liveOverrides: Object.fromEntries(this.liveOverrides),
+    };
+  }
+
+  /** Restore a previously {@link capture}d state (rollback). */
+  restore(state: ModeStoreState): void {
+    this.global = state.global;
+    this.staticOverrides = new Map(Object.entries(state.staticOverrides));
+    this.liveOverrides.clear();
+    for (const [k, v] of Object.entries(state.liveOverrides)) {
+      this.liveOverrides.set(k, v);
+    }
   }
 }

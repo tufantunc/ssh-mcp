@@ -33,6 +33,19 @@ export class OpenSshTransport implements ISshTransport {
   private askpassConfigPath?: string;
   private cleanupRegistered = false;
   /**
+   * Process-level cleanup handlers registered in {@link init}. Retained so
+   * {@link close} can UNREGISTER them: init() adds `process.once` listeners for
+   * exit/SIGINT/SIGTERM, and without removing them on close a config hot-reload
+   * (which closes + discards every transport, then re-dials on next use) would
+   * accumulate one dead handler set per reload — each pinning a closed
+   * transport in memory. Undefined until init() registers them.
+   */
+  private cleanupHandlers?: {
+    exit: () => void;
+    sigint: () => void;
+    sigterm: () => void;
+  };
+  /**
    * True when the most recent command completed a usable live SSH session (an
    * exec whose failure, if any, was the remote command's own non-zero exit).
    * OpenSSH has no persistent connection — init() only verifies the local ssh
@@ -55,9 +68,14 @@ export class OpenSshTransport implements ISshTransport {
 
     if (!this.cleanupRegistered) {
       const cleanup = () => { void this.close(); };
-      process.once('exit', cleanup);
-      process.once('SIGINT', () => { cleanup(); process.exit(130); });
-      process.once('SIGTERM', () => { cleanup(); process.exit(143); });
+      // Keep stable references so close() can remove exactly these listeners.
+      const onExit = cleanup;
+      const onSigint = () => { cleanup(); process.exit(130); };
+      const onSigterm = () => { cleanup(); process.exit(143); };
+      process.once('exit', onExit);
+      process.once('SIGINT', onSigint);
+      process.once('SIGTERM', onSigterm);
+      this.cleanupHandlers = { exit: onExit, sigint: onSigint, sigterm: onSigterm };
       this.cleanupRegistered = true;
     }
   }
@@ -153,6 +171,21 @@ export class OpenSshTransport implements ISshTransport {
   }
 
   async close(): Promise<void> {
+    // Unregister the process-level cleanup listeners added in init(). On a
+    // config hot-reload the registry closes and DISCARDS this transport, then
+    // re-dials a fresh one on next use; leaving the old exit/SIGINT/SIGTERM
+    // handlers attached would leak one dead listener set (and the closed
+    // transport they close over) per reload, eventually tripping Node's
+    // MaxListenersExceededWarning. Removing them here is a no-op during real
+    // process teardown (a fired `process.once` listener has already removed
+    // itself), so this is safe on both the reload path and the exit path.
+    if (this.cleanupHandlers) {
+      process.removeListener('exit', this.cleanupHandlers.exit);
+      process.removeListener('SIGINT', this.cleanupHandlers.sigint);
+      process.removeListener('SIGTERM', this.cleanupHandlers.sigterm);
+      this.cleanupHandlers = undefined;
+      this.cleanupRegistered = false;
+    }
     if (this.askpassDir) {
       try {
         // Synchronous removal: close() is invoked from process 'exit'/SIGINT/

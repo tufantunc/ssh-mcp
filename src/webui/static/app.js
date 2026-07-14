@@ -464,6 +464,24 @@
       try { JSON.parse(ev.data); } catch (_) {}
       fetchProfiles();
     });
+    sse.addEventListener('config-reloaded', (ev) => {
+      // The TOML config file changed on disk and was hot-reloaded (PR-9). The
+      // connection set / descriptions / approval policy may all have changed,
+      // so re-fetch the modes and profile snapshots (the two surfaces this
+      // dashboard renders). (The MCP tool list is NOT part of a reload —
+      // Decision D4 — so nothing about the SSE stream changes.)
+      try { JSON.parse(ev.data); } catch (_) {}
+      // A config reload invalidates the editor's source snapshot itself (the
+      // source may have been renamed/removed), so unlike background polls this
+      // refresh must replace an open draft and converge on server truth.
+      // Clear the editor flag FIRST: the forced re-render replaces the open
+      // editor's DOM, and a stale `descriptionEditorOpen === true` would keep
+      // suppressing background polls and make openDescriptionEditor ignore
+      // every later click, leaving the dashboard uneditable until a manual
+      // page refresh.
+      descriptionEditorOpen = false;
+      fetchModes().then(() => fetchProfiles(true));
+    });
   }
 
   function bootstrap() {
