@@ -554,6 +554,22 @@ timeout_ms = 1234
     expect(cfg.approval?.llm?.timeout_ms).toBe(1234);
   });
 
+  it('propagates per-source description and approval override to the server config', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "dc03"
+host = "dc03.example.com"
+user = "corp\\\\svcuser"
+auth = "kerberos"
+description = '''allow only NTDS\\My thumbprint 8A00772D4491E2E71218405BDDE5A5FE3E9C7DBE certificate-object writes; deny PFX, private key reads, restart, reboot'''
+approval = { mode = "smart" }
+`);
+    expect(cfg.sources[0].description).toContain('NTDS\\My');
+    expect(cfg.sources[0].description).toContain('8A00772D4491E2E71218405BDDE5A5FE3E9C7DBE');
+    expect(cfg.sources[0].approval?.mode).toBe('smart');
+    expect(cfg.perSourceApproval?.dc03).toBe('smart');
+  });
+
   it('rejects a scalar top-level approval value instead of enabling manual mode', () => {
     expect(() => parseTomlConfig(`
 approval = "yolo"

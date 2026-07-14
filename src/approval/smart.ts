@@ -24,6 +24,26 @@ interface LlmJudgement {
   reason: string;
 }
 
+export const DEFAULT_SMART_LLM_TIMEOUT_MS = 8000;
+
+/**
+ * Normalized snapshot of a live SmartApproval's LLM-relevant settings. Used by
+ * the config hot-reload path to compare the incoming TOML `[approval.llm]`
+ * against the sub-engine that was built once at boot: the SmartApproval
+ * instance is never rebuilt on reload, so a reload that changes any of these
+ * fields must be REJECTED (rather than silently keep hitting the stale
+ * boot-time endpoint/model/key). `provider` defaults to `'openai'` so the
+ * comparison is stable regardless of how the engine was constructed.
+ */
+export interface SmartLlmSnapshot {
+  endpoint: string;
+  model: string;
+  api_key?: string;
+  timeout_ms?: number;
+  provider: string;
+  fail_closed: boolean;
+}
+
 /**
  * Parse the LLM response body and extract a {allow, reason} judgement.
  * Throws when the structure is unusable; the caller maps that to a
@@ -87,6 +107,23 @@ export class SmartApproval implements ApprovalEngine {
     }
   }
 
+  /**
+   * Normalized view of the LLM settings this instance was built with. The
+   * config hot-reload path compares this against the reloaded TOML so a change
+   * to endpoint/model/api_key/timeout_ms/provider/fail_closed is rejected
+   * instead of silently ignored (the instance is never rebuilt on reload).
+   */
+  describeConfig(): SmartLlmSnapshot {
+    return {
+      endpoint: this.opts.llm.endpoint,
+      model: this.opts.llm.model,
+      api_key: this.opts.llm.api_key,
+      timeout_ms: this.opts.llm.timeout_ms,
+      provider: this.opts.llm.provider ?? 'openai',
+      fail_closed: this.opts.fail_closed !== false,
+    };
+  }
+
   async decide(ctx: ApprovalContext): Promise<ApprovalDecision> {
     const fail_closed = this.opts.fail_closed !== false; // default true
     const fetchImpl = this.opts.fetchImpl ?? (globalThis.fetch as any);
@@ -98,7 +135,7 @@ export class SmartApproval implements ApprovalEngine {
       );
     }
 
-    const timeoutMs = this.opts.llm.timeout_ms ?? 8000;
+    const timeoutMs = this.opts.llm.timeout_ms ?? DEFAULT_SMART_LLM_TIMEOUT_MS;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 

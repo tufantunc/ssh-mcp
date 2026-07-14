@@ -20,8 +20,10 @@ import {
 } from './types.js';
 import { YoloApproval } from './yolo.js';
 import { SmartApproval } from './smart.js';
+import type { SmartLlmSnapshot } from './smart.js';
 import { ManualApproval } from './manual.js';
 import { ApprovalModeStore } from './mode-store.js';
+import type { ModeStoreState } from './mode-store.js';
 
 export interface BuildApprovalEngineOptions {
   /** Default approval mode when a source has no [sources.approval] override. */
@@ -212,6 +214,56 @@ export class ApprovalDispatcher extends EventEmitter implements ApprovalEngine {
   }
 
   /**
+   * Hot-reload the approval POLICY from a freshly-loaded config (PR-9). Re-seeds
+   * the global default + static per-source overrides and clears live runtime
+   * overrides, so the edited file becomes the source of truth again.
+   *
+   * Sub-engines (yolo/smart/manual) are NEVER rebuilt — only the mode store is
+   * re-seeded — so this is allocation-free and cannot change which transports
+   * or LLM endpoint are wired. That means a reload can only select among modes
+   * already armed at boot: a new default/override naming an UNARMED engine
+   * (e.g. switch to `smart` when no `[approval.llm]` was configured at startup)
+   * is rejected with {@link ModeUnavailableError} and the store is left
+   * untouched (validate-before-swap — atomic). The reloader maps that to a
+   * kept-old-policy outcome; switching INTO a newly-configured smart/manual
+   * engine still requires a restart, exactly like dbhub's tool-list caveat.
+   */
+  reloadPolicy(input: { defaultMode?: ApprovalMode; staticOverrides?: Record<string, ApprovalMode> }): void {
+    const nextDefault: ApprovalMode = input.defaultMode ?? 'yolo';
+    const nextStatic = input.staticOverrides ?? {};
+    // Validate-before-swap: every mode the new policy can resolve to must have
+    // an armed sub-engine. Throws (leaving the store untouched) on the first
+    // unarmed mode.
+    this.assertSwitchable(nextDefault);
+    for (const mode of Object.values(nextStatic)) {
+      this.assertSwitchable(mode);
+    }
+    this.modeStore.reseed(nextDefault, nextStatic);
+  }
+
+  /** Capture the mode-store state for external rollback (PR-9). */
+  captureModeState(): ModeStoreState {
+    return this.modeStore.capture();
+  }
+
+  /**
+   * Normalized snapshot of the live smart sub-engine's LLM settings, or `null`
+   * when no smart engine is armed. The config hot-reload path uses this to
+   * reject a reload that edits `[approval.llm]` (endpoint/model/api_key/
+   * timeout_ms/provider/fail_closed): sub-engines are built once at boot and
+   * never rebuilt on reload, so a changed LLM block would otherwise be reported
+   * as applied while approvals keep hitting the stale boot-time endpoint.
+   */
+  describeSmartLlm(): SmartLlmSnapshot | null {
+    return this.smart?.describeConfig() ?? null;
+  }
+
+  /** Restore a previously captured mode-store state (PR-9 rollback). */
+  restoreModeState(state: ModeStoreState): void {
+    this.modeStore.restore(state);
+  }
+
+  /**
    * The mode `decide()` falls back to when a source carries no per-source
    * override (`ctx.profile.approval?.mode`). Exposed read-only so status
    * surfaces (e.g. the WebUI `/api/profiles` view) can report the
@@ -273,6 +325,13 @@ export interface BuildEngineFromConfigOptions {
   smartFetchImpl?: SmartApprovalOptions['fetchImpl'];
 }
 
+/** True when an inactive LLM block would make smart switchable on a fresh boot. */
+export function isSmartLlmPreArmable(llm: BuildEngineFromConfigInput['llm']): boolean {
+  const configured = !!(llm?.endpoint && llm?.model && !llm?.api_key_unresolved);
+  const providerSupported = llm?.provider === undefined || llm.provider === 'openai';
+  return configured && providerSupported;
+}
+
 export function buildApprovalEngineFromConfig(
   approval: BuildEngineFromConfigInput | undefined,
   options: BuildEngineFromConfigOptions,
@@ -307,14 +366,14 @@ export function buildApprovalEngineFromConfig(
   // guaranteed to omit the operator's configured authorization.
   const llmConfigured = !!(llm?.endpoint && llm?.model && !llm?.api_key_unresolved);
   const smartRequired = usedModes.has('smart');
-  const smartProviderSupported = llm?.provider === undefined || llm.provider === 'openai';
+  const smartPreArmable = isSmartLlmPreArmable(llm);
   if (smartRequired && !llmConfigured) {
     if (llm?.api_key_unresolved) {
       throw new Error('approval mode "smart" requires the configured [approval.llm].api_key to resolve');
     }
     throw new Error('approval mode "smart" requires [approval.llm].endpoint and .model');
   }
-  if (llmConfigured && (smartRequired || smartProviderSupported)) {
+  if (llmConfigured && (smartRequired || smartPreArmable)) {
     built.smart = {
       llm: {
         endpoint: llm!.endpoint!,

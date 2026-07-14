@@ -256,6 +256,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
         `Config: sources.${src.id}.gssapi_delegate_credentials must be yes|no`,
       );
     }
+    if (src.default !== undefined && typeof src.default !== 'boolean') {
+      throw new Error(`Config: sources.${src.id}.default must be a boolean`);
+    }
     // GSSAPIDelegateCredentials is only wired in the Kerberos auth branch (see
     // the `case 'kerberos'` below and OpenSshTransport.buildArgs); for key or
     // password auth the option is silently dropped, so a user requesting
@@ -402,6 +405,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
 
     if (sudoPassword !== undefined) out.sudoPassword = sudoPassword;
     if (suPassword !== undefined) out.suPassword = suPassword;
+    if (src.description !== undefined) out.description = src.description;
     // known_hosts_file / strict_host_key_checking are honored only by the
     // openssh transport (openssh.ts). On ssh2 they are silently dropped, which
     // would disable the requested host-key enforcement — a security downgrade.
@@ -446,6 +450,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
           `Config: sources.${src.id}.approval.mode must be one of: ${VALID_APPROVAL_MODE.join(', ')}`,
         );
       }
+      out.approval = { mode: mode as ApprovalMode };
       perSourceApproval[src.id] = mode as ApprovalMode;
     }
   }

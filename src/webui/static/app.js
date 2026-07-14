@@ -46,11 +46,19 @@
     else { el.textContent = state; }
   }
 
-  async function fetchProfiles() {
+  async function fetchProfiles(force = false) {
+    // The table renderer replaces every row. A background poll/SSE refresh while
+    // the description editor is open would therefore destroy the operator's
+    // unsaved textarea draft. Save/cancel explicitly force a refresh.
+    if (descriptionEditorOpen && !force) return;
     try {
       const r = await fetch('/api/profiles', { headers: authHeaders() });
       if (r.status === 401) { setConnStatus('error'); return; }
       const data = await r.json();
+      // A request can start before the editor opens and finish after it. Re-check
+      // after the async boundary so that stale snapshots cannot replace the draft.
+      if (descriptionEditorOpen && !force) return;
+      sourceEditEnabled = !!data.source_edit_enabled;
       renderProfiles(data.profiles || []);
     } catch (e) { /* ignore polling glitches */ }
   }
@@ -81,7 +89,7 @@
       const tr = document.createElement('tr');
       tr.dataset.id = p.id;
       tr.innerHTML = `<td>${escapeHtml(p.name)}${p.default ? ' <span class="muted">(default)</span>' : ''}</td>
-                      <td>${escapeHtml(p.description || '')}</td>
+                      <td class="desc-cell"></td>
                       <td>${escapeHtml(p.host)}:${escapeHtml(p.port)}</td>
                       <td>${escapeHtml(p.user)}</td>
                       <td>${escapeHtml(p.auth)}</td>
@@ -89,7 +97,94 @@
                       <td class="mode-cell"></td>
                       <td>${p.connected ? '<span class="pill allow">connected</span>' : '<span class="pill">idle</span>'}</td>`;
       tr.querySelector('.mode-cell').appendChild(buildModeControl(p.id, p.approval_mode_effective));
+      tr.querySelector('.desc-cell').appendChild(buildDescriptionControl(p.id, p.description || ''));
       tbody.appendChild(tr);
+    }
+  }
+
+  // Build the per-source description cell. When the server exposes a source
+  // controller (sourceEditEnabled), the cell is click-to-edit: a textarea with
+  // save / revert that PUTs /api/sources/:id/description (in-memory only).
+  // Otherwise it is plain read-only text (the read-only WebUI case).
+  function buildDescriptionControl(sourceId, description) {
+    const wrap = document.createElement('div');
+    wrap.className = 'desc-wrap';
+    wrap.dataset.source = sourceId;
+
+    const text = document.createElement('span');
+    text.className = 'desc-text';
+    text.textContent = description || '—';
+
+    if (!sourceEditEnabled) {
+      wrap.appendChild(text);
+      return wrap;
+    }
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'desc-edit';
+    editBtn.textContent = 'edit';
+    editBtn.title = 'Edit description (live, in-memory only — not written to TOML)';
+    editBtn.addEventListener('click', () => openDescriptionEditor(wrap, sourceId, description));
+
+    wrap.appendChild(text);
+    wrap.appendChild(editBtn);
+    return wrap;
+  }
+
+  function openDescriptionEditor(wrap, sourceId, current) {
+    // Keep one active editor so background profile refreshes can be suspended
+    // without another row's draft being accidentally discarded.
+    if (descriptionEditorOpen) return;
+    descriptionEditorOpen = true;
+    wrap.innerHTML = '';
+    const ta = document.createElement('textarea');
+    ta.className = 'desc-input';
+    ta.value = current || '';
+    ta.rows = 3;
+
+    const actions = document.createElement('div');
+    actions.className = 'desc-actions';
+    const save = document.createElement('button');
+    save.type = 'button'; save.className = 'desc-save'; save.textContent = 'save';
+    const revert = document.createElement('button');
+    revert.type = 'button'; revert.className = 'desc-revert'; revert.textContent = 'revert to config';
+    const cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.className = 'desc-cancel'; cancel.textContent = 'cancel';
+
+    save.addEventListener('click', () => saveDescription(sourceId, ta.value, save));
+    revert.addEventListener('click', () => saveDescription(sourceId, null, revert));
+    cancel.addEventListener('click', () => {
+      descriptionEditorOpen = false;
+      fetchProfiles(true);
+    });
+
+    actions.appendChild(save);
+    actions.appendChild(revert);
+    actions.appendChild(cancel);
+    wrap.appendChild(ta);
+    wrap.appendChild(actions);
+    ta.focus();
+  }
+
+  // PUT the description override. `description === null` reverts to the TOML
+  // value. A successful edit also lands as an SSE source-updated event, which
+  // triggers fetchProfiles() so every open dashboard converges on server truth.
+  async function saveDescription(sourceId, description, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch('/api/sources/' + encodeURIComponent(sourceId) + '/description', {
+        method: 'PUT',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+        body: JSON.stringify({ description }),
+      });
+      if (!r.ok) return;
+      descriptionEditorOpen = false;
+      fetchProfiles(true);
+    } catch (_) {
+      // Preserve the active editor and draft so the operator can retry.
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
 
@@ -145,6 +240,14 @@
   // override). Populated from /api/approval-modes `global` and kept in sync
   // with scope:'global' mode-changed SSE events.
   let globalMode = null;
+
+  // Whether the server exposes the live description-edit surface (PR-8).
+  // Detected at bootstrap from /api/profiles' `source_edit_enabled` flag;
+  // false => read-only description cells (the read-only WebUI case).
+  let sourceEditEnabled = false;
+  // While true, background polling/SSE profile refreshes are suspended so the
+  // active textarea cannot be replaced and lose its unsaved draft.
+  let descriptionEditorOpen = false;
 
   async function fetchModes() {
     try {
@@ -354,6 +457,30 @@
         }
       } catch (_) {}
       fetchProfiles();
+    });
+    sse.addEventListener('source-updated', (ev) => {
+      // A live description edit landed (possibly from another client). Re-fetch
+      // the profile snapshot so every open dashboard converges on server truth.
+      try { JSON.parse(ev.data); } catch (_) {}
+      fetchProfiles();
+    });
+    sse.addEventListener('config-reloaded', (ev) => {
+      // The TOML config file changed on disk and was hot-reloaded (PR-9). The
+      // connection set / descriptions / approval policy may all have changed,
+      // so re-fetch the modes and profile snapshots (the two surfaces this
+      // dashboard renders). (The MCP tool list is NOT part of a reload —
+      // Decision D4 — so nothing about the SSE stream changes.)
+      try { JSON.parse(ev.data); } catch (_) {}
+      // A config reload invalidates the editor's source snapshot itself (the
+      // source may have been renamed/removed), so unlike background polls this
+      // refresh must replace an open draft and converge on server truth.
+      // Clear the editor flag FIRST: the forced re-render replaces the open
+      // editor's DOM, and a stale `descriptionEditorOpen === true` would keep
+      // suppressing background polls and make openDescriptionEditor ignore
+      // every later click, leaving the dashboard uneditable until a manual
+      // page refresh.
+      descriptionEditorOpen = false;
+      fetchModes().then(() => fetchProfiles(true));
     });
   }
 

@@ -61,10 +61,70 @@ export interface ModeController {
   off?(event: 'mode-changed', listener: (e: ModeChangedEvent) => void): void;
 }
 
+/**
+ * Event emitted whenever a live per-source description edit is applied (PR-8).
+ * Kept loose here (string fields) so the WebUI doesn't import the transport
+ * types directly. `description` is the resulting effective description (the
+ * empty string when blanked or reverted to an empty TOML value). `at` is an
+ * ISO timestamp. In-memory only (Decision D3) — never persisted.
+ */
+export interface SourceUpdatedEvent {
+  id: string;
+  description: string;
+  at: string;
+}
+
+/**
+ * Live per-source description control surface (PR-8). The WebUI pushes runtime
+ * description edits back through this controller; `source-updated` events flow
+ * to the SSE stream. All mutation is in-memory only (Decision D3) — the
+ * controller MUST NOT write back to the TOML config. The approval engine
+ * re-reads the effective description on its next decision, so an edit takes
+ * effect live without a restart.
+ */
+export interface SourceController {
+  /** True iff `id` names a registered source (used to 404 cleanly). */
+  hasSource(id: string): boolean;
+  /** The current effective description for a source (override > TOML > ''). */
+  getEffectiveDescription(id: string): string;
+  /**
+   * Set (string) or clear (`null` → revert to the TOML description) the live
+   * description override. Returns the resulting effective description.
+   * Throws if `id` names an unknown source.
+   */
+  setDescription(id: string, description: string | null): SourceUpdatedEvent;
+  on(event: 'source-updated', listener: (e: SourceUpdatedEvent) => void): void;
+  off?(event: 'source-updated', listener: (...args: any[]) => void): void;
+}
+
 export interface ApprovalDecision {
   decision: ApprovalDecisionKind;
   reason: string;
   decided_by: string;
+}
+
+/**
+ * Event emitted whenever a TOML config hot-reload is applied (PR-9). Carries
+ * the post-reload connection name list + effective default. Kept loose (string
+ * fields) so the WebUI doesn't import the config types directly. In-memory
+ * reload only (Decision D3/D4) — the tool list is never part of this.
+ */
+export interface ConfigReloadedEvent {
+  sources: string[];
+  defaultName: string | null;
+  at: string;
+}
+
+/**
+ * Live config-reload control surface (PR-9). The boot path passes the
+ * ConfigReloader (an EventEmitter) here; the SSE hub subscribes and rebroadcasts
+ * `config-reloaded` to every open dashboard so each re-fetches the profile
+ * snapshot. Read-only from the WebUI's perspective — the UI never triggers a
+ * reload, it only reacts to file-driven reloads.
+ */
+export interface ConfigReloadController {
+  on(event: 'config-reloaded', listener: (e: ConfigReloadedEvent) => void): void;
+  off?(event: 'config-reloaded', listener: (...args: any[]) => void): void;
 }
 
 /**
@@ -153,6 +213,14 @@ export interface WebUIOptions {
    * mode-switch routes (`PUT .../approval-mode`, `GET /api/approval-modes`) and
    * SSE `mode-changed` broadcasts. In-memory only (Decision D3). */
   modeController?: ModeController;
+  /** Optional live per-source description controller (PR-8). When present,
+   * enables the description-edit route (`PUT /api/sources/:id/description`) and
+   * SSE `source-updated` broadcasts. In-memory only (Decision D3). */
+  sourceController?: SourceController;
+  /** Optional config-reload controller (PR-9). When present, the SSE hub
+   * subscribes to it and rebroadcasts `config-reloaded` so every dashboard
+   * re-fetches after a TOML hot reload. Read-only; in-memory reload (D4). */
+  reloadController?: ConfigReloadController;
 }
 
 export interface WebUIHandle {
