@@ -228,6 +228,36 @@ password = "super-secret-value
     expect(() => parseTomlConfig(`[server]\naudit_dir = "/tmp"`)).toThrow(/sources/);
   });
 
+  it('rejects fractional and non-positive audit_max_bytes (Codex 3556038524)', () => {
+    const oneSource = `
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+`;
+    // Fractional byte counts would floor to 0 downstream and silently empty
+    // every stdout/stderr capture; they must be rejected at parse time.
+    expect(() => parseTomlConfig(`
+[server]
+audit_max_bytes = 0.5
+${oneSource}`)).toThrow(/audit_max_bytes must be a positive integer/);
+    expect(() => parseTomlConfig(`
+[server]
+audit_max_bytes = 1024.5
+${oneSource}`)).toThrow(/audit_max_bytes must be a positive integer/);
+    expect(() => parseTomlConfig(`
+[server]
+audit_max_bytes = 0
+${oneSource}`)).toThrow(/audit_max_bytes must be a positive integer/);
+    // A positive integer is still accepted.
+    const cfg = parseTomlConfig(`
+[server]
+audit_max_bytes = 4096
+${oneSource}`);
+    expect(cfg.server?.audit_max_bytes).toBe(4096);
+  });
+
   it('rejects duplicate ids', () => {
     expect(() => parseTomlConfig(`
 [[sources]]
@@ -474,6 +504,30 @@ port = 8080
 auth_token = "env:TKN"
 `, { env: { TKN: 'tok' } });
     expect(cfg.webui?.auth_token).toBe('tok');
+  });
+
+  it('parses and validates [webui].cors', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[webui]
+cors = true
+`);
+    expect(cfg.webui?.cors).toBe(true);
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[webui]
+cors = "yes"
+`)).toThrow(/\[webui\]\.cors must be a boolean/);
   });
 
   it('parses [approval] and [approval.llm]', () => {
@@ -1012,6 +1066,57 @@ auth = "kerberos"
 api_key = "env:MISSING_KEY"
 `, { env: {} });
     expect(cfg.approval?.llm?.api_key).toBeUndefined();
+  });
+
+  // Finding: pre-armed smart drops the configured LLM api_key. When the LLM
+  // block is FULLY configured (endpoint + model), buildApprovalEngineFromConfig
+  // pre-arms smart so the WebUI can live-switch into it — but SmartApproval
+  // needs the api_key to authenticate. Preserve the key (env: indirection
+  // included) whenever the block is fully configured, even if smart is not the
+  // enforced default/per-source mode.
+  it('preserves api_key for a fully-configured LLM block even when mode is manual (pre-arm smart)', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[approval]
+mode = "manual"
+
+[approval.llm]
+endpoint = "https://api.openai.com/v1/chat/completions"
+api_key = "env:OPENAI_API_KEY"
+model = "gpt-4o-mini"
+`, { env: { OPENAI_API_KEY: 'sk-live' } });
+    // Manual is the enforced mode, but the fully-configured LLM block pre-arms
+    // smart, so the key must survive for a live switch to smart.
+    expect(cfg.approval?.mode).toBe('manual');
+    expect(cfg.approval?.llm?.api_key).toBe('sk-live');
+  });
+
+  it('does NOT fail startup when a pre-arm-only api_key env is unset (soft-resolve)', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[approval]
+mode = "manual"
+
+[approval.llm]
+endpoint = "https://api.openai.com/v1/chat/completions"
+api_key = "env:MISSING_KEY"
+model = "gpt-4o-mini"
+`, { env: {} });
+    // No throw (manual is active), but retain that the configured key was
+    // unavailable so the engine builder does not pre-arm/advertise smart.
+    expect(cfg.approval?.mode).toBe('manual');
+    expect(cfg.approval?.llm?.api_key).toBeUndefined();
+    expect(cfg.approval?.llm?.api_key_unresolved).toBe(true);
   });
 
   it('resolves api_key when smart mode is only enabled by a per-source override', () => {

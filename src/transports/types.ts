@@ -100,6 +100,8 @@ export interface TransportConfig {
   // Auth (legacy, used by both transports)
   password?: string;
   privateKey?: string;  // private-key contents (not path)
+  /** Internal marker: privateKey was lazily read from keyPath, not configured inline. */
+  privateKeyDerivedFromKeyPath?: true;
   suPassword?: string;
   sudoPassword?: string;
 
@@ -121,7 +123,10 @@ export interface TransportConfig {
 export interface ServerConfig extends TransportConfig {
   /** Unique identifier referenced by MCP tools' connectionName argument. */
   name: string;
-  /** Human-readable host/profile policy description supplied to approval engines. */
+  /**
+   * Optional human-readable source description from TOML, surfaced by
+   * approval prompts and read-only status surfaces (e.g. the WebUI).
+   */
   description?: string;
   /** Per-source approval override. */
   approval?: {

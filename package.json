@@ -9,7 +9,7 @@
   },
   "scripts": {
     "prepare": "npm run build",
-    "build": "tsc && shx chmod +x build/*.js",
+    "build": "tsc && shx rm -rf build/webui/static && shx mkdir -p build/webui && shx cp -r src/webui/static build/webui/static && shx chmod +x build/*.js",
     "inspect": "npx @modelcontextprotocol/inspector node build/index.js",
     "test": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run",
     "test:watch": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest",

@@ -44,6 +44,11 @@ export interface AuditExecInput {
 /** The seam surface the rest of the server depends on. Always safe to call. */
 export interface AuditSink {
   record(input: AuditExecInput): void;
+  /** Optional read-only tail used by the WebUI when src/audit is present. */
+  tail?(opts: { profile?: string; limit: number }): Promise<unknown[]>;
+  /** Optional execution event subscription used by WebUI SSE. */
+  on?(event: 'execution', listener: (record: unknown) => void): void;
+  off?(event: 'execution', listener: (record: unknown) => void): void;
 }
 
 export interface AuditSeamConfig {
@@ -61,6 +66,9 @@ export interface AuditSeamConfig {
 interface AuditModuleLike {
   AuditStore: new (cfg: { auditDir: string; auditMaxBytes: number }) => {
     append(record: unknown): unknown;
+    tail?(opts: { profile?: string; limit: number }): Promise<unknown[]>;
+    on?(event: 'execution', listener: (record: unknown) => void): void;
+    off?(event: 'execution', listener: (record: unknown) => void): void;
   };
   resolveAuditDir(override?: string | null): string;
 }
@@ -123,7 +131,14 @@ function approvalNotReachedSection(
   };
 }
 
-function stderrWithExecutionError(stderr: string | undefined, error: unknown): string {
+/**
+ * Merge a mapped execution error (the McpError raised by `resultToMcpContent`
+ * for a failed ExecResult) into the audited stderr, so failure audit records
+ * keep the synthetic context (`Command exited with status N`, timeout text)
+ * instead of an empty stderr. Exported for the legacy direct wrapper in
+ * `src/index.ts`, which must audit with the same semantics (Codex 3556038517).
+ */
+export function stderrWithExecutionError(stderr: string | undefined, error: unknown): string {
   const base = stderr ?? '';
   if (error === undefined) return base;
 
@@ -163,7 +178,7 @@ export async function loadAuditSink(
     console.error(`[ssh-mcp][audit-seam] audit module present but failed to load; auditing disabled: ${message}`);
     return NO_OP_SINK; // audit module unusable → visible warning + no-op
   }
-  let store: { append(record: unknown): unknown };
+  let store: InstanceType<AuditModuleLike['AuditStore']>;
   try {
     if (
       !mod
@@ -188,6 +203,15 @@ export async function loadAuditSink(
   }
 
   return {
+    tail(opts: { profile?: string; limit: number }): Promise<unknown[]> {
+      return typeof store.tail === 'function' ? store.tail(opts) : Promise.resolve([]);
+    },
+    on(event: 'execution', listener: (record: unknown) => void): void {
+      if (typeof store.on === 'function') store.on(event, listener);
+    },
+    off(event: 'execution', listener: (record: unknown) => void): void {
+      if (typeof store.off === 'function') store.off(event, listener);
+    },
     record(input: AuditExecInput): void {
       try {
         const now = new Date();
@@ -198,30 +222,33 @@ export async function loadAuditSink(
         const approval = input.approval
           ? toApprovalSection(input.approval)
           : approvalNotReachedSection(now, input.error, input.approvalMode ?? 'yolo');
+        const exec = input.result
+          ? {
+              stdout: input.result.stdout ?? '',
+              // When resultToMcpContent rejects after the transport already
+              // returned an ExecResult, keep both the raw transport stderr and
+              // the mapped MCP error. Otherwise timeout/auth/host-key/
+              // transport/non-zero results become audit records that only say
+              // "a result existed" and lose the execution failure context.
+              stderr: stderrWithExecutionError(input.result.stderr, input.error),
+              exitCode: input.result.exitCode ?? null,
+              durationMs,
+            }
+          : input.approval?.decision === 'deny'
+            ? undefined
+            : {
+                stdout: '',
+                stderr: errorMessageFromUnknown(input.error),
+                exitCode: null,
+                durationMs,
+              };
         store.append({
           profile: input.profile,
           tool: input.tool,
           command: input.command,
           description: input.description,
           approval,
-          exec: input.result
-            ? {
-                stdout: input.result.stdout ?? '',
-                // When resultToMcpContent rejects after the transport already
-                // returned an ExecResult, keep both the raw transport stderr and
-                // the mapped MCP error. Otherwise timeout/auth/host-key/
-                // transport/non-zero results become audit records that only say
-                // "a result existed" and lose the execution failure context.
-                stderr: stderrWithExecutionError(input.result.stderr, input.error),
-                exitCode: input.result.exitCode ?? null,
-                durationMs,
-              }
-            : {
-                stdout: '',
-                stderr: errorMessageFromUnknown(input.error),
-                exitCode: null,
-                durationMs,
-              },
+          ...(exec ? { exec } : {}),
           now,
         });
       } catch (auditErr: any) {

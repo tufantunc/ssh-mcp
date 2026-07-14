@@ -120,6 +120,23 @@ audit_dir = "~/audit-only"
     expect(cfg.configPath).toBe(p);
   });
 
+  it('--webui resolves a token from a TOML section whose enabled flag is false', () => {
+    const p = writeToml(tmp, 'cli-webui.toml', `
+[webui]
+enabled = false
+host = "0.0.0.0"
+auth_token = "env:WEBUI_TOKEN"
+`);
+    const cfg = resolveConfig({
+      cliSources: [cliSource('cli')],
+      cliConfigPath: p,
+      env: { WEBUI_TOKEN: 'resolved-token' },
+      webuiEnabled: true,
+    });
+    expect(cfg.webui?.enabled).toBe(false);
+    expect(cfg.webui?.auth_token).toBe('resolved-token');
+  });
+
   it('does not inherit require_connection=false from auto-discovered TOML for CLI sources', () => {
     const xdgRoot = path.join(tmp, 'xdg-cli-guard');
     const discovered = writeToml(xdgRoot, 'ssh-mcp/config.toml', `
@@ -438,5 +455,70 @@ auth = "kerberos"
     const cfg = resolveConfig({ cliSources: [], cliConfigPath: p, env: {} });
     expect(cfg.defaultName).toBe('solo');
     expect(cfg.defaultExplicit).toBe(false);
+  });
+});
+
+describe('reloadResolveConfig pins reloads to the boot-time watched path (finding 4)', () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-mcp-reload-path-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // src/index.ts reloadResolveConfig feeds resolvedConfig.configPath (the
+  // absolute path resolved AT BOOT, which the watcher is attached to) back as
+  // the highest-precedence input. This test reproduces that call shape and
+  // proves a higher-precedence config appearing AFTER boot does not hijack the
+  // reload: the loader keeps reading the originally-watched file.
+  it('keeps reading the boot-discovered file even when SSH_MCP_CONFIG appears post-boot', () => {
+    // Boot from a default-discovered (lowest precedence) config — no CLI, no
+    // SSH_MCP_CONFIG, just XDG discovery.
+    const xdgRoot = path.join(tmp, 'xdg');
+    const discovered = writeToml(xdgRoot, 'ssh-mcp/config.toml', `
+[[sources]]
+id = "discovered"
+host = "discovered.example"
+user = "u"
+auth = "kerberos"
+`);
+    const bootEnv = { XDG_CONFIG_HOME: xdgRoot };
+    const boot = resolveConfig({ cliSources: [], env: bootEnv });
+    expect(boot.sources[0].name).toBe('discovered');
+    expect(boot.configPath).toBe(discovered);
+
+    // A higher-precedence config now appears in the environment (e.g. an
+    // operator exports SSH_MCP_CONFIG after the process is already running).
+    const higher = writeToml(tmp, 'higher.toml', `
+[[sources]]
+id = "higher"
+host = "higher.example"
+user = "u"
+auth = "kerberos"
+`);
+
+    // FIXED behaviour: reloadResolveConfig pins cliConfigPath to the boot path,
+    // so the reload re-reads the watched file, not the newly-higher one.
+    const reloaded = resolveConfig({
+      cliSources: [],
+      cliConfigPath: boot.configPath,
+      env: { ...bootEnv, SSH_MCP_CONFIG: higher },
+    });
+    expect(reloaded.configPath).toBe(discovered);
+    expect(reloaded.sources[0].name).toBe('discovered');
+
+    // Sanity: WITHOUT pinning (the old bug), discovery would re-run and the
+    // higher-precedence SSH_MCP_CONFIG would win — applying a different file
+    // than the one being watched.
+    const unpinned = resolveConfig({
+      cliSources: [],
+      cliConfigPath: undefined,
+      env: { ...bootEnv, SSH_MCP_CONFIG: higher },
+    });
+    expect(unpinned.configPath).toBe(higher);
+    expect(unpinned.sources[0].name).toBe('higher');
   });
 });
