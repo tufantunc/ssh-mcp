@@ -115,50 +115,99 @@ export function startConfigWatcher(options: ConfigWatcherOptions): (() => void) 
   //
   // A configured path may itself be a symlink. Watching only its lexical parent
   // misses every direct or atomic-replace edit in the real target directory, so
-  // subscribe to both paths (deduplicated by directory + basename).
-  const candidatePaths = new Set<string>([path.resolve(configPath)]);
-  try {
-    candidatePaths.add(fs.realpathSync(configPath));
-  } catch {
-    // The lexical directory watcher still observes a config file created later.
-  }
-  const watchedEntries = new Map<string, Set<string>>();
-  for (const candidate of candidatePaths) {
-    const dir = path.dirname(candidate);
-    const names = watchedEntries.get(dir) ?? new Set<string>();
-    names.add(path.basename(candidate));
-    watchedEntries.set(dir, names);
-  }
+  // ALSO watch the resolved target's directory. The symlink entry can be
+  // atomically RETARGETED at any time (a rename over the link inside the
+  // lexical directory), after which the previously resolved target directory is
+  // stale — so the real-path watcher is re-armed on every config-file event
+  // instead of being resolved once at startup.
+  const lexicalPath = path.resolve(configPath);
+  const lexicalDir = path.dirname(lexicalPath);
+  const lexicalBase = path.basename(lexicalPath);
 
-  const watchers: fs.FSWatcher[] = [];
-  try {
-    for (const [dir, basenames] of watchedEntries) {
-      const watcher = fs.watch(dir, (eventType, filename) => {
-        // Most platforms emit 'change'; some emit 'rename' on save-via-replace
-        // or temp-file churn. Treat both as "the watched file might have changed"
-        // and let the parse step in onChange be the real validator. fs.watch on a
-        // directory reports the affected entry in `filename`; when the platform
-        // omits it (rare) we conservatively schedule a reload rather than miss an
-        // edit. Events for OTHER files in the directory are ignored.
+  let realWatcher: fs.FSWatcher | null = null;
+  let realWatchKey: string | null = null;
+
+  const closeRealWatcher = () => {
+    if (realWatcher) {
+      try { realWatcher.close(); } catch { /* best effort */ }
+      realWatcher = null;
+      realWatchKey = null;
+    }
+  };
+
+  // (Re)compute the real target and (re)arm its directory watcher. Called at
+  // startup and again on every config-file event in the lexical directory so a
+  // retargeted symlink keeps hot reload alive at the NEW target. A failed arm
+  // is logged and leaves the lexical watcher in charge — it still sees the
+  // next link replacement, which re-attempts the arm.
+  const armRealWatcher = () => {
+    if (closed) return;
+    let realPath: string;
+    try {
+      realPath = fs.realpathSync(lexicalPath);
+    } catch {
+      // Target currently missing/unresolvable. Drop any stale target watcher;
+      // the lexical directory watcher still observes a config file (or a
+      // re-pointed symlink) created later.
+      closeRealWatcher();
+      return;
+    }
+    const realDir = path.dirname(realPath);
+    const realBase = path.basename(realPath);
+    if (realDir === lexicalDir && realBase === lexicalBase) {
+      // Not a symlink (resolves in place): the lexical watcher covers it.
+      closeRealWatcher();
+      return;
+    }
+    const key = `${realDir}\u0000${realBase}`;
+    if (realWatcher && key === realWatchKey) return; // target unchanged
+    closeRealWatcher();
+    try {
+      const watcher = fs.watch(realDir, (eventType, filename) => {
         if (eventType !== 'change' && eventType !== 'rename') return;
-        if (filename != null && !basenames.has(path.basename(filename.toString()))) return;
+        if (filename != null && path.basename(filename.toString()) !== realBase) return;
         scheduleReload();
       });
-      watchers.push(watcher);
       watcher.unref?.();
       watcher.on('error', (err: Error) => {
-        log(`Config watcher: file watch error in ${dir}: ${err?.message || err}`);
+        log(`Config watcher: file watch error in ${realDir}: ${err?.message || err}`);
       });
+      realWatcher = watcher;
+      realWatchKey = key;
+    } catch (err: any) {
+      log(`Config watcher: failed to watch symlink target dir ${realDir}: ${err?.message || err}`);
     }
+  };
+
+  let lexicalWatcher: fs.FSWatcher;
+  try {
+    lexicalWatcher = fs.watch(lexicalDir, (eventType, filename) => {
+      // Most platforms emit 'change'; some emit 'rename' on save-via-replace
+      // or temp-file churn. Treat both as "the watched file might have changed"
+      // and let the parse step in onChange be the real validator. fs.watch on a
+      // directory reports the affected entry in `filename`; when the platform
+      // omits it (rare) we conservatively schedule a reload rather than miss an
+      // edit. Events for OTHER files in the directory are ignored.
+      if (eventType !== 'change' && eventType !== 'rename') return;
+      if (filename != null && path.basename(filename.toString()) !== lexicalBase) return;
+      // The link entry itself may have been replaced/retargeted: refresh the
+      // real-path watcher BEFORE the debounced reload so edits landing at the
+      // new target during and after the debounce window are still observed.
+      armRealWatcher();
+      scheduleReload();
+    });
   } catch (err: any) {
-    for (const watcher of watchers) {
-      try { watcher.close(); } catch { /* best effort */ }
-    }
     log(`Config watcher: failed to watch ${configPath}: ${err?.message || err}`);
     return null;
   }
+  lexicalWatcher.unref?.();
+  lexicalWatcher.on('error', (err: Error) => {
+    log(`Config watcher: file watch error in ${lexicalDir}: ${err?.message || err}`);
+  });
 
-  log(`Watching ${[...candidatePaths].join(', ')} for changes (hot reload enabled)`);
+  armRealWatcher();
+
+  log(`Watching ${lexicalPath}${realWatchKey ? ' (and its resolved symlink target directory)' : ''} for changes (hot reload enabled)`);
 
   return () => {
     // Mark closed FIRST so any reload still in-flight won't re-schedule from its
@@ -168,8 +217,7 @@ export function startConfigWatcher(options: ConfigWatcherOptions): (() => void) 
       clearTimeout(debounceTimer);
       debounceTimer = null;
     }
-    for (const watcher of watchers) {
-      try { watcher.close(); } catch { /* best effort */ }
-    }
+    try { lexicalWatcher.close(); } catch { /* best effort */ }
+    closeRealWatcher();
   };
 }

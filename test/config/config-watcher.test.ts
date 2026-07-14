@@ -264,6 +264,58 @@ describe('startConfigWatcher', () => {
     expect(calls).toBe(2);
   });
 
+  it('keeps reloading after the symlink is retargeted to a different real file', async () => {
+    const linkDir = join(dir, 'links-retarget');
+    const targetDirA = join(dir, 'real-a');
+    const targetDirB = join(dir, 'real-b');
+    mkdirSync(linkDir);
+    mkdirSync(targetDirA);
+    mkdirSync(targetDirB);
+    const targetA = join(targetDirA, 'a.toml');
+    const targetB = join(targetDirB, 'b.toml');
+    writeFileSync(targetA, 'sources = []\n# a-initial\n');
+    writeFileSync(targetB, 'sources = []\n# b-initial\n');
+    const symlinkPath = join(linkDir, 'config.toml');
+    symlinkSync(targetA, symlinkPath);
+
+    let calls = 0;
+    stop = startConfigWatcher({
+      configPath: symlinkPath,
+      debounceMs: 60,
+      onChange: () => { calls++; },
+      log: () => {},
+    });
+    expect(stop).toBeTypeOf('function');
+
+    // Sanity: edits at the original target fire.
+    writeFileSync(targetA, 'sources = []\n# a-edited\n');
+    await sleep(160);
+    expect(calls).toBe(1);
+
+    // Atomically RETARGET the symlink to point at target B (write a new link,
+    // rename it over the config entry — the standard config-flip pattern).
+    const tmpLink = join(linkDir, '.config.toml.lnk');
+    symlinkSync(targetB, tmpLink);
+    renameSync(tmpLink, symlinkPath);
+    await sleep(160);
+    // The lexical directory watcher observes the link replacement itself.
+    expect(calls).toBe(2);
+
+    // THE REGRESSION: subsequent edits through the symlink land in the NEW
+    // target directory. A watcher resolved once at startup is still bound to
+    // target A's directory and goes silently deaf here.
+    writeFileSync(targetB, 'sources = []\n# b-edited\n');
+    await sleep(160);
+    expect(calls).toBe(3);
+
+    // Atomic replacement in the NEW target directory must fire too.
+    const tmpB = join(targetDirB, '.b.toml.tmp');
+    writeFileSync(tmpB, 'sources = []\n# b-replaced\n');
+    renameSync(tmpB, targetB);
+    await sleep(160);
+    expect(calls).toBe(4);
+  });
+
   it('ignores changes to OTHER files in the watched directory', async () => {
     let calls = 0;
     stop = startConfigWatcher({

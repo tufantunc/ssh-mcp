@@ -31,6 +31,7 @@ import {
   validateSshCliFlag,
 } from '../src/index';
 import { ApprovalDispatcher } from '../src/approval/engine';
+import { getApprovalDecisionFromError } from '../src/approval/gate';
 import { TransportRegistry } from '../src/transports/registry';
 import type { ExecResult, ISshTransport, ServerConfig } from '../src/transports/types';
 import type { ResolvedConfig } from '../src/config/types';
@@ -1123,6 +1124,63 @@ describe('approveTransportForCurrentConfig (Codex V4 finding: re-run approval af
       profile: reg.profile('alpha') as any,
       gate: async () => { throw new Error('approval denied by current profile'); },
     })).rejects.toThrow(/current profile/);
+  });
+
+  it('carries the approval on the error when transport acquisition fails after an allow', async () => {
+    // Codex finding 3575258575: approval succeeded but registry.get() rejected
+    // (unreadable lazy key, connect failure, source removed post-approval).
+    // The operator's decision must survive on the thrown error so the tool
+    // handlers' catch path audits the REAL decision via
+    // getApprovalDecisionFromError instead of a synthetic approval:not-run.
+    const reg = {
+      getReloadGeneration: () => 1,
+      get: async () => { throw new Error('connect ECONNREFUSED 192.0.2.1:22'); },
+      profile: (_name?: string) => ({ id: 'alpha' } as any),
+    };
+    const decision = allow('operator allowed before transport failure');
+
+    let caught: unknown;
+    try {
+      await approveTransportForCurrentConfig({
+        reg: reg as any,
+        profile: reg.profile('alpha') as any,
+        gate: async () => decision,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/ECONNREFUSED/);
+    // Exactly the shape both tool handlers recover in their catch blocks.
+    expect(getApprovalDecisionFromError(caught)).toBe(decision);
+  });
+
+  it('does not overwrite an approval already attached to the acquisition error', async () => {
+    // A registry.get() failure may itself carry an approval (e.g. a nested
+    // gate); the outer helper must not clobber that inner truth.
+    const inner = allow('inner pre-attached decision');
+    const failure = Object.assign(new Error('acquisition failed with prior decision'), {
+      approval: inner,
+    });
+    const reg = {
+      getReloadGeneration: () => 1,
+      get: async () => { throw failure; },
+      profile: (_name?: string) => ({ id: 'alpha' } as any),
+    };
+
+    let caught: unknown;
+    try {
+      await approveTransportForCurrentConfig({
+        reg: reg as any,
+        profile: reg.profile('alpha') as any,
+        gate: async () => allow('outer decision'),
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(getApprovalDecisionFromError(caught)).toBe(inner);
   });
 });
 

@@ -824,7 +824,21 @@ export async function approveTransportForCurrentConfig(params: {
     }
 
     // Approval is current, so transport initialization/elevation may proceed.
-    const transport = await params.reg.get(resolvedName);
+    let transport: ISshTransport;
+    try {
+      transport = await params.reg.get(resolvedName);
+    } catch (err) {
+      // The operator's decision DID happen. A failed acquisition (unreadable
+      // lazy key, connect failure, source removed after the approval) must not
+      // silently discard it: attach the decision to the error so both tool
+      // handlers' catch paths (getApprovalDecisionFromError) audit the real
+      // decision instead of recording a synthetic `approval:not-run` denial.
+      if (err !== null && typeof err === 'object'
+          && (err as { approval?: ApprovalDecision }).approval === undefined) {
+        (err as { approval?: ApprovalDecision }).approval = approval;
+      }
+      throw err;
+    }
     if (params.reg.getReloadGeneration() === generationBeforeApproval) {
       return { transport, profile: effectiveProfile.id, approval };
     }

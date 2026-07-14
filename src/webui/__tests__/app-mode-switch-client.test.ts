@@ -387,6 +387,42 @@ describe('WebUI app.js description editor polling', () => {
     expect(app.getProfileFetchCount()).toBe(beforeReload + 1);
   });
 
+  it('clears the editor state when config-reloaded lands mid-edit so the dashboard stays editable', async () => {
+    // Codex finding 3575258569: the forced refresh replaced the editor's DOM
+    // but left descriptionEditorOpen === true, so background polling stayed
+    // suppressed forever and every later edit click was ignored.
+    const app = await boot({
+      modes: { modes: ['yolo', 'manual'], global: 'yolo' },
+      profiles: [PROFILE],
+      sourceEditEnabled: true,
+    });
+    const edit = app.created.find(e => e.tagName === 'button' && e.className === 'desc-edit')!;
+    edit.fire('click');
+    const draft = app.created.find(e => e.tagName === 'textarea' && e.className === 'desc-input')!;
+    draft.value = 'draft that the reload replaces';
+
+    app.emitConfigReloaded({ sources: ['prod'], defaultName: 'prod', at: new Date().toISOString() });
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+
+    // Background polling must run again (a stale open-editor flag suppresses it).
+    const afterReload = app.getProfileFetchCount();
+    await app.intervalCallbacks[0]();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(app.getProfileFetchCount()).toBe(afterReload + 1);
+
+    // And a NEW editor can be opened on the re-rendered table: the fresh edit
+    // button creates a fresh textarea (openDescriptionEditor is not ignored).
+    const textareasBefore = app.created.filter(
+      e => e.tagName === 'textarea' && e.className === 'desc-input').length;
+    const editButtons = app.created.filter(
+      e => e.tagName === 'button' && e.className === 'desc-edit');
+    editButtons[editButtons.length - 1].fire('click');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const textareasAfter = app.created.filter(
+      e => e.tagName === 'textarea' && e.className === 'desc-input').length;
+    expect(textareasAfter).toBe(textareasBefore + 1);
+  });
+
   it('keeps the editor and draft open when the description save is rejected', async () => {
     const app = await boot({
       profiles: [PROFILE],

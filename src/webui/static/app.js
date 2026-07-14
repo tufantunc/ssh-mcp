@@ -474,6 +474,12 @@
       // A config reload invalidates the editor's source snapshot itself (the
       // source may have been renamed/removed), so unlike background polls this
       // refresh must replace an open draft and converge on server truth.
+      // Clear the editor flag FIRST: the forced re-render replaces the open
+      // editor's DOM, and a stale `descriptionEditorOpen === true` would keep
+      // suppressing background polls and make openDescriptionEditor ignore
+      // every later click, leaving the dashboard uneditable until a manual
+      // page refresh.
+      descriptionEditorOpen = false;
       fetchModes().then(() => fetchProfiles(true));
     });
   }
