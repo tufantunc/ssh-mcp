@@ -11,21 +11,29 @@ import {
   buildTransportConfig,
   hasLegacyCliFlags,
   buildApprovalProfile,
+  approvalTargetForConnection,
+  buildProductionApprovalEngine,
   makeApprovalModeLookup,
   appendDescriptionComment,
   resolveApprovalEngineInput,
   resolveConfiguredApprovalMode,
+  resolveLiveApprovalMode,
   preResolutionProfileName,
   approvalResolverWarningFromInput,
   isCliSwitchEnabled,
   prepareKeyContents,
   validateConfig,
   resolveCliConfigPath,
+  resolveReloadConfig,
+  reacquireTransportIfReloaded,
+  approveTransportForCurrentConfig,
   buildWebUIApprovalQueueAdapter,
   validateSshCliFlag,
 } from '../src/index';
 import { ApprovalDispatcher } from '../src/approval/engine';
-import type { ExecResult, ServerConfig } from '../src/transports/types';
+import { getApprovalDecisionFromError } from '../src/approval/gate';
+import { TransportRegistry } from '../src/transports/registry';
+import type { ExecResult, ISshTransport, ServerConfig } from '../src/transports/types';
 import type { ResolvedConfig } from '../src/config/types';
 
 // Pure-function unit tests for the CLI config/result mapping layer. These
@@ -384,6 +392,30 @@ describe('approval command/context helpers', () => {
     });
   });
 
+  it('uses the live registry description when building the command approval target', () => {
+    const registry = new TransportRegistry();
+    registry.register({
+      name: 'prod',
+      host: 'prod.example.com',
+      port: 22,
+      username: 'operator',
+      transport: 'openssh',
+      authMode: 'kerberos',
+      description: 'boot policy',
+      approval: { mode: 'manual' },
+    });
+    registry.setDescription('prod', 'live edited policy');
+
+    expect(approvalTargetForConnection(registry, 'prod')).toEqual({
+      profile: 'prod',
+      approvalProfile: {
+        id: 'prod',
+        description: 'live edited policy',
+        approval: { mode: 'manual' },
+      },
+    });
+  });
+
   it('does not leak another source approval mode into the default profile', () => {
     const profile = buildApprovalProfile('default', { prod: 'smart' });
     expect(profile).toEqual({ id: 'default' });
@@ -414,6 +446,25 @@ describe('approval command/context helpers', () => {
       getEngine: () => null,
     });
     expect(noEngine('toString')).toBe('yolo');
+  });
+
+  it('reads a profile mode mutation from the live WebUI controller on the next lookup', () => {
+    const engine = buildProductionApprovalEngine(true, resolvedConfig({
+      approval: { mode: 'yolo' },
+      perSourceApproval: { prod: 'yolo' },
+    }))!;
+    const modeController = {
+      getEffectiveMode: (profileId: string) => engine.getEffectiveMode(profileId),
+    };
+    const lookup = makeApprovalModeLookup({
+      perSourceApproval: { prod: 'yolo' },
+      getEngine: () => engine,
+      modeController,
+    });
+
+    expect(lookup('prod')).toBe('yolo');
+    engine.setProfileMode('prod', 'manual');
+    expect(lookup('prod')).toBe('manual');
   });
 
   it('neutralizes description newlines before appending the shell comment', () => {
@@ -449,6 +500,23 @@ describe('approval command/context helpers', () => {
     expect(resolveApprovalEngineInput(resolvedConfig({
       approval: { llm: { endpoint: 'https://api.example/v1/c', model: 'm-1' } },
     }))).toBeNull();
+  });
+
+  it('builds an LLM-only WebUI engine with a yolo baseline and live smart switching', () => {
+    const engine = buildProductionApprovalEngine(true, resolvedConfig({
+      approval: {
+        llm: {
+          endpoint: 'https://api.example/v1/c',
+          model: 'm-1',
+        },
+      },
+    }));
+
+    expect(engine).not.toBeNull();
+    expect(engine!.getGlobalMode()).toBe('yolo');
+    expect(engine!.availableModes()).toContain('smart');
+    engine!.setGlobalMode('smart');
+    expect(engine!.getGlobalMode()).toBe('smart');
   });
 
   it('parses --webui=false as disabled while preserving the bare flag', () => {
@@ -535,6 +603,26 @@ describe('approval command/context helpers', () => {
     expect(resolveConfiguredApprovalMode('unknown', config)).toBe('smart');
     expect(resolveConfiguredApprovalMode('constructor', config)).toBe('smart');
     expect(resolveConfiguredApprovalMode('legacy', resolvedConfig())).toBe('yolo');
+  });
+
+  it('resolves pre-gate audit mode from the live dispatcher after policy reload', () => {
+    const staleBootConfig = resolvedConfig({
+      approval: { mode: 'yolo' },
+      perSourceApproval: { lab: 'yolo' },
+    });
+    const engine = new ApprovalDispatcher({
+      defaultMode: 'yolo',
+      manual: { webuiEnabled: true, timeout_ms: 1000 },
+    });
+    engine.reloadPolicy({ defaultMode: 'manual', staticOverrides: { lab: 'yolo' } });
+
+    // The boot snapshot is stale after hot reload; pre-gate failures must report
+    // the same live mode that the dispatcher would enforce for a new decision.
+    expect(resolveConfiguredApprovalMode('unknown', staleBootConfig)).toBe('yolo');
+    expect(resolveLiveApprovalMode('unknown', engine)).toBe('manual');
+    expect(resolveLiveApprovalMode('lab', engine)).toBe('yolo');
+    expect(resolveLiveApprovalMode('constructor', engine)).toBe('manual');
+    expect(resolveLiveApprovalMode('legacy', null)).toBe('yolo');
   });
 
   it('keeps a whitespace connection name unresolved instead of attributing it to the default profile', () => {
@@ -629,6 +717,7 @@ describe('prepareKeyContents (Codex 3549295046: skip deferred key reads when pas
       };
       await prepareKeyContents(cfg);
       expect(cfg.privateKey).toBe('KEYDATA');
+      expect(cfg.privateKeyDerivedFromKeyPath).toBe(true);
       await fs.writeFile(keyPath, 'ROTATED');
       await prepareKeyContents(cfg);
       expect(cfg.privateKey).toBe('ROTATED');
@@ -750,3 +839,348 @@ describe('resolveCliConfigPath (Codex R2 P2: reject value-less --config)', () =>
       .toThrow(/--config requires a value/);
   });
 });
+
+describe('reload config resolution', () => {
+  it('preserves explicit --webui=false while validating a reload', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-reload-webui-'));
+    const configPath = path.join(dir, 'config.toml');
+    await fs.writeFile(configPath, `
+[webui]
+enabled = false
+host = "0.0.0.0"
+
+[[sources]]
+id = "prod"
+host = "prod.example.com"
+user = "operator"
+auth = "kerberos"
+`);
+    try {
+      expect(() => resolveReloadConfig({
+        cliSources: [],
+        configPath,
+        cliArgs: { webui: null },
+        env: {},
+      })).toThrow(/auth_token/);
+
+      expect(resolveReloadConfig({
+        cliSources: [],
+        configPath,
+        cliArgs: { webui: 'false' },
+        env: {},
+      }).webui?.enabled).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('reacquireTransportIfReloaded (Codex R4 finding 4: revalidate after awaited approval)', () => {
+  const stub = (name = 'ssh2'): ISshTransport => ({
+    name,
+    init: async () => {},
+    exec: async () => ({ stdout: '', stderr: '', exitCode: 0 }) as ExecResult,
+    execElevated: async () => ({ stdout: '', stderr: '', exitCode: 0 }) as ExecResult,
+    close: async () => {},
+  } as unknown as ISshTransport);
+
+  function fakeRegistry(opts: {
+    genBefore: number;
+    genAfter: number;
+    profileId: string;
+    getTransport?: ISshTransport;
+    getThrows?: Error;
+  }) {
+    // First getReloadGeneration() call (the capture) returns genBefore; the
+    // check inside the helper sees genAfter, emulating a reload during approval.
+    let firstRead = true;
+    const reg = {
+      getReloadGeneration: () => {
+        if (firstRead) { firstRead = false; return opts.genBefore; }
+        return opts.genAfter;
+      },
+      get: async (_name?: string) => {
+        if (opts.getThrows) throw opts.getThrows;
+        return opts.getTransport!;
+      },
+      profile: (_name?: string) => ({ id: opts.profileId } as any),
+    };
+    return reg;
+  }
+
+  it('returns the ORIGINAL transport unchanged when no reload landed during approval', async () => {
+    const original = stub('original');
+    const reg = {
+      getReloadGeneration: () => 5, // same before and after — no reload
+      get: async () => { throw new Error('get() must NOT be called when no reload'); },
+      profile: (_n?: string) => ({ id: 'alpha' } as any),
+    };
+    const captured = reg.getReloadGeneration();
+    const { transport, profile } = await reacquireTransportIfReloaded(
+      reg as any, 'alpha', original, captured,
+    );
+    expect(transport).toBe(original);
+    expect(profile).toBe('alpha');
+  });
+
+  it('RE-ACQUIRES a fresh transport when a reload bumped the generation during approval', async () => {
+    const original = stub('pre-reload');
+    const fresh = stub('post-reload');
+    const reg = fakeRegistry({ genBefore: 1, genAfter: 2, profileId: 'alpha', getTransport: fresh });
+    const captured = reg.getReloadGeneration(); // 1
+    const { transport, profile } = await reacquireTransportIfReloaded(
+      reg as any, 'alpha', original, captured,
+    );
+    // The stale pre-reload transport is discarded for the freshly re-dialed one.
+    expect(transport).toBe(fresh);
+    expect(transport).not.toBe(original);
+    expect(profile).toBe('alpha');
+  });
+
+  it('propagates a clean error when the source was REMOVED by the reload (get() throws)', async () => {
+    const original = stub('pre-reload');
+    const reg = fakeRegistry({
+      genBefore: 1,
+      genAfter: 2,
+      profileId: 'gone',
+      getThrows: new Error('Unknown connection name: gone. Registered: beta'),
+    });
+    const captured = reg.getReloadGeneration();
+    await expect(
+      reacquireTransportIfReloaded(reg as any, 'gone', original, captured),
+    ).rejects.toThrow(/Unknown connection name: gone/);
+  });
+});
+
+describe('approveTransportForCurrentConfig (Codex V4 finding: re-run approval after reload)', () => {
+  const stub = (name = 'ssh2'): ISshTransport => ({
+    name,
+    init: async () => {},
+    exec: async () => ({ stdout: '', stderr: '', exitCode: 0 }) as ExecResult,
+    execElevated: async () => ({ stdout: '', stderr: '', exitCode: 0 }) as ExecResult,
+    close: async () => {},
+  } as unknown as ISshTransport);
+
+  const allow = (reason: string) => ({
+    decision: 'allow' as const,
+    reason,
+    decided_by: 'test',
+    decided_at: new Date(0).toISOString(),
+    mode: 'manual' as const,
+  });
+
+  it('reruns approval against the CURRENT profile after a reload invalidates the first decision', async () => {
+    let generation = 1;
+    const fresh = stub('post-reload');
+    const approvedProfiles: string[] = [];
+    const reg = {
+      getReloadGeneration: () => generation,
+      get: async (_name?: string) => fresh,
+      profile: (_name?: string) => ({ id: generation === 1 ? 'old-profile' : 'new-profile' } as any),
+    };
+
+    const result = await approveTransportForCurrentConfig({
+      reg: reg as any,
+      profile: reg.profile('alpha') as any,
+      gate: async (profile) => {
+        approvedProfiles.push(profile.id);
+        if (approvedProfiles.length === 1) {
+          // Simulate the config reload landing while the first manual/smart
+          // approval was in flight. That stale approval MUST NOT authorize the
+          // post-reload transport/profile.
+          generation = 2;
+          return allow('stale decision');
+        }
+        return allow('current decision');
+      },
+    });
+
+    expect(approvedProfiles).toEqual(['old-profile', 'new-profile']);
+    expect(result.transport).toBe(fresh);
+    expect(result.profile).toBe('new-profile');
+    expect(result.approval.reason).toBe('current decision');
+  });
+
+  it('keeps an omitted request pinned to the sampled profile after reload', async () => {
+    let generation = 1;
+    const fresh = stub('post-reload');
+    const approvedProfiles: string[] = [];
+    const getNames: Array<string | undefined> = [];
+    const reg = {
+      getReloadGeneration: () => generation,
+      get: async (name?: string) => { getNames.push(name); return fresh; },
+      profile: (name?: string) => ({
+        id: name === 'old-default' || generation === 1 ? 'old-default' : 'new-default',
+      } as any),
+    };
+
+    const result = await approveTransportForCurrentConfig({
+      reg: reg as any,
+      profile: reg.profile(undefined) as any,
+      gate: async (profile) => {
+        approvedProfiles.push(profile.id);
+        if (approvedProfiles.length === 1) generation = 2;
+        return allow(approvedProfiles.length === 1 ? 'stale decision' : 'current decision');
+      },
+    });
+
+    expect(getNames).toEqual(['old-default']);
+    expect(approvedProfiles).toEqual(['old-default', 'old-default']);
+    expect(result.profile).toBe('old-default');
+    expect(result.transport).toBe(fresh);
+  });
+
+  it('acquires the transport only after approval is current', async () => {
+    const fresh = stub('post-approval');
+    const order: string[] = [];
+    const reg = {
+      getReloadGeneration: () => 1,
+      get: async (name?: string) => { order.push(`get:${name}`); return fresh; },
+      profile: (name?: string) => ({ id: name ?? 'alpha' } as any),
+    };
+
+    const result = await approveTransportForCurrentConfig({
+      reg: reg as any,
+      profile: reg.profile('alpha') as any,
+      gate: async (profile) => {
+        order.push(`gate:${profile.id}`);
+        return allow('current decision');
+      },
+    });
+
+    expect(order).toEqual(['gate:alpha', 'get:alpha']);
+    expect(result.transport).toBe(fresh);
+    expect(result.profile).toBe('alpha');
+  });
+
+  it('re-approves when a reload lands while transport initialization is pending', async () => {
+    let generation = 1;
+    let getCalls = 0;
+    const fresh = stub('post-reload');
+    const order: string[] = [];
+    const reg = {
+      getReloadGeneration: () => generation,
+      get: async (name?: string) => {
+        getCalls += 1;
+        order.push(`get${getCalls}:${name}`);
+        if (getCalls === 1) generation = 2;
+        return fresh;
+      },
+      profile: (name?: string) => ({ id: name ?? 'alpha' } as any),
+    };
+
+    const result = await approveTransportForCurrentConfig({
+      reg: reg as any,
+      profile: reg.profile('alpha') as any,
+      gate: async (profile) => {
+        order.push(`gate${generation}:${profile.id}`);
+        return allow(`decision-${generation}`);
+      },
+    });
+
+    expect(order).toEqual(['gate1:alpha', 'get1:alpha', 'gate2:alpha', 'get2:alpha']);
+    expect(result.transport).toBe(fresh);
+    expect(result.approval.reason).toBe('decision-2');
+  });
+
+  it('retries against the CURRENT profile when a stale pre-reload denial throws', async () => {
+    let generation = 1;
+    const fresh = stub('post-reload');
+    const approvedProfiles: string[] = [];
+    const reg = {
+      getReloadGeneration: () => generation,
+      get: async (_name?: string) => fresh,
+      profile: (_name?: string) => ({ id: generation === 1 ? 'old-profile' : 'new-profile' } as any),
+    };
+
+    const result = await approveTransportForCurrentConfig({
+      reg: reg as any,
+      profile: reg.profile('alpha') as any,
+      gate: async (profile) => {
+        approvedProfiles.push(profile.id);
+        if (approvedProfiles.length === 1) {
+          generation = 2;
+          throw new Error('approval denied by stale profile');
+        }
+        return allow('current decision');
+      },
+    });
+
+    expect(approvedProfiles).toEqual(['old-profile', 'new-profile']);
+    expect(result.transport).toBe(fresh);
+    expect(result.profile).toBe('new-profile');
+    expect(result.approval.reason).toBe('current decision');
+  });
+
+  it('preserves a real denial when no reload changed the generation', async () => {
+    const reg = {
+      getReloadGeneration: () => 1,
+      get: async () => { throw new Error('get() must NOT be called for a current denial'); },
+      profile: (_name?: string) => ({ id: 'current-profile' } as any),
+    };
+
+    await expect(approveTransportForCurrentConfig({
+      reg: reg as any,
+      profile: reg.profile('alpha') as any,
+      gate: async () => { throw new Error('approval denied by current profile'); },
+    })).rejects.toThrow(/current profile/);
+  });
+
+  it('carries the approval on the error when transport acquisition fails after an allow', async () => {
+    // Codex finding 3575258575: approval succeeded but registry.get() rejected
+    // (unreadable lazy key, connect failure, source removed post-approval).
+    // The operator's decision must survive on the thrown error so the tool
+    // handlers' catch path audits the REAL decision via
+    // getApprovalDecisionFromError instead of a synthetic approval:not-run.
+    const reg = {
+      getReloadGeneration: () => 1,
+      get: async () => { throw new Error('connect ECONNREFUSED 192.0.2.1:22'); },
+      profile: (_name?: string) => ({ id: 'alpha' } as any),
+    };
+    const decision = allow('operator allowed before transport failure');
+
+    let caught: unknown;
+    try {
+      await approveTransportForCurrentConfig({
+        reg: reg as any,
+        profile: reg.profile('alpha') as any,
+        gate: async () => decision,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/ECONNREFUSED/);
+    // Exactly the shape both tool handlers recover in their catch blocks.
+    expect(getApprovalDecisionFromError(caught)).toBe(decision);
+  });
+
+  it('does not overwrite an approval already attached to the acquisition error', async () => {
+    // A registry.get() failure may itself carry an approval (e.g. a nested
+    // gate); the outer helper must not clobber that inner truth.
+    const inner = allow('inner pre-attached decision');
+    const failure = Object.assign(new Error('acquisition failed with prior decision'), {
+      approval: inner,
+    });
+    const reg = {
+      getReloadGeneration: () => 1,
+      get: async () => { throw failure; },
+      profile: (_name?: string) => ({ id: 'alpha' } as any),
+    };
+
+    let caught: unknown;
+    try {
+      await approveTransportForCurrentConfig({
+        reg: reg as any,
+        profile: reg.profile('alpha') as any,
+        gate: async () => allow('outer decision'),
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(getApprovalDecisionFromError(caught)).toBe(inner);
+  });
+});
+

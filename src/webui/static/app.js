@@ -46,11 +46,19 @@
     else { el.textContent = state; }
   }
 
-  async function fetchProfiles() {
+  async function fetchProfiles(force = false) {
+    // The table renderer replaces every row. A background poll/SSE refresh while
+    // the description editor is open would therefore destroy the operator's
+    // unsaved textarea draft. Save/cancel explicitly force a refresh.
+    if (descriptionEditorOpen && !force) return;
     try {
       const r = await fetch('/api/profiles', { headers: authHeaders() });
       if (r.status === 401) { setConnStatus('error'); return; }
       const data = await r.json();
+      // A request can start before the editor opens and finish after it. Re-check
+      // after the async boundary so that stale snapshots cannot replace the draft.
+      if (descriptionEditorOpen && !force) return;
+      sourceEditEnabled = !!data.source_edit_enabled;
       renderProfiles(data.profiles || []);
     } catch (e) { /* ignore polling glitches */ }
   }
@@ -79,15 +87,245 @@
     if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" class="muted">no profiles registered</td></tr>'; return; }
     for (const p of rows) {
       const tr = document.createElement('tr');
+      tr.dataset.id = p.id;
       tr.innerHTML = `<td>${escapeHtml(p.name)}${p.default ? ' <span class="muted">(default)</span>' : ''}</td>
-                      <td>${escapeHtml(p.description || '')}</td>
+                      <td class="desc-cell"></td>
                       <td>${escapeHtml(p.host)}:${escapeHtml(p.port)}</td>
                       <td>${escapeHtml(p.user)}</td>
                       <td>${escapeHtml(p.auth)}</td>
                       <td>${escapeHtml(p.transport)}</td>
-                      <td><span class="pill">${escapeHtml(p.approval_mode_effective)}</span></td>
+                      <td class="mode-cell"></td>
                       <td>${p.connected ? '<span class="pill allow">connected</span>' : '<span class="pill">idle</span>'}</td>`;
+      tr.querySelector('.mode-cell').appendChild(buildModeControl(p.id, p.approval_mode_effective));
+      tr.querySelector('.desc-cell').appendChild(buildDescriptionControl(p.id, p.description || ''));
       tbody.appendChild(tr);
+    }
+  }
+
+  // Build the per-source description cell. When the server exposes a source
+  // controller (sourceEditEnabled), the cell is click-to-edit: a textarea with
+  // save / revert that PUTs /api/sources/:id/description (in-memory only).
+  // Otherwise it is plain read-only text (the read-only WebUI case).
+  function buildDescriptionControl(sourceId, description) {
+    const wrap = document.createElement('div');
+    wrap.className = 'desc-wrap';
+    wrap.dataset.source = sourceId;
+
+    const text = document.createElement('span');
+    text.className = 'desc-text';
+    text.textContent = description || '—';
+
+    if (!sourceEditEnabled) {
+      wrap.appendChild(text);
+      return wrap;
+    }
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'desc-edit';
+    editBtn.textContent = 'edit';
+    editBtn.title = 'Edit description (live, in-memory only — not written to TOML)';
+    editBtn.addEventListener('click', () => openDescriptionEditor(wrap, sourceId, description));
+
+    wrap.appendChild(text);
+    wrap.appendChild(editBtn);
+    return wrap;
+  }
+
+  function openDescriptionEditor(wrap, sourceId, current) {
+    // Keep one active editor so background profile refreshes can be suspended
+    // without another row's draft being accidentally discarded.
+    if (descriptionEditorOpen) return;
+    descriptionEditorOpen = true;
+    wrap.innerHTML = '';
+    const ta = document.createElement('textarea');
+    ta.className = 'desc-input';
+    ta.value = current || '';
+    ta.rows = 3;
+
+    const actions = document.createElement('div');
+    actions.className = 'desc-actions';
+    const save = document.createElement('button');
+    save.type = 'button'; save.className = 'desc-save'; save.textContent = 'save';
+    const revert = document.createElement('button');
+    revert.type = 'button'; revert.className = 'desc-revert'; revert.textContent = 'revert to config';
+    const cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.className = 'desc-cancel'; cancel.textContent = 'cancel';
+
+    save.addEventListener('click', () => saveDescription(sourceId, ta.value, save));
+    revert.addEventListener('click', () => saveDescription(sourceId, null, revert));
+    cancel.addEventListener('click', () => {
+      descriptionEditorOpen = false;
+      fetchProfiles(true);
+    });
+
+    actions.appendChild(save);
+    actions.appendChild(revert);
+    actions.appendChild(cancel);
+    wrap.appendChild(ta);
+    wrap.appendChild(actions);
+    ta.focus();
+  }
+
+  // PUT the description override. `description === null` reverts to the TOML
+  // value. A successful edit also lands as an SSE source-updated event, which
+  // triggers fetchProfiles() so every open dashboard converges on server truth.
+  async function saveDescription(sourceId, description, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch('/api/sources/' + encodeURIComponent(sourceId) + '/description', {
+        method: 'PUT',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+        body: JSON.stringify({ description }),
+      });
+      if (!r.ok) return;
+      descriptionEditorOpen = false;
+      fetchProfiles(true);
+    } catch (_) {
+      // Preserve the active editor and draft so the operator can retry.
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // Build the per-profile approval-mode control: a <select> of available modes
+  // when the server exposes a mode controller, else a read-only pill (the
+  // read-only WebUI / no-engine case).
+  function buildModeControl(profileId, effective) {
+    if (!availableModes.length) {
+      const span = document.createElement('span');
+      span.className = 'pill';
+      span.textContent = effective || 'unknown';
+      return span;
+    }
+    const sel = document.createElement('select');
+    sel.className = 'mode-select';
+    sel.dataset.profile = profileId;
+    // Leading "inherit" option clears any live per-profile override (PUT
+    // {mode:null}), letting the profile revert to its static/global mode.
+    // Without it an operator who overrides a profile could never undo it from
+    // the UI — the live override would stay pinned until restart.
+    const inherit = document.createElement('option');
+    inherit.value = '';
+    inherit.textContent = 'inherit';
+    sel.appendChild(inherit);
+    for (const m of availableModes) {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      if (m === effective) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    // If the server reports an effective mode we can't switch to (missing, or
+    // not in availableModes — e.g. modeController wired without getApprovalMode,
+    // so /api/profiles returns 'unknown'), the <select> would otherwise default
+    // to the first option ("inherit") and misrepresent the live state. Surface
+    // the real value as a disabled, pre-selected placeholder instead of lying.
+    if (effective && !availableModes.includes(effective)) {
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = effective + ' (current)';
+      placeholder.disabled = true;
+      placeholder.selected = true;
+      sel.insertBefore(placeholder, sel.firstChild);
+    }
+    sel.addEventListener('change', () => switchMode(profileId, sel.value, sel));
+    return sel;
+  }
+
+  // List of modes the server allows switching to (populated from
+  // /api/approval-modes). Empty => mode switching disabled (read-only).
+  let availableModes = [];
+  // Live global default mode (the fallback applied to any profile without an
+  // override). Populated from /api/approval-modes `global` and kept in sync
+  // with scope:'global' mode-changed SSE events.
+  let globalMode = null;
+
+  // Whether the server exposes the live description-edit surface (PR-8).
+  // Detected at bootstrap from /api/profiles' `source_edit_enabled` flag;
+  // false => read-only description cells (the read-only WebUI case).
+  let sourceEditEnabled = false;
+  // While true, background polling/SSE profile refreshes are suspended so the
+  // active textarea cannot be replaced and lose its unsaved draft.
+  let descriptionEditorOpen = false;
+
+  async function fetchModes() {
+    try {
+      const r = await fetch('/api/approval-modes', { headers: authHeaders() });
+      if (!r.ok) { availableModes = []; globalMode = null; renderGlobalControl(); return; }
+      const data = await r.json();
+      availableModes = Array.isArray(data.modes) ? data.modes : [];
+      globalMode = typeof data.global === 'string' ? data.global : null;
+    } catch (_) { availableModes = []; globalMode = null; }
+    renderGlobalControl();
+  }
+
+  // Render the global-default approval-mode control in the header: a <select>
+  // bound to PUT /api/approval-mode when the server exposes a mode controller,
+  // else nothing (read-only / no-engine case).
+  function renderGlobalControl() {
+    const host = $('#global-mode-control');
+    if (!host) return;
+    host.innerHTML = '';
+    if (!availableModes.length || globalMode == null) return;
+    const label = document.createElement('span');
+    label.className = 'muted';
+    label.textContent = 'global:';
+    host.appendChild(label);
+    const sel = document.createElement('select');
+    sel.className = 'mode-select';
+    sel.id = 'global-mode-select';
+    for (const m of availableModes) {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      if (m === globalMode) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', () => switchGlobalMode(sel.value, sel));
+    host.appendChild(sel);
+  }
+
+  async function switchGlobalMode(mode, sel) {
+    if (sel) sel.disabled = true;
+    try {
+      const r = await fetch('/api/approval-mode', {
+        method: 'PUT',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+        body: JSON.stringify({ mode }),
+      });
+      if (r.ok) {
+        globalMode = mode;
+      } else {
+        // Revert the dropdown to the server's truth on failure.
+        fetchModes();
+      }
+    } catch (_) {
+      fetchModes();
+    } finally {
+      if (sel) sel.disabled = false;
+    }
+  }
+
+  async function switchMode(profileId, mode, sel) {
+    if (sel) sel.disabled = true;
+    // The "inherit" option carries an empty value; serialize it as {mode:null}
+    // so the server clears the override instead of pinning a literal '' mode.
+    const payload = mode === '' ? null : mode;
+    try {
+      const r = await fetch('/api/profiles/' + encodeURIComponent(profileId) + '/approval-mode', {
+        method: 'PUT',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+        body: JSON.stringify({ mode: payload }),
+      });
+      if (!r.ok) {
+        // Revert the dropdown to the server's truth on failure.
+        fetchProfiles();
+      }
+    } catch (_) {
+      fetchProfiles();
+    } finally {
+      if (sel) sel.disabled = false;
     }
   }
 
@@ -106,7 +344,15 @@
         </div>
         <code>${escapeHtml(a.command)}</code>
         ${a.description ? `<div class="muted">${escapeHtml(a.description)}</div>` : ''}
-        <div class="muted">manual approve/deny controls ship in the mutation PR</div>`;
+        <div class="actions">
+          <input type="text" placeholder="optional note">
+          <button class="allow" data-act="allow">allow</button>
+          <button class="deny" data-act="deny">deny</button>
+        </div>`;
+      const noteInput = li.querySelector('input');
+      li.querySelectorAll('button').forEach(btn => {
+        btn.addEventListener('click', () => decide(a.id, btn.dataset.act, noteInput.value, li));
+      });
       list.appendChild(li);
     }
   }
@@ -159,6 +405,17 @@
     $('#exec-count').textContent = String(count);
   }
 
+  async function decide(id, action, note, li) {
+    try {
+      const r = await fetch('/api/approvals/' + encodeURIComponent(id) + '/' + action, {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+        body: JSON.stringify({ note: note || '' }),
+      });
+      if (r.ok) { li.remove(); fetchApprovals(); }
+    } catch (_) {}
+  }
+
 
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[ch]);
@@ -188,11 +445,50 @@
     sse.addEventListener('execution', (ev) => {
       try { prependExecution(JSON.parse(ev.data)); } catch (_) {}
     });
+    sse.addEventListener('mode-changed', (ev) => {
+      // A live mode switch landed (possibly from another client). Reflect a
+      // global-scope switch into the header control immediately, then re-fetch
+      // the profile snapshot so every open dashboard converges on server truth.
+      try {
+        const m = JSON.parse(ev.data);
+        if (m && m.scope === 'global' && typeof m.mode === 'string') {
+          globalMode = m.mode;
+          renderGlobalControl();
+        }
+      } catch (_) {}
+      fetchProfiles();
+    });
+    sse.addEventListener('source-updated', (ev) => {
+      // A live description edit landed (possibly from another client). Re-fetch
+      // the profile snapshot so every open dashboard converges on server truth.
+      try { JSON.parse(ev.data); } catch (_) {}
+      fetchProfiles();
+    });
+    sse.addEventListener('config-reloaded', (ev) => {
+      // The TOML config file changed on disk and was hot-reloaded (PR-9). The
+      // connection set / descriptions / approval policy may all have changed,
+      // so re-fetch the modes and profile snapshots (the two surfaces this
+      // dashboard renders). (The MCP tool list is NOT part of a reload —
+      // Decision D4 — so nothing about the SSE stream changes.)
+      try { JSON.parse(ev.data); } catch (_) {}
+      // A config reload invalidates the editor's source snapshot itself (the
+      // source may have been renamed/removed), so unlike background polls this
+      // refresh must replace an open draft and converge on server truth.
+      // Clear the editor flag FIRST: the forced re-render replaces the open
+      // editor's DOM, and a stale `descriptionEditorOpen === true` would keep
+      // suppressing background polls and make openDescriptionEditor ignore
+      // every later click, leaving the dashboard uneditable until a manual
+      // page refresh.
+      descriptionEditorOpen = false;
+      fetchModes().then(() => fetchProfiles(true));
+    });
   }
 
   function bootstrap() {
     setConnStatus('connecting');
-    fetchProfiles();
+    // Fetch the available-modes list BEFORE profiles so the first render can
+    // draw the mode <select> controls.
+    fetchModes().then(() => fetchProfiles());
     fetchApprovals();
     fetchExecutions();
     openSse();

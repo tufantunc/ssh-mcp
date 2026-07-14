@@ -3,10 +3,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { WebUIOptions, WebUIHandle } from './types.js';
+import type { WebUIOptions, WebUIHandle, ApprovalDecisionKind } from './types.js';
 import { handleProfiles } from './routes/profiles.js';
 import { handleExecutions } from './routes/executions.js';
-import { handleListApprovals } from './routes/approvals.js';
+import { handleListApprovals, handleDecideApproval } from './routes/approvals.js';
+import { handleListModes, handleSetProfileMode, handleSetGlobalMode } from './routes/modes.js';
+import { handleSetSourceDescription } from './routes/sources.js';
 import { SseHub } from './routes/sse.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -21,24 +23,22 @@ const STATIC_MIME: Record<string, string> = {
   '.json': 'application/json; charset=utf-8',
 };
 
+const STATIC_SECURITY_HEADERS = {
+  'Content-Security-Policy': "frame-ancestors 'none'",
+  'X-Frame-Options': 'DENY',
+} as const;
+
 function isLoopback(host: string): boolean {
   const normalized = host.replace(/^\[|\]$/g, '').toLowerCase();
   return normalized === '127.0.0.1' || normalized === '::1' || normalized === 'localhost';
 }
 
-function hostnameFromAuthority(authority: string | undefined): string | null {
-  if (!authority) return null;
-  try {
-    return new URL(`http://${authority}`).hostname;
-  } catch {
-    return null;
-  }
-}
-
 function isLoopbackHeaderValue(value: string | string[] | undefined): boolean {
   if (Array.isArray(value)) return false;
+  // hostnameFromAuthority is declared below with the approval-mutation CSRF
+  // helpers; function declarations hoist, so the shared helper is reused here.
   const hostname = hostnameFromAuthority(value);
-  return hostname !== null && isLoopback(hostname);
+  return hostname !== undefined && isLoopback(hostname);
 }
 
 function hasLoopbackHostAndOrigin(req: http.IncomingMessage): boolean {
@@ -53,6 +53,31 @@ function hasLoopbackHostAndOrigin(req: http.IncomingMessage): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Read JSON body from a request, capped at 1 MiB. Returns null on parse error.
+ */
+function readJson(req: http.IncomingMessage, max = 1024 * 1024): Promise<any | null> {
+  return new Promise(resolve => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > max) {
+        req.destroy();
+        resolve(null);
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      if (!raw.trim()) return resolve({});
+      try { resolve(JSON.parse(raw)); } catch { resolve(null); }
+    });
+    req.on('error', () => resolve(null));
+  });
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -89,6 +114,7 @@ async function serveStatic(res: http.ServerResponse, urlPath: string): Promise<b
       'Content-Type': ct,
       'Content-Length': data.byteLength,
       'Cache-Control': 'no-store',
+      ...STATIC_SECURITY_HEADERS,
     });
     res.end(data);
     return true;
@@ -123,6 +149,55 @@ function checkAuth(opts: { req: http.IncomingMessage; authToken?: string; bind: 
   return false;
 }
 
+function singleHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function normalizeHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[|\]$/g, '');
+}
+
+function hostnameFromAuthority(authority: string | undefined): string | undefined {
+  if (!authority) return undefined;
+  try {
+    return normalizeHostname(new URL(`http://${authority}`).hostname);
+  } catch {
+    return undefined;
+  }
+}
+
+function headerOriginIsSameHost(value: string | undefined, hostHeader: string): boolean {
+  if (!value) return true;
+  try {
+    const origin = new URL(value);
+    return origin.host.toLowerCase() === hostHeader.toLowerCase()
+      && isLoopback(normalizeHostname(origin.hostname));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * State-changing approval routes stay usable in loopback/no-token mode, but
+ * reject browser cross-origin or DNS-rebinding requests. Token-protected
+ * deployments already authenticate above with bearer/X-Auth-Token.
+ */
+function checkApprovalMutationAuth(opts: { req: http.IncomingMessage; authToken?: string }): boolean {
+  if (opts.authToken) return true;
+
+  const hostHeader = singleHeader(opts.req.headers.host);
+  const hostName = hostnameFromAuthority(hostHeader);
+  if (!hostHeader || !hostName || !isLoopback(hostName)) return false;
+
+  const origin = singleHeader(opts.req.headers.origin);
+  const referer = singleHeader(opts.req.headers.referer);
+  if (!origin && !referer) return false;
+  if (!headerOriginIsSameHost(origin, hostHeader)) return false;
+  if (!headerOriginIsSameHost(referer, hostHeader)) return false;
+
+  return true;
+}
+
 /**
  * Start the WebUI HTTP server.
  *
@@ -144,13 +219,25 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
     );
   }
 
-  const hub = new SseHub(opts.queue, opts.audit);
+  const hub = new SseHub(opts.queue, opts.audit, opts.modeController, opts.sourceController, opts.reloadController);
 
   const server = http.createServer(async (req, res) => {
     try {
       const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
       const pathname = urlObj.pathname;
       const method = (req.method || 'GET').toUpperCase();
+
+      if (opts.cors) {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Auth-Token');
+        res.setHeader('Access-Control-Max-Age', '600');
+        if (method === 'OPTIONS') {
+          res.writeHead(204, { 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+      }
 
       // --- SSE: /events --------------------------------------------------
       if (pathname === '/events') {
@@ -174,7 +261,7 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
         }
 
         if (pathname === '/api/profiles' && method === 'GET') {
-          const r = handleProfiles(opts.registry, opts.getApprovalMode);
+          const r = handleProfiles(opts.registry, opts.getApprovalMode, !!opts.sourceController);
           sendJson(res, r.status, r.body);
           return;
         }
@@ -187,6 +274,102 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
 
         if (pathname === '/api/approvals' && method === 'GET') {
           const r = handleListApprovals(opts.queue);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        const m = pathname.match(/^\/api\/approvals\/([^/]+)\/(allow|deny)$/);
+        if (m && method === 'POST') {
+          if (!checkApprovalMutationAuth({ req, authToken })) {
+            sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
+            return;
+          }
+          let id: string;
+          try {
+            id = decodeURIComponent(m[1]);
+          } catch {
+            sendJson(res, 400, { error: 'malformed approval id' });
+            return;
+          }
+          const kind = m[2] as ApprovalDecisionKind;
+          const body = await readJson(req);
+          if (body === null) {
+            sendJson(res, 400, { error: 'invalid JSON body' });
+            return;
+          }
+          const note = typeof body?.note === 'string' ? body.note : undefined;
+          const decidedBy = `webui:${req.socket.remoteAddress || 'unknown'}`;
+          const r = handleDecideApproval(opts.queue, id, kind, note, decidedBy);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        // --- Live approval-mode switching (PR-7, in-memory only) ----------
+        if (pathname === '/api/approval-modes' && method === 'GET') {
+          const r = handleListModes(opts.modeController);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        if (pathname === '/api/approval-mode' && method === 'PUT') {
+          if (!checkApprovalMutationAuth({ req, authToken })) {
+            sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
+            return;
+          }
+          const body = await readJson(req);
+          if (body === null) {
+            sendJson(res, 400, { error: 'invalid JSON body' });
+            return;
+          }
+          const r = handleSetGlobalMode(opts.modeController, body);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        const modeMatch = pathname.match(/^\/api\/profiles\/([^/]+)\/approval-mode$/);
+        if (modeMatch && method === 'PUT') {
+          if (!checkApprovalMutationAuth({ req, authToken })) {
+            sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
+            return;
+          }
+          let id: string;
+          try {
+            id = decodeURIComponent(modeMatch[1]);
+          } catch {
+            sendJson(res, 400, { error: 'malformed profile id' });
+            return;
+          }
+          const profileExists = opts.registry.list().some(p => p.name === id);
+          const body = await readJson(req);
+          if (body === null) {
+            sendJson(res, 400, { error: 'invalid JSON body' });
+            return;
+          }
+          const r = handleSetProfileMode(opts.modeController, id, profileExists, body);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        // --- Live per-source description editing (PR-8, in-memory only) -----
+        const descMatch = pathname.match(/^\/api\/sources\/([^/]+)\/description$/);
+        if (descMatch && method === 'PUT') {
+          if (!checkApprovalMutationAuth({ req, authToken: opts.authToken })) {
+            sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
+            return;
+          }
+          let id: string;
+          try {
+            id = decodeURIComponent(descMatch[1]);
+          } catch {
+            sendJson(res, 400, { error: 'malformed source id' });
+            return;
+          }
+          const body = await readJson(req);
+          if (body === null) {
+            sendJson(res, 400, { error: 'invalid JSON body' });
+            return;
+          }
+          const r = handleSetSourceDescription(opts.sourceController, id, body);
           sendJson(res, r.status, r.body);
           return;
         }

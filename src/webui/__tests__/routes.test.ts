@@ -146,6 +146,7 @@ describe('WebUI server', () => {
   it('GET /api/profiles returns registry snapshot with approval mode', async () => {
     const r = await get(handle, '/api/profiles');
     expect(r.status).toBe(200);
+    expect(r.headers.get('access-control-allow-origin')).toBeNull();
     const j = await r.json();
     expect(j.profiles).toHaveLength(2);
     const prod = j.profiles.find((p: any) => p.id === 'prod');
@@ -163,6 +164,38 @@ describe('WebUI server', () => {
     expect(serialized).not.toContain('super-secret-password');
     expect(serialized).not.toContain('OPENSSH PRIVATE KEY');
     expect(serialized).not.toContain('krb5.keytab');
+  });
+
+  it('emits CORS headers and answers unauthenticated preflight when enabled', async () => {
+    await handle.close();
+    handle = await startWebUI({
+      host: '127.0.0.1',
+      port: 0,
+      authToken: 'secret',
+      cors: true,
+      registry: fakeRegistry,
+    });
+    const base = `http://${handle.address.host}:${handle.address.port}`;
+    const preflight = await fetch(`${base}/api/profiles`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://console.example',
+        'Access-Control-Request-Method': 'GET',
+        'Access-Control-Request-Headers': 'Authorization',
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('access-control-allow-origin')).toBe('*');
+    expect(preflight.headers.get('access-control-allow-headers')).toContain('Authorization');
+
+    const response = await fetch(`${base}/api/profiles`, {
+      headers: {
+        Origin: 'https://console.example',
+        Authorization: 'Bearer secret',
+      },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('access-control-allow-origin')).toBe('*');
   });
 
   it('GET /api/executions returns audit tail and respects limit', async () => {
@@ -199,6 +232,169 @@ describe('WebUI server', () => {
     expect(j.approvals[0].id).toBe('a-1');
   });
 
+  it('POST /api/approvals/:id/allow resolves the engine.decide promise', async () => {
+    const pending: PendingApproval = {
+      id: 'roundtrip-1',
+      profile: 'prod',
+      tool: 'exec',
+      command: 'shutdown -r now',
+      enqueuedAt: new Date().toISOString(),
+    };
+    const decisionPromise = queue.enqueue(pending);
+
+    const r1 = await get(handle, '/api/approvals');
+    const j1 = await r1.json();
+    expect(j1.approvals.map((a: any) => a.id)).toContain('roundtrip-1');
+
+    const origin = `http://${handle.address.host}:${handle.address.port}`;
+    const r2 = await fetch(
+      `${origin}/api/approvals/roundtrip-1/allow`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: origin },
+        body: JSON.stringify({ note: 'go for it' }),
+      },
+    );
+    if (r2.status !== 200) {
+      throw new Error(`unexpected status ${r2.status}: ${await r2.text()}`);
+    }
+    const j2 = await r2.json();
+    expect(j2).toMatchObject({ ok: true, id: 'roundtrip-1', decision: 'allow' });
+
+    const dec = await decisionPromise;
+    expect(dec.decision).toBe('allow');
+    expect(dec.reason).toBe('go for it');
+    expect(dec.decided_by).toMatch(/^webui:/);
+
+    const r3 = await get(handle, '/api/approvals');
+    const j3 = await r3.json();
+    expect(j3.approvals).toHaveLength(0);
+  });
+
+  it('POST allow on unknown id returns 404', async () => {
+    const origin = `http://${handle.address.host}:${handle.address.port}`;
+    const r = await fetch(`${origin}/api/approvals/nope/allow`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: origin },
+      body: '{}',
+    });
+    expect(r.status).toBe(404);
+  });
+
+  it('POST approval mutation rejects cross-origin loopback requests without a token', async () => {
+    queue.enqueue({
+      id: 'origin-guard-1',
+      profile: 'prod',
+      tool: 'exec',
+      command: 'systemctl restart nginx',
+      enqueuedAt: new Date().toISOString(),
+    });
+    // Non-loopback Origin is now caught by the general tokenless DNS-rebinding
+    // guard (401) before the mutation route's same-origin check runs.
+    const rebound = await fetch(
+      `http://${handle.address.host}:${handle.address.port}/api/approvals/origin-guard-1/allow`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'http://evil.example',
+        },
+        body: '{}',
+      },
+    );
+    expect(rebound.status).toBe(401);
+    // A loopback Origin from a DIFFERENT port passes the general guard but is
+    // still cross-origin for the mutation route: 403 from the same-origin check.
+    const crossPort = await fetch(
+      `http://${handle.address.host}:${handle.address.port}/api/approvals/origin-guard-1/allow`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: `http://${handle.address.host}:${handle.address.port + 1}`,
+        },
+        body: '{}',
+      },
+    );
+    expect(crossPort.status).toBe(403);
+    const j = await crossPort.json();
+    expect(j.error).toMatch(/same-origin loopback/);
+    expect(queue.list()).toHaveLength(1);
+  });
+
+  it('POST approval mutation rejects missing Origin/Referer without a token', async () => {
+    queue.enqueue({
+      id: 'origin-guard-missing',
+      profile: 'prod',
+      tool: 'exec',
+      command: 'systemctl restart nginx',
+      enqueuedAt: new Date().toISOString(),
+    });
+    const r = await fetch(
+      `http://${handle.address.host}:${handle.address.port}/api/approvals/origin-guard-missing/allow`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      },
+    );
+    expect(r.status).toBe(403);
+    expect(queue.list()).toHaveLength(1);
+  });
+
+  it('POST approval mutation accepts same-origin loopback requests without a token', async () => {
+    const decisionPromise = queue.enqueue({
+      id: 'origin-guard-2',
+      profile: 'prod',
+      tool: 'exec',
+      command: 'systemctl restart nginx',
+      enqueuedAt: new Date().toISOString(),
+    });
+    const origin = `http://${handle.address.host}:${handle.address.port}`;
+    const r = await fetch(`${origin}/api/approvals/origin-guard-2/allow`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: origin,
+      },
+      body: '{}',
+    });
+    expect(r.status).toBe(200);
+    const decision = await decisionPromise;
+    expect(decision.decision).toBe('allow');
+  });
+
+  it('POST approval with malformed percent-encoded id returns 400', async () => {
+    const origin = `http://${handle.address.host}:${handle.address.port}`;
+    const r = await fetch(`${origin}/api/approvals/%E0%A4%A/allow`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: origin },
+      body: '{}',
+    });
+    expect(r.status).toBe(400);
+    const j = await r.json();
+    expect(j.error).toMatch(/malformed approval id/);
+  });
+
+  it('POST deny resolves with deny', async () => {
+    const decisionPromise = queue.enqueue({
+      id: 'deny-1',
+      profile: 'lab',
+      tool: 'sudo-exec',
+      command: 'rm -rf /tmp/x',
+      enqueuedAt: new Date().toISOString(),
+    });
+    const origin = `http://${handle.address.host}:${handle.address.port}`;
+    await fetch(`${origin}/api/approvals/deny-1/deny`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: origin },
+      body: JSON.stringify({ note: 'nope' }),
+    });
+    const d = await decisionPromise;
+    expect(d.decision).toBe('deny');
+    expect(d.reason).toBe('nope');
+  });
+
 
   it('static index page is served on loopback without token', async () => {
     const r = await get(handle, '/');
@@ -206,6 +402,13 @@ describe('WebUI server', () => {
     const text = await r.text();
     expect(text).toContain('ssh-mcp');
     expect(r.headers.get('content-type') || '').toMatch(/text\/html/);
+  });
+
+  it('static UI responses cannot be embedded in a frame', async () => {
+    const r = await get(handle, '/');
+    expect(r.status).toBe(200);
+    expect(r.headers.get('x-frame-options')).toBe('DENY');
+    expect(r.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
   });
 
   it('unknown api route returns 404', async () => {
