@@ -804,6 +804,59 @@ auth = "kerberos"
     expect(registry.names()).toEqual(['alpha', 'beta']);
   });
 
+  it('allows an LLM-only config to reload without an engine when it remains inert', async () => {
+    // Codex 3575393342: WebUI-disabled boot + LLM-only config intentionally
+    // constructs NO dispatcher. A source/description edit that keeps the policy
+    // LLM-only remains yolo/inert on a fresh boot and must not be misclassified
+    // as a newly exposed smart engine.
+    const llmOnlyPrefix = `
+[approval.llm]
+endpoint = "https://llm.inert/v1/chat/completions"
+model = "gpt-inert"
+`;
+    const bootToml = `${llmOnlyPrefix}
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+
+[[sources]]
+id = "beta"
+host = "beta.example"
+user = "root"
+auth = "kerberos"
+`;
+    const nextToml = `${llmOnlyPrefix}
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+
+[[sources]]
+id = "gamma"
+host = "gamma.example"
+user = "root"
+auth = "kerberos"
+`;
+    const registry = freshRegistry(bootToml);
+    const reloader = new ConfigReloader({
+      registry,
+      // no engine: mirrors WebUI-disabled LLM-only production boot
+      loadConfig: () => parseTomlConfig(nextToml) as ResolvedConfig,
+      log: () => {},
+    });
+    const events: ConfigReloadedEvent[] = [];
+    reloader.on('config-reloaded', e => events.push(e));
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(true);
+    expect(registry.names()).toEqual(['alpha', 'gamma']);
+    expect(events).toHaveLength(1);
+  });
+
   it('rejects an inactive LLM addition when smart was not armed at boot', async () => {
     const registry = freshRegistry(TOML_A);
     // Mirrors a WebUI-enabled yolo/manual process: an approval dispatcher exists,
@@ -967,6 +1020,47 @@ auth = "kerberos"
     const res = await reloader.reload();
     expect(res.ok).toBe(false);
     expect(res.reason).toMatch(/model/);
+  });
+
+  it('allows explicit timeout_ms=8000 when the live smart engine uses the implicit 8000 default', async () => {
+    // Codex 3575393333: undefined and explicit 8000 have identical runtime
+    // semantics in SmartApproval.decide(). Normalizing both sides must let an
+    // unrelated source edit apply rather than falsely report an LLM change.
+    const registry = freshRegistry(TOML_A);
+    const engine = smartArmedEngine(); // timeout omitted at boot -> effective 8000
+    const sameEffectiveTimeoutWithSourceEdit = `
+[approval]
+mode = "smart"
+
+[approval.llm]
+endpoint = "https://llm.old/v1/chat/completions"
+model = "gpt-old"
+api_key = "boot-key"
+timeout_ms = 8000
+
+[[sources]]
+id = "alpha"
+host = "alpha.example"
+user = "root"
+auth = "kerberos"
+
+[[sources]]
+id = "gamma"
+host = "gamma.example"
+user = "root"
+auth = "kerberos"
+`;
+    const reloader = new ConfigReloader({
+      registry,
+      engine,
+      loadConfig: () => parseTomlConfig(sameEffectiveTimeoutWithSourceEdit) as ResolvedConfig,
+      log: () => {},
+    });
+
+    const res = await reloader.reload();
+
+    expect(res.ok).toBe(true);
+    expect(registry.names()).toEqual(['alpha', 'gamma']);
   });
 
   it('rejects a reload that flips fail_closed', async () => {

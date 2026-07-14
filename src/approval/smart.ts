@@ -24,6 +24,8 @@ interface LlmJudgement {
   reason: string;
 }
 
+export const DEFAULT_SMART_LLM_TIMEOUT_MS = 8000;
+
 /**
  * Normalized snapshot of a live SmartApproval's LLM-relevant settings. Used by
  * the config hot-reload path to compare the incoming TOML `[approval.llm]`
@@ -133,7 +135,7 @@ export class SmartApproval implements ApprovalEngine {
       );
     }
 
-    const timeoutMs = this.opts.llm.timeout_ms ?? 8000;
+    const timeoutMs = this.opts.llm.timeout_ms ?? DEFAULT_SMART_LLM_TIMEOUT_MS;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 

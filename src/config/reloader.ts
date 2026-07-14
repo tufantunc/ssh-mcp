@@ -30,7 +30,7 @@ import { resolveApprovalEngineInput, resolveEffectiveDefaultMode } from './appro
 import type { ServerConfig } from '../transports/types.js';
 import type { RegistryStateSnapshot } from '../transports/registry.js';
 import type { ModeStoreState } from '../approval/mode-store.js';
-import type { SmartLlmSnapshot } from '../approval/smart.js';
+import { DEFAULT_SMART_LLM_TIMEOUT_MS, type SmartLlmSnapshot } from '../approval/smart.js';
 import { isSmartLlmPreArmable } from '../approval/engine.js';
 
 /** The registry surface the reloader drives (subset of TransportRegistry). */
@@ -161,12 +161,20 @@ function assertSmartLlmUnchanged(config: ResolvedConfig, engine?: ApprovalReload
   const live = engine?.describeSmartLlm() ?? null;
   const llm = config.approval?.llm;
   if (live === null) {
-    // Preserve inert blocks that would also leave smart unavailable on a fresh
-    // boot (unsupported provider, incomplete settings, or an unresolved key).
-    // They do not change the live mode set, so source/description edits can be
-    // applied safely. A newly pre-armable block is different: fresh boot would
-    // expose smart while this process cannot construct it, so reject atomically.
+    // Preserve blocks that would also leave smart unavailable on a fresh boot.
+    // Unsupported/incomplete/unresolved blocks are always inert. A PRE-ARMABLE
+    // block is also inert when there is no live dispatcher AND the incoming
+    // config is LLM-only: buildProductionApprovalEngine returns null for that
+    // shape when WebUI is disabled, so a source/description-only reload has the
+    // same yolo/no-engine semantics as a fresh boot. (When WebUI is active a
+    // synthetic dispatcher always exists, so `engine` cannot be absent here.)
     if (!isSmartLlmPreArmable(llm)) return;
+    if (!engine && resolveApprovalEngineInput(config) === null && !reloadSelectsSmart(config)) {
+      return;
+    }
+    // Otherwise a fresh boot would construct/expose smart (explicit policy,
+    // per-source policy, or a WebUI synthetic dispatcher), but this process
+    // cannot add a SmartApproval sub-engine during reload.
     throw new Error(
       'new approval [approval.llm] config cannot be hot-reloaded while the smart engine is not armed ' +
       '(the smart engine is built once at boot) — restart to apply',
@@ -198,7 +206,9 @@ function assertSmartLlmUnchanged(config: ResolvedConfig, engine?: ApprovalReload
   if (llm.api_key_unresolved || (llm.api_key ?? undefined) !== (live.api_key ?? undefined)) {
     changed.push('api_key');
   }
-  if ((llm.timeout_ms ?? undefined) !== (live.timeout_ms ?? undefined)) changed.push('timeout_ms');
+  const nextTimeoutMs = llm.timeout_ms ?? DEFAULT_SMART_LLM_TIMEOUT_MS;
+  const liveTimeoutMs = live.timeout_ms ?? DEFAULT_SMART_LLM_TIMEOUT_MS;
+  if (nextTimeoutMs !== liveTimeoutMs) changed.push('timeout_ms');
   if (nextProvider !== live.provider) changed.push('provider');
   if (nextFailClosed !== live.fail_closed) changed.push('fail_closed');
 
