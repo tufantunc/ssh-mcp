@@ -20,6 +20,8 @@ audit_max_bytes = 10000
 enabled = false
 host = "127.0.0.1"
 port = 8088
+# Set true only when a token-authenticated browser client is hosted on another origin.
+# cors = false
 # auth_token = "env:SSHMCP_WEBUI_TOKEN"  # required when host is non-loopback
 
 [approval]

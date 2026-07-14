@@ -7,6 +7,8 @@ import type { WebUIOptions, WebUIHandle, ApprovalDecisionKind } from './types.js
 import { handleProfiles } from './routes/profiles.js';
 import { handleExecutions } from './routes/executions.js';
 import { handleListApprovals, handleDecideApproval } from './routes/approvals.js';
+import { handleListModes, handleSetProfileMode, handleSetGlobalMode } from './routes/modes.js';
+import { handleSetSourceDescription } from './routes/sources.js';
 import { SseHub } from './routes/sse.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -217,13 +219,25 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
     );
   }
 
-  const hub = new SseHub(opts.queue, opts.audit);
+  const hub = new SseHub(opts.queue, opts.audit, opts.modeController, opts.sourceController, opts.reloadController);
 
   const server = http.createServer(async (req, res) => {
     try {
       const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
       const pathname = urlObj.pathname;
       const method = (req.method || 'GET').toUpperCase();
+
+      if (opts.cors) {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Auth-Token');
+        res.setHeader('Access-Control-Max-Age', '600');
+        if (method === 'OPTIONS') {
+          res.writeHead(204, { 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+      }
 
       // --- SSE: /events --------------------------------------------------
       if (pathname === '/events') {
@@ -247,7 +261,7 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
         }
 
         if (pathname === '/api/profiles' && method === 'GET') {
-          const r = handleProfiles(opts.registry, opts.getApprovalMode);
+          const r = handleProfiles(opts.registry, opts.getApprovalMode, !!opts.sourceController);
           sendJson(res, r.status, r.body);
           return;
         }
@@ -286,6 +300,76 @@ export async function startWebUI(opts: WebUIOptions): Promise<WebUIHandle> {
           const note = typeof body?.note === 'string' ? body.note : undefined;
           const decidedBy = `webui:${req.socket.remoteAddress || 'unknown'}`;
           const r = handleDecideApproval(opts.queue, id, kind, note, decidedBy);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        // --- Live approval-mode switching (PR-7, in-memory only) ----------
+        if (pathname === '/api/approval-modes' && method === 'GET') {
+          const r = handleListModes(opts.modeController);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        if (pathname === '/api/approval-mode' && method === 'PUT') {
+          if (!checkApprovalMutationAuth({ req, authToken })) {
+            sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
+            return;
+          }
+          const body = await readJson(req);
+          if (body === null) {
+            sendJson(res, 400, { error: 'invalid JSON body' });
+            return;
+          }
+          const r = handleSetGlobalMode(opts.modeController, body);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        const modeMatch = pathname.match(/^\/api\/profiles\/([^/]+)\/approval-mode$/);
+        if (modeMatch && method === 'PUT') {
+          if (!checkApprovalMutationAuth({ req, authToken })) {
+            sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
+            return;
+          }
+          let id: string;
+          try {
+            id = decodeURIComponent(modeMatch[1]);
+          } catch {
+            sendJson(res, 400, { error: 'malformed profile id' });
+            return;
+          }
+          const profileExists = opts.registry.list().some(p => p.name === id);
+          const body = await readJson(req);
+          if (body === null) {
+            sendJson(res, 400, { error: 'invalid JSON body' });
+            return;
+          }
+          const r = handleSetProfileMode(opts.modeController, id, profileExists, body);
+          sendJson(res, r.status, r.body);
+          return;
+        }
+
+        // --- Live per-source description editing (PR-8, in-memory only) -----
+        const descMatch = pathname.match(/^\/api\/sources\/([^/]+)\/description$/);
+        if (descMatch && method === 'PUT') {
+          if (!checkApprovalMutationAuth({ req, authToken: opts.authToken })) {
+            sendJson(res, 403, { error: 'approval mutation requires same-origin loopback request or auth token' });
+            return;
+          }
+          let id: string;
+          try {
+            id = decodeURIComponent(descMatch[1]);
+          } catch {
+            sendJson(res, 400, { error: 'malformed source id' });
+            return;
+          }
+          const body = await readJson(req);
+          if (body === null) {
+            sendJson(res, 400, { error: 'invalid JSON body' });
+            return;
+          }
+          const r = handleSetSourceDescription(opts.sourceController, id, body);
           sendJson(res, r.status, r.body);
           return;
         }

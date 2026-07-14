@@ -506,6 +506,30 @@ auth_token = "env:TKN"
     expect(cfg.webui?.auth_token).toBe('tok');
   });
 
+  it('parses and validates [webui].cors', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[webui]
+cors = true
+`);
+    expect(cfg.webui?.cors).toBe(true);
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[webui]
+cors = "yes"
+`)).toThrow(/\[webui\]\.cors must be a boolean/);
+  });
+
   it('parses [approval] and [approval.llm]', () => {
     const cfg = parseTomlConfig(`
 [[sources]]
@@ -528,6 +552,22 @@ timeout_ms = 1234
     expect(cfg.approval?.fail_closed).toBe(false);
     expect(cfg.approval?.llm?.api_key).toBe('sk-xyz');
     expect(cfg.approval?.llm?.timeout_ms).toBe(1234);
+  });
+
+  it('propagates per-source description and approval override to the server config', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "dc03"
+host = "dc03.example.com"
+user = "corp\\\\svcuser"
+auth = "kerberos"
+description = '''allow only NTDS\\My thumbprint 8A00772D4491E2E71218405BDDE5A5FE3E9C7DBE certificate-object writes; deny PFX, private key reads, restart, reboot'''
+approval = { mode = "smart" }
+`);
+    expect(cfg.sources[0].description).toContain('NTDS\\My');
+    expect(cfg.sources[0].description).toContain('8A00772D4491E2E71218405BDDE5A5FE3E9C7DBE');
+    expect(cfg.sources[0].approval?.mode).toBe('smart');
+    expect(cfg.perSourceApproval?.dc03).toBe('smart');
   });
 
   it('rejects a scalar top-level approval value instead of enabling manual mode', () => {
@@ -1026,6 +1066,57 @@ auth = "kerberos"
 api_key = "env:MISSING_KEY"
 `, { env: {} });
     expect(cfg.approval?.llm?.api_key).toBeUndefined();
+  });
+
+  // Finding: pre-armed smart drops the configured LLM api_key. When the LLM
+  // block is FULLY configured (endpoint + model), buildApprovalEngineFromConfig
+  // pre-arms smart so the WebUI can live-switch into it — but SmartApproval
+  // needs the api_key to authenticate. Preserve the key (env: indirection
+  // included) whenever the block is fully configured, even if smart is not the
+  // enforced default/per-source mode.
+  it('preserves api_key for a fully-configured LLM block even when mode is manual (pre-arm smart)', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[approval]
+mode = "manual"
+
+[approval.llm]
+endpoint = "https://api.openai.com/v1/chat/completions"
+api_key = "env:OPENAI_API_KEY"
+model = "gpt-4o-mini"
+`, { env: { OPENAI_API_KEY: 'sk-live' } });
+    // Manual is the enforced mode, but the fully-configured LLM block pre-arms
+    // smart, so the key must survive for a live switch to smart.
+    expect(cfg.approval?.mode).toBe('manual');
+    expect(cfg.approval?.llm?.api_key).toBe('sk-live');
+  });
+
+  it('does NOT fail startup when a pre-arm-only api_key env is unset (soft-resolve)', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[approval]
+mode = "manual"
+
+[approval.llm]
+endpoint = "https://api.openai.com/v1/chat/completions"
+api_key = "env:MISSING_KEY"
+model = "gpt-4o-mini"
+`, { env: {} });
+    // No throw (manual is active), but retain that the configured key was
+    // unavailable so the engine builder does not pre-arm/advertise smart.
+    expect(cfg.approval?.mode).toBe('manual');
+    expect(cfg.approval?.llm?.api_key).toBeUndefined();
+    expect(cfg.approval?.llm?.api_key_unresolved).toBe(true);
   });
 
   it('resolves api_key when smart mode is only enabled by a per-source override', () => {

@@ -13,6 +13,9 @@ import { TransportRegistry } from './transports/registry.js';
 import { resolveConfig } from './config/resolver.js';
 import { expandHome } from './config/toml-loader.js';
 import type { ResolvedConfig, ApprovalMode } from './config/types.js';
+import { resolveApprovalEngineInput as resolveApprovalEngineInputForConfig } from './config/approval-policy.js';
+import { startConfigWatcher } from './config/config-watcher.js';
+import { ConfigReloader } from './config/reloader.js';
 import {
   sanitizeCommand as sanitizeCommandImpl,
   sanitizePassword,
@@ -37,6 +40,10 @@ import type {
   PendingApproval as WebUIPendingApproval,
   ApprovalDecision as WebUIApprovalDecision,
   AuditTail as WebUIAuditTail,
+  ModeController as WebUIModeController,
+  SourceController as WebUISourceController,
+  SourceUpdatedEvent as WebUISourceUpdatedEvent,
+  ConfigReloadController as WebUIConfigReloadController,
 } from './webui/types.js';
 
 // Re-exports for backward compatibility with existing tests.
@@ -627,7 +634,6 @@ export async function buildTransportConfig(
 // Transport registry — lazy init, single entry for legacy single-host mode.
 // =============================================================================
 
-const fileLoadedKeyConfigs = new WeakSet<ServerConfig>();
 const registry = new TransportRegistry(prepareKeyContents);
 
 export async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
@@ -641,17 +647,17 @@ export async function prepareKeyContents(cfg: ServerConfig): Promise<void> {
   //
   // Once this hook loads a keyPath, re-read it on every later init attempt. The
   // registry retries rejected initialization with the same config object; the
-  // WeakSet distinguishes file-loaded contents from an explicit inline key so a
-  // key rotation can recover without a process restart.
+  // internal marker distinguishes file-loaded contents from an explicit inline
+  // key so a key rotation can recover without a process restart.
   if (
     cfg.authMode === 'key' &&
     cfg.transport === 'ssh2' &&
     cfg.keyPath &&
-    (!cfg.privateKey || fileLoadedKeyConfigs.has(cfg))
+    (!cfg.privateKey || cfg.privateKeyDerivedFromKeyPath === true)
   ) {
     const fs = await import('fs/promises');
     cfg.privateKey = await fs.readFile(cfg.keyPath, 'utf8');
-    fileLoadedKeyConfigs.add(cfg);
+    cfg.privateKeyDerivedFromKeyPath = true;
   }
 }
 
@@ -747,13 +753,113 @@ export function buildApprovalProfile(
   };
 }
 
-function approvalTargetForConnection(connectionName?: string): { profile: string; approvalProfile: ResolvedSource } {
-  const id = registry.resolveRegisteredName(connectionName);
-  const source = resolvedConfig.sources.find(s => s.name === id);
-  return {
-    profile: id,
-    approvalProfile: buildApprovalProfile(id, resolvedConfig.perSourceApproval ?? {}, source),
-  };
+/**
+ * Finding-4 (Codex R4) revalidation after an awaited approval.
+ *
+ * A manual/smart approval can block for a long time. During that wait a config
+ * hot-reload (closeAll bumps the registry's reload generation) can remove or
+ * re-parameterize the source, but the transport `current` was already dialed
+ * against the PRE-approval config. Running the approved command on it would
+ * bypass the swap (execute on a stale host, or on a source that no longer
+ * exists). Compare the generation captured BEFORE the approval against the live
+ * one: if it changed, re-acquire the transport against the CURRENT config
+ * (registry.get() re-resolves the name — throwing a clear error if it was
+ * removed — and re-dials the new params) and re-sample the profile so audit
+ * attribution matches the transport actually used.
+ *
+ * Returns the transport to execute with and its effective audit profile id.
+ * When no reload landed, returns the originals unchanged (single sync generation
+ * read — no await — so no further reload can interleave before the caller runs).
+ */
+export async function reacquireTransportIfReloaded(
+  reg: Pick<TransportRegistry, 'getReloadGeneration' | 'get' | 'profile'>,
+  connectionName: string | undefined,
+  current: ISshTransport,
+  generationBeforeApproval: number,
+): Promise<{ transport: ISshTransport; profile: string }> {
+  if (reg.getReloadGeneration() === generationBeforeApproval) {
+    return { transport: current, profile: reg.profile(connectionName).id };
+  }
+  const transport = await reg.get(connectionName);
+  return { transport, profile: reg.profile(connectionName).id };
+}
+
+/**
+ * Approve and acquire one stable source across config reloads.
+ *
+ * The canonical source id is sampled before the first await. Every attempt gates
+ * that source before registry.get() can initialize/elevate a transport. If a
+ * reload lands during either await, the decision/transport is discarded and the
+ * same source id is re-profiled and re-approved; it is never reinterpreted as a
+ * new default.
+ */
+export async function approveTransportForCurrentConfig(params: {
+  reg: Pick<TransportRegistry, 'getReloadGeneration' | 'get' | 'profile'>;
+  profile: ResolvedSource;
+  gate: (profile: ResolvedSource) => Promise<ApprovalDecision>;
+  maxAttempts?: number;
+}): Promise<{ transport: ISshTransport; profile: string; approval: ApprovalDecision }> {
+  let effectiveProfile = params.profile;
+  const resolvedName = params.profile.id;
+  const maxAttempts = params.maxAttempts ?? 10;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const generationBeforeApproval = params.reg.getReloadGeneration();
+    let approval: ApprovalDecision;
+    try {
+      approval = await params.gate(effectiveProfile);
+    } catch (err) {
+      if (params.reg.getReloadGeneration() === generationBeforeApproval) {
+        throw err;
+      }
+      // The old denial/timeout was invalidated by reload. Re-profile the SAME
+      // canonical source before retrying; a removed source fails closed here.
+      effectiveProfile = params.reg.profile(resolvedName);
+      continue;
+    }
+
+    if (params.reg.getReloadGeneration() !== generationBeforeApproval) {
+      effectiveProfile = params.reg.profile(resolvedName);
+      continue;
+    }
+
+    // Approval is current, so transport initialization/elevation may proceed.
+    let transport: ISshTransport;
+    try {
+      transport = await params.reg.get(resolvedName);
+    } catch (err) {
+      // The operator's decision DID happen. A failed acquisition (unreadable
+      // lazy key, connect failure, source removed after the approval) must not
+      // silently discard it: attach the decision to the error so both tool
+      // handlers' catch paths (getApprovalDecisionFromError) audit the real
+      // decision instead of recording a synthetic `approval:not-run` denial.
+      if (err !== null && typeof err === 'object'
+          && (err as { approval?: ApprovalDecision }).approval === undefined) {
+        (err as { approval?: ApprovalDecision }).approval = approval;
+      }
+      throw err;
+    }
+    if (params.reg.getReloadGeneration() === generationBeforeApproval) {
+      return { transport, profile: effectiveProfile.id, approval };
+    }
+
+    // A reload landed while get() was initializing. Registry.get() already
+    // discarded/retried stale transport state; loop to authorize the current
+    // transport configuration before execution.
+    effectiveProfile = params.reg.profile(resolvedName);
+  }
+
+  throw new Error(`config reloaded ${maxAttempts} times during approval; retry command after reloads settle`);
+}
+
+export function approvalTargetForConnection(
+  reg: TransportRegistry,
+  connectionName?: string,
+): { profile: string; approvalProfile: ResolvedSource } {
+  const id = reg.resolveRegisteredName(connectionName);
+  // Registry state is the hot-reload source of truth; resolvedConfig is the boot
+  // snapshot and may no longer describe this source.
+  return { profile: id, approvalProfile: reg.profile(id) };
 }
 
 export function appendDescriptionComment(command: string, description?: string): string {
@@ -789,48 +895,11 @@ let auditSink: AuditSink = { record() { /* no-op until wired (or audit absent) *
 export function resolveApprovalEngineInput(
   config: ResolvedConfig = resolvedConfig,
 ): BuildEngineFromConfigInput | null {
-  const approvalCfg = config.approval;
-  const perSourceModes: ApprovalMode[] = Object.values(config.perSourceApproval ?? {});
-  if (approvalCfg === undefined && perSourceModes.length === 0) {
-    return null;
-  }
-  const approvalLlmOnly = approvalCfg !== undefined
-    && approvalCfg.mode === undefined
-    && approvalCfg.fail_closed === undefined
-    && approvalCfg.llm !== undefined;
-  const perSourceOnlyDefault = perSourceModes.length > 0
-    && (approvalCfg === undefined || approvalLlmOnly);
-  // An [approval.llm]-only block supplies settings for smart mode but does not
-  // select approval by itself. Keep it inert unless a per-source override uses
-  // it; otherwise undefined defaultMode would accidentally activate manual.
-  if (approvalLlmOnly && perSourceModes.length === 0) {
-    return null;
-  }
-  return {
-    // Resolve the GLOBAL default mode:
-    //  - explicit [approval].mode set        -> honor it.
-    //  - no global mode, per-source overrides, and either no [approval] block
-    //    or an [approval.llm]-only block -> keep the global default 'yolo'
-    //    (unrestricted) so only the overridden sources are gated. Defining
-    //    [approval.llm] for a per-source `mode = "smart"` makes
-    //    resolvedConfig.approval non-undefined even though no global mode was
-    //    requested, so keying solely on `approvalCfg === undefined` would
-    //    wrongly fall through to manual here and gate every ungated host (or
-    //    throw at boot with WebUI off).
-    //  - no global mode but a real top-level approval knob (e.g.
-    //    `fail_closed = true`, or a bare [approval] block) was added
-    //    deliberately to enable approval; leave defaultMode undefined so
-    //    buildApprovalEngineFromConfig applies the documented 'manual' default.
-    defaultMode:
-      approvalCfg?.mode !== undefined
-        ? approvalCfg.mode
-        : perSourceOnlyDefault
-          ? 'yolo'
-          : undefined,
-    fail_closed: approvalCfg?.fail_closed,
-    llm: approvalCfg?.llm,
-    perSourceModes,
-  };
+  // Delegate to the shared pure resolver so this boot path and the config
+  // hot-reload path (src/config/reloader.ts) can NEVER disagree about how a
+  // ResolvedConfig maps to the effective default/per-source modes. See
+  // src/config/approval-policy.ts for the precedence rationale.
+  return resolveApprovalEngineInputForConfig(config);
 }
 
 /** Effective configured mode used when audit must record a pre-gate failure. */
@@ -845,6 +914,14 @@ export function resolveConfiguredApprovalMode(
     config.perSourceApproval ?? {},
   );
   return profile.approval?.mode ?? input.defaultMode ?? 'manual';
+}
+
+/** Effective live mode used when audit must record a pre-gate failure. */
+export function resolveLiveApprovalMode(
+  profileId: string,
+  engine: Pick<ApprovalDispatcher, 'getEffectiveMode'> | null,
+): ApprovalMode {
+  return engine?.getEffectiveMode(profileId) ?? 'yolo';
 }
 
 export function approvalResolverWarningFromInput(
@@ -869,11 +946,45 @@ export function approvalResolverWarningFromInput(
  *   - manual mode requested but WebUI disabled (gate-12 invariant)
  *   - smart mode requested but [approval.llm] missing endpoint or model
  */
-function buildProductionApprovalEngine(webuiActive: boolean): ApprovalDispatcher | null {
-  const input = resolveApprovalEngineInput();
-  if (input === null) {
+export function buildProductionApprovalEngine(
+  webuiActive: boolean,
+  config: ResolvedConfig = resolvedConfig,
+): ApprovalDispatcher | null {
+  const approvalCfg = config.approval;
+  const perSourceApproval = config.perSourceApproval ?? {};
+  const perSourceModes: ApprovalMode[] = Object.values(perSourceApproval);
+  const approvalLlmOnly = approvalCfg !== undefined
+    && approvalCfg.mode === undefined
+    && approvalCfg.fail_closed === undefined
+    && approvalCfg.llm !== undefined;
+  // A synthetic engine has no selected approval mode. It exists only while the
+  // WebUI is active so operators can live-switch from the legacy yolo baseline.
+  // Preserve an LLM-only block on that engine so a supported smart provider is
+  // switchable without turning the otherwise-inert config into a boot-time mode.
+  const isSyntheticWebUIEngine = perSourceModes.length === 0
+    && (approvalCfg === undefined || approvalLlmOnly);
+
+  // Resolve config through the SHARED helper so the engine we build and the
+  // manual-without-resolver boot warning (wireApprovalAndAudit) can never
+  // disagree about the effective default/per-source modes. It returns null on
+  // the legacy CLI and LLM-only paths; keep that no-engine allow UNLESS the
+  // WebUI is active and wants a live-switchable synthetic engine.
+  const resolved = resolveApprovalEngineInput(config);
+  if (resolved === null && !(isSyntheticWebUIEngine && webuiActive)) {
     return null;
   }
+  const input: BuildEngineFromConfigInput = {
+    ...(resolved ?? (approvalLlmOnly ? { llm: approvalCfg?.llm } : {})),
+    // For a synthetic WebUI engine, pass an explicit `yolo` baseline. Leaving
+    // this undefined makes buildApprovalEngineFromConfig coerce it to `manual`,
+    // which would enqueue/block every exec even though no approval mode was
+    // configured. Per-source and explicit [approval].mode configs keep the
+    // resolved default from the shared helper.
+    defaultMode: resolved?.defaultMode ?? (isSyntheticWebUIEngine ? 'yolo' : undefined),
+    // Seed per-source static overrides into the live mode store so a live mode
+    // switch starts from the operator's configured baseline (mode-switch lane).
+    staticOverrides: perSourceApproval,
+  };
   return buildApprovalEngineFromConfig(input, {
     manualOpts: { webuiEnabled: webuiActive },
   });
@@ -1043,12 +1154,20 @@ export function makeApprovalModeLookup(
   deps: {
     perSourceApproval?: Record<string, ApprovalMode>;
     getEngine?: () => Pick<ApprovalDispatcher, 'defaultMode'> | null;
+    modeController?: Pick<WebUIModeController, 'getEffectiveMode'>;
   } = {},
 ): (profileName: string) => string {
   const perSource = deps.perSourceApproval ?? resolvedConfig.perSourceApproval ?? {};
   // Engine read stays lazy (per lookup, like the previous module-level read)
   // so the adapter never caches a stale null/instance across engine wiring.
   const getEngine = deps.getEngine ?? (() => approvalEngine);
+  // Production passes the same live controller used by the mutation routes.
+  // Its dispatcher-backed lookup observes in-memory profile/global changes made
+  // after startup instead of falling back to the static TOML snapshot below.
+  const modeController = deps.modeController;
+  if (modeController) {
+    return (name: string): string => modeController.getEffectiveMode(name);
+  }
   // Mirror exactly what ApprovalDispatcher.decide() enforces so the WebUI
   // never advertises a gate that is not actually applied:
   //   - no engine wired        -> gateApproval() takes the legacy no-engine
@@ -1072,6 +1191,186 @@ export function makeApprovalModeLookup(
   };
 }
 
+/**
+ * Bridge the in-process dispatcher to the WebUI's ModeController contract
+ * (PR-7). All mutation is in-memory only (Decision D3): this adapter calls the
+ * dispatcher's mode store, which never touches disk. Returns undefined when no
+ * engine is wired (mode switching disabled).
+ */
+function buildWebUIModeController(engine: ApprovalDispatcher | null): WebUIModeController | undefined {
+  if (!engine) return undefined;
+  const wrappers = new Map<Function, (e: any) => void>();
+  return {
+    availableModes: () => engine.availableModes(),
+    getGlobalMode: () => engine.getGlobalMode(),
+    getEffectiveMode: (profileId: string) => engine.getEffectiveMode(profileId),
+    setProfileMode: (profileId: string, mode: string | null) =>
+      engine.setProfileMode(profileId, mode as ApprovalMode | null),
+    setGlobalMode: (mode: string) => engine.setGlobalMode(mode as ApprovalMode),
+    on(event, listener) {
+      const wrap = (e: any) => listener(e);
+      wrappers.set(listener, wrap);
+      engine.on(event, wrap);
+    },
+    off(event, listener) {
+      const wrap = wrappers.get(listener);
+      if (wrap) {
+        engine.off(event, wrap);
+        wrappers.delete(listener);
+      }
+    },
+  };
+}
+
+/**
+ * Bridge the TransportRegistry's in-memory description override to the WebUI's
+ * SourceController contract (PR-8). All mutation is in-memory only (Decision
+ * D3): `registry.setDescription()` updates a Map and NEVER writes the TOML
+ * config. The approval engine re-reads the effective description on its next
+ * decision because `registry.profile()` applies the override on every call —
+ * so an edit takes effect live without a restart. This adapter owns the
+ * `source-updated` fan-out (the registry is a pure state-holder, like the
+ * ApprovalModeStore beneath the mode controller).
+ */
+function buildWebUISourceController(reg: TransportRegistry): WebUISourceController {
+  const listeners = new Set<(e: WebUISourceUpdatedEvent) => void>();
+  return {
+    hasSource: (id: string) => reg.names().includes(id),
+    getEffectiveDescription: (id: string) => reg.getEffectiveDescription(id),
+    setDescription(id: string, description: string | null): WebUISourceUpdatedEvent {
+      const effective = reg.setDescription(id, description);
+      const event: WebUISourceUpdatedEvent = {
+        id,
+        description: effective,
+        at: new Date().toISOString(),
+      };
+      for (const l of listeners) {
+        try { l(event); } catch { /* a bad listener must not break the edit */ }
+      }
+      return event;
+    },
+    on(_event, listener) {
+      listeners.add(listener);
+    },
+    off(_event, listener) {
+      listeners.delete(listener);
+    },
+  };
+}
+
+// =============================================================================
+// Config hot-reload (PR-9). The reloader owns the parse→validate→swap→rollback
+// transaction; the watcher debounces fs.watch and drives it. Reload scope =
+// connections + per-source description + approval policy. The MCP tool list is
+// NEVER reloaded (Decision D4) — it is static and registered once at startup,
+// so STDIO clients need no reconnect. All mutation is in-memory (D3): a reload
+// reseeds from the file but writes nothing back, so it can't loop the watcher.
+// =============================================================================
+
+let configReloader: ConfigReloader | null = null;
+let stopConfigWatcher: (() => void) | null = null;
+
+/**
+ * Re-resolve the boot config from disk using the same precedence chain as
+ * startup. Only ever called on the TOML-driven path (the watcher isn't started
+ * for `--ssh`/legacy CLI), so `cliSources` is empty and TOML wins. Throws on any
+ * parse/validation error — the reloader treats a throw as "keep the old config".
+ */
+export function resolveReloadConfig(params: {
+  cliSources: ServerConfig[];
+  configPath: string;
+  cliArgs: Record<string, unknown>;
+  env?: NodeJS.ProcessEnv;
+}): ResolvedConfig {
+  return resolveConfig({
+    cliSources: params.cliSources,
+    cliConfigPath: params.configPath,
+    // Keep the CLI switch tri-state identical to startup: absent delegates to
+    // TOML, a bare --webui forces true, and --webui=false forces false.
+    webuiEnabled: cliSwitchOverride(params.cliArgs, 'webui'),
+    env: params.env,
+  });
+}
+
+function reloadResolveConfig(): ResolvedConfig {
+  return resolveReloadConfig({
+    cliSources: cliSourceConfigs,
+    // Pin reloads to the EXACT file the boot resolver settled on (the same file
+    // the watcher is attached to), NOT the raw `--config` flag. CONFIG_PATH is
+    // undefined for env-var (`SSH_MCP_CONFIG`) and default-discovered boots, so
+    // passing it would make the reloader RE-RUN discovery: if a higher-
+    // precedence config (e.g. an explicit `--config`-style path, or an
+    // `SSH_MCP_CONFIG` that appeared in the environment) showed up after boot,
+    // an edit to the WATCHED file could end up applying a DIFFERENT file.
+    // `resolvedConfig.configPath` is the absolute path resolved at startup;
+    // feeding it back as the highest-precedence input keeps the loader and the
+    // watcher pinned to one file for the whole process lifetime.
+    configPath: resolvedConfig.configPath!,
+    // Preserve the startup CLI override in BOTH directions so reload validation
+    // sees the same effective WebUI state as a fresh boot. Passing the parsed
+    // argv through the shared tri-state parser is load-bearing: key presence
+    // alone would misread --webui=false as enabled, while coercing an absent
+    // switch to false would suppress TOML enabled=true.
+    cliArgs: argvConfig,
+  });
+}
+
+/**
+ * Build the ConfigReloader bound to the live registry + approval engine. Only
+ * meaningful when a TOML config path exists (TOML-driven boot); returns null
+ * otherwise so the watcher is never started for CLI/`--ssh` mode.
+ */
+function buildConfigReloader(): ConfigReloader | null {
+  if (!resolvedConfig.configPath) return null;
+  // Skip the reloader (and, upstream, the watcher) whenever CLI sources win.
+  // resolveConfig() records `configPath` even when the user supplied CLI/`--ssh`
+  // sources plus a `--config` TOML purely for top-level [server]/[webui]/
+  // [approval] settings — in that mode the TOML `[[sources]]` are intentionally
+  // SUPPRESSED (see resolver.ts "CLI wins"). Watching that file anyway would
+  // start a watcher for a non-file-backed connection set: every save would fire
+  // reload()/closeAll(), dropping the established CLI/`--ssh` transports even
+  // though source edits in the file can never apply. A reload only makes sense
+  // when the registry's sources actually came from the TOML.
+  if (cliSourceConfigs.length > 0) return null;
+  return new ConfigReloader({
+    registry,
+    loadConfig: reloadResolveConfig,
+    engine: approvalEngine ?? undefined,
+    // NOTE: deliberately NO `prepareSources` hook here. Key reading stays LAZY
+    // on reload, exactly like boot: the live `registry` was constructed with
+    // `prepareKeyContents` as its per-host `prepareConfig` hook (see
+    // `new TransportRegistry(prepareKeyContents)`), which runs inside get(name)
+    // for whichever host is actually selected — and survives reloads because
+    // replaceAll() only swaps configs, never the registry instance. Eagerly
+    // running prepareKeyContents() over EVERY new source here (the old
+    // behaviour) made one source with an unreadable/unmounted ssh2 key throw
+    // mid-swap and roll back the ENTIRE reload — including edits to unrelated
+    // healthy sources — a divergence from boot, where a bad key only fails when
+    // that specific host is used. Leaving it lazy keeps reload and boot on the
+    // same failure-isolation contract (multi-host R2 hardening).
+  });
+}
+
+/** Adapt the ConfigReloader (an EventEmitter) to the WebUI's read-only controller. */
+function buildWebUIReloadController(reloader: ConfigReloader | null): WebUIConfigReloadController | undefined {
+  if (!reloader) return undefined;
+  const wrappers = new Map<Function, (e: any) => void>();
+  return {
+    on(event, listener) {
+      const wrap = (e: any) => listener(e);
+      wrappers.set(listener, wrap);
+      reloader.on(event, wrap);
+    },
+    off(event, listener) {
+      const wrap = wrappers.get(listener);
+      if (wrap) {
+        reloader.off(event, wrap);
+        wrappers.delete(listener);
+      }
+    },
+  };
+}
+
 async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined> {
   if (!isWebUIActive()) return undefined;
 
@@ -1080,14 +1379,19 @@ async function maybeStartWebUI(): Promise<{ close(): Promise<void> } | undefined
   const port = tomlWebui?.port ?? 8088;
   const authToken = tomlWebui?.auth_token;
 
+  const modeController = buildWebUIModeController(approvalEngine);
   const handle = await startWebUI({
     host,
     port,
     authToken,
+    cors: tomlWebui?.cors,
     registry: { list: () => registry.list() },
     queue: buildWebUIApprovalQueueAdapter(approvalEngine),
     audit: buildWebUIAuditTailAdapter(auditSink),
-    getApprovalMode: makeApprovalModeLookup(),
+    getApprovalMode: makeApprovalModeLookup({ modeController }),
+    modeController,
+    sourceController: buildWebUISourceController(registry),
+    reloadController: buildWebUIReloadController(configReloader),
   });
   const tokenStatus = authToken ? 'token required' : 'anonymous loopback';
   console.error(`SSH MCP WebUI running on http://${handle.address.host}:${handle.address.port}/ — ${tokenStatus}`);
@@ -1342,7 +1646,7 @@ server.tool(
   async ({ command, description, connectionName }) => {
     let commandWithDescription = String(command ?? '');
     let profile = resolvedProfileName(connectionName);
-    let approvalMode = resolveConfiguredApprovalMode(profile);
+    let approvalMode = resolveLiveApprovalMode(profile, approvalEngine);
     // Fallback timestamp for errors raised before the transport call (registry
     // init failure, approval deny). Re-captured immediately before t.exec below
     // so a SUCCESSFUL command's audit durationMs measures command runtime only,
@@ -1353,16 +1657,22 @@ server.tool(
     try {
       const sanitizedCommand = sanitizeCommand(command);
       commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
-      const target = approvalTargetForConnection(connectionName);
+      const target = approvalTargetForConnection(registry, connectionName);
       profile = target.profile;
-      approvalMode = resolveConfiguredApprovalMode(profile);
-      approvalDecision = await gateApproval({
+      approvalMode = resolveLiveApprovalMode(profile, approvalEngine);
+      const approved = await approveTransportForCurrentConfig({
+        reg: registry,
         profile: target.approvalProfile,
-        tool: 'exec',
-        command: commandWithDescription,
-        description,
+        gate: (currentProfile) => gateApproval({
+          profile: currentProfile,
+          tool: 'exec',
+          command: commandWithDescription,
+          description,
+        }),
       });
-      const t = await registry.get(target.profile);
+      const t = approved.transport;
+      profile = approved.profile;
+      approvalDecision = approved.approval;
       startedAt = Date.now();
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
       audited = true;
@@ -1406,7 +1716,7 @@ if (!DISABLE_SUDO) {
     async ({ command, description, connectionName }) => {
       let commandWithDescription = String(command ?? '');
       let profile = resolvedProfileName(connectionName);
-      let approvalMode = resolveConfiguredApprovalMode(profile);
+      let approvalMode = resolveLiveApprovalMode(profile, approvalEngine);
       // Fallback timestamp for errors raised before the transport call (registry
       // init failure, approval deny). Re-captured immediately before
       // t.execElevated below so a SUCCESSFUL command's audit durationMs measures
@@ -1417,16 +1727,22 @@ if (!DISABLE_SUDO) {
       try {
         const sanitizedCommand = sanitizeCommand(command);
         commandWithDescription = appendDescriptionComment(sanitizedCommand, description);
-        const target = approvalTargetForConnection(connectionName);
+        const target = approvalTargetForConnection(registry, connectionName);
         profile = target.profile;
-        approvalMode = resolveConfiguredApprovalMode(profile);
-        approvalDecision = await gateApproval({
+        approvalMode = resolveLiveApprovalMode(profile, approvalEngine);
+        const approved = await approveTransportForCurrentConfig({
+          reg: registry,
           profile: target.approvalProfile,
-          tool: 'sudo-exec',
-          command: commandWithDescription,
-          description,
+          gate: (currentProfile) => gateApproval({
+            profile: currentProfile,
+            tool: 'sudo-exec',
+            command: commandWithDescription,
+            description,
+          }),
         });
-        const t = await registry.get(target.profile);
+        const t = approved.transport;
+        profile = approved.profile;
+        approvalDecision = approved.approval;
         // Legacy single-host mode may still pass --sudoPassword on CLI; in
         // multi-host mode each ServerConfig carries its own sudoPassword.
         const legacySudo = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined && !isMultiHost)
@@ -1649,7 +1965,18 @@ async function main() {
   // Boot the approval engine + optional audit seam BEFORE the MCP transport so
   // the very first exec / sudo-exec call is gated and (optionally) audited.
   await wireApprovalAndAudit();
+  // Build the config reloader AFTER the approval engine exists so a hot reload
+  // reseeds policy in lockstep with connections. Null for CLI/`--ssh` boots.
+  configReloader = buildConfigReloader();
   const webuiHandle = await maybeStartWebUI();
+  // Start the debounced TOML watcher LAST so the WebUI's reloadController is
+  // already subscribed before any file change can fire `config-reloaded`.
+  if (configReloader && resolvedConfig.configPath) {
+    stopConfigWatcher = startConfigWatcher({
+      configPath: resolvedConfig.configPath,
+      onChange: async () => { await configReloader!.reload(); },
+    });
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
   const mode = isMultiHost ? `multi-host (${registry.names().length} servers: ${registry.names().join(', ')})` : 'single-host';
@@ -1657,6 +1984,7 @@ async function main() {
 
   const cleanup = () => {
     console.error('Shutting down SSH MCP Server...');
+    if (stopConfigWatcher) { try { stopConfigWatcher(); } catch { /* ignore */ } }
     if (webuiHandle) void webuiHandle.close().catch(() => { /* ignore */ });
     void registry.closeAll();
     process.exit(0);

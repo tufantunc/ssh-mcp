@@ -256,6 +256,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
         `Config: sources.${src.id}.gssapi_delegate_credentials must be yes|no`,
       );
     }
+    if (src.default !== undefined && typeof src.default !== 'boolean') {
+      throw new Error(`Config: sources.${src.id}.default must be a boolean`);
+    }
     // GSSAPIDelegateCredentials is only wired in the Kerberos auth branch (see
     // the `case 'kerberos'` below and OpenSshTransport.buildArgs); for key or
     // password auth the option is silently dropped, so a user requesting
@@ -402,6 +405,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
 
     if (sudoPassword !== undefined) out.sudoPassword = sudoPassword;
     if (suPassword !== undefined) out.suPassword = suPassword;
+    if (src.description !== undefined) out.description = src.description;
     // known_hosts_file / strict_host_key_checking are honored only by the
     // openssh transport (openssh.ts). On ssh2 they are silently dropped, which
     // would disable the requested host-key enforcement — a security downgrade.
@@ -446,6 +450,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
           `Config: sources.${src.id}.approval.mode must be one of: ${VALID_APPROVAL_MODE.join(', ')}`,
         );
       }
+      out.approval = { mode: mode as ApprovalMode };
       perSourceApproval[src.id] = mode as ApprovalMode;
     }
   }
@@ -525,6 +530,10 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv, cliEnabledOverride?: bo
     }
     out.port = raw.port;
   }
+  if (raw.cors !== undefined) {
+    if (typeof raw.cors !== 'boolean') throw new Error('Config: [webui].cors must be a boolean');
+    out.cors = raw.cors;
+  }
   const webuiEnabled = cliEnabledOverride ?? out.enabled === true;
   if (raw.auth_token !== undefined) {
     if (typeof raw.auth_token !== 'string') throw new Error('Config: [webui].auth_token must be a string');
@@ -580,19 +589,46 @@ function validateApproval(
       resolved.endpoint = llm.endpoint;
     }
     if (llm.api_key !== undefined) {
-      // Only resolve the api_key env ref when smart approval is actually used:
+      // Resolve the api_key env ref when smart approval is ACTIVELY used —
       // either by the top-level [approval].mode or by a per-source override.
-      // [approval.llm] settings are otherwise irrelevant in the default/manual
-      // mode, so resolving here would fail startup on a missing OPENAI_API_KEY
-      // for a user who copied the example config without enabling smart mode.
-      // Defer resolution until top-level smart mode or a per-source smart
-      // override needs the key; leave api_key unresolved otherwise.
-      if (out.mode === 'smart' || resolveLlmApiKeyForPerSourceSmart) {
-        if (typeof llm.api_key !== 'string') {
-          throw new Error('Config: [approval.llm].api_key must be a string');
-        }
-        resolved.api_key = resolveEnvRef(llm.api_key, '[approval.llm].api_key', env);
+      // In that case a missing/empty OPENAI_API_KEY is fatal (smart cannot
+      // authenticate), so the resolution throws. Type validation is never
+      // deferred: a present api_key must be a string in every mode.
+      if (typeof llm.api_key !== 'string') {
+        throw new Error('Config: [approval.llm].api_key must be a string');
       }
+      const smartActive = out.mode === 'smart' || resolveLlmApiKeyForPerSourceSmart;
+      // The LLM block is "fully configured" once it carries endpoint + model.
+      // buildApprovalEngineFromConfig pre-arms smart for supported providers in
+      // that case (so the WebUI can live-switch into smart without a restart),
+      // and SmartApproval needs the configured api_key to authenticate that live
+      // switch. Preserve the resolved key when the block is fully configured. A
+      // missing env remains non-fatal while smart is inactive, matching deferred
+      // resolution.
+      const fullyConfigured =
+        typeof llm.endpoint === 'string' && typeof llm.model === 'string';
+      if (smartActive) {
+        const apiKey = resolveEnvRef(llm.api_key, '[approval.llm].api_key', env);
+        if (!apiKey) {
+          throw new Error('Config: [approval.llm].api_key must not be empty when smart mode is active');
+        }
+        resolved.api_key = apiKey;
+      } else if (fullyConfigured) {
+        try {
+          const apiKey = resolveEnvRef(llm.api_key, '[approval.llm].api_key', env);
+          if (apiKey) {
+            resolved.api_key = apiKey;
+          } else {
+            resolved.api_key_unresolved = true;
+          }
+        } catch {
+          // Missing env remains non-fatal while smart is inactive, but retain a
+          // marker so the engine builder does not advertise/pre-arm an
+          // unauthenticated smart mode.
+          resolved.api_key_unresolved = true;
+        }
+      }
+      // else: incomplete block and smart unused — defer entirely (unchanged).
     }
     if (llm.model !== undefined) {
       if (typeof llm.model !== 'string') throw new Error('Config: [approval.llm].model must be a string');
