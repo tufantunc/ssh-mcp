@@ -175,6 +175,8 @@ export class SSHConnection {
               setTimeout(() => { try { activeStream?.close(); } catch { /* */ } }, 1000);
             }, 1000);
           }
+          span.setAttribute('ssh.timedOut', true);
+          span.end();
           reject(new Error(`Command timed out after ${timeoutMs}ms`));
         }
       }, timeoutMs);
@@ -189,6 +191,7 @@ export class SSHConnection {
           if (!resolved) {
             resolved = true;
             clearTimeout(timeoutId);
+            span.end();
             reject(new Error(`SSH exec error: ${err.message}`));
           }
           return;
@@ -223,7 +226,7 @@ export class SSHConnection {
           if (stdout.length < maxOutput) stdout += data.toString();
           if (opts.onProgress && Date.now() - lastProgressSent >= PROGRESS_INTERVAL) {
             lastProgressSent = Date.now();
-            const tail = stdout.split('\n').filter(Boolean).slice(-3).join('\n');
+            const tail = redactText(stdout.split('\n').filter(Boolean).slice(-3).join('\n'), { entropyScan: true });
             opts.onProgress(stdout.length, tail);
           }
         });

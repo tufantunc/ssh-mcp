@@ -13,27 +13,29 @@ import { SftpClient } from '../ssh/sftp.js';
 import { BackgroundSession } from '../ssh/session.js';
 import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass } from '../types.js';
 
-export const TOOL_METADATA = [
-  { name: 'list-connections', description: 'List all configured SSH profiles and their connection status. Use this to discover available hosts before running commands.' },
-  { name: 'list-sessions', description: 'List active sessions for a given SSH profile.' },
-  { name: 'open-session', description: 'Open a named session on a remote host. Use type="interactive" for stateful shell (CWD/env persists between commands) or type="background" for long-running processes.' },
-  { name: 'close-session', description: 'Close a named session, releasing its resources.' },
-  { name: 'read-session-output', description: 'Read recent output from a background session (e.g., tail -f logs).' },
-  { name: 'read-command', description: 'Execute a READ-ONLY command from an allowlist (ls, cat, grep, find, stat, df, etc.). This tool does NOT modify the system. Prefer this tool for all read operations.' },
-  { name: 'run-command', description: 'Execute an arbitrary shell command on the remote server. May modify the system. Destructive commands require user approval.' },
-  { name: 'privileged-command', description: 'Execute a command with sudo elevation. ALWAYS requires user approval. The sudo password is piped via stdin (never visible in process list).' },
-  { name: 'sftp-upload', description: 'Upload a file to the remote server via SFTP (secure file transfer, not shell-based).' },
-  { name: 'sftp-download', description: 'Download a file from the remote server via SFTP.' },
-  { name: 'signal-process', description: 'Send a signal (INT, TERM, KILL) to a remote process by PID.' },
-] as const;
+export const TOOL_DESCRIPTIONS: Record<string, string> = {
+  'list-connections': 'List all configured SSH profiles and their connection status. Use this to discover available hosts before running commands.',
+  'list-sessions': 'List active sessions for a given SSH profile.',
+  'open-session': 'Open a named session on a remote host. Use type="interactive" for stateful shell (CWD/env persists between commands) or type="background" for long-running processes.',
+  'close-session': 'Close a named session, releasing its resources.',
+  'read-session-output': 'Read recent output from a background session (e.g., tail -f logs).',
+  'read-command': 'Execute a READ-ONLY command from an allowlist (ls, cat, grep, find, stat, df, etc.). This tool does NOT modify the system. Prefer this tool for all read operations.',
+  'run-command': 'Execute an arbitrary shell command on the remote server. May modify the system. Destructive commands require user approval.',
+  'privileged-command': 'Execute a command with sudo elevation. ALWAYS requires user approval. The sudo password is piped via stdin (never visible in process list).',
+  'sftp-upload': 'Upload a file to the remote server via SFTP (secure file transfer, not shell-based).',
+  'sftp-download': 'Download a file from the remote server via SFTP.',
+  'signal-process': 'Send a signal (INT, TERM, KILL) to a remote process by PID.',
+};
 
 export function getToolHashes(): Record<string, string> {
   const hashes: Record<string, string> = {};
-  for (const tool of TOOL_METADATA) {
-    hashes[tool.name] = createHash('sha256').update(tool.description).digest('hex').slice(0, 16);
+  for (const [name, desc] of Object.entries(TOOL_DESCRIPTIONS)) {
+    hashes[name] = createHash('sha256').update(desc).digest('hex').slice(0, 16);
   }
   return hashes;
 }
+
+const D = TOOL_DESCRIPTIONS;
 
 function deniedEvaluation(commandClass: CommandClass): PolicyEvaluation {
   return { decision: 'deny', commandClass, binary: '', ruleId: 'error' };
@@ -159,7 +161,7 @@ export function registerTools(
   // ─── list-connections ──────────────────────────────────────────────────
   server.tool(
     'list-connections',
-    'List all configured SSH profiles and their connection status. Use this to discover available hosts before running commands.',
+    D["list-connections"],
     {},
     { readOnlyHint: true },
     async () => {
@@ -178,7 +180,7 @@ export function registerTools(
   // ─── list-sessions ─────────────────────────────────────────────────────
   server.tool(
     'list-sessions',
-    'List active sessions for a given SSH profile.',
+    D["list-sessions"],
     { profile: z.string().optional().describe('Profile name (uses default if omitted)') },
     { readOnlyHint: true },
     async ({ profile }) => {
@@ -197,7 +199,7 @@ export function registerTools(
   // ─── open-session ──────────────────────────────────────────────────────
   server.tool(
     'open-session',
-    'Open a named session on a remote host. Use type="interactive" for stateful shell (CWD/env persists between commands) or type="background" for long-running processes.',
+    D["open-session"],
     {
       name: z.string().describe('Session name (alphanumeric, dash, underscore, max 64 chars)'),
       type: z.enum(['interactive', 'background']).default('interactive').describe('Session type'),
@@ -228,7 +230,7 @@ export function registerTools(
   // ─── close-session ─────────────────────────────────────────────────────
   server.tool(
     'close-session',
-    'Close a named session, releasing its resources.',
+    D["close-session"],
     {
       name: z.string().describe('Session name to close'),
       profile: z.string().optional().describe('Profile name'),
@@ -244,7 +246,7 @@ export function registerTools(
   // ─── read-session-output ───────────────────────────────────────────────
   server.tool(
     'read-session-output',
-    'Read recent output from a background session (e.g., tail -f logs).',
+    D["read-session-output"],
     {
       name: z.string().describe('Background session name'),
       lines: z.number().optional().default(50).describe('Number of recent lines to read'),
@@ -267,7 +269,7 @@ export function registerTools(
   // ─── read-command ──────────────────────────────────────────────────────
   server.tool(
     'read-command',
-    'Execute a READ-ONLY command from an allowlist (ls, cat, grep, find, stat, df, etc.). This tool does NOT modify the system. Prefer this tool for all read operations.',
+    D["read-command"],
     {
       command: z.string().describe('Read-only shell command (must be in the allowlist)'),
       profile: z.string().optional().describe('Profile name'),
@@ -287,7 +289,7 @@ export function registerTools(
   // ─── run-command ───────────────────────────────────────────────────────
   server.tool(
     'run-command',
-    'Execute an arbitrary shell command on the remote server. May modify the system. Destructive commands require user approval.',
+    D["run-command"],
     {
       command: z.string().describe('Shell command to execute'),
       profile: z.string().optional().describe('Profile name'),
@@ -323,7 +325,7 @@ export function registerTools(
   // ─── privileged-command ────────────────────────────────────────────────
   server.tool(
     'privileged-command',
-    'Execute a command with sudo elevation. ALWAYS requires user approval. The sudo password is piped via stdin (never visible in process list).',
+    D["privileged-command"],
     {
       command: z.string().describe('Command to execute with sudo'),
       profile: z.string().optional().describe('Profile name'),
@@ -356,7 +358,7 @@ export function registerTools(
   // ─── sftp-upload ───────────────────────────────────────────────────────
   server.tool(
     'sftp-upload',
-    'Upload a file to the remote server via SFTP (secure file transfer, not shell-based).',
+    D["sftp-upload"],
     {
       remotePath: z.string().describe('Remote file path'),
       content: z.string().describe('File content to upload'),
@@ -383,7 +385,7 @@ export function registerTools(
   // ─── sftp-download ─────────────────────────────────────────────────────
   server.tool(
     'sftp-download',
-    'Download a file from the remote server via SFTP.',
+    D["sftp-download"],
     {
       remotePath: z.string().describe('Remote file path to download'),
       profile: z.string().optional().describe('Profile name'),
@@ -409,7 +411,7 @@ export function registerTools(
   // ─── signal-process ────────────────────────────────────────────────────
   server.tool(
     'signal-process',
-    'Send a signal (INT, TERM, KILL) to a remote process by PID.',
+    D["signal-process"],
     {
       pid: z.number().int().min(1).describe('Process ID to signal (positive integer)'),
       signal: z.enum(['INT', 'TERM', 'KILL']).default('TERM').describe('Signal to send'),

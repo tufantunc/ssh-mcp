@@ -98,6 +98,7 @@ export class InteractiveSession extends Session {
         if (!resolved) {
           resolved = true;
           this.stream.removeListener('data', dataHandler);
+          span.end();
           reject(new Error(`Command timed out after ${timeoutMs}ms in session ${this.name}`));
         }
       }, timeoutMs);
