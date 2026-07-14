@@ -74,6 +74,13 @@ export async function startHttpServer(
     ? new RateLimiter(opts.rateLimit)
     : null;
 
+  const mcpTransport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+  });
+  await server.connect(mcpTransport);
+
+  const clientKey = bearerToken;
+
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
@@ -113,28 +120,24 @@ export async function startHttpServer(
     }
 
     if (req.method === 'POST' && url.pathname === '/') {
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-      });
-      await server.connect(transport);
       let body = '';
       let bodyTooLarge = false;
       req.on('data', (chunk) => {
         body += chunk;
         if (body.length > MAX_BODY_SIZE) {
-          bodyTooLarge = true;
+          if (!bodyTooLarge) {
+            bodyTooLarge = true;
+            res.writeHead(413, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Request body too large (max 1MB)' }));
+          }
           req.destroy();
         }
       });
       req.on('end', async () => {
-        if (bodyTooLarge) {
-          res.writeHead(413, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Request body too large (max 1MB)' }));
-          return;
-        }
+        if (bodyTooLarge) return;
         try {
           const parsed = JSON.parse(body);
-          await transport.handleRequest(req, res, parsed);
+          await mcpTransport.handleRequest(req, res, parsed);
         } catch {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid JSON' }));
@@ -144,20 +147,12 @@ export async function startHttpServer(
     }
 
     if (req.method === 'GET' && url.pathname === '/') {
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-      });
-      await server.connect(transport);
-      await transport.handleRequest(req, res);
+      await mcpTransport.handleRequest(req, res);
       return;
     }
 
     if (req.method === 'DELETE' && url.pathname === '/') {
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-      });
-      await server.connect(transport);
-      await transport.handleRequest(req, res);
+      await mcpTransport.handleRequest(req, res);
       return;
     }
 

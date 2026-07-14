@@ -31,31 +31,37 @@ export class ConnectionRegistry {
     }
 
     const promise = (async () => {
-      let conn = this.connections.get(profile.name);
-      if (!conn) {
-        let bastionSock: ClientChannel | undefined;
-        if (profile.via) {
-          const bastionConn = await this.getOrCreate(profile.via);
-          const bastionClient = bastionConn.getClient();
-          bastionSock = await new Promise<ClientChannel>((resolve, reject) => {
-            bastionClient.forwardOut('', 0, profile.host, profile.port, (err: Error | undefined, stream: ClientChannel) => {
-              if (err) reject(new Error(`ProxyJump via "${profile.via}" failed: ${err.message}`));
-              else resolve(stream);
+      try {
+        let conn = this.connections.get(profile.name);
+        if (!conn) {
+          let bastionSock: ClientChannel | undefined;
+          if (profile.via) {
+            const bastionConn = await this.getOrCreate(profile.via);
+            const bastionClient = bastionConn.getClient();
+            bastionSock = await new Promise<ClientChannel>((resolve, reject) => {
+              bastionClient.forwardOut('', 0, profile.host, profile.port, (err: Error | undefined, stream: ClientChannel) => {
+                if (err) reject(new Error(`ProxyJump via "${profile.via}" failed: ${err.message}`));
+                else resolve(stream);
+              });
             });
-          });
+          }
+          conn = new SSHConnection(
+            profile,
+            await resolveCredentials(profile),
+            this.knownHostsStore,
+            this.hostKeyMode,
+            bastionSock,
+          );
+          this.connections.set(profile.name, conn);
         }
-        conn = new SSHConnection(
-          profile,
-          await resolveCredentials(profile),
-          this.knownHostsStore,
-          this.hostKeyMode,
-          bastionSock,
-        );
-        this.connections.set(profile.name, conn);
+        await conn.ensureConnected();
+        return conn;
+      } catch (err) {
+        this.connections.delete(profile.name);
+        throw err;
+      } finally {
+        this.pending.delete(profile.name);
       }
-      await conn.ensureConnected();
-      this.pending.delete(profile.name);
-      return conn;
     })();
 
     this.pending.set(profile.name, promise);
@@ -81,7 +87,13 @@ export class ConnectionRegistry {
 
   reapIdleConnections(): void {
     const idleThreshold = Date.now() - this.config.defaults.connectionIdleReapMs;
+    const viaTargets = new Set(
+      this.config.profiles
+        .map((p) => p.via)
+        .filter((v): v is string => !!v),
+    );
     for (const [name, conn] of this.connections) {
+      if (viaTargets.has(name)) continue;
       const info = conn.toInfo();
       if (info.sessionCount === 0 && info.lastActivity && info.lastActivity.getTime() < idleThreshold) {
         conn.close().catch(() => {});
