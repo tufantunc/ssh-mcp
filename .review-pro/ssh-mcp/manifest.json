@@ -1,6 +1,6 @@
 {
   "name": "ssh-mcp",
-  "version": "1.0.0",
-  "description": "SSH MCP Server project-specific signals",
+  "version": "2.0.0",
+  "description": "SSH MCP Server v2 project-specific signals — progress, cancel, OTEL, HTTP rate limit, ProxyJump, CA certs, resources",
   "reviewers": ["security", "correctness", "backend", "tests", "craft", "ai-antipatterns", "performance"]
 }

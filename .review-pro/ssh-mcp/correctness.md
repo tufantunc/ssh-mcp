@@ -2,26 +2,31 @@
 extends: core/skills/correctness/SKILL.md
 
 ## Stack-specific signals
-- **Stream listener leak** — adding `dataHandler` to an SSH channel/stream without removing it after command completion accumulates listeners and causes PTY session exhaustion (Issue #34 root cause). Always `removeListener('data', handler)` in all exit paths.
-- **Sentinel detection race** — the interactive session uses a UUID sentinel to detect command completion. If the sentinel regex is not anchored or the marker is predictable, output containing the sentinel text can cause false completion.
-- **`connecting` flag not reset on `close()`** — after `SSHConnection.close()`, the `connecting` promise must be nulled, otherwise `ensureConnected()` returns the stale promise without reconnecting.
-- **`isConnected()` false negative** — `_sock.destroyed` check may lag behind actual socket state during reconnection. Consider a grace period or explicit state tracking.
-- **Session `status` not transitioned on connection drop** — when `client.on('end')` fires, sessions must be marked `disconnected`; otherwise `session.run()` on a dead session hangs.
-- **Concurrency cap not enforced** — if `activeChannels` counter is not decremented in all exit paths (error, timeout, close), the semaphore drains and all future `exec()` calls block.
-- **TTL reaper not running** — `reapExpiredSessions()` and `reapIdleConnections()` must be called periodically; otherwise idle sessions/connections leak indefinitely.
-- **PTY initialization race** — `openInteractiveSession()` resolves after a prompt regex match OR timeout. If the prompt never matches and timeout is too short, commands sent immediately may arrive before the shell is ready.
-- **ANSI escape codes in output** — PTY sessions add bracketed-paste sequences (`\x1b[?2004h/l`) that corrupt output if not stripped.
+- **Stream listener leak** — `dataHandler` without `removeListener` in all exit paths accumulates listeners (Issue #34 root cause).
+- **Sentinel detection race** — UUID sentinel must be unpredictable. Output containing sentinel text must not trigger false completion.
+- **`connecting` promise stale** — after `close()`, `connecting` must be nulled or `ensureConnected()` returns stale promise.
+- **`connected` flag vs `_sock`** — v2 uses a `connected` boolean (not `_sock.destroyed`). Verify flag is set/reset in all handlers (ready, end, close, error).
+- **Session `status` on connection drop** — `markSessionsDisconnected()` must call `Session.markDisconnected()` (not `as any`).
+- **`activeChannels` counter leak** — decrement must be OUTSIDE `if (!resolved)` guard in stream close handler (timeout sets resolved=true first).
+- **TTL reaper scheduling** — `setInterval` in `index.ts` must call both `reapExpiredSessions()` per connection AND `reapIdleConnections()` globally.
+- **ProxyJump connection lifecycle** — `forwardOut` sock must outlive the target connection setup. If bastion closes, target connection must fail gracefully.
+- **AbortSignal cancel timing** — `stream.signal('INT')` on abort must have bounded escalation (INT → 1s → TERM → 1s → close). Unbounded retry loops hang.
+- **Progress throttle interaction with cancel** — if `onProgress` fires while abort is being processed, verify no race condition on `resolved` flag.
+- **Rate limiter refill** — token-bucket `tryConsume()` must refill based on elapsed time, not reset per request. Verify `lastRefill` timestamp logic.
+- **changesets config** — `baseBranch` in `.changeset/config.json` must match the actual default branch.
 
 ## Stack-specific remedies
-- Always pair `stream.on('data', handler)` with `stream.removeListener('data', handler)` in every branch (success, error, timeout).
-- Use unguessable markers (crypto.randomUUID) for command completion sentinels.
-- Reset `connecting = null` in `close()`.
-- Strip ANSI sequences (`/\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r/g`) from session output.
-- Decrement `activeChannels--` in all stream close/error paths.
+- Always pair `stream.on('data', handler)` with `removeListener` in every branch.
+- Use unguessable markers (`crypto.randomUUID`-based) for command completion sentinels.
+- Reset `connecting = null` and `connected = false` in `close()`.
+- `activeChannels--` outside `if (!resolved)` block.
+- `setInterval(reaper, 60_000)` cleared on shutdown.
+- `forwardOut` errors must reject the target `getOrCreate()` promise, not silently hang.
 
 ## Stack-specific severity guidance
-- Stream listener leak causing PTY exhaustion: **High** (availability + correctness).
+- Stream listener leak causing PTY exhaustion: **High**.
 - Stale connecting promise preventing reconnect: **High**.
-- Sessions not marked disconnected after connection drop: **High** (hangs on next command).
-- Missing `activeChannels` decrement: **Medium** (degrades over time).
-- ANSI sequences in output: **Medium** (data corruption).
+- Sessions not marked disconnected after connection drop: **High**.
+- Missing `activeChannels` decrement on timeout: **High**.
+- AbortSignal escalation unbounded: **Medium**.
+- Rate limiter incorrect refill: **Medium**.

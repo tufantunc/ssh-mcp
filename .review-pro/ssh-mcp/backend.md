@@ -2,26 +2,31 @@
 extends: core/skills/backend/SKILL.md
 
 ## Stack-specific signals
-- **Policy evaluation order** — denylist must be checked BEFORE role-binding allow check. A command matching both allow and deny must be denied. The `evaluate()` method must check denylist first, then class-allowed, then approval.
-- **Missing policy evaluation** — any code path that calls `conn.exec()` or `session.run()` without first calling `policy.evaluate()` bypasses all authorization.
-- **Missing audit record on error paths** — if a command fails (timeout, SSH error, policy deny), the audit store must still record the attempt with the error/decision. Otherwise the audit log has gaps.
-- **MCP tool annotations mismatch** — `readOnlyHint: true` on a tool that can mutate state misleads client-side auto-approval. `destructiveHint` missing on `privileged-command` or `signal-process` is a safety regression.
-- **Approval mode bypass** — `approvalPolicy: "auto"` on a production profile, or `readOnly: false` with `role: "viewer"`, contradicts the profile's intent.
-- **Connection not closed on profile removal** — if a profile is removed from config but its `SSHConnection` is still in the registry, it remains accessible.
-- **HTTP transport without auth** — starting HTTP server without `bearerToken` exposes the SSH gateway to the network.
-- **Config file permissions not checked** — loading a world-readable config (`0644`) leaks all profile credentials.
+- **Policy evaluation order** — denylist checked BEFORE role-binding allow check.
+- **Missing policy evaluation** — any `conn.exec()` or `session.run()` without `policy.evaluateWithOpa()` bypasses all authorization.
+- **Missing audit on error paths** — failed commands must still produce audit records.
+- **MCP tool annotations mismatch** — `readOnlyHint: true` on mutating tool = auto-approval safety regression.
+- **All tools must go through policy + audit** — `read-command`, `run-command`, `privileged-command` via `runAudited()`; `sftp-upload`, `sftp-download`, `signal-process`, `open-session(background)` via inline `checkPolicyAndApprove()` + `auditResult()`.
+- **HTTP transport auth enforcement** — `startHttpServer()` must throw if `bearerToken` is missing.
+- **Rate limiter scope** — applies only to MCP routes (`pathname === '/'`), NOT to `/health` or `/status`. Verify this is intentional for ops endpoints.
+- **Body size limit** — POST body capped at 1MB. `req.destroy()` on overflow causes EPIPE on client; consider `res.writeHead(413)` + `req.destroy()` instead.
+- **Audit write stream lifecycle** — `ensureStream()` must close+null the write stream during rotation, then reopen. `rotateIfNeeded()` runs BEFORE write, not after.
+- **MCP resources registration** — `registerResources()` must be called alongside `registerTools()`. Resources: `ssh://connections`, `ssh://connections/{profile}`, `ssh://sessions/{profile}/{session}`.
+- **Progress sender graceful degradation** — `makeProgressSender()` returns `undefined` when no `progressToken`. `exec()` must handle `undefined` onProgress without crash.
+- **Cancel signal threading** — `AbortSignal` from `extra.signal` must reach `exec()` via `ExecOpts.abortSignal`. Missing thread = client cancel ignored.
+- **OTEL NoopTracer** — when `--otelEndpoint` is not set, `tracer.startSpan()` returns NoopSpan. `setAttribute()` and `end()` must be no-ops.
 
 ## Stack-specific remedies
-- Every tool handler must follow: sanitize → policy.evaluate → (if require-approval) elicit → execute → audit.
-- Use the `checkPolicyAndApprove()` helper in `tools/registry.ts` consistently.
-- Record audit entries in `try/catch/finally` to cover both success and error paths.
-- Verify tool annotations match actual behavior (`read-command` = truly read-only, `privileged-command` = truly needs sudo).
-- Always set `bearerToken` when `--transport=http`.
-- `checkPermissions()` in `config/loader.ts` must reject files with group/world read bits.
+- Every tool handler: sanitize → `checkPolicyAndApprove()` → execute → `auditResult()`.
+- `runAudited()` helper wraps the common pattern for exec tools.
+- HTTP: `bearerToken` required, rate limiter on MCP routes, 1MB body cap.
+- `registerResources()` for profile/session discovery.
+- `makeProgressSender()` + `abortSignal` threaded to `exec()`.
 
 ## Stack-specific severity guidance
-- Code path executing SSH command without policy evaluation: **Critical**.
-- Missing audit on error path: **High** (forensic gap).
-- `readOnlyHint: true` on mutating tool: **High** (auto-approval safety).
-- HTTP transport without bearer token: **High** (unauthenticated access).
-- Config file world-readable: **High** (credential leak).
+- SSH command without policy evaluation: **Critical**.
+- Missing audit on error path: **High**.
+- `readOnlyHint: true` on mutating tool: **High**.
+- HTTP without bearer enforcement: **High**.
+- Cancel signal not threaded to exec: **Medium**.
+- Rate limiter misconfiguration: **Medium**.
