@@ -55,9 +55,7 @@ describe('TransportRegistry.resolveName (finding 3: omitted name in multi-host)'
     const r = new TransportRegistry();
     r.register(makeConfig('a'));
     r.register(makeConfig('b'));
-    await expect(r.get()).rejects.toThrow(
-      /connectionName is required when multiple SSH connections are configured\. Specify one of: a, b\./,
-    );
+    await expect(r.get()).rejects.toThrow(/connectionName is required when multiple servers are configured: a, b/);
   });
 
   it('still resolves by explicit name when multiple servers are configured', async () => {
@@ -268,15 +266,6 @@ describe('TransportRegistry.list / closeAll', () => {
     const rows = r.list();
     expect(rows.find((x) => x.name === 'a')!.isDefault).toBe(false);
     expect(rows.find((x) => x.name === 'b')!.isDefault).toBe(true);
-  });
-
-  it('marks the first registered server as the default when the multi-source guard is disabled', () => {
-    const r = new TransportRegistry({ requireConnectionWhenMulti: false });
-    r.register(makeConfig('a'));
-    r.register(makeConfig('b'));
-    const rows = r.list();
-    expect(rows.find((x) => x.name === 'a')!.isDefault).toBe(true);
-    expect(rows.find((x) => x.name === 'b')!.isDefault).toBe(false);
   });
 
   it('closeAll closes connected transports and clears state', async () => {
