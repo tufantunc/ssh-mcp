@@ -733,15 +733,6 @@ export function buildApprovalProfile(
   };
 }
 
-function approvalTargetForConnection(connectionName?: string): { profile: string; approvalProfile: ResolvedSource } {
-  const id = registry.resolveRegisteredName(connectionName);
-  const source = resolvedConfig.sources.find(s => s.name === id);
-  return {
-    profile: id,
-    approvalProfile: buildApprovalProfile(id, resolvedConfig.perSourceApproval ?? {}, source),
-  };
-}
-
 export function appendDescriptionComment(command: string, description?: string): string {
   if (!description) return command;
   const safeDescription = description
@@ -1047,16 +1038,16 @@ server.tool(
     let audited = false;
     let approvalDecision: ApprovalDecision | undefined;
     try {
-      const target = approvalTargetForConnection(connectionName);
-      profile = target.profile;
+      const resolvedProfile = registry.profile(connectionName);
+      profile = resolvedProfile.id;
       approvalMode = resolveConfiguredApprovalMode(profile);
       approvalDecision = await gateApproval({
-        profile: target.approvalProfile,
+        profile: resolvedProfile,
         tool: 'exec',
         command: commandWithDescription,
         description,
       });
-      const t = await registry.get(target.profile);
+      const t = await registry.get(resolvedProfile.id);
       startedAt = Date.now();
       const result = await t.exec(commandWithDescription, { timeoutMs: DEFAULT_TIMEOUT });
       audited = true;
@@ -1110,16 +1101,16 @@ if (!DISABLE_SUDO) {
       let audited = false;
       let approvalDecision: ApprovalDecision | undefined;
       try {
-        const target = approvalTargetForConnection(connectionName);
-        profile = target.profile;
+        const resolvedProfile = registry.profile(connectionName);
+        profile = resolvedProfile.id;
         approvalMode = resolveConfiguredApprovalMode(profile);
         approvalDecision = await gateApproval({
-          profile: target.approvalProfile,
+          profile: resolvedProfile,
           tool: 'sudo-exec',
           command: commandWithDescription,
           description,
         });
-        const t = await registry.get(target.profile);
+        const t = await registry.get(resolvedProfile.id);
         // Legacy single-host mode may still pass --sudoPassword on CLI; in
         // multi-host mode each ServerConfig carries its own sudoPassword.
         const legacySudo = (SUDOPASSWORD !== null && SUDOPASSWORD !== undefined && !isMultiHost)

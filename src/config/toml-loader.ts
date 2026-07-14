@@ -250,6 +250,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
         `Config: sources.${src.id}.gssapi_delegate_credentials must be yes|no`,
       );
     }
+    if (src.default !== undefined && typeof src.default !== 'boolean') {
+      throw new Error(`Config: sources.${src.id}.default must be a boolean`);
+    }
     // GSSAPIDelegateCredentials is only wired in the Kerberos auth branch (see
     // the `case 'kerberos'` below and OpenSshTransport.buildArgs); for key or
     // password auth the option is silently dropped, so a user requesting
@@ -439,6 +442,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
           `Config: sources.${src.id}.approval.mode must be one of: ${VALID_APPROVAL_MODE.join(', ')}`,
         );
       }
+      out.approval = { mode: mode as ApprovalMode };
       perSourceApproval[src.id] = mode as ApprovalMode;
     }
   }
