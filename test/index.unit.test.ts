@@ -25,6 +25,7 @@ import {
   validateConfig,
   resolveCliConfigPath,
   resolveReloadConfig,
+  shouldWatchResolvedConfig,
   reacquireTransportIfReloaded,
   approveTransportForCurrentConfig,
   buildWebUIApprovalQueueAdapter,
@@ -841,6 +842,88 @@ describe('resolveCliConfigPath (Codex R2 P2: reject value-less --config)', () =>
 });
 
 describe('reload config resolution', () => {
+  it('watches an explicit --config when CLI sources win, but not an auto-discovered file', () => {
+    expect(shouldWatchResolvedConfig({
+      configPath: '/etc/ssh-mcp/explicit.toml',
+      cliSourceCount: 2,
+      explicitConfigPath: '/etc/ssh-mcp/explicit.toml',
+    })).toBe(true);
+
+    expect(shouldWatchResolvedConfig({
+      configPath: '/etc/ssh-mcp/legacy-policy.toml',
+      cliSourceCount: 1,
+      explicitConfigPath: '/etc/ssh-mcp/legacy-policy.toml',
+    })).toBe(true);
+
+    expect(shouldWatchResolvedConfig({
+      configPath: '/home/operator/.ssh-mcp/config.toml',
+      cliSourceCount: 2,
+      explicitConfigPath: undefined,
+    })).toBe(false);
+
+    expect(shouldWatchResolvedConfig({
+      configPath: undefined,
+      cliSourceCount: 2,
+      explicitConfigPath: '/etc/ssh-mcp/explicit.toml',
+    })).toBe(false);
+  });
+
+  it('reloads explicit TOML top-level policy while preserving CLI sources', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-reload-cli-'));
+    const configPath = path.join(dir, 'config.toml');
+    const cliSources: ServerConfig[] = [
+      {
+        name: 'cli-a', host: 'a.example.com', port: 22, username: 'operator',
+        authMode: 'kerberos', transport: 'openssh', kerberos: true,
+      },
+      {
+        name: 'cli-b', host: 'b.example.com', port: 22, username: 'operator',
+        authMode: 'kerberos', transport: 'openssh', kerberos: true,
+      },
+    ];
+    try {
+      await fs.writeFile(configPath, `
+[server]
+require_connection = false
+
+[approval]
+mode = "manual"
+
+[[sources]]
+id = "suppressed"
+password = "env:UNSET_SOURCE_PASSWORD"
+`);
+      const first = resolveReloadConfig({
+        cliSources,
+        configPath,
+        cliArgs: { config: configPath },
+        env: {},
+      });
+      expect(first.sources.map(source => source.name)).toEqual(['cli-a', 'cli-b']);
+      expect(first.requireConnection).toBe(false);
+      expect(first.approval?.mode).toBe('manual');
+
+      await fs.writeFile(configPath, `
+[server]
+require_connection = true
+
+[approval]
+mode = "yolo"
+`);
+      const second = resolveReloadConfig({
+        cliSources,
+        configPath,
+        cliArgs: { config: configPath },
+        env: {},
+      });
+      expect(second.sources.map(source => source.name)).toEqual(['cli-a', 'cli-b']);
+      expect(second.requireConnection).toBe(true);
+      expect(second.approval?.mode).toBe('yolo');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('preserves explicit --webui=false while validating a reload', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-mcp-reload-webui-'));
     const configPath = path.join(dir, 'config.toml');

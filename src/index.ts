@@ -297,7 +297,7 @@ const GSSAPI_DELEGATE = argvConfig.gssapiDelegateCredentials;
 const KNOWN_HOSTS_FILE = argvConfig.knownHostsFile;
 const STRICT_HOST_KEY = argvConfig.strictHostKeyChecking;
 // The explicit `--config` path is resolved (and value-less `--config` rejected)
-// via resolveCliConfigPath at the resolveConfig call site below.
+// once below, then reused by both boot resolution and hot-reload eligibility.
 
 // Flags that signal intent to use the legacy single-host CLI mode. NOTE:
 // `disableSudo` is deliberately excluded — it only controls whether the sudo
@@ -498,10 +498,14 @@ export function resolveCliConfigPath(
   return expandHome(value);
 }
 
+const explicitConfigPath = (isCliEnabled || isTestMode)
+  ? resolveCliConfigPath(argvConfig)
+  : undefined;
+
 const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
   ? resolveConfig({
       cliSources: cliSourceConfigs,
-      cliConfigPath: resolveCliConfigPath(argvConfig),
+      cliConfigPath: explicitConfigPath,
       // An explicit CLI switch overrides TOML in either direction. Preserve
       // `undefined` when the switch is absent so the loader can still honor
       // `[webui].enabled`; bare `--webui` forces true and `--webui=false`
@@ -1272,9 +1276,10 @@ let stopConfigWatcher: (() => void) | null = null;
 
 /**
  * Re-resolve the boot config from disk using the same precedence chain as
- * startup. Only ever called on the TOML-driven path (the watcher isn't started
- * for `--ssh`/legacy CLI), so `cliSources` is empty and TOML wins. Throws on any
- * parse/validation error — the reloader treats a throw as "keep the old config".
+ * startup. For an explicit `--config` paired with `--ssh`/legacy CLI sources,
+ * `cliSources` is retained so only the TOML top-level policy is reloaded and
+ * the file's suppressed `[[sources]]` never replaces the CLI transports. Throws
+ * on any parse/validation error — the reloader keeps the old config.
  */
 export function resolveReloadConfig(params: {
   cliSources: ServerConfig[];
@@ -1316,22 +1321,27 @@ function reloadResolveConfig(): ResolvedConfig {
 }
 
 /**
- * Build the ConfigReloader bound to the live registry + approval engine. Only
- * meaningful when a TOML config path exists (TOML-driven boot); returns null
- * otherwise so the watcher is never started for CLI/`--ssh` mode.
+ * Decide whether the resolved config path is an authoritative hot-reload input.
+ * TOML-driven boots always qualify. CLI-source boots qualify only when the user
+ * explicitly supplied `--config`; auto-discovered files must not become live
+ * policy inputs (or weaken CLI connection guards) merely because they exist.
  */
+export function shouldWatchResolvedConfig(params: {
+  configPath?: string;
+  cliSourceCount: number;
+  explicitConfigPath?: string;
+}): boolean {
+  if (!params.configPath) return false;
+  return params.cliSourceCount === 0 || params.explicitConfigPath !== undefined;
+}
+
+/** Build the ConfigReloader bound to the live registry + approval engine. */
 function buildConfigReloader(): ConfigReloader | null {
-  if (!resolvedConfig.configPath) return null;
-  // Skip the reloader (and, upstream, the watcher) whenever CLI sources win.
-  // resolveConfig() records `configPath` even when the user supplied CLI/`--ssh`
-  // sources plus a `--config` TOML purely for top-level [server]/[webui]/
-  // [approval] settings — in that mode the TOML `[[sources]]` are intentionally
-  // SUPPRESSED (see resolver.ts "CLI wins"). Watching that file anyway would
-  // start a watcher for a non-file-backed connection set: every save would fire
-  // reload()/closeAll(), dropping the established CLI/`--ssh` transports even
-  // though source edits in the file can never apply. A reload only makes sense
-  // when the registry's sources actually came from the TOML.
-  if (cliSourceConfigs.length > 0) return null;
+  if (!shouldWatchResolvedConfig({
+    configPath: resolvedConfig.configPath,
+    cliSourceCount: cliSourceConfigs.length,
+    explicitConfigPath,
+  })) return null;
   return new ConfigReloader({
     registry,
     loadConfig: reloadResolveConfig,
@@ -1966,7 +1976,8 @@ async function main() {
   // the very first exec / sudo-exec call is gated and (optionally) audited.
   await wireApprovalAndAudit();
   // Build the config reloader AFTER the approval engine exists so a hot reload
-  // reseeds policy in lockstep with connections. Null for CLI/`--ssh` boots.
+  // reseeds policy in lockstep with connections. CLI/`--ssh` boots participate
+  // only when paired with an explicit --config policy file.
   configReloader = buildConfigReloader();
   const webuiHandle = await maybeStartWebUI();
   // Start the debounced TOML watcher LAST so the WebUI's reloadController is

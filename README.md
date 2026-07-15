@@ -264,7 +264,7 @@ npx -y ssh-mcp -- \
 
 ## TOML config watch / hot reload
 
-When the server is started from a TOML config file (`--config=<path>`, `$SSH_MCP_CONFIG`, or a discovered `~/.config/ssh-mcp/config.toml` / `~/.ssh-mcp/config.toml`), it **watches that file and hot-reloads on change** — no restart needed. Edit the file, save, and within ~500ms the running server picks up the new configuration. (CLI/`--ssh=<JSON>` boots are not file-backed, so there is nothing to watch — the watcher is simply not started.)
+When the server is started from a TOML config file (`--config=<path>`, `$SSH_MCP_CONFIG`, or a discovered `~/.config/ssh-mcp/config.toml` / `~/.ssh-mcp/config.toml`), it **watches that file and hot-reloads on change** — no restart needed. Edit the file, save, and within ~500ms the running server picks up the new configuration. CLI/`--ssh=<JSON>` boots are not file-backed by themselves, but when they are paired with an explicit `--config=<path>`, that file is watched for top-level `[server]`, `[webui]`, and `[approval]` changes while the CLI connection set remains authoritative.
 
 ### What reloads (and what does not)
 

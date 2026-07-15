@@ -56,6 +56,46 @@ describe('optional audit seam', () => {
     ).not.toThrow();
   });
 
+  it('prefers TOML audit_max_bytes, then validated env fallback, then the default', async () => {
+    const prior = process.env.SSH_MCP_AUDIT_MAX_BYTES;
+    let constructedWith: { auditDir: string; auditMaxBytes: number } | undefined;
+    const importer = async () => ({
+      resolveAuditDir: () => '/tmp/ssh-mcp-audit-test',
+      AuditStore: class {
+        constructor(config: { auditDir: string; auditMaxBytes: number }) {
+          constructedWith = config;
+        }
+        append(): void {}
+      },
+    });
+
+    try {
+      process.env.SSH_MCP_AUDIT_MAX_BYTES = '256';
+      await loadAuditSink({ auditMaxBytes: 512 }, importer);
+      expect(constructedWith?.auditMaxBytes).toBe(512);
+
+      await loadAuditSink({}, importer);
+      expect(constructedWith?.auditMaxBytes).toBe(256);
+
+      process.env.SSH_MCP_AUDIT_MAX_BYTES = '0';
+      await loadAuditSink({}, importer);
+      expect(constructedWith?.auditMaxBytes).toBe(0);
+
+      for (const invalid of ['-1', '1.5', '123junk', 'not-a-number']) {
+        process.env.SSH_MCP_AUDIT_MAX_BYTES = invalid;
+        await loadAuditSink({}, importer);
+        expect(constructedWith?.auditMaxBytes).toBe(10_000);
+      }
+
+      delete process.env.SSH_MCP_AUDIT_MAX_BYTES;
+      await loadAuditSink({}, importer);
+      expect(constructedWith?.auditMaxBytes).toBe(10_000);
+    } finally {
+      if (prior === undefined) delete process.env.SSH_MCP_AUDIT_MAX_BYTES;
+      else process.env.SSH_MCP_AUDIT_MAX_BYTES = prior;
+    }
+  });
+
   it('surfaces a diagnostic (not a silent no-op) when a present audit store fails to construct', async () => {
     // The audit module IS part of this build, so a construction failure here
     // is a real present-but-broken store (e.g. unwritable audit_dir), not the

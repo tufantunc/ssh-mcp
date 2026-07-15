@@ -5,7 +5,7 @@
  * SSH host and no real config: a burst of writes must collapse to a single
  * onChange (debounce); changes arriving DURING an in-flight reload must coalesce
  * to exactly one trailing reload (re-entrancy guard); a throwing callback must
- * not kill the watcher; an empty path is a no-op (CLI mode).
+ * not kill the watcher; an empty path is a no-op (a pathless CLI mode).
  */
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, renameSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';

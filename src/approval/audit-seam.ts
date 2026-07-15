@@ -102,6 +102,21 @@ const NO_OP_SINK: AuditSink = {
   },
 };
 
+const DEFAULT_AUDIT_MAX_BYTES = 10_000;
+
+/** Preserve the legacy env override below explicit TOML and above the default. */
+function resolveAuditMaxBytes(configured: number | undefined, env: NodeJS.ProcessEnv): number {
+  if (configured !== undefined) return configured;
+
+  const raw = env.SSH_MCP_AUDIT_MAX_BYTES;
+  if (typeof raw !== 'string' || raw.trim() === '') return DEFAULT_AUDIT_MAX_BYTES;
+
+  const normalized = raw.trim();
+  if (!/^\d+$/.test(normalized)) return DEFAULT_AUDIT_MAX_BYTES;
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) ? parsed : DEFAULT_AUDIT_MAX_BYTES;
+}
+
 function toApprovalSection(decision: ApprovalDecision) {
   return {
     mode: decision.mode,
@@ -191,7 +206,7 @@ export async function loadAuditSink(
     const auditDir = mod.resolveAuditDir(config.auditDir);
     store = new mod.AuditStore({
       auditDir,
-      auditMaxBytes: config.auditMaxBytes ?? 10_000,
+      auditMaxBytes: resolveAuditMaxBytes(config.auditMaxBytes, process.env),
     });
     if (!store || typeof store.append !== 'function') {
       throw new TypeError('AuditStore instance must expose append(record)');
