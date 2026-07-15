@@ -40,7 +40,7 @@ export abstract class Session {
     this.lastActivity = new Date();
   }
 
-  abstract run(command: string, timeoutMs?: number): Promise<CommandResult>;
+  abstract run(command: string, timeoutMs?: number, abortSignal?: AbortSignal): Promise<CommandResult>;
   abstract close(): Promise<void>;
 
   markDisconnected(): void {
@@ -77,7 +77,7 @@ export class InteractiveSession extends Session {
     });
   }
 
-  async run(command: string, timeoutMs = 60_000): Promise<CommandResult> {
+  async run(command: string, timeoutMs = 60_000, abortSignal?: AbortSignal): Promise<CommandResult> {
     if (this._status !== 'active') {
       throw new Error(`Session ${this.name} is not active (status: ${this._status})`);
     }
@@ -98,6 +98,8 @@ export class InteractiveSession extends Session {
         if (!resolved) {
           resolved = true;
           this.stream.removeListener('data', dataHandler);
+          try { this.stream.write('\x03'); } catch { /* */ }
+          setTimeout(() => { try { this.stream.signal('TERM'); } catch { /* */ } }, 500);
           span.end();
           reject(new Error(`Command timed out after ${timeoutMs}ms in session ${this.name}`));
         }
@@ -159,6 +161,29 @@ export class InteractiveSession extends Session {
       this.stream.on('data', dataHandler);
       this.stream.write(`${command}\n`);
       this.stream.write(`printf '%s__%s__\\n' '${sentinel}' "$?"\n`);
+
+      if (abortSignal) {
+        if (abortSignal.aborted) {
+          resolved = true;
+          clearTimeout(timeoutId);
+          this.stream.removeListener('data', dataHandler);
+          span.end();
+          reject(new Error('Command aborted before execution'));
+          return;
+        }
+        const onAbort = () => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeoutId);
+            this.stream.removeListener('data', dataHandler);
+            try { this.stream.write('\x03'); } catch { /* */ }
+            setTimeout(() => { try { this.stream.signal('TERM'); } catch { /* */ } }, 1000);
+            span.end();
+            reject(new Error('Command aborted'));
+          }
+        };
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+      }
     });
   }
 

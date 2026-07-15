@@ -211,15 +211,27 @@ export class SSHConnection {
         try { stream.end(); } catch { /* */ }
 
         if (opts.abortSignal) {
-          opts.abortSignal.addEventListener('abort', () => {
+          if (opts.abortSignal.aborted) {
+            resolved = true;
+            clearTimeout(timeoutId);
+            span.end();
+            reject(new Error('Command aborted before execution'));
+            return;
+          }
+          const onAbort = () => {
             if (!resolved) {
+              resolved = true;
+              clearTimeout(timeoutId);
               try { stream.signal('INT'); } catch { /* */ }
               setTimeout(() => {
                 try { stream.signal('TERM'); } catch { /* */ }
                 setTimeout(() => { try { stream.close(); } catch { /* */ } }, 1000);
               }, 1000);
+              span.end();
+              reject(new Error('Command aborted'));
             }
-          }, { once: true });
+          };
+          opts.abortSignal.addEventListener('abort', onAbort, { once: true });
         }
 
         stream.on('data', (data: Buffer) => {

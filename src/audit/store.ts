@@ -32,11 +32,66 @@ export class AuditStore {
   private writeStream: WriteStream | null = null;
   private dirEnsured = false;
   private recordCount = 0;
+  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(logPath?: string, entropyScan = false, tamperEvident = false) {
     this.logPath = logPath || getAuditLogPath();
     this.entropyScan = entropyScan;
     this.tamperEvident = tamperEvident;
+  }
+
+  async record(entry: Omit<AuditRecord, 'timestamp' | 'eventId'>): Promise<void> {
+    this.writeQueue = this.writeQueue.then(() => this._record(entry));
+    return this.writeQueue;
+  }
+
+  async close(): Promise<void> {
+    await this.writeQueue;
+    if (this.writeStream && !this.writeStream.destroyed) {
+      await new Promise<void>((resolve) => this.writeStream!.end(() => resolve()));
+      this.writeStream = null;
+    }
+  }
+
+  private async _record(entry: Omit<AuditRecord, 'timestamp' | 'eventId'>): Promise<void> {
+    const span = tracer.startSpan('audit.record');
+    span.setAttribute('audit.tamperEvident', this.tamperEvident);
+    try {
+      const record: AuditRecord = {
+        ...entry,
+        timestamp: new Date().toISOString(),
+        eventId: randomUUID(),
+      };
+
+      const redactedCommand = redactText(record.command, { entropyScan: this.entropyScan });
+      const redactedError = record.error ? redactText(record.error, { entropyScan: this.entropyScan }) : undefined;
+
+      let lineObj: Record<string, unknown> = { ...record, command: redactedCommand, error: redactedError };
+
+      if (this.tamperEvident) {
+        if (!this.lastHash) {
+          await this.loadLastHash();
+        }
+        const prevHash = this.lastHash;
+        const contentForHash = JSON.stringify(lineObj) + prevHash;
+        const selfHash = createHash('sha256').update(contentForHash).digest('hex');
+        lineObj = { ...lineObj, prevHash, selfHash };
+        this.lastHash = selfHash;
+      }
+
+      const line = JSON.stringify(lineObj) + '\n';
+
+      await this.rotateIfNeeded();
+      const stream = await this.ensureStream();
+      await new Promise<void>((resolve, reject) => {
+        stream.write(line, (err) => err ? reject(err) : resolve());
+      });
+
+      span.setAttribute('audit.bytes', line.length);
+      this.recordCount++;
+    } finally {
+      span.end();
+    }
   }
 
   private async ensureStream(): Promise<WriteStream> {
@@ -50,47 +105,6 @@ export class AuditStore {
     this.writeStream = createWriteStream(this.logPath, { flags: 'a' });
     try { await chmod(this.logPath, 0o600); } catch { /* may not exist yet */ }
     return this.writeStream;
-  }
-
-  async record(entry: Omit<AuditRecord, 'timestamp' | 'eventId'>): Promise<void> {
-    const span = tracer.startSpan('audit.record');
-    span.setAttribute('audit.tamperEvident', this.tamperEvident);
-    try {
-      const record: AuditRecord = {
-        ...entry,
-        timestamp: new Date().toISOString(),
-        eventId: randomUUID(),
-      };
-
-    const redactedCommand = redactText(record.command, { entropyScan: this.entropyScan });
-    const redactedError = record.error ? redactText(record.error, { entropyScan: this.entropyScan }) : undefined;
-
-    let lineObj: Record<string, unknown> = { ...record, command: redactedCommand, error: redactedError };
-
-    if (this.tamperEvident) {
-      if (!this.lastHash) {
-        await this.loadLastHash();
-      }
-      const prevHash = this.lastHash;
-      const contentForHash = JSON.stringify(lineObj) + prevHash;
-      const selfHash = createHash('sha256').update(contentForHash).digest('hex');
-      lineObj = { ...lineObj, prevHash, selfHash };
-      this.lastHash = selfHash;
-    }
-
-    const line = JSON.stringify(lineObj) + '\n';
-
-    await this.rotateIfNeeded();
-    const stream = await this.ensureStream();
-    await new Promise<void>((resolve, reject) => {
-      stream.write(line, (err) => err ? reject(err) : resolve());
-    });
-
-    span.setAttribute('audit.bytes', line.length);
-    this.recordCount++;
-    } finally {
-      span.end();
-    }
   }
 
   private async loadLastHash(): Promise<void> {

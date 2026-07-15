@@ -157,6 +157,7 @@ async function main() {
     isShuttingDown = true;
     console.error('Shutting down SSH MCP Server...');
     clearInterval(reaperInterval);
+    await audit.close();
     await registry.closeAll();
     process.exit(0);
   };
