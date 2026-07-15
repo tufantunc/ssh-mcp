@@ -111,10 +111,11 @@ export function resolveConfig(inputs: ResolverInputs): ResolvedConfig {
     // explicit CLI sources. In particular, a stale default config containing
     // require_connection=false must not make a multi-`--ssh` invocation silently
     // route omitted connectionName calls to its first CLI host. The opt-out is
-    // honored with CLI sources only when the user explicitly supplied --config.
+    // honored with CLI sources only when the user explicitly supplied --config;
+    // every other path resolves to the safe, fully-defined default (true).
     requireConnection: hasCliSources && !hasExplicitCliConfig
-      ? undefined
-      : fromToml?.requireConnection,
+      ? true
+      : (fromToml?.requireConnection ?? true),
     server: fromToml?.server,
     webui: fromToml?.webui,
     approval: fromToml?.approval,

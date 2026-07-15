@@ -10,11 +10,24 @@
 [server]
 audit_dir = "~/.ssh-mcp"
 audit_max_bytes = 10000
-# Multi-source safety guard: when more than one [[sources]] is configured and
-# no source is marked `default = true`, a tool call that omits connectionName is
-# rejected (it could land on the wrong host). Set to false to opt out and
-# restore the legacy "first source wins" behavior. Defaults to true (guard ON).
-# require_connection = true
+# Multi-source connection guard. Default: true (safe).
+#
+# When more than one [[sources]] is configured and no source is marked
+# `default = true`, a tool call that omits or blanks `connectionName` FAILS FAST
+# with the list of valid names, instead of silently routing to whichever source
+# happened to register first. Marking a source `default = true` is an explicit
+# routing choice and still allows omitted names; the example below does this for
+# `prod-bastion`. Single-source deployments are unaffected — omission always
+# resolves the lone source regardless of this flag.
+#
+# require_connection = true   # default; leave it on.
+#
+# !!! DANGER — EMERGENCY OPT-OUT ONLY !!!
+# Setting this to false RE-ENABLES the dangerous legacy silent-default fallback:
+# a multi-source call with no connectionName will quietly run against the default
+# source. Use ONLY as a temporary rollback for a compatibility break, and remove
+# it as soon as callers are fixed. Do NOT ship false to production long-term.
+# require_connection = false
 
 [webui]
 enabled = false

@@ -672,45 +672,6 @@ mode = ""
   });
 });
 
-describe('parseTomlConfig: [server].require_connection wiring', () => {
-  const oneSource = `
-[[sources]]
-id = "x"
-host = "h"
-user = "u"
-auth = "kerberos"
-`;
-
-  it('projects require_connection = false onto ResolvedConfig.requireConnection', () => {
-    const cfg = parseTomlConfig(`
-[server]
-require_connection = false
-${oneSource}`);
-    expect(cfg.requireConnection).toBe(false);
-    expect(cfg.server?.require_connection).toBe(false);
-  });
-
-  it('projects require_connection = true onto ResolvedConfig.requireConnection', () => {
-    const cfg = parseTomlConfig(`
-[server]
-require_connection = true
-${oneSource}`);
-    expect(cfg.requireConnection).toBe(true);
-  });
-
-  it('leaves requireConnection undefined when the field is absent (safe default applied downstream)', () => {
-    const cfg = parseTomlConfig(oneSource);
-    expect(cfg.requireConnection).toBeUndefined();
-  });
-
-  it('rejects a non-boolean require_connection', () => {
-    expect(() => parseTomlConfig(`
-[server]
-require_connection = "no"
-${oneSource}`)).toThrow(/require_connection.*boolean/);
-  });
-});
-
 describe('parseTomlConfig: transport/host-key/secret guards (R1 findings 3-6)', () => {
   // Finding 3: kerberos requires openssh; explicit ssh2 must be rejected at parse.
   it('rejects auth="kerberos" with explicit transport="ssh2"', () => {
@@ -1007,6 +968,72 @@ auth = "kerberos"
 
   it('throws a redact-safe error on missing file', () => {
     expect(() => loadTomlFile('/nonexistent/ssh-mcp-test.toml')).toThrow(/cannot read/);
+  });
+});
+
+describe('parseTomlConfig: [server].require_connection (D-A2 multi-source guard)', () => {
+  const twoSources = `
+[[sources]]
+id = "a"
+host = "a.example"
+user = "u"
+auth = "kerberos"
+
+[[sources]]
+id = "b"
+host = "b.example"
+user = "u"
+auth = "kerberos"
+`;
+
+  it('defaults requireConnection to true when [server] is absent (safe default)', () => {
+    const cfg = parseTomlConfig(twoSources);
+    expect(cfg.requireConnection).toBe(true);
+    expect(cfg.server?.require_connection).toBeUndefined();
+  });
+
+  it('defaults requireConnection to true when [server] exists but omits the flag', () => {
+    const cfg = parseTomlConfig(`
+[server]
+audit_dir = "/tmp/a"
+${twoSources}`);
+    expect(cfg.requireConnection).toBe(true);
+  });
+
+  it('honors explicit require_connection = false (emergency opt-out)', () => {
+    const cfg = parseTomlConfig(`
+[server]
+require_connection = false
+${twoSources}`);
+    expect(cfg.requireConnection).toBe(false);
+    expect(cfg.server?.require_connection).toBe(false);
+  });
+
+  it('honors explicit require_connection = true', () => {
+    const cfg = parseTomlConfig(`
+[server]
+require_connection = true
+${twoSources}`);
+    expect(cfg.requireConnection).toBe(true);
+    expect(cfg.server?.require_connection).toBe(true);
+  });
+
+  it('rejects a non-boolean require_connection clearly', () => {
+    expect(() => parseTomlConfig(`
+[server]
+require_connection = "false"
+${twoSources}`)).toThrow(/require_connection must be a boolean/);
+  });
+
+  it('single-source config still defaults requireConnection to true (registry no-ops it for size 1)', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "only"
+host = "only.example"
+user = "u"
+auth = "kerberos"
+`);
+    expect(cfg.requireConnection).toBe(true);
   });
 });
 

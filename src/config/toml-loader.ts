@@ -477,9 +477,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     // defaultName here is, by construction, a user-chosen explicit default.
     defaultExplicit: defaultName !== undefined,
     perSourceApproval,
-    // Surface [server].require_connection so the boot path can wire the
-    // omit-name guard opt-out. Undefined (field absent) keeps the guard ON.
-    requireConnection: server?.require_connection,
+    // Safe default: require an explicit connectionName when multi-source.
+    // Opt out only via [server].require_connection = false.
+    requireConnection: server?.require_connection ?? true,
     server,
     webui,
     approval,

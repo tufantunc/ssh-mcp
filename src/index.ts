@@ -508,7 +508,7 @@ const resolvedConfig: ResolvedConfig = (isCliEnabled || isTestMode)
       // forces false before token resolution and boot validation.
       webuiEnabled: cliSwitchOverride(argvConfig, 'webui'),
     })
-  : { sources: [], perSourceApproval: {}, defaultExplicit: false };
+  : { sources: [], perSourceApproval: {}, defaultExplicit: false, requireConnection: true };
 
 if (isCliEnabled) {
   if (!isMultiHost && !hasLegacyCli && resolvedConfig.sources.length === 0) {

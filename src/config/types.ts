@@ -19,10 +19,18 @@ export interface ServerSection {
   /** Per-record stdout/stderr cap. Default 10000. */
   audit_max_bytes?: number;
   /**
-   * Opt out of the multi-source omit-name connection guard (restore the legacy
-   * silent first-source default). Absent or `true` keeps the guard ON (safe);
-   * `false` disables it. Projected onto ResolvedConfig.requireConnection and
-   * consumed by applyRegistryConnectionPolicy at boot.
+   * Multi-source connection guard (D-A2 escape hatch). When more than one
+   * [[sources]] is configured, a tool call that omits/blanks `connectionName`
+   * fails fast instead of silently routing to the first-registered (default)
+   * source — the R1 landmine fix.
+   *
+   * Default (unset) is `true` (safe: require an explicit name when multi-source).
+   * Set `false` ONLY as a temporary emergency rollback: it re-enables the
+   * dangerous legacy silent-default fallback. Single-source deployments are
+   * unaffected either way — omission always resolves the lone source.
+   *
+   * Projected onto ResolvedConfig.requireConnection and consumed by
+   * applyRegistryConnectionPolicy at boot.
    */
   require_connection?: boolean;
 }
@@ -115,12 +123,13 @@ export interface ResolvedConfig {
   /** Per-source approval override, keyed by source name. */
   perSourceApproval: Record<string, ApprovalMode>;
   /**
-   * Boot-time value of [server].require_connection. When `false` the
-   * multi-source omit-name guard is disabled (legacy first-source default);
-   * `undefined`/`true` keeps it ON. applyRegistryConnectionPolicy applies the
-   * safe default, so a config that predates this field stays guarded.
+   * Resolved multi-source connection guard (D-A2). `true` (default) makes a
+   * multi-source registry reject omitted/blank `connectionName`; `false` is the
+   * emergency opt-out that restores the legacy silent-default fallback. Mirrors
+   * `[server].require_connection`. Always defined post-resolution so the boot
+   * path can inject it unconditionally via `setRequireConnectionWhenMulti`.
    */
-  requireConnection?: boolean;
+  requireConnection: boolean;
   server?: ServerSection;
   webui?: WebUISection;
   approval?: ApprovalSection;
