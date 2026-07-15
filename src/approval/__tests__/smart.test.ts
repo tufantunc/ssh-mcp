@@ -75,6 +75,46 @@ describe('SmartApproval — happy paths', () => {
     expect(call[1].headers['Content-Type']).toBe('application/json');
   });
 
+  it('redacts profile description secrets before sending them to the external LLM', async () => {
+    const fetchImpl = vi.fn(() =>
+      makeOkResponse(JSON.stringify({ allow: true, reason: 'ok' })),
+    );
+    const s = new SmartApproval(makeOpts({ fetchImpl: fetchImpl as any }));
+
+    await s.decide({
+      ...ctx,
+      profile: { ...ctx.profile, description: 'production host password=profile-secret' },
+    });
+
+    const call: any = (fetchImpl as any).mock.calls[0];
+    const userPrompt = JSON.parse(call[1].body).messages
+      .find((message: any) => message.role === 'user').content as string;
+    expect(userPrompt).toContain('Description: production host password=<redacted>');
+    expect(userPrompt).not.toContain('profile-secret');
+  });
+
+  it('redacts standalone OpenAI API keys before sending them to the external LLM', async () => {
+    const legacy = 'sk-' + 'A'.repeat(48);
+    const project = 'sk-proj-' + 'B'.repeat(80);
+    const fetchImpl = vi.fn(() =>
+      makeOkResponse(JSON.stringify({ allow: true, reason: 'ok' })),
+    );
+    const s = new SmartApproval(makeOpts({ fetchImpl: fetchImpl as any }));
+
+    await s.decide({
+      ...ctx,
+      command: `printf %s ${legacy}`,
+      description: `rotate ${project}`,
+    });
+
+    const call: any = (fetchImpl as any).mock.calls[0];
+    const userPrompt = JSON.parse(call[1].body).messages
+      .find((message: any) => message.role === 'user').content as string;
+    expect(userPrompt).not.toContain(legacy);
+    expect(userPrompt).not.toContain(project);
+    expect((userPrompt.match(/<redacted>/g) ?? []).length).toBe(2);
+  });
+
   it('redacts command and intent secrets before sending them to the external LLM', async () => {
     const fetchImpl = vi.fn(() =>
       makeOkResponse(JSON.stringify({ allow: true, reason: 'ok' })),

@@ -185,7 +185,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
   }
 
   const resolvedSources: ServerConfig[] = [];
-  const perSourceApproval: Record<string, ApprovalMode> = {};
+  const perSourceApproval = Object.create(null) as Record<string, ApprovalMode>;
   const seenNames = new Set<string>();
   let defaultName: string | undefined;
 

@@ -79,8 +79,9 @@ const SYSTEM_PROMPT = [
 ].join(' ');
 
 function buildUserPrompt(ctx: ApprovalContext): string {
-  const profileBlock = ctx.profile.description
-    ? `Profile: ${ctx.profile.id}\nDescription: ${ctx.profile.description}`
+  const profileDescription = redactApprovalText(ctx.profile.description);
+  const profileBlock = profileDescription
+    ? `Profile: ${ctx.profile.id}\nDescription: ${profileDescription}`
     : `Profile: ${ctx.profile.id}`;
   const command = redactApprovalText(ctx.command);
   const description = redactApprovalText(ctx.description);

@@ -120,6 +120,10 @@ const RULES: RedactionRule[] = [
   { re: /\b(?:gh[opusr]_[A-Za-z0-9]{20,255}|github_pat_[A-Za-z0-9_]{40,255})\b/g, replace: REDACTED },
   { re: /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g, replace: REDACTED },
   { re: /\bAIza[0-9A-Za-z_-]{35}\b/g, replace: REDACTED },
+  {
+    re: /(^|[^A-Za-z0-9_-])sk-(?:proj-)?[A-Za-z0-9_-]{20,255}(?=$|[^A-Za-z0-9_-])/g,
+    replace: (_match, lead) => `${lead}${REDACTED}`,
+  },
 ];
 
 export function redactApprovalText(input: string | undefined): string {

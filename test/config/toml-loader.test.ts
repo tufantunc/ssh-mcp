@@ -617,6 +617,23 @@ mode = "yolo"
     expect(cfg.perSourceApproval).toEqual({ x: 'yolo' });
   });
 
+  it('stores a __proto__ source approval as an own enumerable override', () => {
+    const cfg = parseTomlConfig(`
+[[sources]]
+id = "__proto__"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[sources.approval]
+mode = "manual"
+`);
+
+    expect(Object.hasOwn(cfg.perSourceApproval, '__proto__')).toBe(true);
+    expect(cfg.perSourceApproval['__proto__']).toBe('manual');
+    expect(Object.values(cfg.perSourceApproval)).toEqual(['manual']);
+  });
+
   it('rejects an empty per-source approval override mode (Codex 3549260472)', () => {
     expect(() => parseTomlConfig(`
 [[sources]]
