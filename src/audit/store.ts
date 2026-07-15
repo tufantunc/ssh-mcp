@@ -41,12 +41,14 @@ export class AuditStore {
   }
 
   async record(entry: Omit<AuditRecord, 'timestamp' | 'eventId'>): Promise<void> {
-    this.writeQueue = this.writeQueue.then(() => this._record(entry));
+    this.writeQueue = this.writeQueue
+      .catch(() => {})
+      .then(() => this._record(entry));
     return this.writeQueue;
   }
 
   async close(): Promise<void> {
-    await this.writeQueue;
+    try { await this.writeQueue; } catch { /* queue may be rejected */ }
     if (this.writeStream && !this.writeStream.destroyed) {
       await new Promise<void>((resolve) => this.writeStream!.end(() => resolve()));
       this.writeStream = null;

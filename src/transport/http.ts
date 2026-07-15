@@ -88,9 +88,7 @@ export async function startHttpServer(
       }
     }
 
-    const clientKey = bearerToken;
-
-    if (rateLimiter && (req.method === 'POST' || req.method === 'GET' || req.method === 'DELETE')) {
+    if (rateLimiter && url.pathname === '/' && (req.method === 'POST' || req.method === 'GET' || req.method === 'DELETE')) {
       const { allowed, retryAfterMs } = rateLimiter.tryConsume();
       if (!allowed) {
         const retryAfterSec = Math.ceil(retryAfterMs / 1000);

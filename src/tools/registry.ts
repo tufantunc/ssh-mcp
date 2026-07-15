@@ -41,6 +41,10 @@ function deniedEvaluation(commandClass: CommandClass): PolicyEvaluation {
   return { decision: 'deny', commandClass, binary: '', ruleId: 'error' };
 }
 
+function syntheticSuccess(profile: string): CommandResult {
+  return { exitCode: 0, stdout: '', stderr: '', durationMs: 0, profile };
+}
+
 function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
 }
@@ -136,9 +140,10 @@ export function registerTools(
     opts: {
       toolName: string;
       failureClass: CommandClass;
+      enforceClass?: CommandClass;
       profile?: string;
       extra: any;
-      exec: (conn: Awaited<ReturnType<typeof resolveConn>>, onProgress?: (bytes: number, tail: string) => void, abortSignal?: AbortSignal) => Promise<CommandResult>;
+      exec: (conn: Awaited<ReturnType<typeof resolveConn>>, cleanCmd: string, onProgress?: (bytes: number, tail: string) => void, abortSignal?: AbortSignal) => Promise<CommandResult>;
     },
   ) {
     const ctx = makeCtx(opts.extra, opts.profile);
@@ -149,7 +154,10 @@ export function registerTools(
     const cleanCmd = sanitizeCommand(command, profile.maxChars);
     try {
       const { conn, evaluation, approver } = await checkPolicyAndApprove(cleanCmd, profileName, opts.toolName, ctx);
-      const result = await opts.exec(conn, onProgress, abortSignal);
+      if (opts.enforceClass && evaluation.commandClass !== opts.enforceClass) {
+        throw new Error(`${opts.toolName} only accepts ${opts.enforceClass} commands, got: ${evaluation.commandClass}`);
+      }
+      const result = await opts.exec(conn, cleanCmd, onProgress, abortSignal);
       await auditResult(ctx, profileName, cleanCmd, evaluation, result, approver);
       return textResult(redactText(result.stdout));
     } catch (err: any) {
@@ -218,7 +226,7 @@ export function registerTools(
         try {
           const { conn, evaluation, approver } = await checkPolicyAndApprove(cleanCmd, profileName, 'open-session', ctx);
           const session = await conn.openSession({ name: cleanName, type, command: cleanCmd });
-          await auditResult(ctx, profileName, cleanCmd, evaluation, { exitCode: 0, stdout: '', stderr: '', durationMs: 0, profile: profileName } as CommandResult, approver);
+          await auditResult(ctx, profileName, cleanCmd, evaluation, syntheticSuccess(profileName), approver);
           return textResult(`Session "${cleanName}" opened on ${conn.profile.name} (${type}).`);
         } catch (err: any) {
           await auditResult(ctx, profileName, cleanCmd ?? command, deniedEvaluation('destructive'), { error: err.message });
@@ -265,7 +273,7 @@ export function registerTools(
         return textResult(`Background session "${name}" not found.`);
       }
       if (session instanceof BackgroundSession) {
-        return textResult(session.readOutput(lines));
+        return textResult(redactText(session.readOutput(lines), { entropyScan: true }));
       }
       return textResult(`Session "${name}" is not a background session.`);
     },
@@ -282,11 +290,12 @@ export function registerTools(
     { readOnlyHint: true },
     async ({ command, profile }, extra) => {
       return runAudited(command, {
-        toolName: 'read-command',
-        failureClass: 'read-only',
-        profile,
-        extra,
-      exec: (conn, onProgress, abortSignal) => { const cmd = sanitizeCommand(command, conn.profile.maxChars); return conn.exec(cmd, { onProgress, abortSignal }); },
+      toolName: 'read-command',
+      failureClass: 'read-only',
+      enforceClass: 'read-only',
+      profile,
+      extra,
+      exec: (conn, cleanCmd, onProgress, abortSignal) => conn.exec(cleanCmd, { onProgress, abortSignal }),
       });
     },
   );
@@ -340,8 +349,12 @@ export function registerTools(
       const ctx = makeCtx(extra, profile);
       const profileName = defaultProfileName(profile);
       const cleanCmd = sanitizeCommand(command, registry.getProfile(profileName).maxChars);
-      const wrapped = `sudo -p "" -S sh -c ${shellSingleQuote(cleanCmd)}`;
       try {
+        const rawEval = policy.evaluate(cleanCmd, registry.getProfile(profileName), 'privileged-command');
+        if (rawEval.decision === 'deny') {
+          throw new Error(`POLICY_DENIED: ${rawEval.reason || 'Command not allowed'}`);
+        }
+        const wrapped = `sudo -p "" -S sh -c ${shellSingleQuote(cleanCmd)}`;
         const { conn, evaluation, approver } = await checkPolicyAndApprove(wrapped, profileName, 'privileged-command', ctx);
 
         const sudoPassword = conn.getSudoPassword();
@@ -354,7 +367,7 @@ export function registerTools(
         await auditResult(ctx, profileName, wrapped, evaluation, result, approver);
         return textResult(redactText(result.stdout));
       } catch (err: any) {
-        await auditResult(ctx, profileName, wrapped, deniedEvaluation('privileged'), { error: err.message });
+        await auditResult(ctx, profileName, cleanCmd, deniedEvaluation('privileged'), { error: err.message });
         throw err;
       }
     },
@@ -378,7 +391,7 @@ export function registerTools(
         const { conn, evaluation, approver } = await checkPolicyAndApprove(syntheticCommand, profileName, 'sftp-upload', ctx);
         const sftp = new SftpClient(conn);
         await sftp.upload({ remotePath, content });
-        await auditResult(ctx, profileName, syntheticCommand, evaluation, { exitCode: 0, stdout: '', stderr: '', durationMs: 0, profile: profileName } as CommandResult, approver);
+        await auditResult(ctx, profileName, syntheticCommand, evaluation, syntheticSuccess(profileName), approver);
         return textResult(`Uploaded ${content.length} bytes to ${remotePath}`);
       } catch (err: any) {
         await auditResult(ctx, profileName, syntheticCommand, deniedEvaluation('destructive'), { error: err.message });
@@ -404,7 +417,7 @@ export function registerTools(
         const { conn, evaluation, approver } = await checkPolicyAndApprove(syntheticCommand, profileName, 'sftp-download', ctx);
         const sftp = new SftpClient(conn);
         const data = await sftp.download({ remotePath });
-        await auditResult(ctx, profileName, syntheticCommand, evaluation, { exitCode: 0, stdout: '', stderr: '', durationMs: 0, profile: profileName } as CommandResult, approver);
+        await auditResult(ctx, profileName, syntheticCommand, evaluation, syntheticSuccess(profileName), approver);
         return textResult(redactText(data.toString('utf8'), { entropyScan: true }));
       } catch (err: any) {
         await auditResult(ctx, profileName, syntheticCommand, deniedEvaluation('read-only'), { error: err.message });
