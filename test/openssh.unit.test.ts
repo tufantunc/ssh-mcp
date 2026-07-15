@@ -202,6 +202,50 @@ describe('renderAskpassHelper (finding 5: Windows metachar-safe password echo)',
   });
 });
 
+describe('OpenSshTransport cleanup listeners (Codex R4 finding 3: unregister on close, no reload leak)', () => {
+  // init() registers process.once exit/SIGINT/SIGTERM handlers; close() must
+  // remove exactly them so a config hot-reload (close + discard + re-dial per
+  // reload) cannot accumulate one dead handler set per reload. Stub the ssh(1)
+  // probe so the test needs no real ssh binary.
+  function makeInitable() {
+    const t = new OpenSshTransport({ host: 'h', port: 22, username: 'u', authMode: 'kerberos' });
+    (t as any).verifySshBinary = vi.fn().mockResolvedValue(undefined);
+    return t;
+  }
+
+  const counts = () => ({
+    exit: process.listenerCount('exit'),
+    sigint: process.listenerCount('SIGINT'),
+    sigterm: process.listenerCount('SIGTERM'),
+  });
+
+  it('adds one handler set on init and removes it on close', async () => {
+    const before = counts();
+    const t = makeInitable();
+    await t.init();
+    const during = counts();
+    expect(during.exit).toBe(before.exit + 1);
+    expect(during.sigint).toBe(before.sigint + 1);
+    expect(during.sigterm).toBe(before.sigterm + 1);
+
+    await t.close();
+    const after = counts();
+    expect(after).toEqual(before);
+  });
+
+  it('does not accumulate process listeners across repeated init/close cycles (reload leak guard)', async () => {
+    const before = counts();
+    // Simulate many hot-reloads: each closes + discards the old transport and
+    // re-dials a fresh one. Without unregister-on-close this grows unbounded.
+    for (let i = 0; i < 25; i++) {
+      const t = makeInitable();
+      await t.init();
+      await t.close();
+    }
+    expect(counts()).toEqual(before);
+  });
+});
+
 describe('buildOpenSshSudoWrapper (Codex P1: keep sudo password out of local ssh argv)', () => {
   it('builds a passwordless sudo command without sudo -S', () => {
     expect(buildOpenSshSudoWrapper('id -u', false)).toBe("sudo -n sh -c 'id -u'");

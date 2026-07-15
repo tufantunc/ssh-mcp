@@ -20,10 +20,16 @@ audit_max_bytes = 10000
 enabled = false
 host = "127.0.0.1"
 port = 8088
+# Set true only when a token-authenticated browser client is hosted on another origin.
+# cors = false
 # auth_token = "env:SSHMCP_WEBUI_TOKEN"  # required when host is non-loopback
 
 [approval]
-mode = "manual"
+# The approval-engine lane can run standalone before the WebUI approval
+# resolver lands. Keep the copy-paste example bootable with WebUI disabled;
+# switch to mode = "manual" only when [webui].enabled = true (or --webui) and
+# a resolver is wired.
+mode = "yolo"
 fail_closed = true
 
 [approval.llm]

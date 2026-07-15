@@ -135,6 +135,12 @@ export function discoverConfigPath(env: NodeJS.ProcessEnv = process.env): string
 interface LoadOptions {
   env?: NodeJS.ProcessEnv;
   /**
+   * Explicit CLI override for [webui].enabled. `true` enables token resolution
+   * and cross-field checks; `false` disables them even when TOML says enabled;
+   * `undefined` delegates to the TOML value.
+   */
+  webuiEnabled?: boolean;
+  /**
    * Tolerate a TOML with zero [[sources]] entries. Used by the resolver when
    * CLI sources are present and suppress the TOML source list, so a TOML that
    * only supplies top-level sections (e.g. just [webui]) is a valid, supported
@@ -179,7 +185,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
   }
 
   const resolvedSources: ServerConfig[] = [];
-  const perSourceApproval: Record<string, ApprovalMode> = {};
+  const perSourceApproval = Object.create(null) as Record<string, ApprovalMode>;
   const seenNames = new Set<string>();
   let defaultName: string | undefined;
 
@@ -249,6 +255,9 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       throw new Error(
         `Config: sources.${src.id}.gssapi_delegate_credentials must be yes|no`,
       );
+    }
+    if (src.default !== undefined && typeof src.default !== 'boolean') {
+      throw new Error(`Config: sources.${src.id}.default must be a boolean`);
     }
     // GSSAPIDelegateCredentials is only wired in the Kerberos auth branch (see
     // the `case 'kerberos'` below and OpenSshTransport.buildArgs); for key or
@@ -320,15 +329,20 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
     if (knownHostsFile !== undefined && knownHostsFile.length === 0) {
       throw new Error(`Config: sources.${src.id}.known_hosts_file must be a non-empty string`);
     }
+    const description = requireConfigString(src.description, 'description');
 
     const out: ServerConfig = {
       name: src.id,
+      description: src.description,
       host: src.host,
       port: src.port ?? 22,
       username: src.user,
       authMode: src.auth,
       transport: resolvedTransport,
     };
+    if (description && description.length > 0) {
+      out.description = description;
+    }
 
     switch (src.auth) {
       case 'kerberos':
@@ -391,6 +405,7 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
 
     if (sudoPassword !== undefined) out.sudoPassword = sudoPassword;
     if (suPassword !== undefined) out.suPassword = suPassword;
+    if (src.description !== undefined) out.description = src.description;
     // known_hosts_file / strict_host_key_checking are honored only by the
     // openssh transport (openssh.ts). On ssh2 they are silently dropped, which
     // would disable the requested host-key enforcement — a security downgrade.
@@ -428,6 +443,12 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       defaultName = src.id;
     }
 
+    if (
+      src.approval !== undefined &&
+      (typeof src.approval !== 'object' || src.approval === null || Array.isArray(src.approval))
+    ) {
+      throw new Error(`Config: sources.${src.id}.approval must be a table`);
+    }
     if (src.approval?.mode !== undefined) {
       const mode = src.approval.mode;
       if (typeof mode !== 'string' || !VALID_APPROVAL_MODE.includes(mode as ApprovalMode)) {
@@ -435,13 +456,18 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
           `Config: sources.${src.id}.approval.mode must be one of: ${VALID_APPROVAL_MODE.join(', ')}`,
         );
       }
+      out.approval = { mode: mode as ApprovalMode };
       perSourceApproval[src.id] = mode as ApprovalMode;
     }
   }
 
-  const server = parsed.server ? validateServerSection(parsed.server) : undefined;
-  const webui = parsed.webui ? validateWebUI(parsed.webui, env) : undefined;
-  const approval = parsed.approval ? validateApproval(parsed.approval, env) : undefined;
+  const server = parsed.server !== undefined ? validateServerSection(parsed.server) : undefined;
+  const webui = parsed.webui !== undefined
+    ? validateWebUI(parsed.webui, env, opts.webuiEnabled)
+    : undefined;
+  const approval = parsed.approval !== undefined
+    ? validateApproval(parsed.approval, env, Object.values(perSourceApproval).includes('smart'))
+    : undefined;
 
   return {
     sources: resolvedSources,
@@ -461,14 +487,24 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
 }
 
 function validateServerSection(raw: any) {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('Config: [server] must be a table');
+  }
   const out: TomlConfig['server'] = {};
   if (raw.audit_dir !== undefined) {
     if (typeof raw.audit_dir !== 'string') throw new Error('Config: [server].audit_dir must be a string');
     out.audit_dir = expandHome(raw.audit_dir);
   }
   if (raw.audit_max_bytes !== undefined) {
-    if (typeof raw.audit_max_bytes !== 'number' || raw.audit_max_bytes <= 0) {
-      throw new Error('Config: [server].audit_max_bytes must be a positive number');
+    // Byte counts are integer-only: a fractional cap below 1 would floor to 0
+    // downstream and silently empty every stdout/stderr capture, so reject
+    // non-integers at the config entry point (Codex 3556038524).
+    if (
+      typeof raw.audit_max_bytes !== 'number' ||
+      !Number.isInteger(raw.audit_max_bytes) ||
+      raw.audit_max_bytes <= 0
+    ) {
+      throw new Error('Config: [server].audit_max_bytes must be a positive integer');
     }
     out.audit_max_bytes = raw.audit_max_bytes;
   }
@@ -481,7 +517,10 @@ function validateServerSection(raw: any) {
   return out;
 }
 
-function validateWebUI(raw: any, env: NodeJS.ProcessEnv) {
+function validateWebUI(raw: any, env: NodeJS.ProcessEnv, cliEnabledOverride?: boolean) {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('Config: [webui] must be a table');
+  }
   const out: TomlConfig['webui'] = {};
   if (raw.enabled !== undefined) {
     if (typeof raw.enabled !== 'boolean') throw new Error('Config: [webui].enabled must be a boolean');
@@ -492,31 +531,46 @@ function validateWebUI(raw: any, env: NodeJS.ProcessEnv) {
     out.host = raw.host;
   }
   if (raw.port !== undefined) {
-    if (typeof raw.port !== 'number') throw new Error('Config: [webui].port must be a number');
+    if (!Number.isInteger(raw.port) || raw.port < 0 || raw.port > 65535) {
+      throw new Error('Config: [webui].port must be an integer between 0 and 65535');
+    }
     out.port = raw.port;
   }
-  const webuiEnabled = out.enabled === true;
-  if (raw.auth_token !== undefined && webuiEnabled) {
+  if (raw.cors !== undefined) {
+    if (typeof raw.cors !== 'boolean') throw new Error('Config: [webui].cors must be a boolean');
+    out.cors = raw.cors;
+  }
+  const webuiEnabled = cliEnabledOverride ?? out.enabled === true;
+  if (raw.auth_token !== undefined) {
     if (typeof raw.auth_token !== 'string') throw new Error('Config: [webui].auth_token must be a string');
-    out.auth_token = resolveEnvRef(raw.auth_token, '[webui].auth_token', env);
+    if (webuiEnabled) {
+      out.auth_token = resolveEnvRef(raw.auth_token, '[webui].auth_token', env);
+    }
   }
   // Cross-field check: a non-loopback bind requires a token — but ONLY when the
-  // web UI is actually enabled. With `[webui] enabled = false` the section is
-  // inert (parsed/reserved, never served), so demanding a token for a disabled
-  // section would let an otherwise-off optional block fail SSH startup (Codex
-  // 3541772404). When the eventual CLI enable path turns it on, the same check
-  // applies against the resolved enabled=true state.
+  // WebUI is effectively enabled after CLI precedence. A disabled section is
+  // inert (parsed/reserved, never served), so demanding a token for it would let
+  // an otherwise-off optional block fail SSH startup (Codex 3541772404). Bare
+  // `--webui` enables these checks; explicit `--webui=false` suppresses them
+  // even when TOML says enabled=true (Codex 3568934447).
   if (webuiEnabled && out.host && out.host !== '127.0.0.1' && out.host !== 'localhost' && out.host !== '::1') {
     if (!out.auth_token) {
       throw new Error(
-        `Config: [webui].host="${out.host}" is non-loopback; auth_token is required when [webui].enabled = true`,
+        `Config: [webui].host="${out.host}" is non-loopback; auth_token is required when WebUI is enabled`,
       );
     }
   }
   return out;
 }
 
-function validateApproval(raw: any, env: NodeJS.ProcessEnv): ApprovalSection {
+function validateApproval(
+  raw: any,
+  env: NodeJS.ProcessEnv,
+  resolveLlmApiKeyForPerSourceSmart = false,
+): ApprovalSection {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('Config: [approval] must be a table');
+  }
   const out: ApprovalSection = {};
   if (raw.mode !== undefined) {
     if (!VALID_APPROVAL_MODE.includes(raw.mode)) {
@@ -541,25 +595,58 @@ function validateApproval(raw: any, env: NodeJS.ProcessEnv): ApprovalSection {
       resolved.endpoint = llm.endpoint;
     }
     if (llm.api_key !== undefined) {
-      // Only resolve the api_key env ref when smart approval is actually
-      // enabled. [approval.llm] settings are irrelevant in the default/manual
-      // mode, so resolving here would fail startup on a missing OPENAI_API_KEY
-      // for a user who copied the example config without enabling smart mode.
-      // Defer resolution to smart mode; leave api_key unresolved otherwise.
-      if (out.mode === 'smart') {
-        if (typeof llm.api_key !== 'string') {
-          throw new Error('Config: [approval.llm].api_key must be a string');
-        }
-        resolved.api_key = resolveEnvRef(llm.api_key, '[approval.llm].api_key', env);
+      // Resolve the api_key env ref when smart approval is ACTIVELY used —
+      // either by the top-level [approval].mode or by a per-source override.
+      // In that case a missing/empty OPENAI_API_KEY is fatal (smart cannot
+      // authenticate), so the resolution throws. Type validation is never
+      // deferred: a present api_key must be a string in every mode.
+      if (typeof llm.api_key !== 'string') {
+        throw new Error('Config: [approval.llm].api_key must be a string');
       }
+      const smartActive = out.mode === 'smart' || resolveLlmApiKeyForPerSourceSmart;
+      // The LLM block is "fully configured" once it carries endpoint + model.
+      // buildApprovalEngineFromConfig pre-arms smart for supported providers in
+      // that case (so the WebUI can live-switch into smart without a restart),
+      // and SmartApproval needs the configured api_key to authenticate that live
+      // switch. Preserve the resolved key when the block is fully configured. A
+      // missing env remains non-fatal while smart is inactive, matching deferred
+      // resolution.
+      const fullyConfigured =
+        typeof llm.endpoint === 'string' && typeof llm.model === 'string';
+      if (smartActive) {
+        const apiKey = resolveEnvRef(llm.api_key, '[approval.llm].api_key', env);
+        if (!apiKey) {
+          throw new Error('Config: [approval.llm].api_key must not be empty when smart mode is active');
+        }
+        resolved.api_key = apiKey;
+      } else if (fullyConfigured) {
+        try {
+          const apiKey = resolveEnvRef(llm.api_key, '[approval.llm].api_key', env);
+          if (apiKey) {
+            resolved.api_key = apiKey;
+          } else {
+            resolved.api_key_unresolved = true;
+          }
+        } catch {
+          // Missing env remains non-fatal while smart is inactive, but retain a
+          // marker so the engine builder does not advertise/pre-arm an
+          // unauthenticated smart mode.
+          resolved.api_key_unresolved = true;
+        }
+      }
+      // else: incomplete block and smart unused — defer entirely (unchanged).
     }
     if (llm.model !== undefined) {
       if (typeof llm.model !== 'string') throw new Error('Config: [approval.llm].model must be a string');
       resolved.model = llm.model;
     }
     if (llm.timeout_ms !== undefined) {
-      if (typeof llm.timeout_ms !== 'number' || llm.timeout_ms <= 0) {
-        throw new Error('Config: [approval.llm].timeout_ms must be a positive number');
+      if (
+        typeof llm.timeout_ms !== 'number' ||
+        !Number.isFinite(llm.timeout_ms) ||
+        llm.timeout_ms <= 0
+      ) {
+        throw new Error('Config: [approval.llm].timeout_ms must be a positive finite number');
       }
       resolved.timeout_ms = llm.timeout_ms;
     }

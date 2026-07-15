@@ -1,0 +1,260 @@
+/**
+ * OPTIONAL audit-truth seam.
+ *
+ * The approval engine returns a real `ApprovalDecision` from `gateApproval()`.
+ * When the audit module (`src/audit/`) is part of THIS build, the seam threads
+ * that decision into a JSONL audit record so the log reflects the TRUTH of why
+ * a command ran (mode / decided_by / reason), not a placeholder. When
+ * `src/audit/` is ABSENT — as it is on `pr/toml-config`, the base of this lane,
+ * where the engine ships before PR-A merges — the seam degrades to a no-op and
+ * the engine still builds and unit-passes.
+ *
+ * Decision D2 (P1 plan §6): audit is an OPTIONAL seam, not a hard build
+ * prerequisite. We load the audit module via a *computed* (non-literal)
+ * specifier so the TypeScript compiler does not statically resolve it — no
+ * TS2307 when `src/audit/` is missing — and a runtime `ERR_MODULE_NOT_FOUND`
+ * is caught and turned into the no-op sink.
+ */
+import type { ApprovalDecision } from './types.js';
+import type { ExecResult } from '../transports/types.js';
+import { fileURLToPath } from 'node:url';
+
+export type AuditToolName = 'exec' | 'sudo-exec';
+
+/** What an exec/sudo-exec handler hands the seam after (attempting) a command. */
+export interface AuditExecInput {
+  tool: AuditToolName;
+  /** Connection / profile name; `default` for the implicit single host. */
+  profile: string;
+  /** The command actually sent to the transport (already sanitized). */
+  command: string;
+  description?: string;
+  /** `Date.now()` captured before the transport call, for duration math. */
+  startedAt: number;
+  /** Present on success. */
+  result?: ExecResult;
+  /** Present on failure (transport error, timeout, or approval deny). */
+  error?: unknown;
+  /** The real decision from `gateApproval`, when one was produced. */
+  approval?: ApprovalDecision;
+  /** Effective configured mode, retained when a failure occurs before the gate decides. */
+  approvalMode?: ApprovalDecision['mode'];
+}
+
+/** The seam surface the rest of the server depends on. Always safe to call. */
+export interface AuditSink {
+  record(input: AuditExecInput): void;
+  /** Optional read-only tail used by the WebUI when src/audit is present. */
+  tail?(opts: { profile?: string; limit: number }): Promise<unknown[]>;
+  /** Optional execution event subscription used by WebUI SSE. */
+  on?(event: 'execution', listener: (record: unknown) => void): void;
+  off?(event: 'execution', listener: (record: unknown) => void): void;
+}
+
+export interface AuditSeamConfig {
+  /** TOML `[server].audit_dir`. Falls back to env / `~/.ssh-mcp` inside audit. */
+  auditDir?: string;
+  /** TOML `[server].audit_max_bytes`. */
+  auditMaxBytes?: number;
+}
+
+/**
+ * Minimal structural view of the audit module's public surface this seam uses.
+ * Kept local so this file never statically imports `src/audit/` (which may be
+ * absent). The real module satisfies this shape structurally.
+ */
+interface AuditModuleLike {
+  AuditStore: new (cfg: { auditDir: string; auditMaxBytes: number }) => {
+    append(record: unknown): unknown;
+    tail?(opts: { profile?: string; limit: number }): Promise<unknown[]>;
+    on?(event: 'execution', listener: (record: unknown) => void): void;
+    off?(event: 'execution', listener: (record: unknown) => void): void;
+  };
+  resolveAuditDir(override?: string | null): string;
+}
+
+export type AuditModuleImporter = (specifier: string) => Promise<unknown>;
+
+const defaultAuditImporter: AuditModuleImporter = (specifier) => import(specifier);
+
+export function isOptionalAuditStoreMissing(
+  err: unknown,
+  expectedStoreUrl = new URL('../audit/store.js', import.meta.url).href,
+): boolean {
+  const code = (err as { code?: string })?.code;
+  if (code !== 'ERR_MODULE_NOT_FOUND') return false;
+
+  const actualUrl = (err as { url?: string })?.url;
+  if (actualUrl) return actualUrl === expectedStoreUrl;
+
+  const expectedStorePath = fileURLToPath(expectedStoreUrl);
+  const message = (err as { message?: string })?.message ?? String(err);
+  return message.includes(`Cannot find module '${expectedStorePath}'`)
+    || message.includes(`Cannot find module "${expectedStorePath}"`)
+    || message.includes("Cannot find module '../audit/store.js'")
+    || message.includes('Cannot find module "../audit/store.js"');
+}
+
+/** Shared no-op sink for the audit-absent path. */
+const NO_OP_SINK: AuditSink = {
+  record(): void {
+    /* src/audit/ not present in this build — Decision D2 optional seam */
+  },
+};
+
+function toApprovalSection(decision: ApprovalDecision) {
+  return {
+    mode: decision.mode,
+    decision: decision.decision,
+    reason: decision.reason,
+    decided_at: decision.decided_at,
+    decided_by: decision.decided_by,
+  };
+}
+
+function errorMessageFromUnknown(error: unknown): string {
+  return error instanceof Error ? error.message : String(error ?? 'unknown error');
+}
+
+function approvalNotReachedSection(
+  now: Date,
+  error: unknown,
+  mode: ApprovalDecision['mode'],
+) {
+  const message = errorMessageFromUnknown(error);
+  return {
+    mode,
+    decision: 'deny',
+    reason: `approval gate was not reached: ${message}`,
+    decided_at: now.toISOString(),
+    decided_by: 'approval:not-run',
+  };
+}
+
+/**
+ * Merge a mapped execution error (the McpError raised by `resultToMcpContent`
+ * for a failed ExecResult) into the audited stderr, so failure audit records
+ * keep the synthetic context (`Command exited with status N`, timeout text)
+ * instead of an empty stderr. Exported for the legacy direct wrapper in
+ * `src/index.ts`, which must audit with the same semantics (Codex 3556038517).
+ */
+export function stderrWithExecutionError(stderr: string | undefined, error: unknown): string {
+  const base = stderr ?? '';
+  if (error === undefined) return base;
+
+  const message = errorMessageFromUnknown(error);
+  if (base.includes(message)) return base;
+
+  const executionError = `execution error: ${message}`;
+  return base ? `${base}\n${executionError}` : executionError;
+}
+
+/**
+ * Try to wire a truth-logging audit sink. Returns a no-op sink (never throws)
+ * when `src/audit/` is not part of this build, so callers can wire the seam
+ * unconditionally at boot and treat the result as always-present.
+ */
+export async function loadAuditSink(
+  config: AuditSeamConfig = {},
+  importer: AuditModuleImporter = defaultAuditImporter,
+): Promise<AuditSink> {
+  // Non-literal specifier: tsc does NOT resolve this, so the build succeeds
+  // even though `src/audit/store.js` does not exist on `pr/toml-config`.
+  const specifier = '../audit/' + 'store.js';
+  const expectedStoreUrl = new URL(specifier, import.meta.url).href;
+
+  let mod: AuditModuleLike;
+  try {
+    mod = (await importer(specifier)) as unknown as AuditModuleLike;
+  } catch (err) {
+    // Only a missing ../audit/store.js is the expected "audit module absent"
+    // case (Decision D2 optional seam). A present audit module whose own import
+    // is missing also reports ERR_MODULE_NOT_FOUND; do not misclassify that as
+    // optional absence, or the broken module is silently suppressed.
+    if (isOptionalAuditStoreMissing(err, expectedStoreUrl)) {
+      return NO_OP_SINK;
+    }
+    const message = (err as { message?: string })?.message ?? String(err);
+    console.error(`[ssh-mcp][audit-seam] audit module present but failed to load; auditing disabled: ${message}`);
+    return NO_OP_SINK; // audit module unusable → visible warning + no-op
+  }
+  let store: InstanceType<AuditModuleLike['AuditStore']>;
+  try {
+    if (
+      !mod
+      || typeof mod.AuditStore !== 'function'
+      || typeof mod.resolveAuditDir !== 'function'
+    ) {
+      throw new TypeError('expected callable AuditStore and resolveAuditDir exports');
+    }
+
+    const auditDir = mod.resolveAuditDir(config.auditDir);
+    store = new mod.AuditStore({
+      auditDir,
+      auditMaxBytes: config.auditMaxBytes ?? 10_000,
+    });
+    if (!store || typeof store.append !== 'function') {
+      throw new TypeError('AuditStore instance must expose append(record)');
+    }
+  } catch (err) {
+    const message = (err as { message?: string })?.message ?? String(err);
+    console.error(`[ssh-mcp][audit-seam] audit module present but failed to initialize; auditing disabled: ${message}`);
+    return NO_OP_SINK;
+  }
+
+  return {
+    tail(opts: { profile?: string; limit: number }): Promise<unknown[]> {
+      return typeof store.tail === 'function' ? store.tail(opts) : Promise.resolve([]);
+    },
+    on(event: 'execution', listener: (record: unknown) => void): void {
+      if (typeof store.on === 'function') store.on(event, listener);
+    },
+    off(event: 'execution', listener: (record: unknown) => void): void {
+      if (typeof store.off === 'function') store.off(event, listener);
+    },
+    record(input: AuditExecInput): void {
+      try {
+        const now = new Date();
+        const durationMs = Math.max(0, Date.now() - input.startedAt);
+        // Truth: prefer the real decision. When a config/transport failure
+        // happens before the gate can decide, never synthesize a yolo/allow
+        // decision: record an explicit not-run denial marker instead.
+        const approval = input.approval
+          ? toApprovalSection(input.approval)
+          : approvalNotReachedSection(now, input.error, input.approvalMode ?? 'yolo');
+        const exec = input.result
+          ? {
+              stdout: input.result.stdout ?? '',
+              // When resultToMcpContent rejects after the transport already
+              // returned an ExecResult, keep both the raw transport stderr and
+              // the mapped MCP error. Otherwise timeout/auth/host-key/
+              // transport/non-zero results become audit records that only say
+              // "a result existed" and lose the execution failure context.
+              stderr: stderrWithExecutionError(input.result.stderr, input.error),
+              exitCode: input.result.exitCode ?? null,
+              durationMs,
+            }
+          : input.approval?.decision === 'deny'
+            ? undefined
+            : {
+                stdout: '',
+                stderr: errorMessageFromUnknown(input.error),
+                exitCode: null,
+                durationMs,
+              };
+        store.append({
+          profile: input.profile,
+          tool: input.tool,
+          command: input.command,
+          description: input.description,
+          approval,
+          ...(exec ? { exec } : {}),
+          now,
+        });
+      } catch (auditErr: any) {
+        // Audit failure must be visible but must not hide the real SSH result.
+        console.error(`audit log append failed: ${auditErr?.message || auditErr}`);
+      }
+    },
+  };
+}
