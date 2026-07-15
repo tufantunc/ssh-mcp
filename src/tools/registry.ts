@@ -286,7 +286,7 @@ export function registerTools(
         failureClass: 'read-only',
         profile,
         extra,
-        exec: (conn, onProgress, abortSignal) => conn.exec(command, { onProgress, abortSignal }),
+      exec: (conn, onProgress, abortSignal) => { const cmd = sanitizeCommand(command, conn.profile.maxChars); return conn.exec(cmd, { onProgress, abortSignal }); },
       });
     },
   );
@@ -340,21 +340,21 @@ export function registerTools(
       const ctx = makeCtx(extra, profile);
       const profileName = defaultProfileName(profile);
       const cleanCmd = sanitizeCommand(command, registry.getProfile(profileName).maxChars);
+      const wrapped = `sudo -p "" -S sh -c ${shellSingleQuote(cleanCmd)}`;
       try {
-        const { conn, evaluation, approver } = await checkPolicyAndApprove(`sudo ${cleanCmd}`, profileName, 'privileged-command', ctx);
+        const { conn, evaluation, approver } = await checkPolicyAndApprove(wrapped, profileName, 'privileged-command', ctx);
 
         const sudoPassword = conn.getSudoPassword();
-        const wrapped = `sudo -p "" -S sh -c ${shellSingleQuote(cleanCmd)}`;
         const result = await conn.exec(wrapped, {
           stdin: sudoPassword ? sudoPassword + '\n' : undefined,
           onProgress: makeProgressSender(extra),
           abortSignal: extra?.signal,
         });
 
-        await auditResult(ctx, profileName, `sudo ${cleanCmd}`, evaluation, result, approver);
+        await auditResult(ctx, profileName, wrapped, evaluation, result, approver);
         return textResult(redactText(result.stdout));
       } catch (err: any) {
-        await auditResult(ctx, profileName, `sudo ${cleanCmd}`, deniedEvaluation('privileged'), { error: err.message });
+        await auditResult(ctx, profileName, wrapped, deniedEvaluation('privileged'), { error: err.message });
         throw err;
       }
     },

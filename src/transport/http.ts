@@ -7,40 +7,30 @@ import type { AuditStore } from '../audit/store.js';
 
 const MAX_BODY_SIZE = 1_048_576; // 1MB
 
-interface TokenBucket {
-  tokens: number;
-  lastRefill: number;
-}
-
 class RateLimiter {
-  private buckets = new Map<string, TokenBucket>();
+  private tokens: number;
+  private lastRefill: number;
   private maxTokens: number;
   private refillIntervalMs: number;
 
   constructor(maxRequestsPerMinute: number) {
     this.maxTokens = maxRequestsPerMinute;
+    this.tokens = maxRequestsPerMinute;
+    this.lastRefill = Date.now();
     this.refillIntervalMs = 60_000;
   }
 
-  tryConsume(key: string): { allowed: boolean; retryAfterMs: number } {
+  tryConsume(): { allowed: boolean; retryAfterMs: number } {
     const now = Date.now();
-    let bucket = this.buckets.get(key);
-
-    if (!bucket) {
-      bucket = { tokens: this.maxTokens - 1, lastRefill: now };
-      this.buckets.set(key, bucket);
-      return { allowed: true, retryAfterMs: 0 };
-    }
-
-    const elapsed = now - bucket.lastRefill;
+    const elapsed = now - this.lastRefill;
     const refilled = Math.floor((elapsed / this.refillIntervalMs) * this.maxTokens);
     if (refilled > 0) {
-      bucket.tokens = Math.min(this.maxTokens, bucket.tokens + refilled);
-      bucket.lastRefill += Math.round((refilled / this.maxTokens) * this.refillIntervalMs);
+      this.tokens = Math.min(this.maxTokens, this.tokens + refilled);
+      this.lastRefill += Math.round((refilled / this.maxTokens) * this.refillIntervalMs);
     }
 
-    if (bucket.tokens > 0) {
-      bucket.tokens--;
+    if (this.tokens > 0) {
+      this.tokens--;
       return { allowed: true, retryAfterMs: 0 };
     }
 
@@ -81,8 +71,6 @@ export async function startHttpServer(
   });
   await server.connect(mcpTransport);
 
-  const clientKey = bearerToken;
-
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
@@ -102,8 +90,8 @@ export async function startHttpServer(
 
     const clientKey = bearerToken;
 
-    if (rateLimiter && (req.method === 'POST' || req.method === 'GET' || req.method === 'DELETE') && url.pathname === '/') {
-      const { allowed, retryAfterMs } = rateLimiter.tryConsume(clientKey);
+    if (rateLimiter && (req.method === 'POST' || req.method === 'GET' || req.method === 'DELETE')) {
+      const { allowed, retryAfterMs } = rateLimiter.tryConsume();
       if (!allowed) {
         const retryAfterSec = Math.ceil(retryAfterMs / 1000);
         res.writeHead(429, {

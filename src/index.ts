@@ -117,7 +117,6 @@ async function main() {
 
   const { registerResources } = await import('./tools/registry.js');
   registerResources(server, registry);
-
   if (argv.opaUrl) {
     policy.setOpaUrl(argv.opaUrl);
     console.error(`OPA sidecar enabled: ${argv.opaUrl}`);

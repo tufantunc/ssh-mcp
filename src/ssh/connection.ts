@@ -232,14 +232,20 @@ export class SSHConnection {
             }
           };
           opts.abortSignal.addEventListener('abort', onAbort, { once: true });
+          stream.on('close', () => { opts.abortSignal!.removeEventListener('abort', onAbort); });
         }
 
         stream.on('data', (data: Buffer) => {
           if (stdout.length < maxOutput) stdout += data.toString();
           if (opts.onProgress && Date.now() - lastProgressSent >= PROGRESS_INTERVAL) {
             lastProgressSent = Date.now();
-            const tail = redactText(stdout.split('\n').filter(Boolean).slice(-3).join('\n'), { entropyScan: true });
-            opts.onProgress(stdout.length, tail);
+            let tail = stdout;
+            for (let i = 0; i < 3; i++) {
+              const idx = tail.lastIndexOf('\n', tail.length - 2);
+              if (idx < 0) break;
+              tail = tail.substring(idx + 1);
+            }
+            opts.onProgress(stdout.length, redactText(tail.trim(), { entropyScan: true }));
           }
         });
         stream.stderr.on('data', (data: Buffer) => {
