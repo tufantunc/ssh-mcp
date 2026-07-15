@@ -22,6 +22,65 @@ interface RedactionRule {
   replace: string | ((substring: string, ...groups: string[]) => string);
 }
 
+function isSchemeChar(ch: string): boolean {
+  return /[A-Za-z0-9+.-]/.test(ch);
+}
+
+function isValidScheme(scheme: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9+.-]*$/.test(scheme);
+}
+
+function isAuthorityBoundary(ch: string): boolean {
+  return ch === '/' || ch === '?' || ch === '#' || /\s/.test(ch);
+}
+
+function redactUrlUserinfo(input: string): string {
+  let cursor = 0;
+  let searchFrom = 0;
+  let out = '';
+
+  while (true) {
+    const separator = input.indexOf('://', searchFrom);
+    if (separator === -1) break;
+
+    let schemeStart = separator - 1;
+    while (schemeStart >= 0 && isSchemeChar(input[schemeStart])) schemeStart--;
+    schemeStart += 1;
+    const scheme = input.slice(schemeStart, separator);
+    if (!isValidScheme(scheme)) {
+      searchFrom = separator + 3;
+      continue;
+    }
+
+    const authorityStart = separator + 3;
+    let at = -1;
+    for (let i = authorityStart; i < input.length; i++) {
+      const ch = input[i];
+      if (ch === '@') {
+        at = i;
+        break;
+      }
+      if (isAuthorityBoundary(ch)) break;
+    }
+    if (at === -1) {
+      searchFrom = authorityStart;
+      continue;
+    }
+
+    const colon = input.indexOf(':', authorityStart);
+    if (colon === -1 || colon > at) {
+      searchFrom = at + 1;
+      continue;
+    }
+
+    out += input.slice(cursor, colon + 1) + REDACTED + '@';
+    cursor = at + 1;
+    searchFrom = at + 1;
+  }
+
+  return cursor === 0 ? input : out + input.slice(cursor);
+}
+
 const RULES: RedactionRule[] = [
   // Long CLI flags, both --token=value and --token value. Open-quoted rules
   // run first so malformed/truncated commands cannot leak the quoted suffix.
@@ -69,11 +128,6 @@ const RULES: RedactionRule[] = [
     re: /(Authorization\s*:\s*)(Bearer|Basic|Token)\s+([A-Za-z0-9_~\-.=+\/]+)/gi,
     replace: (_match, header, scheme) => `${header}${scheme} ${REDACTED}`,
   },
-  {
-    re: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]+:)([^\s/@]+)(@)/g,
-    replace: (_match, prefix, _password, at) => `${prefix}${REDACTED}${at}`,
-  },
-
   // Shell env assignments, JSON/TOML key-value fields, and simple prose.
   {
     re: new RegExp(String.raw`\b(${SHELL_SECRET_KEY}=)\s*(?:${OPEN_DQ_VALUE}|${OPEN_SQ_VALUE})`, 'g'),
@@ -116,7 +170,7 @@ const RULES: RedactionRule[] = [
     re: /(aws[_-]?secret[_-]?access[_-]?key\s*[:=]?\s*["']?)([A-Za-z0-9/+]{40})(["']?)/gi,
     replace: (_match, prefix, _value, suffix) => `${prefix}${REDACTED}${suffix}`,
   },
-  { re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, replace: REDACTED },
+  { re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{8,}\b/g, replace: REDACTED },
   { re: /\b(?:gh[opusr]_[A-Za-z0-9]{20,255}|github_pat_[A-Za-z0-9_]{40,255})\b/g, replace: REDACTED },
   { re: /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g, replace: REDACTED },
   { re: /\bAIza[0-9A-Za-z_-]{35}\b/g, replace: REDACTED },
@@ -128,7 +182,7 @@ const RULES: RedactionRule[] = [
 
 export function redactApprovalText(input: string | undefined): string {
   if (!input) return '';
-  let output = input;
+  let output = redactUrlUserinfo(input);
   for (const rule of RULES) {
     output = output.replace(rule.re, rule.replace as any);
   }

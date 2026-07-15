@@ -617,6 +617,17 @@ mode = "yolo"
     expect(cfg.perSourceApproval).toEqual({ x: 'yolo' });
   });
 
+  it('rejects a scalar per-source approval value instead of falling back to the global mode', () => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+approval = "manual"
+`)).toThrow(/sources\.x\.approval must be a table/);
+  });
+
   it('stores a __proto__ source approval as an own enumerable override', () => {
     const cfg = parseTomlConfig(`
 [[sources]]

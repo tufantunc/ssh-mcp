@@ -443,6 +443,12 @@ export function parseTomlConfig(raw: string, opts: LoadOptions = {}): ResolvedCo
       defaultName = src.id;
     }
 
+    if (
+      src.approval !== undefined &&
+      (typeof src.approval !== 'object' || src.approval === null || Array.isArray(src.approval))
+    ) {
+      throw new Error(`Config: sources.${src.id}.approval must be a table`);
+    }
     if (src.approval?.mode !== undefined) {
       const mode = src.approval.mode;
       if (typeof mode !== 'string' || !VALID_APPROVAL_MODE.includes(mode as ApprovalMode)) {

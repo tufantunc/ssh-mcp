@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { SmartApproval } from '../smart.js';
+import { redactApprovalText } from '../redactor.js';
 import { ApprovalContext, SmartApprovalOptions } from '../types.js';
 
 const ctx: ApprovalContext = {
@@ -32,6 +33,16 @@ function makeOpts(overrides: Partial<SmartApprovalOptions> = {}): SmartApprovalO
     ...overrides,
   };
 }
+
+describe('redactApprovalText', () => {
+  it('handles long non-URL context without quadratic URL matching', () => {
+    const input = 'a'.repeat(40_000);
+    const startedAt = performance.now();
+
+    expect(redactApprovalText(input)).toBe(input);
+    expect(performance.now() - startedAt).toBeLessThan(300);
+  });
+});
 
 describe('SmartApproval — happy paths', () => {
   it('allows when LLM returns {allow:true}', async () => {
@@ -113,6 +124,22 @@ describe('SmartApproval — happy paths', () => {
     expect(userPrompt).not.toContain(legacy);
     expect(userPrompt).not.toContain(project);
     expect((userPrompt.match(/<redacted>/g) ?? []).length).toBe(2);
+  });
+
+  it('redacts compact JWTs with non-eyJ payload segments before sending them to the external LLM', async () => {
+    const token = `eyJhbGciOiJIUzI1NiJ9.e30.${'s'.repeat(43)}`;
+    const fetchImpl = vi.fn(() =>
+      makeOkResponse(JSON.stringify({ allow: true, reason: 'ok' })),
+    );
+    const s = new SmartApproval(makeOpts({ fetchImpl: fetchImpl as any }));
+
+    await s.decide({ ...ctx, command: `printf %s ${token}` });
+
+    const call: any = (fetchImpl as any).mock.calls[0];
+    const userPrompt = JSON.parse(call[1].body).messages
+      .find((message: any) => message.role === 'user').content as string;
+    expect(userPrompt).not.toContain(token);
+    expect(userPrompt).toContain('<redacted>');
   });
 
   it('redacts command and intent secrets before sending them to the external LLM', async () => {
