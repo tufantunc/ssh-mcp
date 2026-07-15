@@ -641,8 +641,12 @@ function validateApproval(
       resolved.model = llm.model;
     }
     if (llm.timeout_ms !== undefined) {
-      if (typeof llm.timeout_ms !== 'number' || llm.timeout_ms <= 0) {
-        throw new Error('Config: [approval.llm].timeout_ms must be a positive number');
+      if (
+        typeof llm.timeout_ms !== 'number' ||
+        !Number.isFinite(llm.timeout_ms) ||
+        llm.timeout_ms <= 0
+      ) {
+        throw new Error('Config: [approval.llm].timeout_ms must be a positive finite number');
       }
       resolved.timeout_ms = llm.timeout_ms;
     }

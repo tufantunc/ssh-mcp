@@ -554,6 +554,19 @@ timeout_ms = 1234
     expect(cfg.approval?.llm?.timeout_ms).toBe(1234);
   });
 
+  it.each(['nan', 'inf'])('rejects non-finite [approval.llm].timeout_ms = %s', (timeout) => {
+    expect(() => parseTomlConfig(`
+[[sources]]
+id = "x"
+host = "h"
+user = "u"
+auth = "kerberos"
+
+[approval.llm]
+timeout_ms = ${timeout}
+`)).toThrow(/timeout_ms must be a positive finite number/);
+  });
+
   it('propagates per-source description and approval override to the server config', () => {
     const cfg = parseTomlConfig(`
 [[sources]]

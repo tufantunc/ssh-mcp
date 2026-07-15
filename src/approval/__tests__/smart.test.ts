@@ -104,6 +104,51 @@ describe('SmartApproval — happy paths', () => {
     expect(userPrompt).not.toContain('profile-secret');
   });
 
+  it('does not duplicate a description already appended to the command', async () => {
+    const description = 'rotate logs safely';
+    const fetchImpl = vi.fn(() =>
+      makeOkResponse(JSON.stringify({ allow: true, reason: 'ok' })),
+    );
+    const s = new SmartApproval(makeOpts({ fetchImpl: fetchImpl as any }));
+
+    await s.decide({
+      ...ctx,
+      command: `printf ok # ${description}`,
+      description,
+    });
+
+    const call: any = (fetchImpl as any).mock.calls[0];
+    const userPrompt = JSON.parse(call[1].body).messages
+      .find((message: any) => message.role === 'user').content as string;
+    expect(userPrompt.match(new RegExp(description, 'g'))).toHaveLength(1);
+    expect(userPrompt).toContain(`Command:\nprintf ok\nCommand intent: ${description}`);
+  });
+
+  it('bounds every context field before sending the external LLM request', async () => {
+    const maxFieldBytes = 16 * 1024;
+    const fetchImpl = vi.fn(() =>
+      makeOkResponse(JSON.stringify({ allow: true, reason: 'ok' })),
+    );
+    const s = new SmartApproval(makeOpts({ fetchImpl: fetchImpl as any }));
+
+    await s.decide({
+      ...ctx,
+      profile: {
+        ...ctx.profile,
+        description: `profile-start ${'p'.repeat(maxFieldBytes * 2)} profile-tail`,
+      },
+      command: `command-start ${'c'.repeat(maxFieldBytes * 2)} command-tail`,
+      description: `intent-start ${'i'.repeat(maxFieldBytes * 2)} intent-tail`,
+    });
+
+    const call: any = (fetchImpl as any).mock.calls[0];
+    const userPrompt = JSON.parse(call[1].body).messages
+      .find((message: any) => message.role === 'user').content as string;
+    expect(Buffer.byteLength(userPrompt, 'utf8')).toBeLessThanOrEqual(maxFieldBytes * 3 + 512);
+    expect((userPrompt.match(/<truncated>/g) ?? [])).toHaveLength(3);
+    expect(userPrompt).not.toMatch(/profile-tail|command-tail|intent-tail/);
+  });
+
   it('redacts standalone OpenAI API keys before sending them to the external LLM', async () => {
     const legacy = 'sk-' + 'A'.repeat(48);
     const project = 'sk-proj-' + 'B'.repeat(80);

@@ -78,13 +78,41 @@ const SYSTEM_PROMPT = [
   'Deny destructive operations (rm -rf, dd, mkfs, shutdown, user/credential changes) unless the host description explicitly authorises them.',
 ].join(' ');
 
+const SMART_PROMPT_FIELD_MAX_BYTES = 16 * 1024;
+const TRUNCATION_MARKER = '\n<truncated>';
+
+function redactAndBoundPromptField(input: string | undefined): string {
+  const redacted = redactApprovalText(input);
+  const encoded = Buffer.from(redacted, 'utf8');
+  if (encoded.byteLength <= SMART_PROMPT_FIELD_MAX_BYTES) return redacted;
+
+  const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, 'utf8');
+  let end = SMART_PROMPT_FIELD_MAX_BYTES - markerBytes;
+  while (end > 0 && (encoded[end] & 0xc0) === 0x80) end--;
+  return encoded.subarray(0, end).toString('utf8') + TRUNCATION_MARKER;
+}
+
+function commandWithoutAppendedDescription(ctx: ApprovalContext): string {
+  if (!ctx.description) return ctx.command;
+  const normalizedDescription = ctx.description
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[\t\f\v ]+/g, ' ')
+    .trim();
+  if (!normalizedDescription) return ctx.command;
+  const suffix = ` # ${normalizedDescription}`;
+  return ctx.command.endsWith(suffix)
+    ? ctx.command.slice(0, -suffix.length)
+    : ctx.command;
+}
+
 function buildUserPrompt(ctx: ApprovalContext): string {
-  const profileDescription = redactApprovalText(ctx.profile.description);
+  const profileId = redactAndBoundPromptField(ctx.profile.id);
+  const profileDescription = redactAndBoundPromptField(ctx.profile.description);
   const profileBlock = profileDescription
-    ? `Profile: ${ctx.profile.id}\nDescription: ${profileDescription}`
-    : `Profile: ${ctx.profile.id}`;
-  const command = redactApprovalText(ctx.command);
-  const description = redactApprovalText(ctx.description);
+    ? `Profile: ${profileId}\nDescription: ${profileDescription}`
+    : `Profile: ${profileId}`;
+  const command = redactAndBoundPromptField(commandWithoutAppendedDescription(ctx));
+  const description = redactAndBoundPromptField(ctx.description);
   const descBlock = description ? `\nCommand intent: ${description}` : '';
   return [
     profileBlock,
