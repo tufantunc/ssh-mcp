@@ -213,10 +213,15 @@ export function registerTools(
       const profileName = defaultProfileName(profile);
 
       if (type === 'background' && command) {
+        const profileObj = registry.getProfile(profileName);
+        const cleanCmd = sanitizeCommand(command, profileObj.maxChars);
         try {
-          await checkPolicyAndApprove(command, profileName, 'open-session', ctx);
+          const { conn, evaluation, approver } = await checkPolicyAndApprove(cleanCmd, profileName, 'open-session', ctx);
+          const session = await conn.openSession({ name: cleanName, type, command: cleanCmd });
+          await auditResult(ctx, profileName, cleanCmd, evaluation, { exitCode: 0, stdout: '', stderr: '', durationMs: 0, profile: profileName } as CommandResult, approver);
+          return textResult(`Session "${cleanName}" opened on ${conn.profile.name} (${type}).`);
         } catch (err: any) {
-          await auditResult(ctx, profileName, command, deniedEvaluation('destructive'), { error: err.message });
+          await auditResult(ctx, profileName, cleanCmd ?? command, deniedEvaluation('destructive'), { error: err.message });
           throw err;
         }
       }
@@ -308,7 +313,7 @@ export function registerTools(
         if (session) {
           const sess = conn.getSession(session);
           if (!sess) throw new Error(`Session "${session}" not found`);
-          result = await sess.run(cleanCmd);
+          result = await sess.run(cleanCmd, undefined, extra?.signal);
         } else {
           result = await conn.exec(cleanCmd, { tty, onProgress: makeProgressSender(extra), abortSignal: extra?.signal });
         }

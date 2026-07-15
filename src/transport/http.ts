@@ -34,8 +34,10 @@ class RateLimiter {
 
     const elapsed = now - bucket.lastRefill;
     const refilled = Math.floor((elapsed / this.refillIntervalMs) * this.maxTokens);
-    bucket.tokens = Math.min(this.maxTokens, bucket.tokens + refilled);
-    bucket.lastRefill = now;
+    if (refilled > 0) {
+      bucket.tokens = Math.min(this.maxTokens, bucket.tokens + refilled);
+      bucket.lastRefill += Math.round((refilled / this.maxTokens) * this.refillIntervalMs);
+    }
 
     if (bucket.tokens > 0) {
       bucket.tokens--;
