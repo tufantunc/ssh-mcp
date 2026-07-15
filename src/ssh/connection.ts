@@ -214,6 +214,7 @@ export class SSHConnection {
           if (opts.abortSignal.aborted) {
             resolved = true;
             clearTimeout(timeoutId);
+            this.activeChannels--;
             span.end();
             reject(new Error('Command aborted before execution'));
             return;

@@ -158,15 +158,10 @@ export class InteractiveSession extends Session {
         }
       };
 
-      this.stream.on('data', dataHandler);
-      this.stream.write(`${command}\n`);
-      this.stream.write(`printf '%s__%s__\\n' '${sentinel}' "$?"\n`);
-
       if (abortSignal) {
         if (abortSignal.aborted) {
           resolved = true;
           clearTimeout(timeoutId);
-          this.stream.removeListener('data', dataHandler);
           span.end();
           reject(new Error('Command aborted before execution'));
           return;
@@ -184,6 +179,10 @@ export class InteractiveSession extends Session {
         };
         abortSignal.addEventListener('abort', onAbort, { once: true });
       }
+
+      this.stream.on('data', dataHandler);
+      this.stream.write(`${command}\n`);
+      this.stream.write(`printf '%s__%s__\\n' '${sentinel}' "$?"\n`);
     });
   }
 

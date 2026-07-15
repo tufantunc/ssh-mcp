@@ -6,14 +6,14 @@ export function sanitizeCommand(command: unknown, maxChars: number): string {
   if (typeof command !== 'string') {
     throw new McpError(ErrorCode.InvalidParams, 'Command must be a string');
   }
-  const trimmed = command.trim();
-  if (!trimmed) {
+  const cleaned = command.replace(CONTROL_CHARS, ' ').trim();
+  if (!cleaned) {
     throw new McpError(ErrorCode.InvalidParams, 'Command cannot be empty');
   }
-  if (Number.isFinite(maxChars) && trimmed.length > maxChars) {
+  if (Number.isFinite(maxChars) && cleaned.length > maxChars) {
     throw new McpError(ErrorCode.InvalidParams, `Command is too long (max ${maxChars} characters)`);
   }
-  return trimmed;
+  return cleaned;
 }
 
 export function sanitizeMetadata(value: unknown, maxLength = 500): string | undefined {
