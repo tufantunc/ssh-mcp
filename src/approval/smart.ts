@@ -79,7 +79,68 @@ const SYSTEM_PROMPT = [
 ].join(' ');
 
 const SMART_PROMPT_FIELD_MAX_BYTES = 16 * 1024;
+const SMART_PROMPT_REDACTION_HEADROOM_BYTES = 4 * 1024;
+const SMART_PROMPT_INPUT_MAX_BYTES = SMART_PROMPT_FIELD_MAX_BYTES + SMART_PROMPT_REDACTION_HEADROOM_BYTES;
+const SMART_LLM_RESPONSE_MAX_BYTES = 64 * 1024;
 const TRUNCATION_MARKER = '\n<truncated>';
+
+class SmartResponseTooLargeError extends Error {}
+
+interface SmartResponseBodyReader {
+  read(): Promise<{ done: boolean; value?: Uint8Array }>;
+  cancel(reason?: unknown): Promise<void> | void;
+}
+
+interface SmartHttpResponse {
+  ok: boolean;
+  status: number;
+  headers?: { get(name: string): string | null };
+  body?: { getReader(): SmartResponseBodyReader } | null;
+}
+
+function oversizedContextField(ctx: ApprovalContext): string | undefined {
+  const fields: Array<[string, string | undefined]> = [
+    ['profile.id', ctx.profile.id],
+    ['profile.description', ctx.profile.description],
+    ['command', ctx.command],
+    ['description', ctx.description],
+  ];
+  return fields.find(([, value]) =>
+    value !== undefined && Buffer.byteLength(value, 'utf8') > SMART_PROMPT_INPUT_MAX_BYTES,
+  )?.[0];
+}
+
+async function readBoundedResponseBody(response: SmartHttpResponse): Promise<string> {
+  const declaredRaw = response.headers?.get('content-length');
+  if (declaredRaw && /^\d+$/.test(declaredRaw.trim())) {
+    const declared = Number(declaredRaw);
+    if (Number.isSafeInteger(declared) && declared > SMART_LLM_RESPONSE_MAX_BYTES) {
+      throw new SmartResponseTooLargeError(
+        `smart approval: LLM response body exceeds ${SMART_LLM_RESPONSE_MAX_BYTES}-byte limit`,
+      );
+    }
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('LLM response has no readable body stream');
+
+  const chunks: Buffer[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value || value.byteLength === 0) continue;
+    total += value.byteLength;
+    if (total > SMART_LLM_RESPONSE_MAX_BYTES) {
+      try { await reader.cancel('response body too large'); } catch { /* best-effort */ }
+      throw new SmartResponseTooLargeError(
+        `smart approval: LLM response body exceeds ${SMART_LLM_RESPONSE_MAX_BYTES}-byte limit`,
+      );
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks, total).toString('utf8');
+}
 
 function redactAndBoundPromptField(input: string | undefined): string {
   const redacted = redactApprovalText(input);
@@ -164,6 +225,20 @@ export class SmartApproval implements ApprovalEngine {
       );
     }
 
+    // Reject before commandWithoutAppendedDescription/buildUserPrompt can run
+    // normalization or regex redaction over an unbounded client-controlled
+    // field. Accepted fields retain 4 KiB of redaction headroom beyond the
+    // final 16 KiB prompt cap, so a boundary-straddling bounded credential is
+    // still fully visible to the redactor; larger fields never leave the host.
+    const oversizedField = oversizedContextField(ctx);
+    if (oversizedField) {
+      return this.failClosedDecision(
+        fail_closed,
+        `smart approval: context field "${oversizedField}" exceeds ${SMART_PROMPT_INPUT_MAX_BYTES}-byte limit`,
+        'smart-llm:context-too-large',
+      );
+    }
+
     const timeoutMs = this.opts.llm.timeout_ms ?? DEFAULT_SMART_LLM_TIMEOUT_MS;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -188,7 +263,7 @@ export class SmartApproval implements ApprovalEngine {
     let phase: 'request' | 'body' = 'request';
     let raw: string;
     try {
-      const response: { ok: boolean; status: number; text: () => Promise<string> } = await fetchImpl(this.opts.llm.endpoint, {
+      const response: SmartHttpResponse = await fetchImpl(this.opts.llm.endpoint, {
         method: 'POST',
         headers,
         body,
@@ -201,8 +276,15 @@ export class SmartApproval implements ApprovalEngine {
       }
 
       phase = 'body';
-      raw = await response.text();
+      raw = await readBoundedResponseBody(response);
     } catch (err: any) {
+      if (err instanceof SmartResponseTooLargeError) {
+        return this.failClosedDecision(
+          fail_closed,
+          err.message,
+          'smart-llm:response-too-large',
+        );
+      }
       const aborted = err?.name === 'AbortError' || /aborted/i.test(String(err?.message ?? ''));
       if (aborted) {
         return this.failClosedDecision(

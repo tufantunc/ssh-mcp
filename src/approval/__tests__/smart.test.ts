@@ -10,15 +10,32 @@ const ctx: ApprovalContext = {
   description: 'list temp',
 };
 
-function makeOkResponse(content: string) {
-  const body = JSON.stringify({
-    choices: [{ message: { content } }],
-  });
-  return Promise.resolve({
+function makeRawResponse(raw: string) {
+  const bytes = new TextEncoder().encode(raw);
+  let delivered = false;
+  return {
     ok: true,
     status: 200,
-    text: () => Promise.resolve(body),
+    headers: { get: (name: string) => name.toLowerCase() === 'content-length' ? String(bytes.byteLength) : null },
+    body: {
+      getReader: () => ({
+        read: async () => {
+          if (delivered) return { done: true as const, value: undefined };
+          delivered = true;
+          return { done: false as const, value: bytes };
+        },
+        cancel: async () => { delivered = true; },
+      }),
+    },
+    text: vi.fn(() => Promise.resolve(raw)),
+  };
+}
+
+function makeOkResponse(content: string) {
+  const raw = JSON.stringify({
+    choices: [{ message: { content } }],
   });
+  return Promise.resolve(makeRawResponse(raw));
 }
 
 function makeOpts(overrides: Partial<SmartApprovalOptions> = {}): SmartApprovalOptions {
@@ -126,6 +143,7 @@ describe('SmartApproval — happy paths', () => {
 
   it('bounds every context field before sending the external LLM request', async () => {
     const maxFieldBytes = 16 * 1024;
+    const boundedButTruncatedBytes = maxFieldBytes + 2048;
     const fetchImpl = vi.fn(() =>
       makeOkResponse(JSON.stringify({ allow: true, reason: 'ok' })),
     );
@@ -135,10 +153,10 @@ describe('SmartApproval — happy paths', () => {
       ...ctx,
       profile: {
         ...ctx.profile,
-        description: `profile-start ${'p'.repeat(maxFieldBytes * 2)} profile-tail`,
+        description: `profile-start ${'p'.repeat(boundedButTruncatedBytes)} profile-tail`,
       },
-      command: `command-start ${'c'.repeat(maxFieldBytes * 2)} command-tail`,
-      description: `intent-start ${'i'.repeat(maxFieldBytes * 2)} intent-tail`,
+      command: `command-start ${'c'.repeat(boundedButTruncatedBytes)} command-tail`,
+      description: `intent-start ${'i'.repeat(boundedButTruncatedBytes)} intent-tail`,
     });
 
     const call: any = (fetchImpl as any).mock.calls[0];
@@ -147,6 +165,23 @@ describe('SmartApproval — happy paths', () => {
     expect(Buffer.byteLength(userPrompt, 'utf8')).toBeLessThanOrEqual(maxFieldBytes * 3 + 512);
     expect((userPrompt.match(/<truncated>/g) ?? [])).toHaveLength(3);
     expect(userPrompt).not.toMatch(/profile-tail|command-tail|intent-tail/);
+  });
+
+  it('rejects oversized context before redaction or an external request', async () => {
+    const fetchImpl = vi.fn(() =>
+      makeOkResponse(JSON.stringify({ allow: true, reason: 'ok' })),
+    );
+    const s = new SmartApproval(makeOpts({ fetchImpl: fetchImpl as any }));
+
+    const d = await s.decide({
+      ...ctx,
+      description: `intent-start ${'i'.repeat(2 * 1024 * 1024)} intent-tail`,
+    });
+
+    expect(d.decision).toBe('deny');
+    expect(d.decided_by).toBe('smart-llm:context-too-large');
+    expect(d.reason).toMatch(/context field.*limit/i);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it('redacts standalone OpenAI API keys before sending them to the external LLM', async () => {
@@ -254,17 +289,55 @@ describe('SmartApproval — fail-closed (default)', () => {
   });
 
   it('denies on malformed JSON body', async () => {
-    const fetchImpl = vi.fn(() =>
-      Promise.resolve({
-        ok: true,
-        status: 200,
-        text: () => Promise.resolve('not json at all'),
-      }),
-    );
+    const fetchImpl = vi.fn(() => Promise.resolve(makeRawResponse('not json at all')));
     const s = new SmartApproval(makeOpts({ fetchImpl: fetchImpl as any }));
     const d = await s.decide(ctx);
     expect(d.decision).toBe('deny');
     expect(d.reason).toMatch(/malformed/);
+  });
+
+  it('rejects a declared oversized response without buffering or parsing it', async () => {
+    const response = makeRawResponse('x'.repeat(128 * 1024));
+    const readerSpy = vi.spyOn(response.body, 'getReader');
+    const fetchImpl = vi.fn(() => Promise.resolve(response));
+    const s = new SmartApproval(makeOpts({ fetchImpl: fetchImpl as any }));
+
+    const d = await s.decide(ctx);
+
+    expect(d.decision).toBe('deny');
+    expect(d.decided_by).toBe('smart-llm:response-too-large');
+    expect(d.reason).toMatch(/response body.*limit/i);
+    expect(readerSpy).not.toHaveBeenCalled();
+    expect(response.text).not.toHaveBeenCalled();
+  });
+
+  it('cancels a chunked response as soon as its streamed bytes exceed the limit', async () => {
+    const chunk = new Uint8Array(40 * 1024).fill(120);
+    const cancel = vi.fn(async () => {});
+    let reads = 0;
+    const response = {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      body: {
+        getReader: () => ({
+          read: async () => reads++ < 2
+            ? { done: false as const, value: chunk }
+            : { done: true as const, value: undefined },
+          cancel,
+        }),
+      },
+      text: vi.fn(() => Promise.resolve('x'.repeat(80 * 1024))),
+    };
+    const fetchImpl = vi.fn(() => Promise.resolve(response));
+    const s = new SmartApproval(makeOpts({ fetchImpl: fetchImpl as any }));
+
+    const d = await s.decide(ctx);
+
+    expect(d.decision).toBe('deny');
+    expect(d.decided_by).toBe('smart-llm:response-too-large');
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(response.text).not.toHaveBeenCalled();
   });
 
   it('denies when content is missing the JSON object', async () => {
@@ -309,13 +382,20 @@ describe('SmartApproval — fail-closed (default)', () => {
         return Promise.resolve({
           ok: true,
           status: 200,
-          text: () => new Promise<string>((_resolve, reject) => {
-            signal?.addEventListener('abort', () => {
-              const err: any = new Error('aborted while reading body');
-              err.name = 'AbortError';
-              reject(err);
-            });
-          }),
+          headers: { get: () => null },
+          body: {
+            getReader: () => ({
+              read: () => new Promise((_resolve, reject) => {
+                signal?.addEventListener('abort', () => {
+                  const err: any = new Error('aborted while reading body');
+                  err.name = 'AbortError';
+                  reject(err);
+                });
+              }),
+              cancel: async () => {},
+            }),
+          },
+          text: () => Promise.reject(new Error('streaming reader must be used')),
         });
       },
     );
@@ -360,9 +440,7 @@ describe('SmartApproval — fail-open (fail_closed=false)', () => {
 
   it('allows on malformed JSON with warning', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const fetchImpl = vi.fn(() =>
-      Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('garbage') }),
-    );
+    const fetchImpl = vi.fn(() => Promise.resolve(makeRawResponse('garbage')));
     const s = new SmartApproval(makeOpts({ fail_closed: false, fetchImpl: fetchImpl as any }));
     const d = await s.decide(ctx);
     expect(d.decision).toBe('allow');

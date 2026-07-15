@@ -87,13 +87,20 @@ export interface SmartApprovalOptions {
   fail_closed?: boolean;  // default true
   /**
    * Test seam: dependency-injectable fetch implementation. Defaults to the
-   * global `fetch`. The signature is intentionally narrowed to the bits we use
-   * so test stubs don't need to satisfy the full DOM Fetch type.
+   * global `fetch`. The signature is intentionally narrowed to the streaming
+   * response bits we use so response bodies can be size-bounded before they are
+   * fully buffered or parsed.
    */
   fetchImpl?: (input: string, init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal }) => Promise<{
     ok: boolean;
     status: number;
-    text: () => Promise<string>;
+    headers?: { get(name: string): string | null };
+    body?: {
+      getReader(): {
+        read(): Promise<{ done: boolean; value?: Uint8Array }>;
+        cancel(reason?: unknown): Promise<void> | void;
+      };
+    } | null;
   }>;
 }
 

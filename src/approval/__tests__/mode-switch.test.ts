@@ -29,7 +29,7 @@ describe('ApprovalDispatcher — availableModes', () => {
       manual: { webuiEnabled: true, timeout_ms: 5000 },
       smart: {
         llm: { endpoint: 'http://stub/llm', model: 'm' },
-        fetchImpl: (async () => ({ ok: true, status: 200, text: async () => '{}' })) as any,
+        fetchImpl: (async () => new Response('{}', { status: 200 })) as any,
       },
     });
     expect(full.availableModes().sort()).toEqual(['manual', 'smart', 'yolo']);
@@ -238,7 +238,7 @@ describe('buildApprovalEngineFromConfig — pre-arms engines for live switching'
       { defaultMode: 'yolo', llm: { endpoint: 'http://stub/llm', model: 'm' } },
       {
         manualOpts: { webuiEnabled: false },
-        smartFetchImpl: (async () => ({ ok: true, status: 200, text: async () => '{}' })) as any,
+        smartFetchImpl: (async () => new Response('{}', { status: 200 })) as any,
       },
     );
     expect(d.availableModes()).toContain('smart');
@@ -282,7 +282,7 @@ describe('buildApprovalEngineFromConfig — pre-arms engines for live switching'
       { defaultMode: 'yolo', staticOverrides: { prod: 'smart' }, llm: { endpoint: 'http://stub/llm', model: 'm' } },
       {
         manualOpts: { webuiEnabled: false },
-        smartFetchImpl: (async () => ({ ok: true, status: 200, text: async () => '{}' })) as any,
+        smartFetchImpl: (async () => new Response('{}', { status: 200 })) as any,
       },
     );
     expect(d.getEffectiveMode('prod')).toBe('smart');

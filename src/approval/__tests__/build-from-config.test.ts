@@ -41,13 +41,9 @@ describe('buildApprovalEngineFromConfig — mode dispatch', () => {
   });
 
   it('mode=smart wires SmartApproval with stubbed fetch (no real LLM call)', async () => {
-    const fetchStub = vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      text: async () => JSON.stringify({
+    const fetchStub = vi.fn(async () => new Response(JSON.stringify({
         choices: [{ message: { content: '{"allow": true, "reason": "stub allowed"}' } }],
-      }),
-    }));
+      }), { status: 200 }));
 
     const dispatcher = buildApprovalEngineFromConfig(
       {

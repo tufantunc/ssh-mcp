@@ -106,14 +106,12 @@ describe('per-source approval propagates loader -> registry -> engine', () => {
     const bodies: string[] = [];
     const fetchStub = vi.fn(async (_url: string, init: { body: string }) => {
       bodies.push(init.body);
-      return {
-        ok: true,
-        status: 200,
-        text: async () =>
-          JSON.stringify({
+      return new Response(
+        JSON.stringify({
             choices: [{ message: { content: '{"allow": true, "reason": "policy permits certutil"}' } }],
           }),
-      };
+        { status: 200 },
+      );
     });
 
     const dispatcher = buildApprovalEngineFromConfig(

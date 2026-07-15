@@ -115,12 +115,10 @@ describe('approval engine RE-READS the effective description live (override > TO
     const bodies: string[] = [];
     const fetchStub = vi.fn(async (_url: string, init: { body: string }) => {
       bodies.push(init.body);
-      return {
-        ok: true,
-        status: 200,
-        text: async () =>
-          JSON.stringify({ choices: [{ message: { content: '{"allow": true, "reason": "ok"}' } }] }),
-      };
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: '{"allow": true, "reason": "ok"}' } }] }),
+        { status: 200 },
+      );
     });
 
     const dispatcher = buildApprovalEngineFromConfig(
