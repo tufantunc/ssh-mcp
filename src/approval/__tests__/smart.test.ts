@@ -127,7 +127,14 @@ describe('SmartApproval — happy paths', () => {
   });
 
   it('redacts compact JWTs with non-eyJ payload segments before sending them to the external LLM', async () => {
-    const token = `eyJhbGciOiJIUzI1NiJ9.e30.${'s'.repeat(43)}`;
+    const header = Buffer.from('{"alg":"HS256"}').toString('base64url');
+    const payload = Buffer.from('{}').toString('base64url');
+    const signature = 's'.repeat(43);
+    const token = `${header}.${payload}.${signature}`;
+    expect(header).toMatch(/^eyJ/);
+    expect(payload).not.toMatch(/^eyJ/);
+    expect(redactApprovalText(token)).toBe('<redacted>');
+
     const fetchImpl = vi.fn(() =>
       makeOkResponse(JSON.stringify({ allow: true, reason: 'ok' })),
     );
@@ -139,7 +146,8 @@ describe('SmartApproval — happy paths', () => {
     const userPrompt = JSON.parse(call[1].body).messages
       .find((message: any) => message.role === 'user').content as string;
     expect(userPrompt).not.toContain(token);
-    expect(userPrompt).toContain('<redacted>');
+    expect(userPrompt).not.toContain(signature);
+    expect(userPrompt).toContain('Command:\nprintf %s <redacted>');
   });
 
   it('redacts command and intent secrets before sending them to the external LLM', async () => {
