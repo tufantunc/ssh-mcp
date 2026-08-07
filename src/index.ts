@@ -586,13 +586,14 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
         if (!isResolved) {
           isResolved = true;
           clearTimeout(timeoutId);
-          if (stderr) {
-            reject(new McpError(ErrorCode.InternalError, `Error (code ${code}):\n${stderr}`));
+          const outcome = buildExecResult(code, signal, stdout, stderr);
+          if (!outcome.ok) {
+            reject(new McpError(ErrorCode.InternalError, outcome.message));
           } else {
             resolve({
               content: [{
                 type: 'text',
-                text: stdout,
+                text: outcome.text,
               }],
             });
           }
@@ -600,6 +601,47 @@ export async function execSshCommandWithConnection(manager: SSHConnectionManager
       });
     });
   });
+}
+
+/**
+ * Decide whether a finished remote command succeeded, and build its output.
+ *
+ * Success is determined by the exit status, not by whether the command wrote
+ * to stderr. Plenty of successful tools write to stderr (git, npm, apt,
+ * systemctl, curl progress), and treating that as failure both hides the real
+ * stdout and reports a false error.
+ *
+ * On success, stderr is appended to stdout so warnings are still visible,
+ * mirroring what `2>&1` would show in a terminal.
+ */
+export function buildExecResult(
+  code: number | null | undefined,
+  signal: string | null | undefined,
+  stdout: string,
+  stderr: string
+): { ok: true; text: string } | { ok: false; message: string } {
+  if (signal) {
+    return { ok: false, message: `Error (signal ${signal}):\n${stderr || stdout || '(no output)'}` };
+  }
+
+  // A missing exit code means the channel closed without reporting status.
+  // Treat that as success only when nothing was written to stderr.
+  if (code === null || code === undefined) {
+    return stderr
+      ? { ok: false, message: `Error (no exit code reported):\n${stderr}` }
+      : { ok: true, text: stdout };
+  }
+
+  if (code !== 0) {
+    return { ok: false, message: `Error (code ${code}):\n${stderr || stdout || '(no output)'}` };
+  }
+
+  if (!stderr) {
+    return { ok: true, text: stdout };
+  }
+
+  const separator = stdout && !stdout.endsWith('\n') ? '\n' : '';
+  return { ok: true, text: `${stdout}${separator}${stderr}` };
 }
 
 // Keep the old function for backward compatibility (used in tests)
@@ -661,13 +703,14 @@ export async function execSshCommand(sshConfig: any, command: string, stdin?: st
             isResolved = true;
             clearTimeout(timeoutId);
             conn.end();
-            if (stderr) {
-              reject(new McpError(ErrorCode.InternalError, `Error (code ${code}):\n${stderr}`));
+            const outcome = buildExecResult(code, signal, stdout, stderr);
+            if (!outcome.ok) {
+              reject(new McpError(ErrorCode.InternalError, outcome.message));
             } else {
               resolve({
                 content: [{
                   type: 'text',
-                  text: stdout,
+                  text: outcome.text,
                 }],
               });
             }
