@@ -8,6 +8,8 @@ services:
       - PASSWORD_ACCESS=true
       - USER_PASSWORD=secret
       - SUDO_ACCESS=true
+    volumes:
+      - ./docker/test-server-init.sh:/custom-cont-init.d/10-test-limits:ro
     ports:
       - "2222:2222"
 
@@ -18,6 +20,8 @@ services:
       - USER_NAME=viewer
       - PASSWORD_ACCESS=true
       - USER_PASSWORD=viewpass
+    volumes:
+      - ./docker/test-server-init.sh:/custom-cont-init.d/10-test-limits:ro
     ports:
       - "2223:2222"
 
@@ -29,6 +33,8 @@ services:
       - PASSWORD_ACCESS=true
       - USER_PASSWORD=oppass
       - SUDO_ACCESS=true
+    volumes:
+      - ./docker/test-server-init.sh:/custom-cont-init.d/10-test-limits:ro
     ports:
       - "2224:2222"
 
@@ -44,6 +50,7 @@ services:
       - USER_PASSWORD=bastionpass
     volumes:
       - ./docker/bastion-init.sh:/custom-cont-init.d/10-allow-forwarding:ro
+      - ./docker/test-server-init.sh:/custom-cont-init.d/20-test-limits:ro
     ports:
       - "2225:2222"
 

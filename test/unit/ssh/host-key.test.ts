@@ -21,10 +21,15 @@ describe('verifyHostKey', () => {
     expect(knownHosts.get('newhost.com:22')).toBe('SHA256:newkey');
   });
 
-  it('rejects new key in strict mode', () => {
+  it('rejects an unknown host in strict mode', () => {
     const knownHosts = new Map<string, string>();
+    // Distinct from HOST_KEY_MISMATCH: nothing changed, the host is simply not
+    // known yet. The message must also point at a flag that actually exists.
     expect(() => verifyHostKey('newhost.com', 22, 'SHA256:newkey', knownHosts, 'strict')).toThrow(
-      /HOST_KEY_MISMATCH/,
+      /HOST_KEY_UNKNOWN/,
+    );
+    expect(() => verifyHostKey('newhost.com', 22, 'SHA256:newkey', knownHosts, 'strict')).toThrow(
+      /--hostKeyMode=tofu/,
     );
   });
 

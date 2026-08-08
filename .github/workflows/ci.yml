@@ -66,6 +66,9 @@ jobs:
       - name: Dependency resolution check
         run: npm ls zod zod-to-json-schema @modelcontextprotocol/sdk --all
 
+      - name: Typecheck (src + tests)
+        run: npm run typecheck
+
       - name: Wait for all sshd servers
         run: |
           for port in 2222 2223 2224; do
@@ -83,6 +86,9 @@ jobs:
           SSH_MCP_VIEWER_PASSWORD: viewpass
           SSH_MCP_ADMIN_SUDO_PASSWORD: secret
           SSH_MCP_OPERATOR_SUDO_PASSWORD: oppass
+          # Without this, integration tests silently skip themselves when a
+          # server is unreachable and CI reports green with zero of them run.
+          SSH_MCP_REQUIRE_SERVERS: "1"
         run: npm test
 
   security-scan:
