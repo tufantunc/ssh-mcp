@@ -114,6 +114,27 @@ Agent: read-session-output(name="logs", lines=20)   # poll
 Agent: close-session(name="logs")
 ```
 
+### Remote host support
+
+Tested against Linux (Debian/bash, Alpine/busybox ash), Dropbear, and Windows
+OpenSSH on Windows 11.
+
+| | Linux / BSD / macOS | Windows OpenSSH |
+|---|:---:|:---:|
+| `read-command`, `run-command`, `privileged-command`, `signal-process` | ✅ | ✅ |
+| `sftp-upload`, `sftp-download` | ✅ | ✅ |
+| Background sessions | ✅ | ✅ |
+| **Interactive sessions** | ✅ | ❌ |
+
+**Interactive sessions require a POSIX shell** (sh, bash, ash, zsh). They work by
+bracketing each command with `printf` markers and reading `$?` and `$PWD` from a
+trailer — none of which exist in `cmd.exe`, the default shell for Windows
+OpenSSH. Opening one against such a host fails immediately with an explicit
+error rather than timing out; everything else works normally.
+
+Setting PowerShell as the OpenSSH `DefaultShell` does not help: the protocol is
+POSIX-specific, not merely non-`cmd`.
+
 ---
 
 ## Configuration

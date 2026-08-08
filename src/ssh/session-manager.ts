@@ -86,52 +86,71 @@ export class SessionManager {
 
     const session = new InteractiveSession(id, name, this.deps.profile().name, stream, ttlMs);
     this.register(name, session, stream);
-    await this.primeShell(stream, session);
+    try {
+      await this.primeShell(stream, session);
+    } catch (err) {
+      await session.close().catch(() => { /* channel already going away */ });
+      this.sessions.delete(name);
+      throw err;
+    }
     return session;
   }
 
+
   /**
-   * Quiet the shell down before the caller runs anything: no prompt, no
-   * history, no bracketed paste — all of which would otherwise land in command
-   * output. Resolves on the first prompt, with a ceiling so an exotic shell
-   * that never matches cannot hang the open.
+   * Quiet the shell down and confirm it can run the session protocol — in one
+   * round trip.
+   *
+   * Priming suppresses the prompt, history and bracketed paste, all of which
+   * would otherwise land in command output. The readiness marker at the end
+   * doubles as the handshake: it comes back only from a shell that can run
+   * `printf`, which is the same capability every later command depends on.
+   *
+   * This replaced two weaker mechanisms. Waiting for a prompt with /[#$>]\s*$/
+   * was a guess that failed on busybox ash (its prompt is followed by a
+   * cursor-position query) and would silently "succeed" on cmd.exe, which
+   * presents a `>` prompt and then cannot run a single command — every call
+   * afterwards sat until the 60s command timeout with nothing useful to say.
    */
   private primeShell(stream: ClientChannel, session: InteractiveSession): Promise<void> {
-    const { workdir } = this.deps.profile();
+    const { workdir, name: profileName } = this.deps.profile();
+    // Split literals: the echoed input never contains the assembled marker, so
+    // only the shell's own output can satisfy the match.
+    const parts = ['SSHMCP_RDY', `_${randomUUID()}`];
+    const marker = parts.join('');
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      let buffer = '';
       let settled = false;
-      let initBuffer = '';
 
-      const finish = (delayMs: number) => {
+      const settle = (err?: Error) => {
         if (settled) return;
         settled = true;
-        stream.removeListener('data', initHandler);
-        clearTimeout(ceiling);
-        setTimeout(resolve, delayMs);
+        clearTimeout(timer);
+        stream.removeListener('data', onData);
+        err ? reject(err) : resolve();
       };
 
-      const initHandler = (data: Buffer) => {
-        initBuffer += data.toString();
-        // Strip ANSI before looking for the prompt. busybox ash follows its
-        // prompt with a cursor-position query (ESC[6n), so the raw buffer ends
-        // in an escape sequence rather than "$ " — the match failed and every
-        // session open on such a shell waited out the 3s ceiling instead.
-        const visible = stripAnsi(initBuffer);
-        if (!/[#$>]\s*$/.test(visible) && initBuffer.length <= 1000) return;
-
-        stream.write('PS1=""\n');
-        stream.write('set +o history 2>/dev/null\n');
-        stream.write('bind "set enable-bracketed-paste off" 2>/dev/null\n');
-        if (workdir) {
-          stream.write(`cd ${shellSingleQuote(workdir)}\n`);
-          session.setCwd(workdir);
-        }
-        finish(200);
+      const onData = (data: Buffer) => {
+        buffer += data.toString();
+        if (stripAnsi(buffer).includes(marker)) settle();
       };
 
-      const ceiling = setTimeout(() => finish(0), 3000);
-      stream.on('data', initHandler);
+      const timer = setTimeout(() => settle(new Error(
+        `Interactive sessions are not supported on ${profileName}: its shell did not complete the ` +
+        'session handshake. The protocol requires a POSIX shell (sh/bash/ash/zsh); cmd.exe and ' +
+        'PowerShell do not provide it. Use read-command / run-command instead, which work on any shell.',
+      )), 5000);
+
+      stream.on('data', onData);
+      stream.write('PS1=""\n');
+      stream.write('set +o history 2>/dev/null\n');
+      stream.write('bind "set enable-bracketed-paste off" 2>/dev/null\n');
+      if (workdir) {
+        stream.write(`cd ${shellSingleQuote(workdir)}\n`);
+        session.setCwd(workdir);
+      }
+      stream.write(`printf '%s%s\\n' '${parts[0]}' '${parts[1]}'\n`);
     });
   }
 

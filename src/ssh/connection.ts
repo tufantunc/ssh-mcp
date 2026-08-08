@@ -195,7 +195,6 @@ export class SSHConnection {
 
   async exec(rawCommand: string, opts: ExecOpts = {}): Promise<CommandResult> {
     await this.ensureConnected();
-    const client = this.getClient();
     const command = this.applyWorkdir(rawCommand);
     const timeoutMs = opts.timeoutMs ?? this.profile.timeout;
     const startTime = Date.now();
