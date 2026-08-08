@@ -2,8 +2,8 @@ import { Client, type ClientChannel, type ConnectConfig, type ExecOptions } from
 import type { ConnectionInfo, Profile, ResolvedCredentials, ExecOpts, CommandResult, SessionOpts } from '../types.js';
 import { FROZEN_ALGORITHMS } from './algorithms.js';
 import { verifyHostKey, fingerprintPublicKey, type HostKeyMode } from './host-key.js';
-import { InteractiveSession, BackgroundSession, type Session } from './session.js';
-import { randomUUID } from 'crypto';
+import type { Session } from './session.js';
+import { SessionManager } from './session-manager.js';
 import { tracer } from '../observability/tracer.js';
 import { redactText } from '../guard/redactor.js';
 import { shellSingleQuote } from '../guard/sanitizer.js';
@@ -12,7 +12,7 @@ export class SSHConnection {
   readonly profile: Profile;
   private client: Client | null = null;
   private credentials: ResolvedCredentials;
-  private sessions = new Map<string, Session>();
+  private readonly sessions: SessionManager;
   private activeChannels = 0;
   private connecting: Promise<void> | null = null;
   private connected = false;
@@ -34,6 +34,25 @@ export class SSHConnection {
     this.knownHostsStore = knownHostsStore;
     this.hostKeyMode = hostKeyMode;
     this.bastionSock = bastionSock ?? null;
+
+    this.sessions = new SessionManager({
+      // Live read: the profile object can be replaced after construction.
+      profile: () => this.profile,
+      openShell: () => new Promise((resolve, reject) => {
+        this.getClient().shell(
+          { term: 'xterm-256color', cols: 200, rows: 50 },
+          (err, stream) => (err ? reject(err) : resolve(stream)),
+        );
+      }),
+      openExec: (command) => new Promise((resolve, reject) => {
+        this.getClient().exec(
+          this.applyWorkdir(command),
+          (err, stream) => (err ? reject(err) : resolve(stream)),
+        );
+      }),
+      onChannelOpened: () => { this.activeChannels++; },
+      onChannelClosed: () => { this.activeChannels--; },
+    });
   }
 
   async ensureConnected(): Promise<void> {
@@ -93,7 +112,7 @@ export class SSHConnection {
       const onDisconnect = (reason: string) => () => {
         if (!isCurrent()) return;
         this.connected = false;
-        this.markSessionsDisconnected();
+        this.sessions.markAllDisconnected();
         this.client = null;
         this.connectedAt = null;
         // Without clearing the timer here, a handshake that fails via a clean
@@ -305,104 +324,11 @@ export class SSHConnection {
     });
   }
 
+  // ─── Sessions (delegated to SessionManager) ──────────────────────────
+
   async openSession(opts: SessionOpts): Promise<Session> {
     await this.ensureConnected();
-
-    if (this.sessions.size >= this.profile.sessionMaxPerConnection) {
-      throw new Error(
-        `Session limit reached for ${this.profile.name} (max: ${this.profile.sessionMaxPerConnection})`,
-      );
-    }
-
-    if (this.sessions.has(opts.name)) {
-      throw new Error(`Session "${opts.name}" already exists on ${this.profile.name}`);
-    }
-
-    const ttl = opts.ttlMs ?? this.profile.sessionIdleTimeoutMs;
-    const id = randomUUID();
-
-    if (opts.type === 'interactive') {
-      return this.openInteractiveSession(id, opts.name, ttl);
-    } else {
-      if (!opts.command) throw new Error('Background sessions require a command');
-      return this.openBackgroundSession(id, opts.name, opts.command, ttl);
-    }
-  }
-
-  private openInteractiveSession(id: string, name: string, ttlMs: number): Promise<Session> {
-    const client = this.getClient();
-
-    return new Promise((resolve, reject) => {
-      client.shell({ term: 'xterm-256color', cols: 200, rows: 50 }, (err, stream) => {
-        if (err) {
-          reject(new Error(`Failed to open interactive session: ${err.message}`));
-          return;
-        }
-        const session = new InteractiveSession(id, name, this.profile.name, stream, ttlMs);
-        this.sessions.set(name, session);
-        this.activeChannels++;
-
-        stream.on('close', () => {
-          this.activeChannels--;
-          // Only evict if this session is still the registered one. close()
-          // merely ends the stream, so the channel's 'close' can arrive well
-          // after a session with the same name was reopened — and used to
-          // delete the *new* session, leaving its channel open but unreachable
-          // via getSession/list/close/reap.
-          if (this.sessions.get(name) === session) this.sessions.delete(name);
-        });
-
-        let initBuffer = '';
-        const initHandler = (data: Buffer) => {
-          initBuffer += data.toString();
-          if (/[#$>]\s*$/.test(initBuffer) || initBuffer.length > 1000) {
-            stream.removeListener('data', initHandler);
-            stream.write('PS1=""\n');
-            stream.write('set +o history 2>/dev/null\n');
-            stream.write('bind "set enable-bracketed-paste off" 2>/dev/null\n');
-            if (this.profile.workdir) {
-              stream.write(`cd ${shellSingleQuote(this.profile.workdir)}\n`);
-              session.setCwd(this.profile.workdir);
-            }
-            setTimeout(() => resolve(session), 200);
-          }
-        };
-        stream.on('data', initHandler);
-
-        setTimeout(() => {
-          stream.removeListener('data', initHandler);
-          resolve(session);
-        }, 3000);
-      });
-    });
-  }
-
-  private openBackgroundSession(id: string, name: string, command: string, ttlMs: number): Promise<Session> {
-    const client = this.getClient();
-
-    return new Promise((resolve, reject) => {
-      client.exec(this.applyWorkdir(command), (err, stream) => {
-        if (err) {
-          reject(new Error(`Failed to open background session: ${err.message}`));
-          return;
-        }
-        const session = new BackgroundSession(id, name, this.profile.name, stream, ttlMs, this.profile.sessionBackgroundMaxMs);
-        this.sessions.set(name, session);
-        this.activeChannels++;
-
-        stream.on('close', () => {
-          this.activeChannels--;
-          // Only evict if this session is still the registered one. close()
-          // merely ends the stream, so the channel's 'close' can arrive well
-          // after a session with the same name was reopened — and used to
-          // delete the *new* session, leaving its channel open but unreachable
-          // via getSession/list/close/reap.
-          if (this.sessions.get(name) === session) this.sessions.delete(name);
-        });
-
-        resolve(session);
-      });
-    });
+    return this.sessions.open(opts);
   }
 
   getSession(name: string): Session | undefined {
@@ -410,35 +336,19 @@ export class SSHConnection {
   }
 
   listSessions(): Session[] {
-    return Array.from(this.sessions.values());
+    return this.sessions.list();
   }
 
   async closeSession(name: string): Promise<void> {
-    const session = this.sessions.get(name);
-    if (!session) throw new Error(`Session "${name}" not found on ${this.profile.name}`);
-    await session.close();
-    this.sessions.delete(name);
+    return this.sessions.close(name);
   }
 
   reapExpiredSessions(): void {
-    for (const [name, session] of this.sessions) {
-      if (session.isExpired()) {
-        session.close().catch(() => {});
-        this.sessions.delete(name);
-      }
-    }
-  }
-
-  private markSessionsDisconnected(): void {
-    for (const session of this.sessions.values()) {
-      session.markDisconnected();
-    }
+    this.sessions.reapExpired();
   }
 
   async close(): Promise<void> {
-    for (const [name] of this.sessions) {
-      await this.closeSession(name).catch(() => {});
-    }
+    await this.sessions.closeAll();
     if (this.client) {
       this.client.end();
       this.client = null;
