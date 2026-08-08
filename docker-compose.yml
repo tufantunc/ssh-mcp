@@ -32,6 +32,21 @@ services:
     ports:
       - "2224:2222"
 
+  # Bastion for ProxyJump (`profile.via`) tests. Identical to ssh-admin except
+  # that an init hook enables AllowTcpForwarding, which the base image disables
+  # — without it every direct-tcpip channel fails and the hop cannot be tested.
+  ssh-bastion:
+    image: lscr.io/linuxserver/openssh-server:latest
+    profiles: ["test"]
+    environment:
+      - USER_NAME=bastion
+      - PASSWORD_ACCESS=true
+      - USER_PASSWORD=bastionpass
+    volumes:
+      - ./docker/bastion-init.sh:/custom-cont-init.d/10-allow-forwarding:ro
+    ports:
+      - "2225:2222"
+
   # ─── SSH MCP Server v2 ────────────────────────────────────────────────────
   ssh-mcp:
     build: .

@@ -33,6 +33,18 @@ export class ConnectionRegistry {
     const promise = (async () => {
       try {
         let conn = this.connections.get(profile.name);
+
+        // A ProxyJump connection runs over a forwarded channel on the bastion.
+        // Once the connection drops, that channel is dead, so reconnecting the
+        // same SSHConnection reuses a corpse and always fails — which used to
+        // burn one tool call on every reconnect before the retry rebuilt it.
+        // Discard the object so the hop is re-established below.
+        if (conn && profile.via && !conn.isConnected()) {
+          await conn.close().catch(() => {});
+          this.connections.delete(profile.name);
+          conn = undefined;
+        }
+
         if (!conn) {
           let bastionSock: ClientChannel | undefined;
           if (profile.via) {

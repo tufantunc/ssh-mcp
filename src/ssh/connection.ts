@@ -46,52 +46,64 @@ export class SSHConnection {
 
   private async connect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.client = new Client();
+      // Every handler below acts on `client`, not `this.client`, and only
+      // mutates shared state while it is still the current client. A late event
+      // from a superseded attempt must not tear down the connection that
+      // replaced it.
+      const client = new Client();
+      this.client = client;
+      const isCurrent = () => this.client === client;
+
+      let settled = false;
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        if (isCurrent()) this.connecting = null;
+        fn();
+      };
 
       const timeoutId = setTimeout(() => {
-        this.client?.end();
-        this.client = null;
-        this.connecting = null;
-        reject(new Error('SSH connection timeout'));
+        settle(() => {
+          try { client.end(); } catch { /* already gone */ }
+          if (isCurrent()) this.client = null;
+          reject(new Error('SSH connection timeout'));
+        });
       }, 20000);
 
-      this.client.on('ready', () => {
-        clearTimeout(timeoutId);
-        this.connecting = null;
-        this.connected = true;
-        this.connectedAt = new Date();
-        this.lastActivity = new Date();
-        resolve();
+      client.on('ready', () => {
+        settle(() => {
+          this.connected = true;
+          this.connectedAt = new Date();
+          this.lastActivity = new Date();
+          resolve();
+        });
       });
 
-      this.client.on('error', (err: Error) => {
-        clearTimeout(timeoutId);
-        this.client = null;
-        this.connecting = null;
-        reject(new Error(`SSH connection error: ${err.message}`));
+      client.on('error', (err: Error) => {
+        settle(() => {
+          if (isCurrent()) this.client = null;
+          reject(new Error(`SSH connection error: ${err.message}`));
+        });
       });
 
-      this.client.on('end', () => {
+      // 'end'/'close' also fire long after a successful handshake, when the
+      // connection drops — that path must clear connection state but leave the
+      // already-resolved promise alone.
+      const onDisconnect = (reason: string) => () => {
+        if (!isCurrent()) return;
         this.connected = false;
         this.markSessionsDisconnected();
         this.client = null;
         this.connectedAt = null;
-        if (this.connecting) {
-          this.connecting = null;
-          reject(new Error('SSH connection ended during handshake'));
-        }
-      });
+        // Without clearing the timer here, a handshake that fails via a clean
+        // TCP close left a 20s bomb armed: it would later end a *newer* client
+        // mid-handshake and null its `connecting`, leaving that attempt hung.
+        settle(() => reject(new Error(`SSH connection ${reason} during handshake`)));
+      };
 
-      this.client.on('close', () => {
-        this.connected = false;
-        this.markSessionsDisconnected();
-        this.client = null;
-        this.connectedAt = null;
-        if (this.connecting) {
-          this.connecting = null;
-          reject(new Error('SSH connection closed during handshake'));
-        }
-      });
+      client.on('end', onDisconnect('ended'));
+      client.on('close', onDisconnect('closed'));
 
       const connectConfig: ConnectConfig = {
         host: this.profile.host,
@@ -134,7 +146,7 @@ export class SSHConnection {
         connectConfig.sock = this.bastionSock;
       }
 
-      this.client.connect(connectConfig);
+      client.connect(connectConfig);
     });
   }
 
