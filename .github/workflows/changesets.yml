@@ -21,6 +21,15 @@ jobs:
           node-version: '22.x'
           registry-url: 'https://registry.npmjs.org/'
 
+      # Trusted publishing needs npm >= 11.5.1, and every Node 22 release ships
+      # npm 10.9.x. Without this the CLI never detects the OIDC environment and
+      # silently falls back to token auth — which, with no token configured,
+      # means the publish fails at the last step of a release.
+      - name: Upgrade npm for trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm -v
+
       - run: npm ci
 
       - name: Build
@@ -29,10 +38,16 @@ jobs:
       - name: Create Release Pull Request or Publish
         uses: changesets/action@v1
         with:
-          publish: npm run build && npm publish --provenance --access public
+          # No --provenance: trusted publishing generates provenance
+          # attestations automatically for a public package from a public repo.
+          publish: npm run build && npm publish --access public
           version: npm run version
           title: 'chore(release): version packages'
           commit: 'chore(release): version packages'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # NODE_AUTH_TOKEN is deliberately absent. Authentication comes from
+          # the OIDC identity of this workflow (id-token: write above), which is
+          # what the package's trusted publisher is configured against. Leaving
+          # the token here would let a misconfigured trusted publisher fall back
+          # silently, so nobody would notice it had stopped working.
