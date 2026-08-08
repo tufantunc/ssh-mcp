@@ -41,6 +41,16 @@ export async function resolveCredentials(profile: Profile): Promise<ResolvedCred
     creds.agentSocket = process.env.SSH_AUTH_SOCK;
   }
 
+  // Warn rather than silently walking down to a weaker credential source: a
+  // profile that asked for the OS keychain and got an env var instead has a
+  // different security posture than the operator configured.
+  if (profile.auth === 'keychain' && !keyringGet) {
+    console.error(
+      `Profile "${profile.name}" requests auth = "keychain" but @napi-rs/keyring is unavailable ` +
+      '(it is an optional dependency). Falling back to the remaining credential sources.',
+    );
+  }
+
   if (profile.auth === 'keychain' && profile.keychainEntry && keyringGet) {
     try {
       const [service, account] = profile.keychainEntry.split('/');

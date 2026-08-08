@@ -5,33 +5,23 @@ import type {
   Profile,
   ApprovalMode,
 } from '../types.js';
-import { classifyCommand } from './classifier.js';
+import { classifyCommand, FORBIDDEN_PATTERNS } from './classifier.js';
 
 export interface PolicyRules {
   roleBindings: Record<string, Record<string, CommandClass[]>>;
+  /**
+   * Extra deny patterns supplied by the operator, as regex source strings.
+   * The canonical never-allowed list (FORBIDDEN_PATTERNS) lives in
+   * classifier.ts and is always applied on top of these — not repeated here.
+   */
   denylist?: string[];
   allowlist?: string[];
 }
 
+/** Tiers, most restrictive first. Unknown/unset tiers resolve to the first. */
+const HOST_GROUPS = ['prod', 'staging', 'dev'] as const;
+
 export const DEFAULT_RULES: PolicyRules = {
-  denylist: [
-    'rm\\s+-rf\\s+/(\\s|$)',
-    'mkfs\\.',
-    'dd\\s+.*\\bof=/dev/',
-    '>\\s*/dev/sd',
-    '\\bshutdown\\b',
-    '\\breboot\\b',
-    '\\bhalt\\b',
-    '\\bpoweroff\\b',
-    'curl\\s+.*\\|\\s*(sh|bash|zsh)',
-    'wget\\s+.*\\|\\s*(sh|bash|zsh)',
-    '\\beval\\b',
-    '>\\s*/etc/cron',
-    '>\\s*/etc/systemd',
-    '>\\s*~/.ssh/authorized_keys',
-    '\\biptables\\s+-F\\b',
-    '\\bchmod\\s+-R\\s+777\\s+/',
-  ],
   roleBindings: {
     viewer: {
       prod: ['read-only'],
@@ -53,8 +43,26 @@ export const DEFAULT_RULES: PolicyRules = {
 
 export class PolicyEngine {
   private opaUrl: string | null = null;
+  /** Rate-limits the fail-open warning so one outage can't flood stderr. */
+  private lastOpaWarning = 0;
+  /** Canonical patterns plus the operator's, compiled once at construction. */
+  private readonly denyPatterns: RegExp[];
 
-  constructor(private rules: PolicyRules = DEFAULT_RULES) {}
+  constructor(private rules: PolicyRules = DEFAULT_RULES) {
+    // Compile eagerly: a deny rule that silently degrades (the old code fell
+    // back to substring-matching the command against the regex *source*) is
+    // worse than a startup failure, because nothing surfaces the degradation.
+    const userPatterns = (rules.denylist ?? []).map((pattern) => {
+      try {
+        return new RegExp(pattern);
+      } catch (err) {
+        throw new Error(
+          `Invalid denylist pattern ${JSON.stringify(pattern)}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    });
+    this.denyPatterns = [...FORBIDDEN_PATTERNS, ...userPatterns];
+  }
 
   setOpaUrl(url: string | null): void {
     this.opaUrl = url;
@@ -153,7 +161,10 @@ export class PolicyEngine {
         body: JSON.stringify({ input }),
       });
 
-      if (!resp.ok) return local;
+      if (!resp.ok) {
+        this.warnOpaUnavailable(`HTTP ${resp.status} from ${this.opaUrl}`);
+        return local;
+      }
 
       const data = await resp.json() as { result?: boolean };
       if (data.result === false) {
@@ -165,11 +176,28 @@ export class PolicyEngine {
           reason: 'Denied by OPA policy',
         };
       }
-    } catch {
-      // OPA unreachable — fall back to local evaluation
+    } catch (err) {
+      this.warnOpaUnavailable(err instanceof Error ? err.message : String(err));
     }
 
     return local;
+  }
+
+  /**
+   * OPA is an *additional* deny layer, so an outage falls back to the local
+   * decision rather than blocking all work. That is a deliberate trade-off, but
+   * it must be loud: an operator who deployed OPA as a hard authorization gate
+   * would otherwise have no signal that the gate is down while commands it
+   * would have denied keep running.
+   */
+  private warnOpaUnavailable(cause: string): void {
+    const now = Date.now();
+    if (now - this.lastOpaWarning < 60_000) return;
+    this.lastOpaWarning = now;
+    console.error(
+      `POLICY WARNING: OPA evaluation unavailable (${cause}). ` +
+      'Falling back to local policy — commands OPA would deny may now be allowed.',
+    );
   }
 
   private getAllowedClasses(profile: Profile): CommandClass[] {
@@ -180,15 +208,30 @@ export class PolicyEngine {
     if (!roleBinding) {
       return ['read-only'];
     }
-    const hostGroup = this.inferHostGroup(profile);
-    return roleBinding[hostGroup] || roleBinding['dev'] || ['read-only'];
+    const hostGroup = this.resolveHostGroup(profile);
+    // Falls back to the most restrictive tier, never to the loosest one.
+    return roleBinding[hostGroup] || roleBinding[HOST_GROUPS[0]] || ['read-only'];
   }
 
-  private inferHostGroup(profile: Profile): string {
+  /**
+   * Which tier's role binding applies to this profile.
+   *
+   * `profile.group` is authoritative. Without it we still infer from the name
+   * for convenience, but an unrecognised name resolves to the most restrictive
+   * tier: the previous default sent every unrecognised profile to `dev`, so a
+   * production host merely named "web-01" silently received the loosest
+   * permissions in the matrix.
+   */
+  private resolveHostGroup(profile: Profile): string {
+    if (profile.group) return profile.group;
+
     const name = profile.name.toLowerCase();
     if (name.includes('prod')) return 'prod';
     if (name.includes('staging')) return 'staging';
-    return 'dev';
+    if (/\b(dev|local|test|sandbox)\b/.test(name) || /(^|[-_])(dev|local|test|sandbox)([-_]|$)/.test(name)) {
+      return 'dev';
+    }
+    return HOST_GROUPS[0];
   }
 
   /**
@@ -204,13 +247,6 @@ export class PolicyEngine {
   }
 
   private matchesDenylist(command: string): boolean {
-    if (!this.rules.denylist) return false;
-    return this.rules.denylist.some((pattern) => {
-      try {
-        return new RegExp(pattern).test(command);
-      } catch {
-        return command.includes(pattern);
-      }
-    });
+    return this.denyPatterns.some((pattern) => pattern.test(command));
   }
 }

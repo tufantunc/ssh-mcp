@@ -22,8 +22,17 @@ const READ_ONLY_ALLOWLIST = new Set([
 // small amounts of data through DNS/ICMP queries. They cannot modify the host,
 // so they stay read-only; tighten them via profile policy if egress matters.
 
-const DESTRUCTIVE_DENYLIST: RegExp[] = [
-  /rm\s+-rf?\s+\//,
+/**
+ * Commands that are never allowed, whatever the role or approval policy.
+ *
+ * This is the policy engine's denylist — the single definition of it. The
+ * engine used to keep a parallel copy as regex *strings*, which had already
+ * drifted (it was missing the fork bomb and the recursive chown, and its `rm`
+ * pattern was narrower). Anything here is also destructive for classification
+ * purposes; see DESTRUCTIVE_DENYLIST below.
+ */
+const FORBIDDEN_PATTERNS: RegExp[] = [
+  /rm\s+-rf?\s+\/(\s|$)/,          // rm -rf / — the filesystem root itself
   /mkfs\./,
   /dd\s+.*\bof=\/dev\//,
   />\s*\/dev\/sd/,
@@ -31,7 +40,7 @@ const DESTRUCTIVE_DENYLIST: RegExp[] = [
   /\breboot\b/,
   /\bhalt\b/,
   /\bpoweroff\b/,
-  /:\(\)\s*\{\s*:\|:\&\s*\}\s*;\s*:/,
+  /:\(\)\s*\{\s*:\|:\&\s*\}\s*;\s*:/,   // fork bomb
   /curl\s+.*\|\s*(sh|bash|zsh)/,
   /wget\s+.*\|\s*(sh|bash|zsh)/,
   /\beval\b/,
@@ -42,6 +51,17 @@ const DESTRUCTIVE_DENYLIST: RegExp[] = [
   /\bchmod\s+-R\s+777\s+\//,
   /\bchown\s+-R\s+.*\s+\/\s*$/,
 ];
+
+/**
+ * Commands that are destructive but legitimate under approval — e.g.
+ * `rm -rf /tmp/build`, which must NOT be confused with `rm -rf /`.
+ */
+const DESTRUCTIVE_PATTERNS: RegExp[] = [
+  /rm\s+-rf?\s+\//,
+];
+
+/** Everything that classifies as destructive: forbidden commands included. */
+const DESTRUCTIVE_DENYLIST: RegExp[] = [...FORBIDDEN_PATTERNS, ...DESTRUCTIVE_PATTERNS];
 
 const PRIVILEGED_INDICATORS = [
   /^\s*sudo\b/,
@@ -90,4 +110,4 @@ export function classifyCommand(command: string): ParsedCommand {
   return { binary, fullCommand, class: 'safe' as CommandClass };
 }
 
-export { READ_ONLY_ALLOWLIST, DESTRUCTIVE_DENYLIST };
+export { READ_ONLY_ALLOWLIST, DESTRUCTIVE_DENYLIST, FORBIDDEN_PATTERNS };

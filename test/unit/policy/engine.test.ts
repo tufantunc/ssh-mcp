@@ -5,6 +5,7 @@ import type { Profile } from '../../../src/types.js';
 function makeProfile(overrides: Partial<Profile> = {}): Profile {
   return {
     name: 'dev',
+    group: 'dev',
     host: 'localhost',
     port: 22,
     user: 'test',
@@ -71,9 +72,9 @@ describe('PolicyEngine', () => {
   });
 
   it('prod host group is stricter than dev', () => {
-    const operatorProd = makeProfile({ role: 'operator', name: 'prod-web-1' });
-    const adminProd = makeProfile({ role: 'admin', name: 'prod-web-1' });
-    const adminDev = makeProfile({ role: 'admin', name: 'dev-local' });
+    const operatorProd = makeProfile({ role: 'operator', name: 'prod-web-1', group: 'prod' });
+    const adminProd = makeProfile({ role: 'admin', name: 'prod-web-1', group: 'prod' });
+    const adminDev = makeProfile({ role: 'admin', name: 'dev-local', group: 'dev' });
 
     // Operator cannot run destructive on prod (denied by role binding)
     expect(engine.evaluate('rm -rf /tmp/test', operatorProd, 'run-command').decision).toBe('deny');
@@ -107,14 +108,36 @@ describe('PolicyEngine', () => {
     expect(engine.evaluate('ls -la', profile, 'read-command').decision).toBe('allow');
   });
 
-  it('denylist with invalid regex falls back to substring match', () => {
-    const engineWithBadRegex = new PolicyEngine({
-      ...DEFAULT_RULES,
-      denylist: ['[invalid'],
-    });
-    const profile = makeProfile({ role: 'admin', name: 'dev', approvalPolicy: 'auto' });
-    // Should not throw, should fall back to includes()
-    const result = engineWithBadRegex.evaluate('echo [invalid pattern', profile, 'run-command');
-    expect(result.decision).toBe('deny');
+  it('rejects an invalid denylist pattern at construction', () => {
+    // Previously this fell back to `command.includes(pattern)` — matching the
+    // command against regex *source text*. A deny rule that silently degrades
+    // is worse than a startup failure, because nothing surfaces the degradation.
+    expect(() => new PolicyEngine({ ...DEFAULT_RULES, denylist: ['[invalid'] }))
+      .toThrow(/Invalid denylist pattern/);
+  });
+
+  it('applies operator-supplied denylist patterns on top of the canonical list', () => {
+    const engineWithExtra = new PolicyEngine({ ...DEFAULT_RULES, denylist: ['\\bnpm\\s+publish\\b'] });
+    const profile = makeProfile({ role: 'admin', group: 'dev', approvalPolicy: 'auto' });
+    expect(engineWithExtra.evaluate('npm publish', profile, 'run-command').decision).toBe('deny');
+    // ...and the canonical entries still apply.
+    expect(engineWithExtra.evaluate('rm -rf /', profile, 'run-command').ruleId).toBe('denylist');
+  });
+
+  it('separates never-allowed commands from destructive-but-approvable ones', () => {
+    const profile = makeProfile({ role: 'admin', group: 'dev', approvalPolicy: 'ask-destructive' });
+    // `rm -rf /` can never run; `rm -rf /tmp/x` is destructive but approvable.
+    expect(engine.evaluate('rm -rf /', profile, 'run-command').ruleId).toBe('denylist');
+    expect(engine.evaluate('rm -rf /tmp/x', profile, 'run-command').decision).toBe('require-approval');
+  });
+
+  it('resolves an unrecognised profile name to the strictest tier', () => {
+    // Previously any unrecognised name fell through to `dev`, so a production
+    // host merely named "web-01" silently got the loosest permissions.
+    const unknown = makeProfile({ role: 'admin', name: 'web-01', group: undefined });
+    expect(engine.evaluate('sudo whoami', unknown, 'privileged-command').decision).toBe('deny');
+    // An explicit group is authoritative.
+    const tagged = makeProfile({ role: 'admin', name: 'web-01', group: 'dev' });
+    expect(engine.evaluate('sudo whoami', tagged, 'privileged-command').decision).toBe('require-approval');
   });
 });

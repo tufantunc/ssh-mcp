@@ -24,6 +24,9 @@ export const profileSchema = z.object({
   keyRef: z.string().optional(),
   keychainEntry: z.string().optional(),
   via: z.string().optional(),
+  // Drives the role-binding tier. Without it the tier is guessed from the
+  // profile name, and an unrecognised name resolves to the strictest tier.
+  group: z.string().optional(),
   workdir: z.string().optional(),
   trustedHostKey: z.string().optional(),
   tty: z.boolean().default(false),
