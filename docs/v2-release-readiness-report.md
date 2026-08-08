@@ -14,8 +14,8 @@
 
 | Ölçüt | İlk durum | Şimdi |
 |---|---|---|
-| Test sayısı | 183 | **304** |
-| Suite durumu | 182/183 (1 kırmızı) | **304/304**, ardışık koşularda kararlı |
+| Test sayısı | 183 | **315** |
+| Suite durumu | 182/183 (1 kırmızı) | **315/315**, ardışık koşularda kararlı |
 | Build + typecheck | build temiz, testler tsc dışında | **ikisi de temiz** (`npm run typecheck` eklendi) |
 | Yayın bloke eden | 9 | **0** |
 | Yüksek öncelikli | 12 | **0** |
@@ -30,7 +30,7 @@
 |---|---|
 | `npm run build` (tsc) | ✅ Temiz |
 | `npm run typecheck` (src + test) | ✅ Temiz — **yeni**, testler önceden tsc kapsamı dışındaydı |
-| `npm test` | ✅ **304/304** (38 dosya) |
+| `npm test` | ✅ **315/315** (38 dosya) |
 | Ardışık koşu kararlılığı | ✅ 3/3 temiz |
 
 ### Test kapsamındaki büyümenin nedeni
@@ -99,6 +99,7 @@ Bunlar ilk incelemede **bulunamamıştı** — test kapsamı eklenmeden görün�
 | ⚡ Background çıktısı bozuluyordu | Chunk sınırında satır bölünmesi + her chunk arası boş satır | Uzun-satır regresyon testi |
 | ⚡ 7 mevcut tip hatası | Testler tsc kapsamı dışındaydı | `tsconfig.test.json` eklenince |
 | ⚡ **busybox ash'te her session açılışı 3 sn sürüyordu** | Prompt tespiti ham buffer'ı test ediyordu; ash prompt'undan sonra ANSI imleç sorgusu (`ESC[6n`) yolluyor, eşleşme kaçıyor ve 3 sn'lik tavana düşülüyordu | Alpine/ash imajı eklenince |
+| ⚡ **Dropbear host'larında session/SFTP açılışı yazı-tura** | Dropbear, bir önceki kanal serbest bırakıldıktan hemen sonra kanal açmayı aralıklı reddediyor; SFTP trafiği altında bağlantıyı tamamen düşürüyor. Ham ssh2 ile de üretildi — bizim kodumuz değil, ama araçlarımızı o host sınıfında güvenilmez kılıyordu | Dropbear imajı eklenince |
 
 ---
 
@@ -146,7 +147,7 @@ değil. §5'in 9 maddesi artık her koşuda otomatik doğrulanıyor.
 | HTTP: iki eşzamanlı istemci, biri ayrılınca üçüncü bağlanabiliyor | `e2e/http.e2e.test.ts` |
 | `/health` tokensiz, `/status` tokenli | `e2e/http.e2e.test.ts` |
 | TOFU kaydı, bozuk fingerprint reddi, strict mod | `integration/host-key.test.ts` |
-| **Farklı kabuk (Alpine + busybox ash)**: session protokolü, CWD/env, exit code, priming | `integration/shell-compat.test.ts` |
+| **Farklı kabuk (Alpine + busybox ash) ve farklı sshd (Dropbear)**: algoritma anlaşması, session protokolü, CWD/env, exit code, priming, SFTP | `integration/shell-compat.test.ts` |
 | ProxyJump kopma + yeniden bağlanma | `integration/proxy-jump.test.ts` |
 | **pnpm (katı çözümleyici) altında OTEL zinciri çözülüyor** | `e2e/packaging.e2e.test.ts` |
 | Kaldırılan v1 flag'leri startup'ta reddediliyor | `e2e/packaging.e2e.test.ts` |
@@ -164,12 +165,12 @@ kırılırdı.
       sunucu fail-closed davranıp **her destructive komutu reddeder** — ürün
       "bozuk" görünür. B7'de bunun için stderr log'u eklendi, bir kez gözle
       görülmeli.
-- [ ] **Windows / diğer host'lar.** Kabuk çeşitliliği artık kısmen kapsanıyor:
-      `ssh-alpine` servisi (Alpine + busybox `ash`) eklendi ve session
-      protokolü ona karşı test ediliyor (`integration/shell-compat.test.ts`).
-      Bu, prompt tespitinde gerçek bir hatayı ortaya çıkardı (aşağıya bakın).
-      Hâlâ denenmemiş olanlar: **Windows OpenSSH** (README bunu iddia ediyor),
-      eski OpenSSH 7.x ve Dropbear.
+- [ ] **Windows OpenSSH.** Host çeşitliliği artık iki eksende kapsanıyor:
+      `ssh-alpine` (farklı **kabuk**: busybox ash) ve `ssh-dropbear` (farklı
+      **sshd**: OpenSSH değil, dar algoritma seti). İkisi de gerçek hata buldu.
+      Hâlâ denenmemiş: **Windows OpenSSH** — README bunu iddia ediyor ve
+      Docker'da verilemiyor; gerçek bir host gerekiyor. Eski OpenSSH 7.x de
+      denenmedi.
 - [ ] **CI'ı bir kez Linux'ta yeşil görmek** (`SSH_MCP_REQUIRE_SERVERS=1` ile).
 
 Bunların dışında gerçek ağ koşulları (NAT/firewall idle timeout — `keepalive`'ın

@@ -1,20 +1,27 @@
 import type { SFTPWrapper } from 'ssh2';
 import type { SftpUploadOpts, SftpDownloadOpts, SftpStat } from '../types.js';
 import type { SSHConnection } from './connection.js';
+import { openWithRetry } from './channel-retry.js';
 
 export class SftpClient {
   constructor(private conn: SSHConnection) {}
 
   private async withSftp<T>(fn: (sftp: SFTPWrapper) => Promise<T>): Promise<T> {
-    await this.conn.ensureConnected();
-    const client = this.conn.getClient();
-    const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
-      client.sftp((err, handle) => {
-        if (err) {
-          reject(new Error(`SFTP error: ${err.message}`));
-          return;
-        }
-        resolve(handle);
+    // ensureConnected lives inside the retry: Dropbear drops the whole
+    // connection under SFTP channel churn, so an attempt can fail because the
+    // link died rather than because the channel was refused. Re-establishing
+    // before each attempt covers both.
+    const sftp = await openWithRetry(async () => {
+      await this.conn.ensureConnected();
+      const client = this.conn.getClient();
+      return new Promise<SFTPWrapper>((resolve, reject) => {
+        client.sftp((err, handle) => {
+          if (err) {
+            reject(new Error(`SFTP error: ${err.message}`));
+            return;
+          }
+          resolve(handle);
+        });
       });
     });
     try {
