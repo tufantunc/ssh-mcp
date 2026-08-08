@@ -102,6 +102,7 @@ async function buildAppConfig(argv: Record<string, string | null>): Promise<AppC
     commandMaxOutputBytes: 1_048_576,
     connectionIdleReapMs: 900_000,
     commandQuotaPerDay: parseInt(argv.commandQuota as string) || 0,
+    approvalGrantTtlMs: parseInt(argv.approvalGrantTtl as string) || 0,
     approvalMode: 'ask-destructive',
   };
 
@@ -170,7 +171,9 @@ async function main() {
         resources: {},
       },
     });
-    registerTools(server, registry, policy, audit);
+    registerTools(server, registry, policy, audit, {
+      approvalGrantTtlMs: config.defaults.approvalGrantTtlMs,
+    });
     registerResources(server, registry);
     return server;
   };

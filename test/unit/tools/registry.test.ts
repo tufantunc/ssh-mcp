@@ -211,6 +211,63 @@ describe('audit records', () => {
   });
 });
 
+describe('just-in-time approval grants', () => {
+  // Approving the same destructive command every few seconds trains the
+  // operator to click through prompts, which is worse than a bounded grant.
+  it('skips the prompt for an identical command within the grant window', async () => {
+    h = await createHarness({}, { approvalGrantTtlMs: 60_000 });
+    h.setApproval(true);
+
+    await call('run-command', { command: 'rm -rf /tmp/build' });
+    await call('run-command', { command: 'rm -rf /tmp/build' });
+    await call('run-command', { command: 'rm -rf /tmp/build' });
+
+    expect(h.approvalPrompts()).toBe(1);
+    expect(h.execCalls).toHaveLength(3);
+  });
+
+  // Bound to the exact command: a grant must not widen to a similar one.
+  it('still prompts for a different command', async () => {
+    h = await createHarness({}, { approvalGrantTtlMs: 60_000 });
+    h.setApproval(true);
+
+    await call('run-command', { command: 'rm -rf /tmp/build' });
+    await call('run-command', { command: 'rm -rf /tmp/build-prod' });
+
+    expect(h.approvalPrompts()).toBe(2);
+  });
+
+  it('records the grant as the approver in the audit log', async () => {
+    h = await createHarness({}, { approvalGrantTtlMs: 60_000 });
+    h.setApproval(true);
+    await call('run-command', { command: 'rm -rf /tmp/build' });
+    await call('run-command', { command: 'rm -rf /tmp/build' });
+
+    // The second run is attributable to the grant, not to a fresh human answer.
+    expect(h.auditRecords.at(-2).approver).toBe('mcp-client');
+    expect(h.auditRecords.at(-1).approver).toBe('jit-grant');
+  });
+
+  // Off by default: auto-approval weakens the gate that makes destructive
+  // commands safe, so it must be an explicit decision.
+  it('is disabled by default — every destructive command prompts', async () => {
+    h = await createHarness();
+    h.setApproval(true);
+    await call('run-command', { command: 'rm -rf /tmp/build' });
+    await call('run-command', { command: 'rm -rf /tmp/build' });
+    expect(h.approvalPrompts()).toBe(2);
+  });
+
+  it('does not grant anything when the client declines', async () => {
+    h = await createHarness({}, { approvalGrantTtlMs: 60_000 });
+    h.setApproval(false);
+    await call('run-command', { command: 'rm -rf /tmp/build' });
+    await call('run-command', { command: 'rm -rf /tmp/build' });
+    expect(h.approvalPrompts()).toBe(2);
+    expect(h.execCalls).toHaveLength(0);
+  });
+});
+
 describe('command quota', () => {
   // The approval gate stops destructive commands and the HTTP limiter caps
   // request rate, but neither bounds total work: an agent looping over allowed

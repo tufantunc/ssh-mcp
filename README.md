@@ -131,6 +131,7 @@ commandMaxChars = 5000
 commandMaxOutputBytes = 1048576     # 1MB
 connectionIdleReapMs = 900000       # 15min
 commandQuotaPerDay = 0              # 0 = unlimited; circuit breaker for runaway agents
+approvalGrantTtlMs = 0              # 0 = always prompt; see "Approval Grants"
 approvalMode = "ask-destructive"    # auto | ask-destructive | ask-all | deny
 
 [[profiles]]
@@ -241,6 +242,23 @@ denylist; an invalid pattern fails at startup rather than degrading silently.
 - `ask-destructive` — prompt for destructive/privileged (default)
 - `ask-all` — prompt for every command
 - `deny` — reject destructive/privileged commands outright (no prompt)
+
+### Approval Grants (just-in-time)
+
+`approvalGrantTtlMs` lets one explicit approval cover repeats of the **exact
+same** command on the same profile for a bounded time (e.g. `300000` for five
+minutes). It exists because approving `rm -rf /tmp/build` every few seconds
+during an iterative task trains you to click through prompts — which is worse
+for safety than a grant you chose deliberately.
+
+A grant is bound to the exact command text, the profile and the command class:
+approving `rm -rf /tmp/build` does not cover `rm -rf /tmp/build-prod`, the same
+command on another host, or the same command escalated to `sudo`. Runs covered
+by a grant appear in the audit log with `approver: "jit-grant"`, so they stay
+distinguishable from a fresh human answer.
+
+**Off by default** (`0` = always prompt). Auto-approval weakens the gate that
+makes destructive commands safe, so turning it on should be a decision.
 
 ### Command Quota
 
@@ -411,6 +429,7 @@ Secrets are **never** passed as CLI arguments.
 | `--disableApproval` | false | Skip the approval gate (quick start profile only) |
 | `--opaUrl` | — | OPA sidecar URL for external policy |
 | `--commandQuota` | 0 (off) | Max commands per rolling 24h per profile |
+| `--approvalGrantTtl` | 0 (off) | Auto-approve an identical command for this many ms after approval |
 | `--auditEntropyScan` | false | Enable entropy-based secret scanning in audit |
 | `--auditTamperEvident` | false | Enable hash-chained tamper-evident audit log |
 | `--otelEndpoint` | — | OTLP/HTTP endpoint for OpenTelemetry traces |

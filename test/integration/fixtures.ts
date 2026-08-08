@@ -97,6 +97,7 @@ export function createAppConfig(): AppConfig {
     commandMaxOutputBytes: 1048576,
     connectionIdleReapMs: 60000,
     commandQuotaPerDay: 0,
+    approvalGrantTtlMs: 0,
     approvalMode: 'ask-destructive',
   };
   return { defaults, profiles: Object.values(profiles) };

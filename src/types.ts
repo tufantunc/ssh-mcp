@@ -41,6 +41,8 @@ export interface Defaults {
   commandMaxOutputBytes: number;
   connectionIdleReapMs: number;
   commandQuotaPerDay: number;
+  /** Lifetime of a just-in-time approval grant; 0 = always prompt. */
+  approvalGrantTtlMs: number;
   approvalMode: ApprovalMode;
 }
 

@@ -7,6 +7,7 @@ import { sanitizeCommand } from '../guard/sanitizer.js';
 import { requestApproval } from '../guard/elicitation.js';
 import { commandOutput, type ToolResult } from './results.js';
 import { CommandQuota } from '../policy/quota.js';
+import { ApprovalGrants } from '../guard/approval-grants.js';
 import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass } from '../types.js';
 
 /**
@@ -43,6 +44,8 @@ export class PolicyRefusedError extends Error {
 
 export interface ToolDeps {
   server: McpServer;
+  /** Lifetime of a just-in-time approval grant; 0 = always prompt. */
+  approvalGrantTtlMs?: number;
   registry: ConnectionRegistry;
   policy: PolicyEngine;
   audit: AuditStore;
@@ -56,8 +59,9 @@ export interface ToolDeps {
  * and audit store. Tool groups receive the result and never touch those four
  * directly, so there is exactly one path from caller input to a remote command.
  */
-export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
+export function createPipeline({ server, registry, policy, audit, approvalGrantTtlMs = 0 }: ToolDeps) {
   const quota = new CommandQuota();
+  const grants = new ApprovalGrants(approvalGrantTtlMs);
   async function resolveConn(profileName?: string) {
     return registry.getOrCreate(profileName);
   }
@@ -85,10 +89,17 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       }
 
       if (evaluation.decision === 'require-approval') {
+        // A live grant from an earlier explicit approval of this exact command.
+        if (grants.has(conn.profile.name, command, evaluation.commandClass)) {
+          span.setAttribute('policy.grant', 'reused');
+          return { conn, evaluation, approver: 'jit-grant' };
+        }
+
         const approval = await requestApproval(server, command, conn.profile.name, evaluation);
         if (!approval.approved) {
           throw new PolicyRefusedError('APPROVAL_DENIED: User did not approve this command', evaluation);
         }
+        grants.record(conn.profile.name, command, evaluation.commandClass);
         return { conn, evaluation, approver: approval.approver };
       }
 
@@ -275,7 +286,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     };
   }
 
-  return { runAudited, execAndReport, defaultProfileName, makeCtx, auditResult, auditFailure, resolveConn, quota };
+  return { runAudited, execAndReport, defaultProfileName, makeCtx, auditResult, auditFailure, resolveConn, quota, grants };
 }
 
 export type Pipeline = ReturnType<typeof createPipeline>;
