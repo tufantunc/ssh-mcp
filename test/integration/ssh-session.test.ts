@@ -16,12 +16,14 @@ const testProfile: Profile = {
   tty: false,
   timeout: 10000,
   maxChars: 5000,
+  maxOutputBytes: 1048576,
   role: 'admin',
   readOnly: false,
   approvalPolicy: 'auto',
   cert: false,
   sessionMaxPerConnection: 5,
   sessionIdleTimeoutMs: 60000,
+  sessionBackgroundMaxMs: 3600000,
 };
 
 let conn: SSHConnection;

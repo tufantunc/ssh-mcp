@@ -1,22 +1,31 @@
-import type { ClientChannel } from 'ssh2';
+import type { SFTPWrapper } from 'ssh2';
 import type { SftpUploadOpts, SftpDownloadOpts, SftpStat } from '../types.js';
 import type { SSHConnection } from './connection.js';
 
 export class SftpClient {
   constructor(private conn: SSHConnection) {}
 
-  private async withSftp<T>(fn: (sftp: any) => Promise<T>): Promise<T> {
+  private async withSftp<T>(fn: (sftp: SFTPWrapper) => Promise<T>): Promise<T> {
     await this.conn.ensureConnected();
     const client = this.conn.getClient();
-    return new Promise((resolve, reject) => {
-      client.sftp((err: Error | undefined, sftp: any) => {
+    const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
+      client.sftp((err, handle) => {
         if (err) {
           reject(new Error(`SFTP error: ${err.message}`));
           return;
         }
-        fn(sftp).then(resolve).catch(reject);
+        resolve(handle);
       });
     });
+    try {
+      return await fn(sftp);
+    } finally {
+      // Every client.sftp() opens a new subsystem channel. Without end() they
+      // accumulate for the life of the connection until the server's MaxSessions
+      // limit (OpenSSH default: 10) is hit, after which no channel — SFTP, exec
+      // or shell — can be opened on this connection any more.
+      try { sftp.end(); } catch { /* already torn down */ }
+    }
   }
 
   async upload(opts: SftpUploadOpts): Promise<void> {

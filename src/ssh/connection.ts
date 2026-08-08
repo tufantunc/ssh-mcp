@@ -6,6 +6,7 @@ import { InteractiveSession, BackgroundSession, type Session } from './session.j
 import { randomUUID } from 'crypto';
 import { tracer } from '../observability/tracer.js';
 import { redactText } from '../guard/redactor.js';
+import { shellSingleQuote } from '../guard/sanitizer.js';
 
 export class SSHConnection {
   readonly profile: Profile;
@@ -150,9 +151,20 @@ export class SSHConnection {
     return this.credentials.sudoPassword;
   }
 
-  async exec(command: string, opts: ExecOpts = {}): Promise<CommandResult> {
+  /**
+   * Prefix a command with the profile's working directory, if configured.
+   * Applied here rather than at the tool layer so the string the policy engine
+   * classified is never the string that carries the `&&`.
+   */
+  private applyWorkdir(command: string): string {
+    if (!this.profile.workdir) return command;
+    return `cd ${shellSingleQuote(this.profile.workdir)} && ${command}`;
+  }
+
+  async exec(rawCommand: string, opts: ExecOpts = {}): Promise<CommandResult> {
     await this.ensureConnected();
     const client = this.getClient();
+    const command = this.applyWorkdir(rawCommand);
     const timeoutMs = opts.timeoutMs ?? this.profile.timeout;
     const startTime = Date.now();
 
@@ -201,7 +213,7 @@ export class SSHConnection {
 
         let stdout = '';
         let stderr = '';
-        const maxOutput = 1_048_576; // 1MB cap
+        const maxOutput = this.profile.maxOutputBytes;
         let lastProgressSent = 0;
         const PROGRESS_INTERVAL = 500;
 
@@ -326,6 +338,10 @@ export class SSHConnection {
             stream.write('PS1=""\n');
             stream.write('set +o history 2>/dev/null\n');
             stream.write('bind "set enable-bracketed-paste off" 2>/dev/null\n');
+            if (this.profile.workdir) {
+              stream.write(`cd ${shellSingleQuote(this.profile.workdir)}\n`);
+              session.setCwd(this.profile.workdir);
+            }
             setTimeout(() => resolve(session), 200);
           }
         };
@@ -343,12 +359,12 @@ export class SSHConnection {
     const client = this.getClient();
 
     return new Promise((resolve, reject) => {
-      client.exec(command, (err, stream) => {
+      client.exec(this.applyWorkdir(command), (err, stream) => {
         if (err) {
           reject(new Error(`Failed to open background session: ${err.message}`));
           return;
         }
-        const session = new BackgroundSession(id, name, this.profile.name, stream, ttlMs);
+        const session = new BackgroundSession(id, name, this.profile.name, stream, ttlMs, this.profile.sessionBackgroundMaxMs);
         this.sessions.set(name, session);
         this.activeChannels++;
 

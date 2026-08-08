@@ -18,12 +18,14 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
     tty: false,
     timeout: 60000,
     maxChars: 5000,
+    maxOutputBytes: 1048576,
     role: 'operator',
     readOnly: false,
     approvalPolicy: 'ask-destructive',
     cert: false,
     sessionMaxPerConnection: 5,
     sessionIdleTimeoutMs: 600000,
+    sessionBackgroundMaxMs: 3600000,
     ...overrides,
   };
 }

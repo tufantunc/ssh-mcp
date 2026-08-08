@@ -77,6 +77,13 @@ export async function loadConfig(customPath?: string): Promise<AppConfig> {
   return normalizeConfig(result.data);
 }
 
+/**
+ * Resolve every profile against [defaults]. Each of these keys is documented as
+ * a default that profiles inherit, so all of them must cascade — a key that is
+ * accepted by the schema but never applied silently ignores the operator's
+ * configuration (an `approvalMode` that never takes effect is a security
+ * downgrade, not just a papercut).
+ */
 function normalizeConfig(raw: RawConfig): AppConfig {
   const defaults: Defaults = {
     ...raw.defaults,
@@ -84,8 +91,13 @@ function normalizeConfig(raw: RawConfig): AppConfig {
 
   const profiles: Profile[] = raw.profiles.map((p) => ({
     ...p,
+    timeout: p.timeout ?? defaults.commandTimeoutMs,
+    maxChars: p.maxChars ?? defaults.commandMaxChars,
+    maxOutputBytes: p.maxOutputBytes ?? defaults.commandMaxOutputBytes,
+    approvalPolicy: p.approvalPolicy ?? defaults.approvalMode,
     sessionMaxPerConnection: p.sessionMaxPerConnection ?? defaults.sessionMaxPerConnection,
     sessionIdleTimeoutMs: p.sessionIdleTimeoutMs ?? defaults.sessionIdleTimeoutMs,
+    sessionBackgroundMaxMs: p.sessionBackgroundMaxMs ?? defaults.sessionBackgroundMaxMs,
   }));
 
   return { defaults, profiles };

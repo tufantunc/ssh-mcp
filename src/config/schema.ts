@@ -13,7 +13,7 @@ export const defaultsSchema = z.object({
   commandMaxOutputBytes: z.number().int().positive().default(1_048_576),
   connectionIdleReapMs: z.number().int().positive().default(900_000),
   approvalMode: approvalModeSchema.default('ask-destructive'),
-});
+}).strict();
 
 export const profileSchema = z.object({
   name: z.string().min(1),
@@ -26,18 +26,21 @@ export const profileSchema = z.object({
   via: z.string().optional(),
   workdir: z.string().optional(),
   trustedHostKey: z.string().optional(),
-  hostFingerprint: z.string().optional(),
   tty: z.boolean().default(false),
-  timeout: z.number().int().positive().default(60_000),
-  maxChars: z.number().int().positive().default(5000),
   role: z.string().default('operator'),
   readOnly: z.boolean().default(false),
-  approvalPolicy: approvalModeSchema.default('ask-destructive'),
   cert: z.boolean().default(false),
-  caFingerprint: z.string().optional(),
+  // Left optional on purpose: normalizeConfig() fills these from [defaults], and
+  // a schema-level .default() would make "user omitted it" indistinguishable
+  // from "user set the default value", silently shadowing [defaults].
+  timeout: z.number().int().positive().optional(),
+  maxChars: z.number().int().positive().optional(),
+  maxOutputBytes: z.number().int().positive().optional(),
+  approvalPolicy: approvalModeSchema.optional(),
   sessionMaxPerConnection: z.number().int().positive().optional(),
   sessionIdleTimeoutMs: z.number().int().positive().optional(),
-});
+  sessionBackgroundMaxMs: z.number().int().positive().optional(),
+}).strict();
 
 export const configSchema = z.object({
   defaults: defaultsSchema.default({}),

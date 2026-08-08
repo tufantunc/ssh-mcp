@@ -49,6 +49,28 @@ function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
 }
 
+/**
+ * Render a CommandResult for the client. A non-zero exit (or a kill signal)
+ * is reported as isError with the redacted stderr and the exit status, so a
+ * failed remote command cannot be mistaken for an empty success.
+ */
+function commandOutput(result: CommandResult) {
+  // ssh2 reports exitCode null when the process died from a signal.
+  const failed = result.exitCode !== 0 || Boolean(result.signal);
+  const stdout = redactText(result.stdout);
+  const stderr = redactText(result.stderr);
+
+  const parts: string[] = [];
+  if (stdout) parts.push(stdout);
+  if (stderr) parts.push(`[stderr]\n${stderr}`);
+  if (failed) {
+    parts.push(result.signal ? `[killed by SIG${result.signal}]` : `[exit ${result.exitCode}]`);
+  }
+
+  const content = [{ type: 'text' as const, text: parts.join('\n\n') }];
+  return failed ? { content, isError: true } : { content };
+}
+
 export function registerTools(
   server: McpServer,
   registry: ConnectionRegistry,
@@ -159,7 +181,7 @@ export function registerTools(
       }
       const result = await opts.exec(conn, cleanCmd, onProgress, abortSignal);
       await auditResult(ctx, profileName, cleanCmd, evaluation, result, approver);
-      return textResult(redactText(result.stdout));
+      return commandOutput(result);
     } catch (err: any) {
       await auditResult(ctx, profileName, cleanCmd, deniedEvaluation(opts.failureClass), { error: err.message });
       throw err;
@@ -328,7 +350,7 @@ export function registerTools(
         }
 
         await auditResult(ctx, profileName, cleanCmd, evaluation, result, approver);
-        return textResult(redactText(result.stdout));
+        return commandOutput(result);
       } catch (err: any) {
         await auditResult(ctx, profileName, cleanCmd, deniedEvaluation('safe'), { error: err.message });
         throw err;
@@ -365,7 +387,7 @@ export function registerTools(
         });
 
         await auditResult(ctx, profileName, wrapped, evaluation, result, approver);
-        return textResult(redactText(result.stdout));
+        return commandOutput(result);
       } catch (err: any) {
         await auditResult(ctx, profileName, cleanCmd, deniedEvaluation('privileged'), { error: err.message });
         throw err;
@@ -442,9 +464,14 @@ export function registerTools(
       const profileName = defaultProfileName(profile);
       try {
         const { conn, evaluation, approver } = await checkPolicyAndApprove(command, profileName, 'signal-process', ctx);
-        const result = await conn.exec(command);
+        const result = await conn.exec(command, { abortSignal: extra?.signal });
         await auditResult(ctx, profileName, command, evaluation, result, approver);
-        return textResult(result.stdout || `Signal ${signal} sent to PID ${pid}`);
+        const output = commandOutput(result);
+        // `kill` is silent on success — confirm what was sent instead of an empty result.
+        if (!('isError' in output) && !result.stdout.trim() && !result.stderr.trim()) {
+          return textResult(`Signal ${signal} sent to PID ${pid}`);
+        }
+        return output;
       } catch (err: any) {
         await auditResult(ctx, profileName, command, deniedEvaluation('destructive'), { error: err.message });
         throw err;
