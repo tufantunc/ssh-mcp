@@ -48,14 +48,20 @@ export interface Harness {
   setExecResult(result: Partial<CommandResult>): void;
   /** Whether the client approves elicitation prompts. */
   setApproval(approve: boolean): void;
+  /** How many times the client was actually prompted. */
+  approvalPrompts(): number;
   close(): Promise<void>;
 }
 
-export async function createHarness(overrides: Partial<Profile> = {}): Promise<Harness> {
+export async function createHarness(
+  overrides: Partial<Profile> = {},
+  toolOpts: { approvalGrantTtlMs?: number } = {},
+): Promise<Harness> {
   const profile: Profile = { ...testProfile, ...overrides };
   const execCalls: ExecCall[] = [];
   const auditRecords: any[] = [];
   let approve = true;
+  let approvalPrompts = 0;
   let execResult: Partial<CommandResult> = {};
 
   const makeResult = (command: string): CommandResult => ({
@@ -111,7 +117,7 @@ export async function createHarness(overrides: Partial<Profile> = {}): Promise<H
     name: 'test', version: '0.0.0',
     capabilities: { tools: {}, resources: {} },
   });
-  registerTools(server, registry, new PolicyEngine(DEFAULT_RULES), audit);
+  registerTools(server, registry, new PolicyEngine(DEFAULT_RULES), audit, toolOpts);
   registerResources(server, registry);
 
   const client = new Client(
@@ -119,9 +125,10 @@ export async function createHarness(overrides: Partial<Profile> = {}): Promise<H
     { capabilities: { elicitation: {} } },
   );
   // Stand in for the human at the approval prompt.
-  client.setRequestHandler(ElicitRequestSchema, async () =>
-    approve ? { action: 'accept', content: { confirm: true } } : { action: 'decline' },
-  );
+  client.setRequestHandler(ElicitRequestSchema, async () => {
+    approvalPrompts++;
+    return approve ? { action: 'accept', content: { confirm: true } } : { action: 'decline' };
+  });
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -132,6 +139,7 @@ export async function createHarness(overrides: Partial<Profile> = {}): Promise<H
     auditRecords,
     setExecResult(result) { execResult = result; },
     setApproval(value) { approve = value; },
+    approvalPrompts: () => approvalPrompts,
     async close() { await client.close(); await server.close(); },
   };
 }
