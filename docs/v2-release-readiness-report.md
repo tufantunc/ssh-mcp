@@ -14,7 +14,7 @@
 
 | Ölçüt | İlk durum | Şimdi |
 |---|---|---|
-| Test sayısı | 183 | **315** |
+| Test sayısı | 183 | **321** (6'sı Windows host'u gerektirdiği için opt-in) |
 | Suite durumu | 182/183 (1 kırmızı) | **315/315**, ardışık koşularda kararlı |
 | Build + typecheck | build temiz, testler tsc dışında | **ikisi de temiz** (`npm run typecheck` eklendi) |
 | Yayın bloke eden | 9 | **0** |
@@ -30,7 +30,7 @@
 |---|---|
 | `npm run build` (tsc) | ✅ Temiz |
 | `npm run typecheck` (src + test) | ✅ Temiz — **yeni**, testler önceden tsc kapsamı dışındaydı |
-| `npm test` | ✅ **315/315** (38 dosya) |
+| `npm test` | ✅ **315/315** + 6 opt-in Windows testi (39 dosya) |
 | Ardışık koşu kararlılığı | ✅ 3/3 temiz |
 
 ### Test kapsamındaki büyümenin nedeni
@@ -99,6 +99,7 @@ Bunlar ilk incelemede **bulunamamıştı** — test kapsamı eklenmeden görün�
 | ⚡ Background çıktısı bozuluyordu | Chunk sınırında satır bölünmesi + her chunk arası boş satır | Uzun-satır regresyon testi |
 | ⚡ 7 mevcut tip hatası | Testler tsc kapsamı dışındaydı | `tsconfig.test.json` eklenince |
 | ⚡ **busybox ash'te her session açılışı 3 sn sürüyordu** | Prompt tespiti ham buffer'ı test ediyordu; ash prompt'undan sonra ANSI imleç sorgusu (`ESC[6n`) yolluyor, eşleşme kaçıyor ve 3 sn'lik tavana düşülüyordu | Alpine/ash imajı eklenince |
+| ⚡ **Windows'ta interactive session 60 sn sessizce timeout oluyordu** | cmd.exe kanalı kabul ediyor ve `>` prompt'u gösteriyor, yani açılış *başarılı görünüyordu*; sonra her komut tam timeout süresi bekleyip "timed out" diyordu. Artık handshake açılışta başarısız oluyor ve nedenini söylüyor (5 sn) | Gerçek Windows host'una bağlanınca |
 | ⚡ **Dropbear host'larında session/SFTP açılışı yazı-tura** | Dropbear, bir önceki kanal serbest bırakıldıktan hemen sonra kanal açmayı aralıklı reddediyor; SFTP trafiği altında bağlantıyı tamamen düşürüyor. Ham ssh2 ile de üretildi — bizim kodumuz değil, ama araçlarımızı o host sınıfında güvenilmez kılıyordu | Dropbear imajı eklenince |
 
 ---
@@ -157,7 +158,22 @@ pnpm testi H11'in gerçek doğrulaması: `@opentelemetry/resources` ve
 yayınlanan paketi pnpm/yarn-pnp ile kuran birinde tracing çalışma anında
 kırılırdı.
 
-### Docker'ın veremediği — kalan gerçek manuel liste (3 madde)
+### Windows desteği — ölçülen gerçek
+
+README kayıtsız şartsız "Windows desteği" diyordu. Gerçek bir host'a karşı
+ölçüldüğünde destek **kısmi**:
+
+| | Linux/BSD/macOS | Windows OpenSSH |
+|---|:---:|:---:|
+| exec araçları, SFTP, background session | ✅ | ✅ |
+| **interactive session** | ✅ | ❌ |
+
+Sebep düzeltilebilir bir hata değil, protokolün doğası: session protokolü
+komutları `printf` işaretçileriyle çevreliyor ve `$?`/`$PWD` okuyor — cmd.exe'de
+bunların hiçbiri yok. PowerShell'i `DefaultShell` yapmak da çözmez; protokol
+POSIX'e özgü, sadece "cmd değil"e değil. README bu tabloyla güncellendi.
+
+### Docker'ın veremediği — kalan gerçek manuel liste (2 madde)
 
 - [ ] **Claude Desktop'ta bir destructive komut çalıştırıp onay prompt'unu görmek.**
       Protokolü test edebiliyoruz, istemcinin prompt'u gerçekten gösterip
@@ -165,11 +181,11 @@ kırılırdı.
       sunucu fail-closed davranıp **her destructive komutu reddeder** — ürün
       "bozuk" görünür. B7'de bunun için stderr log'u eklendi, bir kez gözle
       görülmeli.
-- [ ] **Windows OpenSSH.** Host çeşitliliği artık iki eksende kapsanıyor:
-      `ssh-alpine` (farklı **kabuk**: busybox ash) ve `ssh-dropbear` (farklı
-      **sshd**: OpenSSH değil, dar algoritma seti). İkisi de gerçek hata buldu.
-      Hâlâ denenmemiş: **Windows OpenSSH** — README bunu iddia ediyor ve
-      Docker'da verilemiyor; gerçek bir host gerekiyor. Eski OpenSSH 7.x de
+- [x] ~~**Windows OpenSSH.**~~ **Yapıldı** — gerçek bir Windows 11 host'una
+      (build 26200, UTM VM) karşı test edildi. `integration/windows-compat.test.ts`,
+      `SSH_MCP_WIN_HOST/_USER/_PASSWORD` ile opt-in. Sonuç: destek gerçek ama
+      **kısmi** — exec araçları, background session'lar ve SFTP çalışıyor;
+      interactive session'lar çalışamaz (aşağıya bakın). Eski OpenSSH 7.x hâlâ
       denenmedi.
 - [ ] **CI'ı bir kez Linux'ta yeşil görmek** (`SSH_MCP_REQUIRE_SERVERS=1` ile).
 
