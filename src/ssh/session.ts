@@ -4,7 +4,7 @@ import { tracer } from '../observability/tracer.js';
 
 const ANSI_REGEX = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r/g;
 
-function stripAnsi(text: string): string {
+export function stripAnsi(text: string): string {
   return text.replace(ANSI_REGEX, '');
 }
 

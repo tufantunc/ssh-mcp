@@ -14,8 +14,8 @@
 
 | Ölçüt | İlk durum | Şimdi |
 |---|---|---|
-| Test sayısı | 183 | **295** |
-| Suite durumu | 182/183 (1 kırmızı) | **295/295**, 3 ardışık koşuda kararlı |
+| Test sayısı | 183 | **304** |
+| Suite durumu | 182/183 (1 kırmızı) | **304/304**, ardışık koşularda kararlı |
 | Build + typecheck | build temiz, testler tsc dışında | **ikisi de temiz** (`npm run typecheck` eklendi) |
 | Yayın bloke eden | 9 | **0** |
 | Yüksek öncelikli | 12 | **0** |
@@ -30,7 +30,7 @@
 |---|---|
 | `npm run build` (tsc) | ✅ Temiz |
 | `npm run typecheck` (src + test) | ✅ Temiz — **yeni**, testler önceden tsc kapsamı dışındaydı |
-| `npm test` | ✅ **295/295** (37 dosya) |
+| `npm test` | ✅ **304/304** (38 dosya) |
 | Ardışık koşu kararlılığı | ✅ 3/3 temiz |
 
 ### Test kapsamındaki büyümenin nedeni
@@ -98,6 +98,7 @@ Bunlar ilk incelemede **bulunamamıştı** — test kapsamı eklenmeden görün�
 | ⚡ Interactive session çıktı ayrıştırması yanlıştı | Satır sayma + `printf` heuristiği; PTY echo sırasına bağlı bozulma | Ardışık koşu kararlılık analizi |
 | ⚡ Background çıktısı bozuluyordu | Chunk sınırında satır bölünmesi + her chunk arası boş satır | Uzun-satır regresyon testi |
 | ⚡ 7 mevcut tip hatası | Testler tsc kapsamı dışındaydı | `tsconfig.test.json` eklenince |
+| ⚡ **busybox ash'te her session açılışı 3 sn sürüyordu** | Prompt tespiti ham buffer'ı test ediyordu; ash prompt'undan sonra ANSI imleç sorgusu (`ESC[6n`) yolluyor, eşleşme kaçıyor ve 3 sn'lik tavana düşülüyordu | Alpine/ash imajı eklenince |
 
 ---
 
@@ -145,6 +146,7 @@ değil. §5'in 9 maddesi artık her koşuda otomatik doğrulanıyor.
 | HTTP: iki eşzamanlı istemci, biri ayrılınca üçüncü bağlanabiliyor | `e2e/http.e2e.test.ts` |
 | `/health` tokensiz, `/status` tokenli | `e2e/http.e2e.test.ts` |
 | TOFU kaydı, bozuk fingerprint reddi, strict mod | `integration/host-key.test.ts` |
+| **Farklı kabuk (Alpine + busybox ash)**: session protokolü, CWD/env, exit code, priming | `integration/shell-compat.test.ts` |
 | ProxyJump kopma + yeniden bağlanma | `integration/proxy-jump.test.ts` |
 | **pnpm (katı çözümleyici) altında OTEL zinciri çözülüyor** | `e2e/packaging.e2e.test.ts` |
 | Kaldırılan v1 flag'leri startup'ta reddediliyor | `e2e/packaging.e2e.test.ts` |
@@ -162,10 +164,12 @@ kırılırdı.
       sunucu fail-closed davranıp **her destructive komutu reddeder** — ürün
       "bozuk" görünür. B7'de bunun için stderr log'u eklendi, bir kez gözle
       görülmeli.
-- [ ] **Farklı SSH sunucusu.** Container'lar tek imaj (OpenSSH 10.2). README
-      **Windows desteği** iddia ediyor; Windows OpenSSH, eski OpenSSH 7.x ve
-      Dropbear hiç denenmedi. Sentinel protokolü ve `primeShell`'in prompt
-      tespiti kabuk davranışına duyarlı.
+- [ ] **Windows / diğer host'lar.** Kabuk çeşitliliği artık kısmen kapsanıyor:
+      `ssh-alpine` servisi (Alpine + busybox `ash`) eklendi ve session
+      protokolü ona karşı test ediliyor (`integration/shell-compat.test.ts`).
+      Bu, prompt tespitinde gerçek bir hatayı ortaya çıkardı (aşağıya bakın).
+      Hâlâ denenmemiş olanlar: **Windows OpenSSH** (README bunu iddia ediyor),
+      eski OpenSSH 7.x ve Dropbear.
 - [ ] **CI'ı bir kez Linux'ta yeşil görmek** (`SSH_MCP_REQUIRE_SERVERS=1` ile).
 
 Bunların dışında gerçek ağ koşulları (NAT/firewall idle timeout — `keepalive`'ın

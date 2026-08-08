@@ -54,6 +54,16 @@ services:
     ports:
       - "2225:2222"
 
+  # A different sshd/shell combination from the three above: Alpine with
+  # busybox `ash` instead of Debian with bash. The session protocol talks to
+  # whatever shell the host runs, so this is the axis that matters — the README
+  # claims broad host support and every other test target was the same image.
+  ssh-alpine:
+    build: ./docker/alpine-sshd
+    profiles: ["test"]
+    ports:
+      - "2226:2222"
+
   # ─── SSH MCP Server v2 ────────────────────────────────────────────────────
   ssh-mcp:
     build: .
