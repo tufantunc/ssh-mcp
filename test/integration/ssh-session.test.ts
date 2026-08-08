@@ -103,4 +103,49 @@ describe.skipIf(await SSH_AVAILABLE === false)('InteractiveSession', () => {
     await conn.closeSession('list-a');
     await conn.closeSession('list-b');
   });
+
+  // Regression: close() only ends the stream, so the channel's 'close' event
+  // can arrive after a session with the same name has been reopened. The
+  // handler deleted by name unconditionally, evicting the *new* session — its
+  // channel stayed open but was unreachable via getSession/list/close/reap.
+  it('reopening a session under the same name survives the old channel closing', async () => {
+    // close() only ends the stream. A background command that ignores stdin EOF
+    // keeps its channel open afterwards, so the 'close' event lands seconds
+    // later — after the name has been reused. That is the ordering the guard
+    // exists for; an interactive shell exits immediately on EOF and never
+    // exercises it.
+    await conn.openSession({ name: 'reuse-name', type: 'background', command: 'sleep 3' });
+    await conn.closeSession('reuse-name');
+
+    const reopened = await conn.openSession({ name: 'reuse-name', type: 'interactive' });
+
+    // Wait past the old command's lifetime so its channel close fires now.
+    await new Promise((r) => setTimeout(r, 4000));
+
+    expect(conn.getSession('reuse-name')).toBe(reopened);
+    expect(conn.listSessions().some((s) => s.name === 'reuse-name')).toBe(true);
+
+    const result = await reopened.run('echo still-here');
+    expect(result.stdout.trim()).toBe('still-here');
+
+    await conn.closeSession('reuse-name');
+  }, 30000);
+
+  it('reports the shell CWD rather than inferring it from the command', async () => {
+    const session = await conn.openSession({ name: 'cwd-real', type: 'interactive' });
+
+    // A relative cd: the old code recorded the literal argument ("..").
+    await session.run('cd /tmp');
+    const sub = await session.run('mkdir -p /tmp/nested/dir && cd /tmp/nested/dir');
+    expect(sub.cwd).toBe('/tmp/nested/dir');
+
+    const up = await session.run('cd ..');
+    expect(up.cwd).toBe('/tmp/nested');
+
+    const pwd = await session.run('pwd');
+    expect(pwd.stdout.trim()).toBe('/tmp/nested');
+    expect(pwd.cwd).toBe('/tmp/nested');
+
+    await conn.closeSession('cwd-real');
+  }, 20000);
 });
