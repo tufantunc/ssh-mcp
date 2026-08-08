@@ -369,16 +369,80 @@ Secrets are **never** passed as CLI arguments.
 | `--user` | — | Quick start: SSH username |
 | `--port` | 22 | Quick start: SSH port |
 | `--key` | — | Quick start: Path to private key |
+| `--workdir` | — | Quick start: Working directory for commands and sessions |
 | `--timeout` | 60000 | Command timeout in ms |
-| `--maxChars` | 5000 | Max command length |
+| `--maxChars` | 5000 | Max command length (`none` or `0` disables the limit) |
+| `--sessionMax` | 5 | Max concurrent sessions per connection |
+| `--sessionTtl` | 600000 | Session idle timeout in ms |
 | `--transport` | stdio | `stdio` or `http` |
 | `--httpPort` | 3000 | HTTP transport port |
 | `--httpHost` | 127.0.0.1 | HTTP bind address |
-| `--bearerToken` | — | Bearer token for HTTP transport auth |
+| `--bearerToken` | — | Bearer token for HTTP transport auth (required for `--transport=http`) |
+| `--rateLimit` | 0 | HTTP requests per minute on the MCP route (0 = unlimited) |
 | `--insecureHostKey` | false | Disable host key verification (test only!) |
+| `--disableApproval` | false | Skip the approval gate (quick start profile only) |
 | `--opaUrl` | — | OPA sidecar URL for external policy |
 | `--auditEntropyScan` | false | Enable entropy-based secret scanning in audit |
 | `--auditTamperEvident` | false | Enable hash-chained tamper-evident audit log |
+| `--otelEndpoint` | — | OTLP/HTTP endpoint for OpenTelemetry traces |
+| `--otelServiceName` | ssh-mcp | Service name reported on trace spans |
+| `--dumpToolHashes` | — | Print SHA-256 hashes of the tool descriptions and exit |
+
+---
+
+## Migrating from v1
+
+v2 is a breaking release. Passing a removed flag now fails at startup with the
+replacement, rather than failing later as a confusing auth error.
+
+### Tools
+
+| v1 | v2 | Notes |
+|----|----|-------|
+| `exec` | `read-command` | Allowlisted read-only commands. Prefer this for reads. |
+| `exec` | `run-command` | Arbitrary commands. Destructive ones go through the approval gate. |
+| `sudo-exec` | `privileged-command` | Always requires approval. Password is piped via stdin. |
+| `description` parameter | — | Removed. It was an injection vector (#44) and never reached the host. |
+
+**Command results now carry status.** In v1 a failed command rejected with
+`Error (code N)`. In v2 a non-zero exit comes back as an error result including
+the exit code and stderr — so an empty response no longer means "it worked".
+
+### Flags
+
+| v1 flag | Replacement |
+|---------|-------------|
+| `--password` | `SSH_MCP_PASSWORD` env var (or `SSH_MCP_<PROFILE>_PASSWORD`) |
+| `--suPassword` | `SSH_MCP_SUDO_PASSWORD` env var |
+| `--sudoPassword` | `SSH_MCP_SUDO_PASSWORD` env var |
+| `--disableSudo` | Use a role/policy that disallows the `privileged` class |
+
+Credentials moved off the command line because CLI arguments are world-readable
+via `/proc/<pid>/cmdline` on Linux (CWE-214). Credentials now resolve through an
+SSH agent → OS keychain → env var → key file cascade.
+
+### Example
+
+```jsonc
+// v1
+{ "command": "npx", "args": ["ssh-mcp", "--host=1.2.3.4", "--user=root", "--password=hunter2"] }
+
+// v2 — credentials via env
+{
+  "command": "npx",
+  "args": ["ssh-mcp", "--host=1.2.3.4", "--user=root"],
+  "env": { "SSH_MCP_PASSWORD": "hunter2" }
+}
+```
+
+For more than one host, move to a TOML config file (see [Configuration](#configuration))
+and pass `--config <path>`; profiles carry per-host roles and approval policy.
+
+### Host key verification
+
+v1 did not verify host keys. v2 defaults to trust-on-first-use and records the
+key; a later mismatch fails the connection. Pin explicitly with `trustedHostKey`
+in a profile, or pass `--insecureHostKey` to opt out (test environments only).
 
 ---
 
