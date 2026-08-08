@@ -1,0 +1,17 @@
+title = "ssh-mcp"
+
+[extend]
+useDefault = true
+
+# The redactor's own test file is secret-shaped by design: it feeds a fake PEM
+# key, a fake JWT, a fake GitLab PAT and a fake API key through redactText() to
+# prove they come back masked. Every value there is synthetic — the PEM body
+# literally reads "FakeKey123", the JWT is the canonical jwt.io example, the PAT
+# is the plain alphabet, the API key is sequential hex.
+#
+# Scoped to this one path on purpose. A blanket ignore for `test/**` would also
+# silence a real credential accidentally committed in a fixture, which is
+# exactly the mistake this scanner exists to catch.
+[[allowlists]]
+description = "Synthetic secrets used to test the redactor"
+paths = ['''test/unit/guard/redactor\.test\.ts''']

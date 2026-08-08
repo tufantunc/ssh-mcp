@@ -1,4 +1,4 @@
-import { mkdir, stat, rename, chmod, open } from 'fs/promises';
+import { mkdir, stat, rename, chmod, open, type FileHandle } from 'fs/promises';
 import { createWriteStream, type WriteStream } from 'fs';
 import { homedir, platform } from 'os';
 import { join, dirname } from 'path';
@@ -118,20 +118,30 @@ export class AuditStore {
   }
 
   private async loadLastHash(): Promise<void> {
+    let fd: FileHandle | undefined;
     try {
-      const fileStat = await stat(this.logPath);
+      // Open first, then stat the handle. Stat-then-open is a TOCTOU race
+      // (js/file-system-race): the size is used as a read offset, so a file
+      // that shrank in between would be read from the wrong position. Statting
+      // the open handle describes exactly the file being read.
+      fd = await open(this.logPath, 'r');
+      const fileStat = await fd.stat();
       const readSize = Math.min(fileStat.size, 8192);
-      const fd = await open(this.logPath, 'r');
+      if (readSize === 0) return;
+
       const buf = Buffer.alloc(readSize);
       await fd.read(buf, 0, readSize, fileStat.size - readSize);
-      await fd.close();
-      const content = buf.toString('utf8');
-      const lines = content.split('\n').filter(Boolean);
+
+      const lines = buf.toString('utf8').split('\n').filter(Boolean);
       if (lines.length === 0) return;
       const lastLine = JSON.parse(lines[lines.length - 1]);
       this.lastHash = lastLine.selfHash || '';
     } catch {
       // File doesn't exist or can't be read — start fresh
+    } finally {
+      // The old code closed the handle only on the success path, leaking one
+      // per failed read.
+      await fd?.close().catch(() => { /* already closed */ });
     }
   }
 
