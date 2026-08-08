@@ -6,6 +6,7 @@ import { existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import { serverBuilt, SERVER_ENTRY } from './harness.js';
+import { assertAvailable } from '../integration/helpers.js';
 
 const run = promisify(execFile);
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
@@ -28,7 +29,10 @@ async function havePnpm(): Promise<boolean> {
   }
 }
 
-const pnpmAvailable = await havePnpm();
+// The pnpm case is the only real verification that the OTEL imports are
+// declared rather than resolved by npm's hoisting, so a CI run without pnpm
+// would be quietly missing the check it exists for.
+const pnpmAvailable = assertAvailable(await havePnpm(), 'pnpm (run `corepack enable`)');
 
 describe.skipIf(!serverBuilt)('E2E — packaging', () => {
   it('starts and reports a version consistent with package.json', async () => {
