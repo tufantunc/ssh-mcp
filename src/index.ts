@@ -212,6 +212,15 @@ async function main() {
     process.exit(0);
   };
 
+  if (transportMode !== 'http') {
+    // The SDK's stdio transport listens only for 'data' and 'error', so a
+    // client that exits without signalling leaves this process running with
+    // its SSH connections open. Treat EOF on stdin as the client going away.
+    const onStdinClosed = () => { void cleanup(); };
+    process.stdin.on('end', onStdinClosed);
+    process.stdin.on('close', onStdinClosed);
+  }
+
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
 }

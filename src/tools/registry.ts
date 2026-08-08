@@ -73,7 +73,9 @@ function syntheticSuccess(profile: string): CommandResult {
   return { exitCode: 0, stdout: '', stderr: '', durationMs: 0, profile };
 }
 
-function textResult(text: string) {
+type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
+
+function textResult(text: string): ToolResult {
   return { content: [{ type: 'text' as const, text }] };
 }
 
@@ -218,41 +220,100 @@ export function registerTools(
     };
   }
 
+  interface RunContext {
+    conn: Awaited<ReturnType<typeof resolveConn>>;
+    /** Sanitized (and wrapped, where applicable) command actually being run. */
+    command: string;
+    profileName: string;
+    onProgress?: (bytes: number, tail: string) => void;
+    abortSignal?: AbortSignal;
+    extra: any;
+  }
+
+  interface AuditedOpts {
+    toolName: string;
+    /** Class recorded when a failure happens before policy produced a decision. */
+    failureClass: CommandClass;
+    profile?: string;
+    session?: string;
+    extra: any;
+    /** Reject anything the policy engine did not classify as this. */
+    enforceClass?: CommandClass;
+    /**
+     * Synthetic commands (`sftp:upload …`, `kill -TERM …`, `session:open …`)
+     * are built by us, not the caller, so they skip caller-input sanitization.
+     */
+    synthetic?: boolean;
+    /** Extra check on the sanitized command before policy evaluation. */
+    preCheck?: (cleanCmd: string) => void;
+    /** Rewrite what policy evaluates and what runs (the sudo wrapper). */
+    wrap?: (cleanCmd: string) => string;
+  }
+
+  /**
+   * The one place the sanitize → policy → approve → run → audit pipeline lives.
+   *
+   * Five of the six audited handlers used to inline their own copy of this, and
+   * they had already drifted apart: one dropped abort/progress support, one
+   * audited a different command string on success than on failure, one carried
+   * a dead `?? command` fallback. Every audit-semantics fix had to be made six
+   * times, so they were never all correct at once.
+   */
   async function runAudited(
     command: string,
-    opts: {
-      toolName: string;
-      failureClass: CommandClass;
-      enforceClass?: CommandClass;
-      profile?: string;
-      extra: any;
-      exec: (conn: Awaited<ReturnType<typeof resolveConn>>, cleanCmd: string, onProgress?: (bytes: number, tail: string) => void, abortSignal?: AbortSignal) => Promise<CommandResult>;
-    },
-  ) {
-    const ctx = makeCtx(opts.extra, opts.profile);
+    opts: AuditedOpts,
+    run: (rt: RunContext) => Promise<{ audited: CommandResult; output: ToolResult }>,
+  ): Promise<ToolResult> {
+    const ctx = makeCtx(opts.extra, opts.profile, opts.session);
     const profileName = defaultProfileName(opts.profile);
     const profile = registry.getProfile(profileName);
     const onProgress = makeProgressSender(opts.extra);
     const abortSignal = opts.extra?.signal;
-    // Sanitization lives inside the try so a rejected (empty, control-char-only,
+
+    // Sanitization runs inside the try so a rejected (empty, control-char-only,
     // over-length) command still leaves an audit trail — a client probing with
     // malformed payloads used to leave none.
     const state: AuditState = { command };
     try {
-      const cleanCmd = sanitizeCommand(command, profile.maxChars);
-      state.command = cleanCmd;
-      const { conn, evaluation, approver } = await checkPolicyAndApprove(cleanCmd, profileName, opts.toolName, ctx);
+      let effective = opts.synthetic ? command : sanitizeCommand(command, profile.maxChars);
+      state.command = effective;
+
+      opts.preCheck?.(effective);
+
+      if (opts.wrap) {
+        effective = opts.wrap(effective);
+        state.command = effective;
+      }
+
+      const { conn, evaluation, approver } = await checkPolicyAndApprove(effective, profileName, opts.toolName, ctx);
       state.evaluation = evaluation;
+
       if (opts.enforceClass && evaluation.commandClass !== opts.enforceClass) {
         throw new Error(`${opts.toolName} only accepts ${opts.enforceClass} commands, got: ${evaluation.commandClass}`);
       }
-      const result = await opts.exec(conn, cleanCmd, onProgress, abortSignal);
-      await auditResult(ctx, profileName, cleanCmd, evaluation, result, approver);
-      return commandOutput(result);
+
+      const { audited, output } = await run({
+        conn, command: effective, profileName, onProgress, abortSignal, extra: opts.extra,
+      });
+
+      await auditResult(ctx, profileName, effective, evaluation, audited, approver);
+      return output;
     } catch (err: any) {
       await auditFailure(ctx, profileName, state, opts.failureClass, err);
       throw err;
     }
+  }
+
+  /** Run a command over the connection and report it verbatim to the client. */
+  function execAndReport(opts: { stdin?: string } = {}) {
+    return async (rt: RunContext) => {
+      const audited = await rt.conn.exec(rt.command, {
+        stdin: opts.stdin,
+        onProgress: rt.onProgress,
+        abortSignal: rt.abortSignal,
+      });
+      return { audited, output: commandOutput(audited) };
+    };
   }
 
   // ─── list-connections ──────────────────────────────────────────────────
@@ -310,40 +371,34 @@ export function registerTools(
     // failing every call with "cb is not a function".
     async ({ name, type, command, profile }, extra) => {
       const cleanName = sanitizeSessionName(name);
-      const ctx = makeCtx(extra, profile);
-      const profileName = defaultProfileName(profile);
+      const isBackground = type === 'background' && Boolean(command);
 
-      if (type === 'background' && command) {
-        const profileObj = registry.getProfile(profileName);
-        const state: AuditState = { command };
-        try {
-          const cleanCmd = sanitizeCommand(command, profileObj.maxChars);
-          state.command = cleanCmd;
-          const { conn, evaluation, approver } = await checkPolicyAndApprove(cleanCmd, profileName, 'open-session', ctx);
-          state.evaluation = evaluation;
-          await conn.openSession({ name: cleanName, type, command: cleanCmd });
-          await auditResult(ctx, profileName, cleanCmd, evaluation, syntheticSuccess(profileName), approver);
-          return textResult(`Session "${cleanName}" opened on ${conn.profile.name} (${type}).`);
-        } catch (err: any) {
-          await auditFailure(ctx, profileName, state, 'destructive', err);
-          throw err;
-        }
-      }
-
-      // Opening a stateful shell is a security-relevant lifecycle event, so it
-      // gets an audit record too — this branch used to produce none.
-      const sessionCommand = `session:open ${type} ${cleanName}`;
-      const state: AuditState = { command: sessionCommand };
-      try {
-        const { conn, evaluation, approver } = await checkPolicyAndApprove(sessionCommand, profileName, 'open-session', ctx);
-        state.evaluation = evaluation;
-        await conn.openSession({ name: cleanName, type, command });
-        await auditResult(ctx, profileName, sessionCommand, evaluation, syntheticSuccess(profileName), approver);
-        return textResult(`Session "${cleanName}" opened on ${conn.profile.name} (${type}).`);
-      } catch (err: any) {
-        await auditFailure(ctx, profileName, state, 'safe', err);
-        throw err;
-      }
+      // A background session runs a caller-supplied command, so that command is
+      // what policy must evaluate. An interactive session runs no command yet,
+      // but opening a stateful shell is still a lifecycle event worth auditing
+      // — that branch used to produce no record at all.
+      return runAudited(
+        isBackground ? command! : `session:open ${type} ${cleanName}`,
+        {
+          toolName: 'open-session',
+          failureClass: isBackground ? 'destructive' : 'safe',
+          profile,
+          session: cleanName,
+          extra,
+          synthetic: !isBackground,
+        },
+        async (rt) => {
+          await rt.conn.openSession({
+            name: cleanName,
+            type,
+            command: isBackground ? rt.command : command,
+          });
+          return {
+            audited: syntheticSuccess(rt.profileName),
+            output: textResult(`Session "${cleanName}" opened on ${rt.conn.profile.name} (${type}).`),
+          };
+        },
+      );
     },
   );
 
@@ -396,14 +451,11 @@ export function registerTools(
     },
     { readOnlyHint: true },
     async ({ command, profile }, extra) => {
-      return runAudited(command, {
-      toolName: 'read-command',
-      failureClass: 'read-only',
-      enforceClass: 'read-only',
-      profile,
-      extra,
-      exec: (conn, cleanCmd, onProgress, abortSignal) => conn.exec(cleanCmd, { onProgress, abortSignal }),
-      });
+      return runAudited(
+        command,
+        { toolName: 'read-command', failureClass: 'read-only', enforceClass: 'read-only', profile, extra },
+        execAndReport(),
+      );
     },
   );
 
@@ -419,30 +471,24 @@ export function registerTools(
     },
     { destructiveHint: true },
     async ({ command, profile, session, tty }, extra) => {
-      const ctx = makeCtx(extra, profile, session);
-      const profileName = defaultProfileName(profile);
-      const state: AuditState = { command };
-      try {
-        const cleanCmd = sanitizeCommand(command, registry.getProfile(profileName).maxChars);
-        state.command = cleanCmd;
-        const { conn, evaluation, approver } = await checkPolicyAndApprove(cleanCmd, profileName, 'run-command', ctx);
-        state.evaluation = evaluation;
-
-        let result: CommandResult;
-        if (session) {
-          const sess = conn.getSession(session);
-          if (!sess) throw new Error(`Session "${session}" not found`);
-          result = await sess.run(cleanCmd, undefined, extra?.signal);
-        } else {
-          result = await conn.exec(cleanCmd, { tty, onProgress: makeProgressSender(extra), abortSignal: extra?.signal });
-        }
-
-        await auditResult(ctx, profileName, cleanCmd, evaluation, result, approver);
-        return commandOutput(result);
-      } catch (err: any) {
-        await auditFailure(ctx, profileName, state, 'safe', err);
-        throw err;
-      }
+      return runAudited(
+        command,
+        { toolName: 'run-command', failureClass: 'safe', profile, session, extra },
+        async (rt) => {
+          // A session run keeps the caller's shell state; a plain exec does not.
+          let audited: CommandResult;
+          if (session) {
+            const sess = rt.conn.getSession(session);
+            if (!sess) throw new Error(`Session "${session}" not found`);
+            audited = await sess.run(rt.command, undefined, rt.abortSignal);
+          } else {
+            audited = await rt.conn.exec(rt.command, {
+              tty, onProgress: rt.onProgress, abortSignal: rt.abortSignal,
+            });
+          }
+          return { audited, output: commandOutput(audited) };
+        },
+      );
     },
   );
 
@@ -456,37 +502,32 @@ export function registerTools(
     },
     { destructiveHint: true },
     async ({ command, profile }, extra) => {
-      const ctx = makeCtx(extra, profile);
       const profileName = defaultProfileName(profile);
-      const state: AuditState = { command };
-      try {
-        const cleanCmd = sanitizeCommand(command, registry.getProfile(profileName).maxChars);
-        state.command = cleanCmd;
-        // Evaluate the bare command too: the sudo wrapper would otherwise hide
-        // a denylisted command inside a quoted `sh -c` argument.
-        const rawEval = policy.evaluate(cleanCmd, registry.getProfile(profileName), 'privileged-command');
-        if (rawEval.decision === 'deny') {
-          state.evaluation = rawEval;
-          throw new Error(`POLICY_DENIED: ${rawEval.reason || 'Command not allowed'}`);
-        }
-        const wrapped = `sudo -p "" -S sh -c ${shellSingleQuote(cleanCmd)}`;
-        state.command = wrapped;
-        const { conn, evaluation, approver } = await checkPolicyAndApprove(wrapped, profileName, 'privileged-command', ctx);
-        state.evaluation = evaluation;
-
-        const sudoPassword = conn.getSudoPassword();
-        const result = await conn.exec(wrapped, {
-          stdin: sudoPassword ? sudoPassword + '\n' : undefined,
-          onProgress: makeProgressSender(extra),
-          abortSignal: extra?.signal,
-        });
-
-        await auditResult(ctx, profileName, wrapped, evaluation, result, approver);
-        return commandOutput(result);
-      } catch (err: any) {
-        await auditFailure(ctx, profileName, state, 'privileged', err);
-        throw err;
-      }
+      return runAudited(
+        command,
+        {
+          toolName: 'privileged-command',
+          failureClass: 'privileged',
+          profile,
+          extra,
+          // Evaluate the bare command too: the sudo wrapper would otherwise
+          // hide a forbidden command inside a quoted `sh -c` argument.
+          preCheck: (cleanCmd) => {
+            const rawEval = policy.evaluate(cleanCmd, registry.getProfile(profileName), 'privileged-command');
+            if (rawEval.decision === 'deny') {
+              throw new PolicyRefusedError(
+                `POLICY_DENIED: ${rawEval.reason || 'Command not allowed'}`,
+                rawEval,
+              );
+            }
+          },
+          wrap: (cleanCmd) => `sudo -p "" -S sh -c ${shellSingleQuote(cleanCmd)}`,
+        },
+        (rt) => {
+          const sudoPassword = rt.conn.getSudoPassword();
+          return execAndReport({ stdin: sudoPassword ? sudoPassword + '\n' : undefined })(rt);
+        },
+      );
     },
   );
 
@@ -501,21 +542,17 @@ export function registerTools(
     },
     { destructiveHint: true },
     async ({ remotePath, content, profile }, extra) => {
-      const ctx = makeCtx(extra, profile);
-      const profileName = defaultProfileName(profile);
-      const syntheticCommand = `sftp:upload ${remotePath}`;
-      const state: AuditState = { command: syntheticCommand };
-      try {
-        const { conn, evaluation, approver } = await checkPolicyAndApprove(syntheticCommand, profileName, 'sftp-upload', ctx);
-        state.evaluation = evaluation;
-        const sftp = new SftpClient(conn);
-        await sftp.upload({ remotePath, content });
-        await auditResult(ctx, profileName, syntheticCommand, evaluation, syntheticSuccess(profileName), approver);
-        return textResult(`Uploaded ${content.length} bytes to ${remotePath}`);
-      } catch (err: any) {
-        await auditFailure(ctx, profileName, state, 'destructive', err);
-        throw err;
-      }
+      return runAudited(
+        `sftp:upload ${remotePath}`,
+        { toolName: 'sftp-upload', failureClass: 'destructive', profile, extra, synthetic: true },
+        async (rt) => {
+          await new SftpClient(rt.conn).upload({ remotePath, content });
+          return {
+            audited: syntheticSuccess(rt.profileName),
+            output: textResult(`Uploaded ${content.length} bytes to ${remotePath}`),
+          };
+        },
+      );
     },
   );
 
@@ -529,21 +566,17 @@ export function registerTools(
     },
     { readOnlyHint: true },
     async ({ remotePath, profile }, extra) => {
-      const ctx = makeCtx(extra, profile);
-      const profileName = defaultProfileName(profile);
-      const syntheticCommand = `sftp:download ${remotePath}`;
-      const state: AuditState = { command: syntheticCommand };
-      try {
-        const { conn, evaluation, approver } = await checkPolicyAndApprove(syntheticCommand, profileName, 'sftp-download', ctx);
-        state.evaluation = evaluation;
-        const sftp = new SftpClient(conn);
-        const data = await sftp.download({ remotePath });
-        await auditResult(ctx, profileName, syntheticCommand, evaluation, syntheticSuccess(profileName), approver);
-        return textResult(redactText(data.toString('utf8'), { entropyScan: true }));
-      } catch (err: any) {
-        await auditFailure(ctx, profileName, state, 'read-only', err);
-        throw err;
-      }
+      return runAudited(
+        `sftp:download ${remotePath}`,
+        { toolName: 'sftp-download', failureClass: 'read-only', profile, extra, synthetic: true },
+        async (rt) => {
+          const data = await new SftpClient(rt.conn).download({ remotePath });
+          return {
+            audited: syntheticSuccess(rt.profileName),
+            output: textResult(redactText(data.toString('utf8'), { entropyScan: true })),
+          };
+        },
+      );
     },
   );
 
@@ -558,25 +591,20 @@ export function registerTools(
     },
     { destructiveHint: true },
     async ({ pid, signal, profile }, extra) => {
-      const ctx = makeCtx(extra, profile);
-      const command = `kill -${signal} ${pid}`;
-      const profileName = defaultProfileName(profile);
-      const state: AuditState = { command };
-      try {
-        const { conn, evaluation, approver } = await checkPolicyAndApprove(command, profileName, 'signal-process', ctx);
-        state.evaluation = evaluation;
-        const result = await conn.exec(command, { abortSignal: extra?.signal });
-        await auditResult(ctx, profileName, command, evaluation, result, approver);
-        const output = commandOutput(result);
-        // `kill` is silent on success — confirm what was sent instead of an empty result.
-        if (!('isError' in output) && !result.stdout.trim() && !result.stderr.trim()) {
-          return textResult(`Signal ${signal} sent to PID ${pid}`);
-        }
-        return output;
-      } catch (err: any) {
-        await auditFailure(ctx, profileName, state, 'destructive', err);
-        throw err;
-      }
+      return runAudited(
+        `kill -${signal} ${pid}`,
+        { toolName: 'signal-process', failureClass: 'destructive', profile, extra, synthetic: true },
+        async (rt) => {
+          const { audited, output } = await execAndReport()(rt);
+          // `kill` is silent on success — confirm what was sent rather than
+          // returning an empty result.
+          const silentSuccess = !output.isError && !audited.stdout.trim() && !audited.stderr.trim();
+          return {
+            audited,
+            output: silentSuccess ? textResult(`Signal ${signal} sent to PID ${pid}`) : output,
+          };
+        },
+      );
     },
   );
 }
