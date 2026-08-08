@@ -103,7 +103,14 @@ export class InteractiveSession extends Session {
     span.setAttribute('session.name', this.name);
 
     const marker = this.generateMarker();
-    const sentinel = `SSHMCP_END_${marker}`;
+    // Split literals: the shell assembles these at runtime, so the *echoed*
+    // command line never contains the assembled marker — only the command's
+    // actual output does. That is what makes the parse below deterministic
+    // instead of a guess about which echoed line to skip.
+    const beginParts = ['SSHMCP_BEG', `_${marker}`];
+    const endParts = ['SSHMCP_END', `_${marker}`];
+    const beginMarker = beginParts.join('');
+    const endMarker = endParts.join('');
     const startTime = Date.now();
 
     return new Promise((resolve, reject) => {
@@ -121,41 +128,49 @@ export class InteractiveSession extends Session {
         }
       }, timeoutMs);
 
-      const sentinelRegex = new RegExp(`${sentinel}__(\\d+)__`);
+      // The trailer carries the exit code and the shell's real CWD, so neither
+      // has to be inferred (cwd used to be guessed from the command text, which
+      // was wrong for relative paths, `cd -`, symlinks and `cd` with no arg).
+      const endRegex = new RegExp(`${endMarker}__(\\d+)__([^\\r\\n]*)`);
 
       const dataHandler = (data: Buffer) => {
+        const prevLength = buffer.length;
         buffer += data.toString();
         if (buffer.length > InteractiveSession.MAX_OUTPUT * 2) {
           buffer = buffer.slice(-InteractiveSession.MAX_OUTPUT * 2);
         }
 
-        const match = buffer.match(sentinelRegex);
+        // The marker can only appear at the tail, so search the newly-arrived
+        // bytes plus an overlap rather than rescanning the whole buffer on
+        // every chunk — that was O(total x buffer) for a chatty command. The
+        // cheap indexOf also gates the ANSI strip, which is the expensive part.
+        const searchFrom = Math.max(0, Math.min(prevLength, buffer.length) - endMarker.length - 32);
+        if (resolved || buffer.indexOf(endMarker, searchFrom) === -1) return;
+
+        const cleaned = stripAnsi(buffer);
+        const match = cleaned.match(endRegex);
         if (match && !resolved) {
           resolved = true;
           clearTimeout(timeoutId);
           this.stream.removeListener('data', dataHandler);
 
           const exitCode = parseInt(match[1]);
+          const reportedCwd = match[2].trim();
 
-          const sentinelLineIdx = buffer.indexOf(`${sentinel}__`);
-          let beforeSentinel = buffer.substring(0, sentinelLineIdx);
+          // Output is exactly what lies between the two printed markers.
+          // Anything before the begin marker — the echoed command, leftover
+          // shell init, a prompt that PS1="" had not suppressed yet — is
+          // discarded by construction rather than by counting lines.
+          const beginIdx = cleaned.indexOf(beginMarker);
+          const afterBegin = beginIdx >= 0
+            ? cleaned.slice(cleaned.indexOf('\n', beginIdx) + 1)
+            : cleaned;
+          const endIdx = afterBegin.indexOf(endMarker);
+          const between = endIdx >= 0 ? afterBegin.slice(0, endIdx) : afterBegin;
 
-          const cleaned = stripAnsi(beforeSentinel);
-          const lines = cleaned.split('\n');
+          const output = between.replace(/^\n+/, '').replace(/\n+$/, '');
 
-          const outputLines: string[] = [];
-          for (let i = 1; i < lines.length; i++) {
-            const line = lines[i];
-            if (line.includes('printf') && line.includes(sentinel.slice(0, 10))) break;
-            if (/^[^$]*\$?\s*printf\s+/.test(line) && line.includes(sentinel.slice(0, 10))) break;
-            outputLines.push(line);
-          }
-
-          let output = outputLines.join('\n').replace(/^\n+/, '').replace(/\n+$/, '');
-
-          if (command.trim().startsWith('cd ')) {
-            this.cwd = command.trim().slice(3) || '~';
-          }
+          if (reportedCwd) this.cwd = reportedCwd;
 
           this.touch();
           this.outputBuffer = output;
@@ -197,8 +212,19 @@ export class InteractiveSession extends Session {
       }
 
       this.stream.on('data', dataHandler);
-      this.stream.write(`${command}\n`);
-      this.stream.write(`printf '%s__%s__\\n' '${sentinel}' "$?"\n`);
+      // One line, so the PTY produces exactly one echo and it necessarily
+      // precedes the begin marker's output. Written as three lines, the shell
+      // echoed each just before running it, interleaving the echoes of the
+      // command and the trailer *after* the begin marker — right in the middle
+      // of what we treat as output.
+      //
+      // The markers are printed from split literals, so the echo of this line
+      // never contains an assembled marker; only the shell's own output does.
+      this.stream.write(
+        `printf '%s%s\\n' '${beginParts[0]}' '${beginParts[1]}'; ` +
+        `${command}; ` +
+        `printf '%s%s__%s__%s\\n' '${endParts[0]}' '${endParts[1]}' "$?" "$PWD"\n`,
+      );
     });
   }
 
