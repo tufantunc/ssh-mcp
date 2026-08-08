@@ -61,6 +61,7 @@ jobs:
       - run: npm ci
 
       - name: Build
+        # Also required by the e2e suite, which drives the built artifact.
         run: npm run build
 
       - name: Dependency resolution check
