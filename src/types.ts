@@ -185,6 +185,8 @@ export interface SftpUploadOpts {
 export interface SftpDownloadOpts {
   profile?: string;
   remotePath: string;
+  /** Byte cap for the download. Defaults to the profile's maxOutputBytes. */
+  maxBytes?: number;
 }
 
 export interface SftpStat {

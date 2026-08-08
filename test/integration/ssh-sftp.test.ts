@@ -100,6 +100,22 @@ describe.skipIf(await SSH_AVAILABLE === false)('SFTP operations', () => {
     await conn.exec(`rm -f ${remotePath}`);
   });
 
+  // exec output has always been capped; SFTP download was not, so one tool call
+  // could buffer an arbitrarily large remote file, decode it to a string and
+  // entropy-scan it — multi-GB RSS and a long event-loop stall for the server.
+  it('refuses to download a file larger than the cap', async () => {
+    const remotePath = '/tmp/ssh-mcp-big.txt';
+    await conn.exec(`head -c 20000 /dev/zero | tr '\\0' 'a' > ${remotePath}`);
+
+    await expect(sftp.download({ remotePath, maxBytes: 1024 })).rejects.toThrow(/exceeds the 1024 byte limit/);
+
+    // Under the cap the same file downloads normally.
+    const ok = await sftp.download({ remotePath, maxBytes: 100_000 });
+    expect(ok.length).toBe(20000);
+
+    await conn.exec(`rm -f ${remotePath}`);
+  }, 20000);
+
   // Regression: withSftp used to open a channel per operation and never end() it,
   // so past ~MaxSessions (OpenSSH default 10) no further channel could be opened
   // on the connection — SFTP, exec or shell alike.
