@@ -7,7 +7,9 @@ import { resolveCredentials } from './config/credential-resolver.js';
 import { ConnectionRegistry } from './ssh/connection-registry.js';
 import { PolicyEngine, DEFAULT_RULES } from './policy/engine.js';
 import { AuditStore } from './audit/store.js';
-import { registerTools } from './tools/registry.js';
+import { registerTools, registerResources, getToolHashes } from './tools/registry.js';
+import { initKeychain } from './config/credential-resolver.js';
+import { SERVER_VERSION } from './version.js';
 import type { HostKeyMode } from './ssh/host-key.js';
 import type { AppConfig, Profile, Defaults } from './types.js';
 
@@ -85,7 +87,6 @@ async function main() {
   const argv = parseArgv();
 
   if (argv.dumpToolHashes !== undefined) {
-    const { getToolHashes } = await import('./tools/registry.js');
     console.log(JSON.stringify(getToolHashes(), null, 2));
     return;
   }
@@ -95,7 +96,6 @@ async function main() {
   const entropyScan = !!argv.auditEntropyScan;
   const tamperEvident = !!argv.auditTamperEvident;
 
-  const { initKeychain } = await import('./config/credential-resolver.js');
   await initKeychain();
 
   if (argv.otelEndpoint) {
@@ -107,39 +107,40 @@ async function main() {
   const policy = new PolicyEngine(DEFAULT_RULES);
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);
 
-  const server = new McpServer({
-    name: 'SSH MCP Server',
-    version: '2.0.0',
-    capabilities: {
-      tools: {},
-      resources: {},
-    },
-  });
-
-  registerTools(server, registry, policy, audit);
-
-  const { registerResources } = await import('./tools/registry.js');
-  registerResources(server, registry);
   if (argv.opaUrl) {
     policy.setOpaUrl(argv.opaUrl);
     console.error(`OPA sidecar enabled: ${argv.opaUrl}`);
   }
 
+  // An McpServer binds to a single transport, so HTTP needs one per session.
+  const createMcpServer = (): McpServer => {
+    const server = new McpServer({
+      name: 'SSH MCP Server',
+      version: SERVER_VERSION,
+      capabilities: {
+        tools: {},
+        resources: {},
+      },
+    });
+    registerTools(server, registry, policy, audit);
+    registerResources(server, registry);
+    return server;
+  };
+
   const transportMode = argv.transport || 'stdio';
 
   if (transportMode === 'http') {
     const { startHttpServer } = await import('./transport/http.js');
-    await startHttpServer(server, {
+    await startHttpServer(createMcpServer, {
       port: parseInt(argv.httpPort as string) || 3000,
       host: (argv.httpHost as string) || '127.0.0.1',
       bearerToken: argv.bearerToken as string | undefined,
       rateLimit: parseInt(argv.rateLimit as string) || 0,
       registry,
-      audit,
     });
   } else {
     const transport = new StdioServerTransport();
-    await server.connect(transport);
+    await createMcpServer().connect(transport);
     console.error('SSH MCP Server v2 running on stdio');
   }
 
