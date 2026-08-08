@@ -35,6 +35,30 @@ function httpGet(path: string, headers: Record<string, string> = {}): Promise<{ 
   });
 }
 
+function httpPost(path: string, body: string, headers: Record<string, string>): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        hostname: '127.0.0.1', port: PORT, path, method: 'POST', agent: false,
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          'content-length': Buffer.byteLength(body),
+          ...headers,
+        },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (c) => (data += c));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }));
+      },
+    );
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 async function connectClient(): Promise<Client> {
   const client = new Client({ name: 'e2e-http', version: '0.0.0' }, { capabilities: {} });
   const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${PORT}/`), {
@@ -95,6 +119,29 @@ describe.skipIf(!available)('E2E — HTTP transport', () => {
 
     const authorised = await httpGet('/status', { authorization: `Bearer ${BEARER}` });
     expect(authorised.status).toBe(200);
+  });
+
+  // A page the user visits can make their browser POST to a localhost server;
+  // the bearer token does not help if the browser is tricked into attaching it.
+  // Validating the Host header is what stops it (GHSA-w48q-cv73-mx4w).
+  it('rejects a request whose Host header is not an allowed host', async () => {
+    const init = JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'c', version: '1' } },
+    });
+
+    const attacker = await httpPost('/', init, {
+      host: 'evil.example.com',
+      authorization: `Bearer ${BEARER}`,
+    });
+    expect(attacker.status).toBeGreaterThanOrEqual(400);
+
+    // The same request with a legitimate Host is accepted.
+    const legitimate = await httpPost('/', init, {
+      host: `127.0.0.1:${PORT}`,
+      authorization: `Bearer ${BEARER}`,
+    });
+    expect(legitimate.status).toBe(200);
   });
 
   // Regression: one shared transport meant the SDK rejected the second client

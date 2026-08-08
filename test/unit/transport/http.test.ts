@@ -28,11 +28,10 @@ function startTestServer(): Promise<Server> {
         getOrCreate: async () => { throw new Error('not in test'); },
       } as any;
 
-      const mcpServer = new McpServer({
-        name: 'test',
-        version: '0.0.0',
-        capabilities: { tools: {}, resources: {} },
-      });
+      const mcpServer = new McpServer(
+        { name: 'test', version: '0.0.0' },
+        { capabilities: { tools: {}, resources: {} } },
+      );
 
       await startHttpServer(() => mcpServer, {
         port: HTTP_PORT,
