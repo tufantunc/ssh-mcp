@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { SSHConnection } from '../../src/ssh/connection.js';
 import { SftpClient } from '../../src/ssh/sftp.js';
 import { resolveCredentials } from '../../src/config/credential-resolver.js';
-import { isSshServerUp, SSH_HOST } from './helpers.js';
+import { isSshServerUp, assertAvailable, SSH_HOST } from './helpers.js';
 import type { Profile } from '../../src/types.js';
 import type { BackgroundSession } from '../../src/ssh/session.js';
 
@@ -58,7 +58,12 @@ function profileFor(t: Target): Profile {
 
 const availability = new Map<string, boolean>();
 for (const t of TARGETS) {
-  availability.set(t.name, await isSshServerUp(SSH_HOST, t.port));
+  const up = await isSshServerUp(SSH_HOST, t.port);
+  // These targets are the reason the ANSI prompt bug and the Dropbear channel
+  // flakiness were found at all. Skipping them silently in CI would leave a
+  // green build that never exercised either.
+  assertAvailable(up, `${t.name} (${SSH_HOST}:${t.port})`);
+  availability.set(t.name, up);
 }
 
 for (const target of TARGETS) {

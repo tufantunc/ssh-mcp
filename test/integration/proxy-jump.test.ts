@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ConnectionRegistry } from '../../src/ssh/connection-registry.js';
 import { checkAllServers, allServersUp, setupEnv, createAppConfig } from './fixtures.js';
-import { isSshServerUp, SSH_HOST } from './helpers.js';
+import { isSshServerUp, assertAvailable, SSH_HOST } from './helpers.js';
 import type { AppConfig, Profile } from '../../src/types.js';
 
 // ProxyJump (profile.via) had no test at all: the recursive getOrCreate, the
@@ -42,7 +42,8 @@ function configWithBastion(): AppConfig {
   return { ...base, profiles: [...base.profiles, bastion, jumped] };
 }
 
-const bastionUp = isSshServerUp(SSH_HOST, BASTION_PORT);
+const bastionUp = isSshServerUp(SSH_HOST, BASTION_PORT)
+  .then((up) => assertAvailable(up, `bastion (${SSH_HOST}:${BASTION_PORT})`));
 
 beforeAll(async () => {
   if (!allServersUp(await checkAllServers())) return;

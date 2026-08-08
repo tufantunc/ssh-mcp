@@ -9,54 +9,18 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    services:
-      ssh-admin:
-        image: lscr.io/linuxserver/openssh-server:latest
-        env:
-          USER_NAME: admin
-          PASSWORD_ACCESS: "true"
-          USER_PASSWORD: secret
-          SUDO_ACCESS: "true"
-        ports:
-          - 2222:2222
-        options: >-
-          --health-cmd="nc -z localhost 2222 || exit 1"
-          --health-interval=2s
-          --health-timeout=2s
-          --health-retries=30
-      ssh-viewer:
-        image: lscr.io/linuxserver/openssh-server:latest
-        env:
-          USER_NAME: viewer
-          PASSWORD_ACCESS: "true"
-          USER_PASSWORD: viewpass
-        ports:
-          - 2223:2222
-        options: >-
-          --health-cmd="nc -z localhost 2222 || exit 1"
-          --health-interval=2s
-          --health-timeout=2s
-          --health-retries=30
-      ssh-operator:
-        image: lscr.io/linuxserver/openssh-server:latest
-        env:
-          USER_NAME: operator
-          PASSWORD_ACCESS: "true"
-          USER_PASSWORD: oppass
-          SUDO_ACCESS: "true"
-        ports:
-          - 2224:2222
-        options: >-
-          --health-cmd="nc -z localhost 2222 || exit 1"
-          --health-interval=2s
-          --health-timeout=2s
-          --health-retries=30
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      # The pnpm packaging test is the only real check that the OTEL imports are
+      # declared rather than resolved by npm's hoisting. Without pnpm on the
+      # runner it skipped, so the check it exists for never ran in CI.
+      - name: Enable corepack (pnpm)
+        run: corepack enable
 
       - run: npm ci
 
@@ -70,13 +34,26 @@ jobs:
       - name: Typecheck (src + tests)
         run: npm run typecheck
 
+      # docker compose rather than `services:`, because two of the test servers
+      # build from local Dockerfiles (Alpine/busybox-ash and Dropbear) and one
+      # mounts an init script — none of which a service container can express.
+      # It also gives the containers a shared network, which the ProxyJump test
+      # needs to resolve the target host from inside the bastion.
+      #
+      # Keeping one definition also stops CI and docker-compose.yml drifting:
+      # CI used to define three of the six servers and none of the sshd tuning.
+      - name: Start SSH test servers
+        run: docker compose --profile test up -d --build --wait
+
       - name: Wait for all sshd servers
         run: |
-          for port in 2222 2223 2224; do
-            for i in {1..60}; do
-              nc -z 127.0.0.1 $port && echo "sshd on $port ready" && break
+          for port in 2222 2223 2224 2225 2226 2227; do
+            ready=false
+            for i in $(seq 1 60); do
+              if nc -z 127.0.0.1 $port; then echo "sshd on $port ready"; ready=true; break; fi
               sleep 1
             done
+            if [ "$ready" != true ]; then echo "::error::sshd on $port never became ready"; exit 1; fi
           done
 
       - name: Run tests
@@ -91,6 +68,12 @@ jobs:
           # server is unreachable and CI reports green with zero of them run.
           SSH_MCP_REQUIRE_SERVERS: "1"
         run: npm test
+
+      # Service containers surface their logs in the UI automatically; compose
+      # containers do not, so a failure would otherwise be undebuggable.
+      - name: SSH server logs
+        if: failure()
+        run: docker compose --profile test logs --tail=100
 
   security-scan:
     runs-on: ubuntu-latest
