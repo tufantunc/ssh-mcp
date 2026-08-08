@@ -211,6 +211,54 @@ describe('audit records', () => {
   });
 });
 
+describe('command quota', () => {
+  // The approval gate stops destructive commands and the HTTP limiter caps
+  // request rate, but neither bounds total work: an agent looping over allowed
+  // commands stays under both. The quota is the circuit breaker for that.
+  it('refuses further commands once the daily quota is spent', async () => {
+    h = await createHarness({ commandQuotaPerDay: 3 });
+
+    for (let i = 0; i < 3; i++) {
+      const ok = await call('read-command', { command: `ls dir-${i}` });
+      expect(ok.isError).toBeFalsy();
+    }
+
+    const blocked = await call('read-command', { command: 'ls again' });
+    expect(blocked.isError).toBe(true);
+    expect(textOf(blocked)).toMatch(/QUOTA_EXCEEDED/);
+    // The refused command must not reach the host.
+    expect(h.execCalls).toHaveLength(3);
+  });
+
+  it('audits a quota refusal with its own rule id', async () => {
+    h = await createHarness({ commandQuotaPerDay: 1 });
+    await call('read-command', { command: 'ls' });
+    await call('read-command', { command: 'ls' });
+
+    const record = h.auditRecords.at(-1);
+    expect(record.decision).toBe('deny');
+    expect(record.ruleId).toBe('command-quota');
+  });
+
+  it('does not count commands the policy already refused', async () => {
+    h = await createHarness({ commandQuotaPerDay: 2 });
+    // Denied by the forbidden list — should not spend budget.
+    await call('run-command', { command: 'rm -rf /' });
+    await call('run-command', { command: 'rm -rf /' });
+
+    const ok = await call('read-command', { command: 'ls' });
+    expect(ok.isError).toBeFalsy();
+  });
+
+  it('is unlimited when the quota is zero', async () => {
+    h = await createHarness({ commandQuotaPerDay: 0 });
+    for (let i = 0; i < 12; i++) {
+      const res = await call('read-command', { command: `ls ${i}` });
+      expect(res.isError).toBeFalsy();
+    }
+  });
+});
+
 describe('sessions', () => {
   it('opens, lists and closes a session, auditing the open', async () => {
     h = await createHarness();

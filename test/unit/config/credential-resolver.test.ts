@@ -26,6 +26,7 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
     sessionMaxPerConnection: 5,
     sessionIdleTimeoutMs: 600000,
     sessionBackgroundMaxMs: 3600000,
+    commandQuotaPerDay: 0,
     ...overrides,
   };
 }

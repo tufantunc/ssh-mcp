@@ -130,6 +130,7 @@ commandTimeoutMs = 60000
 commandMaxChars = 5000
 commandMaxOutputBytes = 1048576     # 1MB
 connectionIdleReapMs = 900000       # 15min
+commandQuotaPerDay = 0              # 0 = unlimited; circuit breaker for runaway agents
 approvalMode = "ask-destructive"    # auto | ask-destructive | ask-all | deny
 
 [[profiles]]
@@ -151,6 +152,7 @@ approvalPolicy = "ask-all"
 cert = false                        # SSH CA cert auth — auto-detects keyRef-cert.pub
 sessionMaxPerConnection = 3         # per-profile override
 sessionIdleTimeoutMs = 300000       # stricter for prod
+commandQuotaPerDay = 200            # per-profile override
 ```
 
 ### ProxyJump (Bastion)
@@ -239,6 +241,19 @@ denylist; an invalid pattern fails at startup rather than degrading silently.
 - `ask-destructive` — prompt for destructive/privileged (default)
 - `ask-all` — prompt for every command
 - `deny` — reject destructive/privileged commands outright (no prompt)
+
+### Command Quota
+
+`commandQuotaPerDay` bounds how many commands a profile may run in a rolling
+24-hour window (0 = unlimited). The approval gate stops *destructive* commands
+and the HTTP rate limiter caps request rate, but neither bounds total work — a
+prompt-injected agent looping over allowed commands stays under both. The quota
+is the circuit breaker for that case.
+
+Counted after policy allows a command and before it runs, so a denied command
+does not spend budget. The window slides rather than resetting at midnight,
+which would let an agent spend a full quota just before the reset and another
+immediately after.
 
 ### External Policy Engine (OPA)
 
@@ -395,6 +410,7 @@ Secrets are **never** passed as CLI arguments.
 | `--insecureHostKey` | false | Disable host key verification (test only!) |
 | `--disableApproval` | false | Skip the approval gate (quick start profile only) |
 | `--opaUrl` | — | OPA sidecar URL for external policy |
+| `--commandQuota` | 0 (off) | Max commands per rolling 24h per profile |
 | `--auditEntropyScan` | false | Enable entropy-based secret scanning in audit |
 | `--auditTamperEvident` | false | Enable hash-chained tamper-evident audit log |
 | `--otelEndpoint` | — | OTLP/HTTP endpoint for OpenTelemetry traces |

@@ -32,6 +32,7 @@ export const testProfile: Profile = {
   sessionMaxPerConnection: 5,
   sessionIdleTimeoutMs: 60_000,
   sessionBackgroundMaxMs: 3_600_000,
+  commandQuotaPerDay: 0,
 };
 
 export interface ExecCall {

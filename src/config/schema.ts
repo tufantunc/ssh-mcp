@@ -12,6 +12,8 @@ export const defaultsSchema = z.object({
   commandMaxChars: z.number().int().positive().default(5000),
   commandMaxOutputBytes: z.number().int().positive().default(1_048_576),
   connectionIdleReapMs: z.number().int().positive().default(900_000),
+  // 0 = unlimited. A circuit breaker for runaway agents, not a rate limit.
+  commandQuotaPerDay: z.number().int().nonnegative().default(0),
   approvalMode: approvalModeSchema.default('ask-destructive'),
 }).strict();
 
@@ -43,6 +45,7 @@ export const profileSchema = z.object({
   sessionMaxPerConnection: z.number().int().positive().optional(),
   sessionIdleTimeoutMs: z.number().int().positive().optional(),
   sessionBackgroundMaxMs: z.number().int().positive().optional(),
+  commandQuotaPerDay: z.number().int().nonnegative().optional(),
 }).strict();
 
 export const configSchema = z.object({

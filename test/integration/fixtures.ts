@@ -26,6 +26,7 @@ const baseProfile: Omit<Profile, 'name' | 'host' | 'port' | 'user' | 'role'> = {
   sessionMaxPerConnection: 5,
   sessionIdleTimeoutMs: 60000,
   sessionBackgroundMaxMs: 3600000,
+  commandQuotaPerDay: 0,
 };
 
 export const profiles: Record<string, Profile> = {
@@ -95,6 +96,7 @@ export function createAppConfig(): AppConfig {
     commandMaxChars: 5000,
     commandMaxOutputBytes: 1048576,
     connectionIdleReapMs: 60000,
+    commandQuotaPerDay: 0,
     approvalMode: 'ask-destructive',
   };
   return { defaults, profiles: Object.values(profiles) };
