@@ -1,6 +1,6 @@
 import type { ClientChannel } from 'ssh2';
 import type { Profile, SessionOpts } from '../types.js';
-import { InteractiveSession, BackgroundSession, type Session } from './session.js';
+import { InteractiveSession, BackgroundSession, stripAnsi, type Session } from './session.js';
 import { shellSingleQuote } from '../guard/sanitizer.js';
 import { randomUUID } from 'crypto';
 
@@ -112,7 +112,12 @@ export class SessionManager {
 
       const initHandler = (data: Buffer) => {
         initBuffer += data.toString();
-        if (!/[#$>]\s*$/.test(initBuffer) && initBuffer.length <= 1000) return;
+        // Strip ANSI before looking for the prompt. busybox ash follows its
+        // prompt with a cursor-position query (ESC[6n), so the raw buffer ends
+        // in an escape sequence rather than "$ " — the match failed and every
+        // session open on such a shell waited out the 3s ceiling instead.
+        const visible = stripAnsi(initBuffer);
+        if (!/[#$>]\s*$/.test(visible) && initBuffer.length <= 1000) return;
 
         stream.write('PS1=""\n');
         stream.write('set +o history 2>/dev/null\n');
