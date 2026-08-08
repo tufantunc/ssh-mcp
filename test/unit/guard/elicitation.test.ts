@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { requestApproval } from '../../../src/guard/elicitation.js';
 import type { PolicyEvaluation } from '../../../src/types.js';
 
@@ -9,10 +9,14 @@ const mockEvaluation: PolicyEvaluation = {
   ruleId: 'approval-policy',
 };
 
+// Mocks the SDK's typed Server.elicitInput(). Mocking the old low-level
+// server.request() made these tests pass for the wrong reason: any change of
+// API left elicitInput undefined, the call threw, and "approved: false" still
+// satisfied three of the four assertions.
 function makeMockServer(action: 'accept' | 'decline' | 'cancel' | 'error'): any {
-  const server = {
+  return {
     server: {
-      request: vi.fn().mockImplementation(async () => {
+      elicitInput: vi.fn().mockImplementation(async () => {
         if (action === 'error') throw new Error('Client does not support elicitation');
         if (action === 'accept') return { action: 'accept', content: { confirm: true } };
         if (action === 'decline') return { action: 'decline', content: {} };
@@ -20,13 +24,23 @@ function makeMockServer(action: 'accept' | 'decline' | 'cancel' | 'error'): any 
       }),
     },
   };
-  return server;
 }
+
+let errorSpy: ReturnType<typeof vi.spyOn>;
+
+beforeEach(() => {
+  errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  errorSpy.mockRestore();
+});
 
 describe('requestApproval', () => {
   it('returns approved when client accepts', async () => {
     const server = makeMockServer('accept');
     const result = await requestApproval(server, 'rm /tmp/x', 'dev', mockEvaluation);
+    expect(server.server.elicitInput).toHaveBeenCalledOnce();
     expect(result.approved).toBe(true);
     expect(result.approver).toBe('mcp-client');
   });
@@ -43,18 +57,30 @@ describe('requestApproval', () => {
     expect(result.approved).toBe(false);
   });
 
-  it('returns not approved when client throws (no support)', async () => {
+  it('fails closed and logs when the elicitation call throws', async () => {
     const server = makeMockServer('error');
+    const result = await requestApproval(server, 'rm /tmp/x', 'dev', mockEvaluation);
+    expect(result.approved).toBe(false);
+    // A gate that always denies for an unnoticed reason is its own outage.
+    expect(errorSpy).toHaveBeenCalledOnce();
+    expect(String(errorSpy.mock.calls[0][0])).toMatch(/Approval request failed/);
+  });
+
+  it('does not approve when the client accepts but confirm is false', async () => {
+    const server = {
+      server: { elicitInput: vi.fn().mockResolvedValue({ action: 'accept', content: { confirm: false } }) },
+    } as any;
     const result = await requestApproval(server, 'rm /tmp/x', 'dev', mockEvaluation);
     expect(result.approved).toBe(false);
   });
 
-  it('includes command class in message', async () => {
+  it('sends the command class, profile and command in the prompt', async () => {
     const server = makeMockServer('accept');
-    await requestApproval(server, 'rm /tmp/x', 'prod-web-1', mockEvaluation);
-    expect(server.server.request).toHaveBeenCalled();
-    const call = server.server.request.mock.calls[0][0];
-    expect(call.params.message).toContain('destructive');
-    expect(call.params.message).toContain('prod-web-1');
+    await requestApproval(server, 'rm -rf /tmp/x', 'prod-web-1', mockEvaluation);
+    const params = server.server.elicitInput.mock.calls[0][0];
+    expect(params.message).toContain('destructive');
+    expect(params.message).toContain('prod-web-1');
+    expect(params.message).toContain('rm -rf /tmp/x');
+    expect(params.requestedSchema.required).toContain('confirm');
   });
 });

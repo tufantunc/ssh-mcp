@@ -39,12 +39,46 @@ export class SftpClient {
     });
   }
 
+  /**
+   * Download a remote file, refusing anything over the cap.
+   *
+   * exec output has always been capped, but SFTP download was not: the whole
+   * file was buffered, concatenated, decoded to a UTF-16 string and entropy
+   * scanned. A large remote file therefore turned one tool call into multi-GB
+   * RSS and a multi-second event-loop stall for the entire server.
+   */
   async download(opts: SftpDownloadOpts): Promise<Buffer> {
+    const maxBytes = opts.maxBytes ?? this.conn.profile.maxOutputBytes;
+
     return this.withSftp(async (sftp) => {
+      // Refuse before transferring anything when the size is known up front.
+      const size = await new Promise<number | undefined>((resolve) => {
+        sftp.stat(opts.remotePath, (err, stats) => resolve(err ? undefined : stats?.size));
+      });
+      if (size !== undefined && size > maxBytes) {
+        throw new Error(
+          `Refusing to download ${opts.remotePath}: ${size} bytes exceeds the ${maxBytes} byte limit ` +
+          `(commandMaxOutputBytes). Narrow the file or raise the limit for this profile.`,
+        );
+      }
+
       return new Promise<Buffer>((resolve, reject) => {
         const chunks: Buffer[] = [];
+        let received = 0;
         const stream = sftp.createReadStream(opts.remotePath);
-        stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+        stream.on('data', (chunk: Buffer) => {
+          received += chunk.length;
+          // stat can be stale or unavailable (growing file, no permission), so
+          // enforce the cap on the stream too and stop reading immediately.
+          if (received > maxBytes) {
+            stream.destroy();
+            reject(new Error(
+              `Refusing to download ${opts.remotePath}: exceeded the ${maxBytes} byte limit while transferring.`,
+            ));
+            return;
+          }
+          chunks.push(chunk);
+        });
         stream.on('error', reject);
         stream.on('close', () => resolve(Buffer.concat(chunks)));
       });
