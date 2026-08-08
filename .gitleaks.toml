@@ -12,6 +12,11 @@ useDefault = true
 # Scoped to this one path on purpose. A blanket ignore for `test/**` would also
 # silence a real credential accidentally committed in a fixture, which is
 # exactly the mistake this scanner exists to catch.
-[[allowlists]]
+#
+# Singular `[allowlist]`, not the newer `[[allowlists]]` array form: alongside
+# `[extend] useDefault = true` the plural form is parsed without complaint and
+# then never applied, so the scan still fails with the config apparently loaded.
+# Verified against gitleaks 8.24.3 in both `dir` and `git` mode.
+[allowlist]
 description = "Synthetic secrets used to test the redactor"
 paths = ['''test/unit/guard/redactor\.test\.ts''']
