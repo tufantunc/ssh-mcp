@@ -116,11 +116,14 @@ export class InteractiveSession extends Session {
     return new Promise((resolve, reject) => {
       let buffer = '';
       let resolved = false;
+      // Assigned below; declared here so every settle path can detach it.
+      let detachAbort = () => { /* no abort signal */ };
 
       const timeoutId = setTimeout(() => {
         if (!resolved) {
           resolved = true;
           this.stream.removeListener('data', dataHandler);
+          detachAbort();
           try { this.stream.write('\x03'); } catch { /* */ }
           setTimeout(() => { try { this.stream.signal('TERM'); } catch { /* */ } }, 500);
           span.end();
@@ -153,6 +156,7 @@ export class InteractiveSession extends Session {
           resolved = true;
           clearTimeout(timeoutId);
           this.stream.removeListener('data', dataHandler);
+          detachAbort();
 
           const exitCode = parseInt(match[1]);
           const reportedCwd = match[2].trim();
@@ -209,6 +213,9 @@ export class InteractiveSession extends Session {
           }
         };
         abortSignal.addEventListener('abort', onAbort, { once: true });
+        // Without this the listener outlived the run, and its closure retained
+        // the run's buffer (up to 2MB) for the lifetime of the signal.
+        detachAbort = () => abortSignal.removeEventListener('abort', onAbort);
       }
 
       this.stream.on('data', dataHandler);
@@ -254,6 +261,8 @@ export class BackgroundSession extends Session {
   private ringBuffer: string[] = [];
   private ringBytes = 0;
   private ringMax = 10_000;
+  /** Tail of the last chunk when it did not end on a line boundary. */
+  private partialLine = '';
   private exitCode: number | null = null;
   private static RING_CHAR_LIMIT = 100_000;
 
@@ -261,8 +270,14 @@ export class BackgroundSession extends Session {
     super(id, name, profile, 'background', ttlMs, maxLifetimeMs);
     this.stream = stream;
     stream.on('data', (data: Buffer) => {
-      const text = data.toString();
+      // Splitting each chunk independently corrupted the output twice over: a
+      // line spanning two chunks became two entries (readOutput joins with
+      // '\n', inventing a break that was never in the stream), and a chunk
+      // ending on '\n' produced a trailing '' entry, so a blank line was
+      // inserted between every chunk. Carry the incomplete tail instead.
+      const text = this.partialLine + data.toString();
       const lines = text.split('\n');
+      this.partialLine = lines.pop() ?? '';
       for (const line of lines) {
         this.ringBuffer.push(line);
         this.ringBytes += line.length + 1;
@@ -271,26 +286,55 @@ export class BackgroundSession extends Session {
       this.touch();
     });
     stream.on('close', (code: number) => {
+      // Flush a final line that never got its newline.
+      if (this.partialLine) {
+        this.ringBuffer.push(this.partialLine);
+        this.ringBytes += this.partialLine.length + 1;
+        this.partialLine = '';
+        this.trimRingBuffer();
+      }
       this.exitCode = code;
       this._status = this.isExpired() ? 'expired' : 'closed';
     });
   }
 
+  /**
+   * Evict from the head in one splice. Looping `shift()` moved every remaining
+   * element per evicted line, so a chatty process paid O(lines x buffer) on the
+   * shared event loop once the buffer was full.
+   */
   private trimRingBuffer(): void {
-    while (this.ringBytes > BackgroundSession.RING_CHAR_LIMIT && this.ringBuffer.length > 0) {
-      const removed = this.ringBuffer.shift()!;
-      this.ringBytes -= removed.length + 1;
+    let dropCount = 0;
+    let freed = 0;
+
+    while (
+      this.ringBytes - freed > BackgroundSession.RING_CHAR_LIMIT &&
+      dropCount < this.ringBuffer.length
+    ) {
+      freed += this.ringBuffer[dropCount].length + 1;
+      dropCount++;
     }
-    if (this.ringBuffer.length > this.ringMax) {
-      const drop = this.ringBuffer.splice(0, this.ringBuffer.length - this.ringMax);
-      for (const d of drop) {
-        this.ringBytes -= d.length + 1;
+
+    const remaining = this.ringBuffer.length - dropCount;
+    if (remaining > this.ringMax) {
+      const extra = remaining - this.ringMax;
+      for (let i = 0; i < extra; i++) {
+        freed += this.ringBuffer[dropCount + i].length + 1;
       }
+      dropCount += extra;
+    }
+
+    if (dropCount > 0) {
+      this.ringBuffer.splice(0, dropCount);
+      this.ringBytes -= freed;
     }
   }
 
   readOutput(lines = 50): string {
-    return this.ringBuffer.slice(-lines).join('\n');
+    // Include the in-flight partial line so output that has not yet ended with
+    // a newline is still visible to a caller polling the session.
+    const all = this.partialLine ? [...this.ringBuffer, this.partialLine] : this.ringBuffer;
+    return all.slice(-lines).join('\n');
   }
 
   isRunning(): boolean {

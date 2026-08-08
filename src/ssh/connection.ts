@@ -239,6 +239,11 @@ export class SSHConnection {
             resolved = true;
             clearTimeout(timeoutId);
             this.activeChannels--;
+            // client.exec() has already dispatched the command, so rejecting
+            // without signalling left it running to completion on the host and
+            // held a channel until it finished.
+            try { stream.signal('INT'); } catch { /* */ }
+            try { stream.close(); } catch { /* */ }
             span.end();
             reject(new Error('Command aborted before execution'));
             return;
@@ -339,7 +344,12 @@ export class SSHConnection {
 
         stream.on('close', () => {
           this.activeChannels--;
-          this.sessions.delete(name);
+          // Only evict if this session is still the registered one. close()
+          // merely ends the stream, so the channel's 'close' can arrive well
+          // after a session with the same name was reopened — and used to
+          // delete the *new* session, leaving its channel open but unreachable
+          // via getSession/list/close/reap.
+          if (this.sessions.get(name) === session) this.sessions.delete(name);
         });
 
         let initBuffer = '';
@@ -382,7 +392,12 @@ export class SSHConnection {
 
         stream.on('close', () => {
           this.activeChannels--;
-          this.sessions.delete(name);
+          // Only evict if this session is still the registered one. close()
+          // merely ends the stream, so the channel's 'close' can arrive well
+          // after a session with the same name was reopened — and used to
+          // delete the *new* session, leaving its channel open but unreachable
+          // via getSession/list/close/reap.
+          if (this.sessions.get(name) === session) this.sessions.delete(name);
         });
 
         resolve(session);
