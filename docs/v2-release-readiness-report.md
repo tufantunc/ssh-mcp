@@ -1,7 +1,7 @@
 # ssh-mcp v2 — Yayına Hazırlık Raporu
 
 > İlk sürüm: 2026-08-08 · **Güncellendi: 2026-08-08 (düzeltmeler sonrası)**
-> Branch: `v2` (main'e göre 62 commit, 101 dosya, +12.797/-1.666)
+> Branch: `v2` (main'e göre 74 commit)
 > Yöntem: build + test çalıştırma, 8 uzman kod incelemesi (security, correctness, backend, tests, performance, craft, ai-antipatterns, api-contract), açık issue/PR eşlemesi, ardından bulguların düzeltilmesi ve her düzeltmenin testle doğrulanması.
 
 ---
@@ -14,8 +14,8 @@
 
 | Ölçüt | İlk durum | Şimdi |
 |---|---|---|
-| Test sayısı | 183 | **248** |
-| Suite durumu | 182/183 (1 kırmızı) | **248/248**, 3 ardışık koşuda kararlı |
+| Test sayısı | 183 | **295** |
+| Suite durumu | 182/183 (1 kırmızı) | **295/295**, 3 ardışık koşuda kararlı |
 | Build + typecheck | build temiz, testler tsc dışında | **ikisi de temiz** (`npm run typecheck` eklendi) |
 | Yayın bloke eden | 9 | **0** |
 | Yüksek öncelikli | 12 | **0** |
@@ -30,7 +30,7 @@
 |---|---|
 | `npm run build` (tsc) | ✅ Temiz |
 | `npm run typecheck` (src + test) | ✅ Temiz — **yeni**, testler önceden tsc kapsamı dışındaydı |
-| `npm test` | ✅ **248/248** (31 dosya) |
+| `npm test` | ✅ **295/295** (37 dosya) |
 | Ardışık koşu kararlılığı | ✅ 3/3 temiz |
 
 ### Test kapsamındaki büyümenin nedeni
@@ -103,14 +103,19 @@ Bunlar ilk incelemede **bulunamamıştı** — test kapsamı eklenmeden görün�
 
 ## 4. Kalan İş (yayını bloke etmez)
 
-| Madde | Durum | Neden ertelendi |
-|---|---|---|
-| `SessionManager` çıkarımı | 🔄 **Devam ediyor** | `SSHConnection` 464 satır; session yönetimi ayrı sorumluluk |
-| `tools/registry.ts` 704 satır | Açık | Boru hattı konsolide edildi ama dosya hâlâ büyük |
-| PR #64 config hot-reload | Açık | Yeni özellik |
-| PR #60-#63 WebUI | v2.1'e ertelendi | `docs/v2-remaining-work.md`'de zaten planlı |
-| `docs/v2-remaining-work.md` 9 maddesi | Açık | JIT token, asciinema, age config, quotas, sigstore, WebUI |
-| Issue #27 "description sonrası çıktı yok" | ❓ Belirsiz | v2'de `description` parametresi kaldırıldı; manuel doğrulama gerekli |
+| Madde | Durum |
+|---|---|
+| PR #60-#63 WebUI | v2.1'e ertelendi |
+| PR #64 config hot-reload | v2.1'e ertelendi. `SessionManager` ve `CommandQuota` artık profili çağrı anında okuyor — gereken şekil hazır |
+| Issue #27 "description sonrası çıktı yok" | ❓ v2'de `description` parametresi kaldırıldı; senaryo net değil, manuel doğrulama gerekli |
+
+`docs/v2-remaining-work.md`'deki 9 maddenin tamamı sonuçlandı: 4'ü tamamlandı
+(OTEL, changesets, komut kotası, JIT approval), 4'ü gerekçesiyle iptal edildi
+(asciinema, age config, dynamic connections, sigstore), WebUI ertelendi.
+
+Kod yapısı tarafında bu turda kapatılanlar: `SessionManager` çıkarıldı
+(`SSHConnection` 464 → 374 satır), `tools/registry.ts` konuya göre bölündü
+(704 satır → en büyüğü 267), `noUnusedLocals`/`noUnusedParameters` açıldı.
 
 ### Test altyapısı hakkında bilinen kısıt
 
@@ -120,22 +125,51 @@ Bu yerel macOS/Docker Desktop port yönlendirme katmanının bir özelliği (ssh
 
 ---
 
-## 5. Gerçek Sunucuda Doğrulama — hâlâ öneriliyor
+## 5. Gerçek Sunucuda Doğrulama
 
-Otomatik kapsam ilk rapordakinden çok daha iyi, ama şunlar hâlâ manuel doğrulama istiyor:
+İlk rapor bu bölümü 12 maddelik **manuel** bir liste olarak yazmıştı. O sırada
+handler katmanının hiç testi yoktu. Artık `test/e2e/` altında derlenmiş sunucuyu
+**gerçek stdio/HTTP transport** üzerinden **gerçek MCP SDK client**'ı ile sürüp
+Docker'daki gerçek SSH sunucularına bağlayan bir suite var — hiçbir şey mock'lu
+değil. §5'in 9 maddesi artık her koşuda otomatik doğrulanıyor.
 
-- [ ] Gerçek bir MCP istemcisiyle (Claude Desktop / MCP Inspector) 11 tool'un tamamı — özellikle **`open-session`**, çünkü MCP üzerinden hiç çalışmadığı yeni ortaya çıktı
-- [ ] Onay akışı: gerçek bir istemcide destructive komutun prompt üretmesi ve reddedilince çalışmaması
-- [ ] Başarısız bir komut → istemcinin hata gördüğünü doğrula
-- [ ] `read-command` ile `curl` dene → reddedildiğini gör
-- [ ] `[defaults] approvalMode = "ask-all"` koy, profilde `approvalPolicy` yazma → uygulandığını gör
-- [ ] HTTP transport'a iki istemci bağla, birincisini kopar, üçüncüyü bağla
-- [ ] Temiz makinede TOFU: ilk bağlantı kaydı, fingerprint bozunca red
-- [ ] `--hostKeyMode=strict` ile bilinmeyen host → red
-- [ ] `via` ile bastion üzerinden bağlan, bağlantıyı düşür, tekrar dene
-- [ ] `pnpm install` ile kurup `--otelEndpoint` dene
-- [ ] Issue #27'yi (çıktı yok) mevcut sürümde tekrar üretmeyi dene
-- [ ] CI'ı bir kez Linux'ta çalıştırıp `SSH_MCP_REQUIRE_SERVERS=1` ile yeşil olduğunu gör
+### Otomatikleşenler (`npm run test:e2e`)
+
+| Madde | Nerede |
+|---|---|
+| 11 tool'un tamamı gerçek client ile | `e2e/tools.e2e.test.ts` |
+| Onay akışı: prompt geliyor, red komutu durduruyor (dosya hâlâ yerinde) | `e2e/approval.e2e.test.ts` |
+| Başarısız komut → istemci exit code ve stderr görüyor | `e2e/tools.e2e.test.ts` |
+| `read-command` + `curl` reddi | `e2e/tools.e2e.test.ts` |
+| `[defaults]` cascade'i gerçek config yüklemesiyle (`ask-all`, `deny`, kota, JIT grant) | `e2e/approval.e2e.test.ts` |
+| HTTP: iki eşzamanlı istemci, biri ayrılınca üçüncü bağlanabiliyor | `e2e/http.e2e.test.ts` |
+| `/health` tokensiz, `/status` tokenli | `e2e/http.e2e.test.ts` |
+| TOFU kaydı, bozuk fingerprint reddi, strict mod | `integration/host-key.test.ts` |
+| ProxyJump kopma + yeniden bağlanma | `integration/proxy-jump.test.ts` |
+| **pnpm (katı çözümleyici) altında OTEL zinciri çözülüyor** | `e2e/packaging.e2e.test.ts` |
+| Kaldırılan v1 flag'leri startup'ta reddediliyor | `e2e/packaging.e2e.test.ts` |
+
+pnpm testi H11'in gerçek doğrulaması: `@opentelemetry/resources` ve
+`semantic-conventions` önceden yalnızca npm hoisting sayesinde çözülüyordu, yani
+yayınlanan paketi pnpm/yarn-pnp ile kuran birinde tracing çalışma anında
+kırılırdı.
+
+### Docker'ın veremediği — kalan gerçek manuel liste (3 madde)
+
+- [ ] **Claude Desktop'ta bir destructive komut çalıştırıp onay prompt'unu görmek.**
+      Protokolü test edebiliyoruz, istemcinin prompt'u gerçekten gösterip
+      göstermediğini edemiyoruz. Kritik: istemci elicitation desteklemiyorsa
+      sunucu fail-closed davranıp **her destructive komutu reddeder** — ürün
+      "bozuk" görünür. B7'de bunun için stderr log'u eklendi, bir kez gözle
+      görülmeli.
+- [ ] **Farklı SSH sunucusu.** Container'lar tek imaj (OpenSSH 10.2). README
+      **Windows desteği** iddia ediyor; Windows OpenSSH, eski OpenSSH 7.x ve
+      Dropbear hiç denenmedi. Sentinel protokolü ve `primeShell`'in prompt
+      tespiti kabuk davranışına duyarlı.
+- [ ] **CI'ı bir kez Linux'ta yeşil görmek** (`SSH_MCP_REQUIRE_SERVERS=1` ile).
+
+Bunların dışında gerçek ağ koşulları (NAT/firewall idle timeout — `keepalive`'ın
+var olma sebebi) Docker loopback'te hiç oluşmuyor; bu bilinen bir kapsam boşluğu.
 
 ---
 

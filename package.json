@@ -18,7 +18,8 @@
     "test:unit": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/unit/ test/property/",
     "test:integration": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/integration/",
     "test:watch": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest",
-    "coverage": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run --coverage"
+    "coverage": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run --coverage",
+    "test:e2e": "npm run build && cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/e2e/"
   },
   "files": [
     "build"
