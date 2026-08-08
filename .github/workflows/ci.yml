@@ -99,6 +99,12 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # gitleaks scans a commit range, which the default shallow clone
+          # (depth 1) cannot resolve: it fails with "unknown revision" and exits
+          # non-zero having scanned nothing — a red build that says "no leaks
+          # found in partial scan". Full history is what makes the scan real.
+          fetch-depth: 0
 
       - name: Semgrep Scan
         uses: returntocorp/semgrep-action@v1
