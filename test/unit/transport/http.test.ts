@@ -1,17 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { get } from 'http';
 import type { Server } from 'net';
 
 const HTTP_PORT = 18399;
 const HTTP_HOST = '127.0.0.1';
 const BEARER = 'test-token-secret';
-const BASE_URL = `http://${HTTP_HOST}:${HTTP_PORT}`;
-
-let serverProcess: any;
 
 beforeAll(async () => {
   process.env.SSH_MCP_DISABLE_MAIN = '1';
-  serverProcess = await startTestServer();
+  await startTestServer();
 });
 
 afterAll(async () => {
@@ -24,8 +20,6 @@ function startTestServer(): Promise<Server> {
     try {
       const { startHttpServer } = await import('../../../src/transport/http.js');
       const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
-      const { ConnectionRegistry } = await import('../../../src/ssh/connection-registry.js');
-      const { AuditStore } = await import('../../../src/audit/store.js');
 
       const mockRegistry = {
         listConnections: () => [],
@@ -33,8 +27,6 @@ function startTestServer(): Promise<Server> {
         get: () => undefined,
         getOrCreate: async () => { throw new Error('not in test'); },
       } as any;
-
-      const mockAudit = {} as any;
 
       const mcpServer = new McpServer({
         name: 'test',

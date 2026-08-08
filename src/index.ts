@@ -3,7 +3,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { loadConfig } from './config/loader.js';
-import { resolveCredentials } from './config/credential-resolver.js';
 import { ConnectionRegistry } from './ssh/connection-registry.js';
 import { PolicyEngine, DEFAULT_RULES } from './policy/engine.js';
 import { AuditStore } from './audit/store.js';

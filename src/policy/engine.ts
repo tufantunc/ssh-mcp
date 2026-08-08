@@ -1,6 +1,5 @@
 import type {
   CommandClass,
-  PolicyDecision,
   PolicyEvaluation,
   Profile,
   ApprovalMode,
@@ -71,7 +70,7 @@ export class PolicyEngine {
   evaluate(
     command: string,
     profile: Profile,
-    toolName: string,
+    _toolName: string,
   ): PolicyEvaluation {
     const parsed = classifyCommand(command);
     const allowedClasses = this.getAllowedClasses(profile);

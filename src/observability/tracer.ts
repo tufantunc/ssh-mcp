@@ -1,4 +1,4 @@
-import { trace, type Tracer, type Span } from '@opentelemetry/api';
+import { trace, type Tracer } from '@opentelemetry/api';
 
 let initialized = false;
 
