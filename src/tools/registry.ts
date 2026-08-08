@@ -58,6 +58,17 @@ function rejectedEvaluation(commandClass: CommandClass): PolicyEvaluation {
   return { decision: 'deny', commandClass, binary: '', ruleId: 'input-rejected' };
 }
 
+/**
+ * Carries the policy decision that caused a refusal, so the audit record shows
+ * the real rule and class instead of a synthetic placeholder.
+ */
+class PolicyRefusedError extends Error {
+  constructor(message: string, readonly evaluation: PolicyEvaluation) {
+    super(message);
+    this.name = 'PolicyRefusedError';
+  }
+}
+
 function syntheticSuccess(profile: string): CommandResult {
   return { exitCode: 0, stdout: '', stderr: '', durationMs: 0, profile };
 }
@@ -74,8 +85,11 @@ function textResult(text: string) {
 function commandOutput(result: CommandResult) {
   // ssh2 reports exitCode null when the process died from a signal.
   const failed = result.exitCode !== 0 || Boolean(result.signal);
-  const stdout = redactText(result.stdout);
-  const stderr = redactText(result.stderr);
+  // entropyScan matches the SFTP and session-output paths. Without it a plain
+  // `env` dump hands high-entropy secrets straight to the model, since the
+  // regex layer only knows a fixed set of token shapes.
+  const stdout = redactText(result.stdout, { entropyScan: true });
+  const stderr = redactText(result.stderr, { entropyScan: true });
 
   const parts: string[] = [];
   if (stdout) parts.push(stdout);
@@ -115,13 +129,16 @@ export function registerTools(
       span.setAttribute('command.binary', evaluation.binary);
 
       if (evaluation.decision === 'deny') {
-        throw new Error(`POLICY_DENIED: ${evaluation.reason || 'Command not allowed'}`);
+        throw new PolicyRefusedError(
+          `POLICY_DENIED: ${evaluation.reason || 'Command not allowed'}`,
+          evaluation,
+        );
       }
 
       if (evaluation.decision === 'require-approval') {
         const approval = await requestApproval(server, command, conn.profile.name, evaluation);
         if (!approval.approved) {
-          throw new Error('APPROVAL_DENIED: User did not approve this command');
+          throw new PolicyRefusedError('APPROVAL_DENIED: User did not approve this command', evaluation);
         }
         return { conn, evaluation, approver: approval.approver };
       }
@@ -148,6 +165,7 @@ export function registerTools(
       commandClass: evaluation.commandClass,
       binary: evaluation.binary,
       decision: evaluation.decision,
+      ruleId: evaluation.ruleId,
       exitCode: 'exitCode' in result ? result.exitCode : undefined,
       durationMs: 'durationMs' in result ? result.durationMs : undefined,
       error: 'error' in result ? result.error : undefined,
@@ -173,7 +191,9 @@ export function registerTools(
     failureClass: CommandClass,
     err: any,
   ): Promise<void> {
-    const evaluation = state.evaluation ?? rejectedEvaluation(failureClass);
+    const evaluation = (err instanceof PolicyRefusedError ? err.evaluation : undefined)
+      ?? state.evaluation
+      ?? rejectedEvaluation(failureClass);
     try {
       await auditResult(ctx, profileName, state.command, evaluation, {
         error: err?.message ?? String(err),
@@ -283,7 +303,11 @@ export function registerTools(
       command: z.string().optional().describe('Command for background sessions'),
       profile: z.string().optional().describe('Profile name (uses default if omitted)'),
     },
-    {},
+    // No annotations object here on purpose. The SDK's overload resolution
+    // treats an EMPTY object as a Zod raw shape (isZodRawShape returns true for
+    // `{}`), so passing `{}` in the annotations slot made it consume the
+    // callback slot instead — leaving this tool registered with no handler and
+    // failing every call with "cb is not a function".
     async ({ name, type, command, profile }, extra) => {
       const cleanName = sanitizeSessionName(name);
       const ctx = makeCtx(extra, profile);

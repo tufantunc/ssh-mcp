@@ -7,7 +7,7 @@ import { resolveCredentials } from '../../src/config/credential-resolver.js';
 import { ConnectionRegistry as Registry } from '../../src/ssh/connection-registry.js';
 import { PolicyEngine as Engine, DEFAULT_RULES } from '../../src/policy/engine.js';
 import { SSHConnection as Conn } from '../../src/ssh/connection.js';
-import { isSshServerUp, SSH_HOST } from './helpers.js';
+import { isSshServerUp, assertAvailable, SSH_HOST } from './helpers.js';
 
 export const PORTS = { admin: 2222, viewer: 2223, operator: 2224 };
 
@@ -62,6 +62,9 @@ export async function checkAllServers(): Promise<ServerStatus> {
     isSshServerUp(SSH_HOST, PORTS.viewer),
   ]);
   cachedStatus = { admin, operator, viewer };
+  const down = Object.entries(cachedStatus).filter(([, up]) => !up).map(([name]) => name);
+  // Fails loudly in CI rather than letting the whole integration suite skip.
+  assertAvailable(down.length === 0, `down: ${down.join(', ') || 'none'}`);
   return cachedStatus;
 }
 

@@ -62,6 +62,19 @@ function parseMaxChars(raw: string | null | undefined): number {
   return parsed <= 0 ? Number.MAX_SAFE_INTEGER : parsed;
 }
 
+/**
+ * `strict` was previously unreachable: nothing but test code could select it,
+ * yet host-key.ts pointed users at a `--acceptNewHostKey` flag that never
+ * existed. `--insecureHostKey` is kept as an alias for the documented flag.
+ */
+function resolveHostKeyMode(argv: Record<string, string | null>): HostKeyMode {
+  if (argv.insecureHostKey !== undefined) return 'insecure';
+  const mode = argv.hostKeyMode;
+  if (mode === null || mode === undefined) return 'tofu';
+  if (mode === 'tofu' || mode === 'strict' || mode === 'insecure') return mode;
+  throw new Error(`Invalid --hostKeyMode=${mode}. Expected one of: tofu, strict, insecure.`);
+}
+
 async function buildAppConfig(argv: Record<string, string | null>): Promise<AppConfig> {
   if (argv.config) {
     return loadConfig(argv.config);
@@ -126,7 +139,7 @@ async function main() {
   }
 
   const config = await buildAppConfig(argv);
-  const hostKeyMode: HostKeyMode = argv.insecureHostKey ? 'insecure' : 'tofu';
+  const hostKeyMode = resolveHostKeyMode(argv);
   const entropyScan = !!argv.auditEntropyScan;
   const tamperEvident = !!argv.auditTamperEvident;
 

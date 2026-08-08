@@ -30,7 +30,8 @@ export function verifyHostKey(
 
   if (mode === 'strict') {
     throw new Error(
-      `HOST_KEY_MISMATCH: No known key for ${host}:${port}. Use TOFU mode or --acceptNewHostKey to trust on first use.`,
+      `HOST_KEY_UNKNOWN: No known key for ${host}:${port} and --hostKeyMode=strict is set. ` +
+      'Pin the key with trustedHostKey in the profile, or use --hostKeyMode=tofu to trust on first use.',
     );
   }
 

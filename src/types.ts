@@ -156,6 +156,8 @@ export interface AuditRecord {
   commandClass: CommandClass;
   binary: string;
   decision: PolicyDecision;
+  /** Which rule produced the decision (denylist, role-binding, approval-policy, ...). */
+  ruleId?: string;
   exitCode?: number;
   durationMs?: number;
   bytesIn?: number;
