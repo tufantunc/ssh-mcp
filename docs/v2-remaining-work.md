@@ -1,10 +1,10 @@
 # SSH MCP v2 — Remaining Work / TODO
 
-> Updated: 2026-07-11. Reflects all completed work.
+> Updated: 2026-08-08. Backlog kapandı — kalan iki madde bilinçli olarak v2.1'e ertelendi.
 
 ---
 
-## Tamamlanan (11 madde)
+## Tamamlanan (15 madde)
 
 | Madde | Tarih | Açıklama |
 |-------|-------|----------|
@@ -19,83 +19,35 @@
 | P2-J | 2026-07-11 | CodeQL in CI (security-extended + security-and-quality) |
 | P2-M | 2026-07-11 | Compliance Mapping (SOC 2, PCI-DSS, ISO 27001, HIPAA) |
 | P2-N | 2026-07-11 | Tool-description hash (`--dumpToolHashes`, release artifact) |
+| **P2-C** | 2026-08-08 | **OTEL Tracing** — `src/observability/tracer.ts`, `--otelEndpoint` / `--otelServiceName`; span'lar connection, session ve policy katmanlarında. Bağımlılıklar beyan edildi (`@opentelemetry/resources`, `semantic-conventions` — önceden yalnızca npm hoisting sayesinde çözülüyordu) |
+| **P2-I** | 2026-08-08 | **changesets Release Pipeline** — major changeset eklendi (`changeset status` → 2.0.0), `changesets.yml` workflow, README migration bölümü, kaldırılan v1 flag'leri için startup guard |
+| **P2-L** | 2026-08-08 | **Per-Profile Command Quota** — `commandQuotaPerDay`, kayan 24s penceresi, policy sonrası enforce, `command-quota` ruleId ile audit |
+| **P2-A** | 2026-08-08 | **JIT Approval Grants** — `approvalGrantTtlMs`, tam komut + profil + sınıfa bağlı, `approver: "jit-grant"` ile audit, varsayılan kapalı |
 
-## İptal Edilen (2 madde)
+## İptal Edilen (6 madde)
 
 | Madde | Sebep |
 |-------|-------|
 | P1-D Composite session ref (`@`) | Düşük değer — LLM explicit parametrelerle daha iyi çalışır |
 | P2-E Interactive password prompt | MCP uyumsuz — stdin JSON-RPC pipe, TTY değil |
+| **P2-B** asciinema Session Recording | Kayıt, projenin her yerde uyguladığı redaksiyonu delerdi: ham session I/O'su (sudo şifresi, dosya içerikleri) diske yazılır. Redaksiyon uygulanırsa replay bozulur, uygulanmazsa sır sızar. Değeri bu tavizi karşılamıyor |
+| **P2-D** age-encrypted Config | Doküman yazıldığında credential'lar config dosyasındaydı; **v2'de çıkarıldılar** (agent → keychain → env → key file). Geriye şifrelenecek olarak yalnızca host adları ve policy kalıyor, onlar da zaten `0600`/`0700` altında. Yeni bir crypto bağımlılığının koruyacağı şey kalmadı |
+| **P2-F** Dynamic Connections | README'nin uyardığı lethal trifecta'yı doğrudan genişletiyor: prompt-injected agent önceden tanımlanmamış bir host'a bağlanabilir. Opt-in ile daraltılabilirdi ama kazanılan esneklik riski karşılamıyor |
+| **P2-K** Sigstore Audit Signing | Mevcut hash-chain zaten tamper-evident. Sigstore bunu dışarıdan doğrulanabilir yapardı, ama yalnızca uyumluluk denetimi olan ortamlarda değer katıyor — yeni bağımlılığı şu an haklı çıkarmıyor |
 
 ---
 
-## Kalan Maddeler (9)
-
-### Kolay (2/5)
-
-#### P2-I: changesets Release Pipeline
-- **Açıklama:** Conventional Commits + `@changesets/cli` ile otomatik version bump, changelog, release
-- **Efor:** Config + CI workflow (~1 saat)
-- **Değer:** Release süreçni otomatikleştirir, changelog üretir
-
-### Orta (3/5 — her biri ~yarım gün)
-
-#### P2-A: JIT Approval Tokens (HMAC, TTL)
-- **Açıklama:** Kullanıcı destructive komutu onaylar → 5dk geçerli HMAC-signed token → aynı komut tekrar çalışınca token ile auto-approve
-- **Değer:** Tekrarlayan destructive komutlarda approval friction'ı azaltır
-- **Risk:** Token çalınırsa 5dk boyunca abuse edilebilir — ama HMAC-signed, specific command'a bound
-
-#### P2-B: asciinema Session Recording
-- **Açıklama:** Interactive session I/O'yu asciinema cast v2 formatında kaydet, `asciinema play` ile replay
-- **Değer:** Forensic replay — "agent ne yaptı?" sorusunu görsel olarak yanıtlar
-- **Opsiyonel:** `--recordSessions` flag ile açma/kapama
-
-#### P2-C: OTEL Tracing
-- **Açıklama:** OpenTelemetry span'ları — MCP requestId → SSH exec → policy evaluation arasındaki correlation
-- **Değer:** Dağıtık sistemlerde observability — "hangi MCP isteği hangi SSH komutunu tetikledi?"
-- **Dependency:** `@opentelemetry/api` (~50KB)
-
-#### P2-D: age-encrypted Config Sections
-- **Açıklama:** TOML config'de `[profiles.secrets]` bölümünü `age` ile şifrele, passphrase ile decrypt
-- **Değer:** Config dosyası disk'te şifreli — `0600`'e ek bir koruma katmanı
-- **Dependency:** `age-encryption` npm paketi veya CLI wrapper
-
-#### P2-F: Dynamic Connections
-- **Açıklama:** Client tool çağrısında `host`, `user`, `port` verir, config'de tanımlı olmayan host'lara bağlanır
-- **Değer:** Esneklik — önceden tanımlanmamış host'lara erişim
-- **Risk:** Prompt-injected agent yeni host'a bağlanabilir — `allowDynamicConnections: true` explicit opt-in, lowest-trust default ile
-
-#### P2-K: Sigstore Audit Signing
-- **Açıklama:** Hash-chain audit log'a ek olarak günlük sigstore/cosign keyless root signing
-- **Değer:** Audit log'un cryptographically verifiable olması — high-assurance environments için
-- **Dependency:** `sigstore-js`
-
-#### P2-L: Per-Agent Command Quotas
-- **Açıklama:** Her agent/client için günlük komut sayısı limiti (örn: günde 500 komut), circuit breaker
-- **Değer:** Runaway agent koruması — prompt-injected agent sınırsız komut çalıştıramaz
-- **Config:** `commandQuotaPerDay` profile veya defaults seviyesinde
-
-### Çok Büyük (5/5)
+## Kalan (2 madde — v2.1)
 
 #### P2-G: WebUI (Approval Queue + Audit Viewer)
-- **Açıklama:** Hono HTTP server + minimal SPA — connection status, live approval queue, audit log viewer
-- **Değer:** HTTP transport kullananlar için görsel yönetim paneli
-- **Efor:** ~500+ satır, yeni dependency (Hono + Preact/htmx), ayrı bir sub-project gibi
-- **Öneri:** v2.1 veya v2.2'ye ertele
+- **Açıklama:** HTTP server + minimal SPA — connection status, live approval queue, audit log viewer
+- **Efor:** ~500+ satır, yeni dependency, ayrı bir sub-project gibi
+- **Durum:** v2.1/v2.2'ye ertelendi. Açık PR'lar: #60, #61, #62, #63
 
----
-
-## Önerilen Sıra
-
-1. **P2-I** changesets (2/5 — kolay, release'i otomatikleştirir)
-2. **P2-L** Per-agent quotas (3/5 — güvenlik değeri yüksek, runaway agent koruması)
-3. **P2-A** JIT tokens (3/5 — UX iyileştirmesi, approval friction)
-4. **P2-F** Dynamic connections (3/5 — esneklik, ama güvenlik dikkat ister)
-5. **P2-D** age config (3/5 — security hardening)
-6. **P2-B** asciinema (3/5 — forensic replay)
-7. **P2-C** OTEL tracing (3/5 — observability)
-8. **P2-K** Sigstore (3/5 — high-assurance audit)
-9. **P2-G** WebUI (5/5 — büyük, sonraya)
+#### PR #64: Config Hot-Reload
+- **Açıklama:** TOML config değişikliklerini yeniden başlatmadan uygula
+- **Not:** `SessionManager` ve `CommandQuota` artık profili **çağrı anında** okuyor (constructor'da snapshot almıyor), yani hot-reload için gereken şekil hazır
+- **Durum:** v2.1'e ertelendi
 
 ---
 
@@ -104,10 +56,13 @@
 | Kategori | Toplam | Tamamlandı | İptal | Kalan |
 |----------|:------:|:----------:|:-----:|:-----:|
 | P0 Security | 10 | 10 | 0 | 0 |
-| P1 Core Features | 7 | 4 | 1 | 2 → 0 (hepsi yapıldı/iptal) |
-| P2 Hardening | 14 | 11 | 1 | 2 |
+| P1 Core Features | 7 | 6 | 1 | 0 |
+| P2 Hardening | 14 | 9 | 5 | 1 (WebUI) |
 | Session Arch | 7 | 7 | 0 | 0 |
 | Dead Code (WD) | 4 | 4 | 0 | 0 |
-| **Toplam** | **42** | **36** | **2** | **9** |
+| **Toplam** | **42** | **36** | **6** | **1** |
 
-153 test, 22 kaynak dosyası, 19 modül.
+**270 test, 33 test dosyası, 25 kaynak dosyası.**
+
+> Yayın durumu için `docs/v2-release-readiness-report.md`'ye bakın. 2.0.0 etiketi
+> öncesi kalan tek gerçek koşul, o rapordaki §5 manuel doğrulama turu.
