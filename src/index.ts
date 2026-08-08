@@ -163,14 +163,11 @@ async function main() {
 
   // An McpServer binds to a single transport, so HTTP needs one per session.
   const createMcpServer = (): McpServer => {
-    const server = new McpServer({
-      name: 'SSH MCP Server',
-      version: SERVER_VERSION,
-      capabilities: {
-        tools: {},
-        resources: {},
-      },
-    });
+    // capabilities moved from serverInfo to ServerOptions in SDK 1.30.
+    const server = new McpServer(
+      { name: 'SSH MCP Server', version: SERVER_VERSION },
+      { capabilities: { tools: {}, resources: {} } },
+    );
     registerTools(server, registry, policy, audit, {
       approvalGrantTtlMs: config.defaults.approvalGrantTtlMs,
     });
@@ -187,6 +184,7 @@ async function main() {
       host: (argv.httpHost as string) || '127.0.0.1',
       bearerToken: argv.bearerToken as string | undefined,
       rateLimit: parseInt(argv.rateLimit as string) || 0,
+      allowedHosts: (argv.allowedHosts as string)?.split(',').map((h) => h.trim()).filter(Boolean),
       registry,
     });
   } else {

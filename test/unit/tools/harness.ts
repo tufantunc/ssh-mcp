@@ -113,10 +113,10 @@ export async function createHarness(
   // Capture audit records instead of writing to disk.
   const audit = { record: async (r: any) => { auditRecords.push(r); } } as unknown as AuditStore;
 
-  const server = new McpServer({
-    name: 'test', version: '0.0.0',
-    capabilities: { tools: {}, resources: {} },
-  });
+  const server = new McpServer(
+    { name: 'test', version: '0.0.0' },
+    { capabilities: { tools: {}, resources: {} } },
+  );
   registerTools(server, registry, new PolicyEngine(DEFAULT_RULES), audit, toolOpts);
   registerResources(server, registry);
 

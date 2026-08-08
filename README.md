@@ -446,6 +446,7 @@ Secrets are **never** passed as CLI arguments.
 | `--httpHost` | 127.0.0.1 | HTTP bind address |
 | `--bearerToken` | — | Bearer token for HTTP transport auth (required for `--transport=http`) |
 | `--rateLimit` | 0 | HTTP requests per minute on the MCP route (0 = unlimited) |
+| `--allowedHosts` | bind address + localhost | Comma-separated Host headers accepted by the DNS-rebinding guard |
 | `--insecureHostKey` | false | Disable host key verification (test only!) |
 | `--disableApproval` | false | Skip the approval gate (quick start profile only) |
 | `--opaUrl` | — | OPA sidecar URL for external policy |

@@ -48,6 +48,12 @@ export interface HttpTransportOpts {
   bearerToken?: string;
   registry: ConnectionRegistry;
   rateLimit?: number;
+  /**
+   * Host headers accepted by the DNS-rebinding guard. Defaults to the bind
+   * address and localhost; set this when running behind a reverse proxy that
+   * presents a different hostname.
+   */
+  allowedHosts?: string[];
 }
 
 function jsonRpcError(res: ServerResponse, status: number, code: number, message: string): void {
@@ -76,6 +82,14 @@ export async function startHttpServer(
   const rateLimiter = opts.rateLimit && opts.rateLimit > 0
     ? new RateLimiter(opts.rateLimit)
     : null;
+
+  // DNS rebinding: a page the user visits can make their browser POST to a
+  // localhost server, and the bearer token does not help if the browser is
+  // tricked into attaching it. Validating the Host header is what stops it.
+  // GHSA-w48q-cv73-mx4w is exactly this, and the SDK leaves it to the caller.
+  const allowedHosts = opts.allowedHosts?.length
+    ? opts.allowedHosts
+    : [`${host}:${port}`, `localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
 
   const transports = new Map<string, StreamableHTTPServerTransport>();
 
@@ -107,6 +121,8 @@ export async function startHttpServer(
 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
+      enableDnsRebindingProtection: true,
+      allowedHosts,
       onsessioninitialized: (id) => { transports.set(id, transport); },
       onsessionclosed: (id) => { transports.delete(id); },
     });
