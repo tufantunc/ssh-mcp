@@ -85,24 +85,35 @@ function httpRequest(method: string, path: string, headers: Record<string, strin
 
 describe('HTTP transport — auth', () => {
   it('rejects request without bearer token', async () => {
-    const res = await httpRequest('GET', '/health');
+    const res = await httpRequest('GET', '/status');
     expect(res.status).toBe(401);
+    // RFC 7235: a 401 has to tell the client how to authenticate.
+    expect(res.headers['www-authenticate']).toMatch(/Bearer/);
+    // Same JSON-RPC dialect as the 413/429 on this server.
+    expect(JSON.parse(res.body).error.message).toBe('Unauthorized');
   });
 
   it('rejects request with wrong token', async () => {
-    const res = await httpRequest('GET', '/health', { authorization: 'Bearer wrong-token' });
+    const res = await httpRequest('GET', '/status', { authorization: 'Bearer wrong-token' });
     expect(res.status).toBe(401);
   });
 
   it('accepts request with correct token', async () => {
-    const res = await httpRequest('GET', '/health', { authorization: `Bearer ${BEARER}` });
+    const res = await httpRequest('GET', '/status', { authorization: `Bearer ${BEARER}` });
     expect(res.status).toBe(200);
-    expect(JSON.parse(res.body).healthy).toBe(true);
   });
 
   it('rejects malformed authorization header', async () => {
-    const res = await httpRequest('GET', '/health', { authorization: 'Basic xyz' });
+    const res = await httpRequest('GET', '/status', { authorization: 'Basic xyz' });
     expect(res.status).toBe(401);
+  });
+
+  // Load balancers probe /health unauthenticated, and it reveals nothing
+  // beyond "the process is up".
+  it('serves /health without authentication', async () => {
+    const res = await httpRequest('GET', '/health');
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).healthy).toBe(true);
   });
 });
 

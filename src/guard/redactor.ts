@@ -8,7 +8,11 @@ const REGEX_PATTERNS: { name: string; pattern: RegExp }[] = [
   { name: 'github-token', pattern: /gh[pousr]_[A-Za-z0-9]{36,}/g },
   { name: 'gitlab-token', pattern: /glpat-[A-Za-z0-9_-]{20}/g },
   { name: 'jwt', pattern: /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g },
-  { name: 'pem-private-key', pattern: /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/g },
+  // Body is bounded: an unbounded lazy [\s\S]*? rescans to end-of-input for
+  // every BEGIN that has no matching END, so k unmatched markers in a 1MB
+  // output cost O(k x 1MB) of synchronous regex time. 64KB comfortably covers
+  // any real private key (an 8192-bit RSA key is well under 8KB).
+  { name: 'pem-private-key', pattern: /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[\s\S]{0,65536}?-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/g },
   { name: 'bearer-auth', pattern: /[Bb]earer\s+[A-Za-z0-9._~+\/-]+=*/g },
   { name: 'generic-api-key', pattern: /(?:api[_-]?key|api[_-]?secret)["'\s]*[:=]\s*["']([A-Za-z0-9_\-]{20,})["']/gi },
 ];

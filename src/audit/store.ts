@@ -32,12 +32,17 @@ export class AuditStore {
   private writeStream: WriteStream | null = null;
   private dirEnsured = false;
   private recordCount = 0;
+  /** Bytes in the open log file; -1 means "read the baseline from disk". */
+  private bytesWritten = -1;
   private writeQueue: Promise<void> = Promise.resolve();
+  /** Rotation threshold; injectable so tests exercise it without a 100MB file. */
+  private maxFileSize: number;
 
-  constructor(logPath?: string, entropyScan = false, tamperEvident = false) {
+  constructor(logPath?: string, entropyScan = false, tamperEvident = false, maxFileSize = MAX_FILE_SIZE) {
     this.logPath = logPath || getAuditLogPath();
     this.entropyScan = entropyScan;
     this.tamperEvident = tamperEvident;
+    this.maxFileSize = maxFileSize;
   }
 
   async record(entry: Omit<AuditRecord, 'timestamp' | 'eventId'>): Promise<void> {
@@ -83,11 +88,12 @@ export class AuditStore {
 
       const line = JSON.stringify(lineObj) + '\n';
 
-      await this.rotateIfNeeded();
+      await this.rotateIfNeeded(Buffer.byteLength(line));
       const stream = await this.ensureStream();
       await new Promise<void>((resolve, reject) => {
         stream.write(line, (err) => err ? reject(err) : resolve());
       });
+      this.bytesWritten += Buffer.byteLength(line);
 
       span.setAttribute('audit.bytes', line.length);
       this.recordCount++;
@@ -105,6 +111,8 @@ export class AuditStore {
     }
 
     this.writeStream = createWriteStream(this.logPath, { flags: 'a' });
+    // Force a fresh baseline read for the newly opened file.
+    this.bytesWritten = -1;
     try { await chmod(this.logPath, 0o600); } catch { /* may not exist yet */ }
     return this.writeStream;
   }
@@ -127,10 +135,20 @@ export class AuditStore {
     }
   }
 
-  private async rotateIfNeeded(): Promise<void> {
+  /**
+   * Rotate before the incoming record would push the file over the limit.
+   *
+   * The size is tracked from the open stream instead of stat()ing the file on
+   * every record: every tool call awaits this on the shared write queue, so
+   * that was a syscall per request to answer a question we already know.
+   */
+  private async rotateIfNeeded(incomingBytes: number): Promise<void> {
     try {
-      const fileStat = await stat(this.logPath);
-      if (fileStat.size < MAX_FILE_SIZE) return;
+      if (this.bytesWritten < 0) {
+        // First write on this stream — establish the baseline once.
+        this.bytesWritten = await stat(this.logPath).then((s) => s.size).catch(() => 0);
+      }
+      if (this.bytesWritten + incomingBytes < this.maxFileSize) return;
 
       if (this.writeStream && !this.writeStream.destroyed) {
         await new Promise<void>((resolve) => {

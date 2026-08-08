@@ -123,7 +123,11 @@ export async function startHttpServer(
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
-    {
+    // Liveness probes are conventionally unauthenticated, and the README lists
+    // /health without an auth caveat. It exposes nothing beyond "process is up".
+    const isHealthProbe = req.method === 'GET' && url.pathname === '/health';
+
+    if (!isHealthProbe) {
       const auth = req.headers.authorization || '';
       const expected = `Bearer ${bearerToken}`;
       const authBuf = Buffer.from(auth);
@@ -131,8 +135,18 @@ export async function startHttpServer(
       const match = authBuf.length === expectedBuf.length &&
         timingSafeEqual(authBuf, expectedBuf);
       if (!match) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        // RFC 7235: a 401 must say how to authenticate. MCP clients also parse
+        // JSON-RPC envelopes on this route, so 401 speaks the same dialect as
+        // the 429 and 413 responses rather than a bare {error}.
+        res.writeHead(401, {
+          'Content-Type': 'application/json',
+          'WWW-Authenticate': 'Bearer realm="ssh-mcp"',
+        });
+        res.end(JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32001, message: 'Unauthorized' },
+          id: null,
+        }));
         return;
       }
     }
@@ -236,11 +250,22 @@ export async function startHttpServer(
     res.end(JSON.stringify({ error: 'Not found' }));
   });
 
-  httpServer.listen(port, host, () => {
-    console.error(`SSH MCP Server v2 (HTTP) listening on http://${host}:${port}`);
-    console.error('Endpoints: POST / (MCP), GET /status, GET /health');
-    if (rateLimiter) {
-      console.error(`Rate limit: ${opts.rateLimit} req/min`);
-    }
+  // Previously listen() had no error handler, so EADDRINUSE surfaced as an
+  // unhandled 'error' event and a raw stack — and startHttpServer resolved
+  // immediately regardless, so the caller carried on as if the server was up.
+  await new Promise<void>((resolve, reject) => {
+    httpServer.once('error', (err: NodeJS.ErrnoException) => {
+      reject(err.code === 'EADDRINUSE'
+        ? new Error(`Cannot bind ${host}:${port} — address already in use.`)
+        : err);
+    });
+    httpServer.listen(port, host, () => {
+      console.error(`SSH MCP Server v2 (HTTP) listening on http://${host}:${port}`);
+      console.error('Endpoints: POST / (MCP), GET /status, GET /health');
+      if (rateLimiter) {
+        console.error(`Rate limit: ${opts.rateLimit} req/min`);
+      }
+      resolve();
+    });
   });
 }

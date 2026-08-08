@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shellSingleQuote, sanitizeCommand, sanitizeMetadata, sanitizeSessionName } from '../../../src/guard/sanitizer.js';
+import { shellSingleQuote, sanitizeCommand, sanitizeSessionName } from '../../../src/guard/sanitizer.js';
 
 describe('shellSingleQuote', () => {
   it('wraps simple command in single quotes', () => {

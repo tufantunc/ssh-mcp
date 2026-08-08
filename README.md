@@ -335,7 +335,7 @@ ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret --rateLimit=60
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--bearerToken` | required | Bearer token for authentication |
+| `--bearerToken` | required | Bearer token for authentication (all routes except `GET /health`) |
 | `--httpPort` | 3000 | HTTP listen port |
 | `--httpHost` | 127.0.0.1 | Bind address |
 | `--rateLimit` | 0 (off) | Max requests per minute (0 = unlimited) |
