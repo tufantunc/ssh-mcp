@@ -29,6 +29,39 @@ function parseArgv(): Record<string, string | null> {
   return config;
 }
 
+/**
+ * v1 flags that v2 removed. Silently ignoring them means the user only finds
+ * out at the first command, as an auth failure with no hint about the cause.
+ */
+const REMOVED_V1_FLAGS: Record<string, string> = {
+  password: 'Use the SSH_MCP_PASSWORD env var (or a per-profile SSH_MCP_<PROFILE>_PASSWORD).',
+  suPassword: 'Use the SSH_MCP_SUDO_PASSWORD env var.',
+  sudoPassword: 'Use the SSH_MCP_SUDO_PASSWORD env var.',
+  disableSudo: 'Sudo is now a separate tool; restrict it with a role/policy that disallows the "privileged" class.',
+};
+
+function checkRemovedFlags(argv: Record<string, string | null>): void {
+  const found = Object.keys(REMOVED_V1_FLAGS).filter((f) => f in argv);
+  if (found.length === 0) return;
+  throw new Error(
+    'These flags were removed in v2:\n' +
+    found.map((f) => `  --${f}: ${REMOVED_V1_FLAGS[f]}`).join('\n') +
+    '\nSee the "Migrating from v1" section of the README.',
+  );
+}
+
+/**
+ * v1 documented `--maxChars=none` (and 0/negative) as "no limit". Parsing it
+ * with `parseInt(...) || 5000` silently turned that into a 5000-char cap.
+ */
+function parseMaxChars(raw: string | null | undefined): number {
+  if (typeof raw !== 'string' || raw === '') return 5_000;
+  if (raw.toLowerCase() === 'none') return Number.MAX_SAFE_INTEGER;
+  const parsed = parseInt(raw);
+  if (isNaN(parsed)) return 5_000;
+  return parsed <= 0 ? Number.MAX_SAFE_INTEGER : parsed;
+}
+
 async function buildAppConfig(argv: Record<string, string | null>): Promise<AppConfig> {
   if (argv.config) {
     return loadConfig(argv.config);
@@ -53,7 +86,7 @@ async function buildAppConfig(argv: Record<string, string | null>): Promise<AppC
     sessionIdleTimeoutMs: parseInt(argv.sessionTtl as string) || 600_000,
     sessionBackgroundMaxMs: 3_600_000,
     commandTimeoutMs: parseInt(argv.timeout as string) || 60_000,
-    commandMaxChars: parseInt(argv.maxChars as string) || 5_000,
+    commandMaxChars: parseMaxChars(argv.maxChars),
     commandMaxOutputBytes: 1_048_576,
     connectionIdleReapMs: 900_000,
     approvalMode: 'ask-destructive',
@@ -85,6 +118,7 @@ async function buildAppConfig(argv: Record<string, string | null>): Promise<AppC
 
 async function main() {
   const argv = parseArgv();
+  checkRemovedFlags(argv);
 
   if (argv.dumpToolHashes !== undefined) {
     console.log(JSON.stringify(getToolHashes(), null, 2));
@@ -179,4 +213,4 @@ if (isCliEnabled || isTestMode) {
   });
 }
 
-export { parseArgv, buildAppConfig };
+export { parseArgv, buildAppConfig, checkRemovedFlags, parseMaxChars };
