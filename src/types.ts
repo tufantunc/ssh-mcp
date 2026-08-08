@@ -1,9 +1,6 @@
-import type { ClientChannel } from 'ssh2';
-
 // ─── Config Types ───────────────────────────────────────────────────────────
 
 export type AuthMethod = 'agent' | 'key' | 'password' | 'keychain';
-export type HostKeyMode = 'tofu' | 'strict' | 'insecure';
 export type ApprovalMode = 'auto' | 'ask-destructive' | 'ask-all' | 'deny';
 
 export interface Profile {
@@ -98,8 +95,6 @@ export interface ExecOpts {
   tty?: boolean;
   stdin?: string;
   timeoutMs?: number;
-  profile?: string;
-  session?: string;
   onProgress?: (bytesReceived: number, recentOutput: string) => void;
   abortSignal?: AbortSignal;
 }
@@ -160,10 +155,6 @@ export interface AuditRecord {
   ruleId?: string;
   exitCode?: number;
   durationMs?: number;
-  bytesIn?: number;
-  bytesOut?: number;
-  sessionId?: string;
-  approvalId?: string;
   approver?: string;
   error?: string;
 }
@@ -174,7 +165,6 @@ export interface ToolContext {
   requestId: string | number;
   profile?: string;
   session?: string;
-  clientIdentity?: string;
 }
 
 // ─── SFTP Types ─────────────────────────────────────────────────────────────

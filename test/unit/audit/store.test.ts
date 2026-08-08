@@ -57,36 +57,48 @@ describe('AuditStore', () => {
     expect(content).toContain('[REDACTED:aws-access-key');
   });
 
-  it('rotates when file exceeds size limit', async () => {
+  // Drives rotation through the store with a small threshold instead of
+  // writing a real 101MB file behind its back. The old shape both cost ~200MB
+  // of I/O per run and only worked because the store re-stat()ed the file on
+  // every record — it stopped testing rotation the moment that was optimised.
+  it('rotates when the file reaches the size limit', async () => {
     const logPath = join(tempDir, 'audit.log');
-    const store = new AuditStore(logPath);
-    await store.record({
+    const store = new AuditStore(logPath, false, false, 2048);
+
+    const write = (command: string) => store.record({
       mcpRequestId: 0,
       profile: 'dev',
       user: 'test',
-      command: 'init',
+      command,
       commandClass: 'read-only',
-      binary: 'init',
+      binary: 'cmd',
       decision: 'allow',
     });
 
-    await writeFile(logPath, 'x'.repeat(101 * 1024 * 1024), 'utf8');
-
-    await store.record({
-      mcpRequestId: 1,
-      profile: 'dev',
-      user: 'test',
-      command: 'after-rotate',
-      commandClass: 'read-only',
-      binary: 'after-rotate',
-      decision: 'allow',
-    });
+    // Each record is a couple hundred bytes; enough of them cross 2KB.
+    for (let i = 0; i < 20; i++) await write(`filler-${i}`);
+    await write('after-rotate');
 
     const rotatedStat = await stat(`${logPath}.1`);
-    expect(rotatedStat.size).toBeGreaterThan(100 * 1024 * 1024);
+    expect(rotatedStat.size).toBeGreaterThan(0);
 
     const newContent = await readFile(logPath, 'utf8');
-    const record = JSON.parse(newContent.trim());
-    expect(record.command).toBe('after-rotate');
+    const lines = newContent.trim().split('\n').filter(Boolean);
+    expect(lines.length).toBeLessThan(21);
+    expect(JSON.parse(lines[lines.length - 1]).command).toBe('after-rotate');
+  });
+
+  it('does not rotate below the limit', async () => {
+    const logPath = join(tempDir, 'audit.log');
+    const store = new AuditStore(logPath, false, false, 1024 * 1024);
+    for (let i = 0; i < 5; i++) {
+      await store.record({
+        mcpRequestId: i, profile: 'dev', user: 'test', command: `cmd-${i}`,
+        commandClass: 'read-only', binary: 'cmd', decision: 'allow',
+      });
+    }
+    await expect(stat(`${logPath}.1`)).rejects.toThrow();
+    const lines = (await readFile(logPath, 'utf8')).trim().split('\n').filter(Boolean);
+    expect(lines).toHaveLength(5);
   });
 });

@@ -1,4 +1,4 @@
-import { Client, type ClientChannel, type ConnectConfig } from 'ssh2';
+import { Client, type ClientChannel, type ConnectConfig, type ExecOptions } from 'ssh2';
 import type { ConnectionInfo, Profile, ResolvedCredentials, ExecOpts, CommandResult, SessionOpts } from '../types.js';
 import { FROZEN_ALGORITHMS } from './algorithms.js';
 import { verifyHostKey, fingerprintPublicKey, type HostKeyMode } from './host-key.js';
@@ -205,7 +205,7 @@ export class SSHConnection {
         }
       }, timeoutMs);
 
-      const execOpts: any = {};
+      const execOpts: ExecOptions = {};
       if (opts.tty || this.profile.tty) {
         execOpts.pty = { term: 'xterm-256color', cols: 200, rows: 50 };
       }

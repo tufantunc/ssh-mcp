@@ -16,13 +16,6 @@ export function sanitizeCommand(command: unknown, maxChars: number): string {
   return cleaned;
 }
 
-export function sanitizeMetadata(value: unknown, maxLength = 500): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== 'string') return undefined;
-  const cleaned = value.replace(CONTROL_CHARS, ' ').trim();
-  return cleaned.length > maxLength ? cleaned.slice(0, maxLength) : cleaned;
-}
-
 export function sanitizeSessionName(name: string): string {
   if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) {
     throw new McpError(
