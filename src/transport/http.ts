@@ -1,11 +1,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { randomUUID, timingSafeEqual } from 'crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ConnectionRegistry } from '../ssh/connection-registry.js';
-import type { AuditStore } from '../audit/store.js';
+import { SERVER_VERSION } from '../version.js';
 
 const MAX_BODY_SIZE = 1_048_576; // 1MB
+/** Cap on concurrent MCP sessions, so unauthenticated-adjacent churn can't grow the map without bound. */
+const MAX_SESSIONS = 64;
 
 class RateLimiter {
   private tokens: number;
@@ -44,15 +47,24 @@ export interface HttpTransportOpts {
   host?: string;
   bearerToken?: string;
   registry: ConnectionRegistry;
-  audit: AuditStore;
   rateLimit?: number;
 }
 
+function jsonRpcError(res: ServerResponse, status: number, code: number, message: string): void {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id: null }));
+}
+
+/**
+ * @param createMcpServer Builds a fresh McpServer per MCP session. An McpServer
+ *   binds to exactly one transport, so a shared instance would let only the
+ *   first client initialize — and would stay unusable after that client left.
+ */
 export async function startHttpServer(
-  server: McpServer,
+  createMcpServer: () => McpServer | Promise<McpServer>,
   opts: HttpTransportOpts,
 ): Promise<void> {
-  const { port, host = '127.0.0.1', bearerToken, registry, audit } = opts;
+  const { port, host = '127.0.0.1', bearerToken, registry } = opts;
 
   if (!bearerToken) {
     throw new Error(
@@ -61,15 +73,52 @@ export async function startHttpServer(
     );
   }
 
-  const tokenBuf = Buffer.from(bearerToken);
   const rateLimiter = opts.rateLimit && opts.rateLimit > 0
     ? new RateLimiter(opts.rateLimit)
     : null;
 
-  const mcpTransport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-  });
-  await server.connect(mcpTransport);
+  const transports = new Map<string, StreamableHTTPServerTransport>();
+
+  /** Route to the session's transport, or start a new session on `initialize`. */
+  async function resolveTransport(
+    req: IncomingMessage,
+    res: ServerResponse,
+    parsedBody?: unknown,
+  ): Promise<StreamableHTTPServerTransport | null> {
+    const sessionId = req.headers['mcp-session-id'] as string | undefined;
+
+    if (sessionId) {
+      const existing = transports.get(sessionId);
+      if (existing) return existing;
+      jsonRpcError(res, 404, -32001, 'Session not found or expired. Re-initialize to obtain a new session.');
+      return null;
+    }
+
+    const body = Array.isArray(parsedBody) ? parsedBody : [parsedBody];
+    if (!body.some((m) => isInitializeRequest(m))) {
+      jsonRpcError(res, 400, -32000, 'Missing mcp-session-id header. Send an initialize request first.');
+      return null;
+    }
+
+    if (transports.size >= MAX_SESSIONS) {
+      jsonRpcError(res, 503, -32000, `Server is at its session limit (${MAX_SESSIONS}). Close an existing session and retry.`);
+      return null;
+    }
+
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (id) => { transports.set(id, transport); },
+      onsessionclosed: (id) => { transports.delete(id); },
+    });
+    // Covers transport teardown that isn't a DELETE (client disconnect, error).
+    transport.onclose = () => {
+      if (transport.sessionId) transports.delete(transport.sessionId);
+    };
+
+    const mcp = await createMcpServer();
+    await mcp.connect(transport);
+    return transport;
+  }
 
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
@@ -115,32 +164,48 @@ export async function startHttpServer(
         if (body.length > MAX_BODY_SIZE) {
           if (!bodyTooLarge) {
             bodyTooLarge = true;
-            res.writeHead(413, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Request body too large (max 1MB)' }));
+            // Connection: close is load-bearing, not cosmetic. Without it a
+            // keep-alive client (Node's default agent since v19) returns this
+            // socket to its pool, and the destroy below then kills the pooled
+            // socket — so the client's *next* request fails with EPIPE.
+            res.writeHead(413, {
+              'Content-Type': 'application/json',
+              'Connection': 'close',
+            });
+            // Destroy only once the 413 has flushed; destroying immediately
+            // races the response and the client sees a bare connection reset
+            // instead of the status telling it what went wrong.
+            res.end(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                error: { code: -32600, message: 'Request body too large (max 1MB)' },
+                id: null,
+              }),
+              () => req.destroy(),
+            );
           }
-          req.destroy();
         }
       });
       req.on('end', async () => {
         if (bodyTooLarge) return;
+        let parsed: unknown;
         try {
-          const parsed = JSON.parse(body);
-          await mcpTransport.handleRequest(req, res, parsed);
+          parsed = JSON.parse(body);
         } catch {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+          jsonRpcError(res, 400, -32700, 'Parse error: invalid JSON');
+          return;
         }
+        const transport = await resolveTransport(req, res, parsed);
+        if (!transport) return;
+        await transport.handleRequest(req, res, parsed);
       });
       return;
     }
 
-    if (req.method === 'GET' && url.pathname === '/') {
-      await mcpTransport.handleRequest(req, res);
-      return;
-    }
-
-    if (req.method === 'DELETE' && url.pathname === '/') {
-      await mcpTransport.handleRequest(req, res);
+    if ((req.method === 'GET' || req.method === 'DELETE') && url.pathname === '/') {
+      const transport = await resolveTransport(req, res);
+      if (!transport) return;
+      await transport.handleRequest(req, res);
       return;
     }
 
@@ -148,7 +213,7 @@ export async function startHttpServer(
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: 'running',
-        version: '2.0.0',
+        version: SERVER_VERSION,
         connections: registry.listConnections(),
         profiles: registry.listAllProfiles().map((p) => ({
           name: p.name,
