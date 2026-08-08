@@ -1,4 +1,4 @@
-import { appendFile, mkdir, stat, rename, readFile, chmod, open } from 'fs/promises';
+import { mkdir, stat, rename, chmod, open } from 'fs/promises';
 import { createWriteStream, type WriteStream } from 'fs';
 import { homedir, platform } from 'os';
 import { join, dirname } from 'path';

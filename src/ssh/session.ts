@@ -82,7 +82,6 @@ export abstract class Session {
 export class InteractiveSession extends Session {
   private stream: ClientChannel;
   private cwd = '~';
-  private outputBuffer = '';
   private static MAX_OUTPUT = 1_048_576;
 
   constructor(id: string, name: string, profile: string, stream: ClientChannel, ttlMs: number) {
@@ -177,7 +176,6 @@ export class InteractiveSession extends Session {
           if (reportedCwd) this.cwd = reportedCwd;
 
           this.touch();
-          this.outputBuffer = output;
 
           resolve({
             stdout: output,

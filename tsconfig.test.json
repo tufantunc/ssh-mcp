@@ -2,8 +2,18 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
-    "rootDir": "."
+    "rootDir": ".",
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
   },
-  "include": ["src/**/*", "test/**/*", "vitest.config.ts"],
-  "exclude": ["node_modules", "build", "test/legacy/**"]
+  "include": [
+    "src/**/*",
+    "test/**/*",
+    "vitest.config.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "build",
+    "test/legacy/**"
+  ]
 }
