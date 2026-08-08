@@ -44,6 +44,81 @@ auth = "password"
     expect(config.profiles[0].sessionMaxPerConnection).toBe(5);
   });
 
+  // Regression: [defaults] used to be validated but only two session keys were
+  // ever merged into profiles, so a documented default silently did nothing —
+  // an approvalMode that never applies is a security downgrade, not a papercut.
+  it('cascades every [defaults] key into profiles that omit it', async () => {
+    const path = await writeConfig(`
+[defaults]
+approvalMode = "ask-all"
+commandTimeoutMs = 30000
+commandMaxChars = 1234
+commandMaxOutputBytes = 2048
+sessionBackgroundMaxMs = 111000
+sessionMaxPerConnection = 9
+sessionIdleTimeoutMs = 222000
+
+[[profiles]]
+name = "dev"
+host = "localhost"
+user = "test"
+`);
+    const config = await loadConfig(path);
+    const p = config.profiles[0];
+    expect(p.approvalPolicy).toBe('ask-all');
+    expect(p.timeout).toBe(30000);
+    expect(p.maxChars).toBe(1234);
+    expect(p.maxOutputBytes).toBe(2048);
+    expect(p.sessionBackgroundMaxMs).toBe(111000);
+    expect(p.sessionMaxPerConnection).toBe(9);
+    expect(p.sessionIdleTimeoutMs).toBe(222000);
+  });
+
+  it('lets an explicit profile value override [defaults]', async () => {
+    const path = await writeConfig(`
+[defaults]
+approvalMode = "ask-all"
+commandTimeoutMs = 30000
+
+[[profiles]]
+name = "dev"
+host = "localhost"
+user = "test"
+approvalPolicy = "auto"
+timeout = 5000
+`);
+    const config = await loadConfig(path);
+    expect(config.profiles[0].approvalPolicy).toBe('auto');
+    expect(config.profiles[0].timeout).toBe(5000);
+  });
+
+  it('falls back to schema defaults when [defaults] is absent', async () => {
+    const path = await writeConfig(`
+[[profiles]]
+name = "dev"
+host = "localhost"
+user = "test"
+`);
+    const config = await loadConfig(path);
+    const p = config.profiles[0];
+    expect(p.approvalPolicy).toBe('ask-destructive');
+    expect(p.timeout).toBe(60_000);
+    expect(p.maxOutputBytes).toBe(1_048_576);
+  });
+
+  it('rejects unknown profile keys instead of silently dropping them', async () => {
+    const path = await writeConfig(`
+[[profiles]]
+name = "dev"
+host = "localhost"
+user = "test"
+hostFingerprint = "SHA256:abc"
+`);
+    // hostFingerprint was accepted-but-unimplemented; a user pinning with it
+    // got plain TOFU. Unknown keys must now fail loudly.
+    await expect(loadConfig(path)).rejects.toThrow(/hostFingerprint|Config validation/);
+  });
+
   it('rejects config with no profiles', async () => {
     const path = await writeConfig(`
 [defaults]
@@ -143,7 +218,7 @@ describe('checkPermissions', () => {
 
   it('fails for world-readable directory', async () => {
     const subdir = join(tempDir, 'insecure-dir');
-    await mkdtemp(subdir, 'x').catch(async () => {
+    await mkdtemp(subdir).catch(async () => {
       await import('fs/promises').then((fs) => fs.mkdir(subdir, { recursive: true }));
     });
     const cfgPath = join(tempDir, 'config.toml');

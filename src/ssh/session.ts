@@ -16,9 +16,18 @@ export abstract class Session {
   readonly createdAt: Date;
   lastActivity: Date;
   ttlMs: number;
+  /** Absolute lifetime cap, measured from createdAt. Undefined = no cap. */
+  readonly maxLifetimeMs?: number;
   protected _status: SessionStatus = 'active';
 
-  constructor(id: string, name: string, profile: string, type: 'interactive' | 'background', ttlMs: number) {
+  constructor(
+    id: string,
+    name: string,
+    profile: string,
+    type: 'interactive' | 'background',
+    ttlMs: number,
+    maxLifetimeMs?: number,
+  ) {
     this.id = id;
     this.name = name;
     this.profile = profile;
@@ -26,6 +35,7 @@ export abstract class Session {
     this.createdAt = new Date();
     this.lastActivity = new Date();
     this.ttlMs = ttlMs;
+    this.maxLifetimeMs = maxLifetimeMs;
   }
 
   get status(): SessionStatus {
@@ -33,6 +43,12 @@ export abstract class Session {
   }
 
   isExpired(): boolean {
+    // The idle TTL alone never fires for a chatty background process, because
+    // every data chunk touches lastActivity. The absolute cap is what actually
+    // bounds a `tail -f`-style session.
+    if (this.maxLifetimeMs !== undefined && Date.now() - this.createdAt.getTime() > this.maxLifetimeMs) {
+      return true;
+    }
     return Date.now() - this.lastActivity.getTime() > this.ttlMs;
   }
 
@@ -200,6 +216,11 @@ export class InteractiveSession extends Session {
   get currentCwd(): string {
     return this.cwd;
   }
+
+  /** Record the shell's starting directory when the profile sets a workdir. */
+  setCwd(dir: string): void {
+    this.cwd = dir;
+  }
 }
 
 export class BackgroundSession extends Session {
@@ -210,8 +231,8 @@ export class BackgroundSession extends Session {
   private exitCode: number | null = null;
   private static RING_CHAR_LIMIT = 100_000;
 
-  constructor(id: string, name: string, profile: string, stream: ClientChannel, ttlMs: number) {
-    super(id, name, profile, 'background', ttlMs);
+  constructor(id: string, name: string, profile: string, stream: ClientChannel, ttlMs: number, maxLifetimeMs?: number) {
+    super(id, name, profile, 'background', ttlMs, maxLifetimeMs);
     this.stream = stream;
     stream.on('data', (data: Buffer) => {
       const text = data.toString();

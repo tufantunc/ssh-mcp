@@ -10,6 +10,7 @@
   "scripts": {
     "prepare": "npm run build",
     "build": "tsc && shx chmod +x build/*.js",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "inspect": "npx @modelcontextprotocol/inspector node build/index.js",
     "changeset": "changeset",
     "version": "changeset version",

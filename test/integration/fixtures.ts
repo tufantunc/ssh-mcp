@@ -16,11 +16,13 @@ const baseProfile: Omit<Profile, 'name' | 'host' | 'port' | 'user' | 'role'> = {
   tty: false,
   timeout: 15000,
   maxChars: 5000,
+  maxOutputBytes: 1048576,
   readOnly: false,
   approvalPolicy: 'ask-destructive',
   cert: false,
   sessionMaxPerConnection: 5,
   sessionIdleTimeoutMs: 60000,
+  sessionBackgroundMaxMs: 3600000,
 };
 
 export const profiles: Record<string, Profile> = {

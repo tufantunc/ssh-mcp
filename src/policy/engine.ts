@@ -95,6 +95,17 @@ export class PolicyEngine {
     }
 
     if (approvalRequired) {
+      // approvalPolicy "deny" rejects outright instead of prompting — otherwise
+      // it would behave exactly like ask-destructive and never deny anything.
+      if (profile.approvalPolicy === 'deny') {
+        return {
+          decision: 'deny',
+          commandClass: parsed.class,
+          binary: parsed.binary,
+          ruleId: 'approval-policy',
+          reason: `Profile "${profile.name}" denies ${parsed.class} commands (approvalPolicy = "deny")`,
+        };
+      }
       return {
         decision: 'require-approval',
         commandClass: parsed.class,
@@ -180,11 +191,15 @@ export class PolicyEngine {
     return 'dev';
   }
 
+  /**
+   * Whether this command trips the profile's approval gate. What happens at the
+   * gate — prompt or deny — is decided by evaluate() from the approvalPolicy.
+   */
   private requiresApproval(profile: Profile, needsApproval: boolean): boolean {
     const mode: ApprovalMode = profile.approvalPolicy;
     if (mode === 'auto') return false;
     if (mode === 'ask-all') return true;
-    if (mode === 'deny') return needsApproval;
+    // ask-destructive and deny both gate on destructive/privileged commands.
     return needsApproval;
   }
 

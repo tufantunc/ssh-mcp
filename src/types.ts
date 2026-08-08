@@ -17,17 +17,17 @@ export interface Profile {
   via?: string;
   workdir?: string;
   trustedHostKey?: string;
-  hostFingerprint?: string;
   tty: boolean;
   timeout: number;
   maxChars: number;
+  maxOutputBytes: number;
   role: string;
   readOnly: boolean;
   approvalPolicy: ApprovalMode;
   cert: boolean;
-  caFingerprint?: string;
   sessionMaxPerConnection: number;
   sessionIdleTimeoutMs: number;
+  sessionBackgroundMaxMs: number;
 }
 
 export interface Defaults {

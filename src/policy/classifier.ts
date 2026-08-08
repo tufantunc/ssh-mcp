@@ -9,9 +9,18 @@ const READ_ONLY_ALLOWLIST = new Set([
   'systemctl status', 'journalctl', 'docker ps', 'docker logs', 'docker inspect',
   'docker stats', 'docker images', 'free', 'top', 'htop', 'iostat', 'vmstat',
   'netstat', 'ss', 'ifconfig', 'ip addr', 'ip route', 'arp', 'dig', 'nslookup',
-  'host', 'ping', 'traceroute', 'curl', 'wget', 'git status', 'git log',
+  'host', 'ping', 'traceroute', 'git status', 'git log',
   'git diff', 'git branch', 'git show', 'git remote',
 ]);
+// Deliberately NOT read-only: `curl` and `wget` fetch arbitrary URLs (SSRF to
+// cloud metadata / internal services), post local files to a remote host
+// (`curl -d @/etc/passwd`), and write remote files (`curl -o`, `wget -O`) —
+// none of which need a shell metacharacter to escape the classifier. They fall
+// through to the `safe` class, so run-command can still use them under policy.
+//
+// Residual risk kept on purpose: dig/nslookup/host/ping/traceroute can leak
+// small amounts of data through DNS/ICMP queries. They cannot modify the host,
+// so they stay read-only; tighten them via profile policy if egress matters.
 
 const DESTRUCTIVE_DENYLIST: RegExp[] = [
   /rm\s+-rf?\s+\//,

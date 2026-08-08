@@ -64,15 +64,18 @@ async function buildAppConfig(argv: Record<string, string | null>): Promise<AppC
     user: argv.user,
     auth: argv.key ? 'key' : 'password',
     keyRef: argv.key || undefined,
+    workdir: argv.workdir || undefined,
     tty: false,
     timeout: defaults.commandTimeoutMs,
     maxChars: defaults.commandMaxChars,
+    maxOutputBytes: defaults.commandMaxOutputBytes,
     role: 'admin',
     readOnly: false,
-    approvalPolicy: argv.disableApproval ? 'auto' : 'ask-destructive',
+    approvalPolicy: argv.disableApproval ? 'auto' : defaults.approvalMode,
     cert: false,
     sessionMaxPerConnection: defaults.sessionMaxPerConnection,
     sessionIdleTimeoutMs: defaults.sessionIdleTimeoutMs,
+    sessionBackgroundMaxMs: defaults.sessionBackgroundMaxMs,
   };
 
   return { defaults, profiles: [profile] };

@@ -17,12 +17,14 @@ const testProfile: Profile = {
   tty: false,
   timeout: 10000,
   maxChars: 5000,
+  maxOutputBytes: 1048576,
   role: 'admin',
   readOnly: false,
   approvalPolicy: 'auto',
   cert: false,
   sessionMaxPerConnection: 5,
   sessionIdleTimeoutMs: 60000,
+  sessionBackgroundMaxMs: 3600000,
 };
 
 let conn: SSHConnection;
@@ -97,4 +99,24 @@ describe.skipIf(await SSH_AVAILABLE === false)('SFTP operations', () => {
 
     await conn.exec(`rm -f ${remotePath}`);
   });
+
+  // Regression: withSftp used to open a channel per operation and never end() it,
+  // so past ~MaxSessions (OpenSSH default 10) no further channel could be opened
+  // on the connection — SFTP, exec or shell alike.
+  it('does not exhaust channels across many operations', async () => {
+    const remotePath = '/tmp/ssh-mcp-channel-limit.txt';
+
+    for (let i = 0; i < 15; i++) {
+      await sftp.upload({ remotePath, content: `iteration ${i}` });
+      const downloaded = await sftp.download({ remotePath });
+      expect(downloaded.toString()).toBe(`iteration ${i}`);
+    }
+
+    // exec shares the same channel budget — it must still work afterwards.
+    const result = await conn.exec('echo channels-ok');
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('channels-ok');
+
+    await conn.exec(`rm -f ${remotePath}`);
+  }, 30000);
 });

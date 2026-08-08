@@ -12,12 +12,14 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
     tty: false,
     timeout: 60000,
     maxChars: 5000,
+    maxOutputBytes: 1048576,
     role: 'operator',
     readOnly: false,
     approvalPolicy: 'ask-destructive',
     cert: false,
     sessionMaxPerConnection: 5,
     sessionIdleTimeoutMs: 600000,
+    sessionBackgroundMaxMs: 3600000,
     ...overrides,
   };
 }
@@ -88,9 +90,21 @@ describe('PolicyEngine', () => {
     expect(engine.evaluate('ls -la', profile, 'read-command').decision).toBe('require-approval');
   });
 
-  it('deny mode requires approval for destructive', () => {
+  it('deny mode denies destructive commands outright (no approval prompt)', () => {
     const profile = makeProfile({ role: 'admin', name: 'dev', approvalPolicy: 'deny' });
-    expect(engine.evaluate('rm -rf /tmp/x', profile, 'run-command').decision).toBe('require-approval');
+    const result = engine.evaluate('rm -rf /tmp/x', profile, 'run-command');
+    expect(result.decision).toBe('deny');
+    expect(result.ruleId).toBe('approval-policy');
+  });
+
+  it('deny mode denies privileged commands outright', () => {
+    const profile = makeProfile({ role: 'admin', name: 'dev', approvalPolicy: 'deny' });
+    expect(engine.evaluate('sudo systemctl restart nginx', profile, 'privileged-command').decision).toBe('deny');
+  });
+
+  it('deny mode still allows non-destructive commands', () => {
+    const profile = makeProfile({ role: 'admin', name: 'dev', approvalPolicy: 'deny' });
+    expect(engine.evaluate('ls -la', profile, 'read-command').decision).toBe('allow');
   });
 
   it('denylist with invalid regex falls back to substring match', () => {

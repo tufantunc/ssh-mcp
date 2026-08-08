@@ -45,7 +45,7 @@ describe('sanitizeMetadata', () => {
   });
 
   it('truncates to max length', () => {
-    expect(sanitizeMetadata('a'.repeat(200), 100).length).toBe(100);
+    expect(sanitizeMetadata('a'.repeat(200), 100)?.length).toBe(100);
   });
 
   it('returns undefined for undefined input', () => {
