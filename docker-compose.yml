@@ -64,6 +64,15 @@ services:
     ports:
       - "2226:2222"
 
+  # A different sshd implementation entirely (not OpenSSH). Dropbear supports a
+  # narrower algorithm set, so it is the only target that proves
+  # FROZEN_ALGORITHMS can negotiate outside the OpenSSH family.
+  ssh-dropbear:
+    build: ./docker/dropbear-sshd
+    profiles: ["test"]
+    ports:
+      - "2227:2222"
+
   # ─── SSH MCP Server v2 ────────────────────────────────────────────────────
   ssh-mcp:
     build: .

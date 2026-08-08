@@ -7,6 +7,7 @@ import { SessionManager } from './session-manager.js';
 import { tracer } from '../observability/tracer.js';
 import { redactText } from '../guard/redactor.js';
 import { shellSingleQuote } from '../guard/sanitizer.js';
+import { openWithRetry } from './channel-retry.js';
 
 export class SSHConnection {
   readonly profile: Profile;
@@ -229,7 +230,20 @@ export class SSHConnection {
         execOpts.pty = { term: 'xterm-256color', cols: 200, rows: 50 };
       }
 
-      client.exec(command, execOpts, (err, stream) => {
+      // Retried: some servers (Dropbear especially) intermittently refuse a
+      // channel right after a previous one was released. Only the open is
+      // retried — once a stream exists, nothing here re-runs the command.
+      const openExecChannel = async () => {
+        // Re-established per attempt: the refusal can be a dropped connection
+        // rather than a refused channel.
+        await this.ensureConnected();
+        const activeClient = this.getClient();
+        return new Promise<ClientChannel>((res, rej) => {
+          activeClient.exec(command, execOpts, (err, stream) => (err ? rej(err) : res(stream)));
+        });
+      };
+
+      const onExecChannel = (err: Error | undefined, stream: ClientChannel) => {
         if (err) {
           if (!resolved) {
             resolved = true;
@@ -320,7 +334,12 @@ export class SSHConnection {
             span.end();
           }
         });
-      });
+      };
+
+      openWithRetry(openExecChannel).then(
+        (stream) => onExecChannel(undefined, stream),
+        (err: Error) => onExecChannel(err, undefined as unknown as ClientChannel),
+      );
     });
   }
 

@@ -2,6 +2,7 @@ import type { ClientChannel } from 'ssh2';
 import type { Profile, SessionOpts } from '../types.js';
 import { InteractiveSession, BackgroundSession, stripAnsi, type Session } from './session.js';
 import { shellSingleQuote } from '../guard/sanitizer.js';
+import { openWithRetry } from './channel-retry.js';
 import { randomUUID } from 'crypto';
 
 /**
@@ -78,7 +79,7 @@ export class SessionManager {
   private async openInteractive(id: string, name: string, ttlMs: number): Promise<Session> {
     let stream: ClientChannel;
     try {
-      stream = await this.deps.openShell();
+      stream = await openWithRetry(() => this.deps.openShell());
     } catch (err) {
       throw new Error(`Failed to open interactive session: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -137,7 +138,7 @@ export class SessionManager {
   private async openBackground(id: string, name: string, command: string, ttlMs: number): Promise<Session> {
     let stream: ClientChannel;
     try {
-      stream = await this.deps.openExec(command);
+      stream = await openWithRetry(() => this.deps.openExec(command));
     } catch (err) {
       throw new Error(`Failed to open background session: ${err instanceof Error ? err.message : String(err)}`);
     }
