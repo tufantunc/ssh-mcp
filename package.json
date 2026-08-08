@@ -27,18 +27,12 @@
     "@modelcontextprotocol/sdk": "~1.17.5",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
+    "@opentelemetry/resources": "^2.9.0",
     "@opentelemetry/sdk-node": "^0.220.0",
+    "@opentelemetry/semantic-conventions": "^1.43.0",
     "smol-toml": "^1.7.0",
     "ssh2": "^1.17.0",
     "zod": "^3.25.28"
-  },
-  "peerDependencies": {
-    "zod": "^3.25.28"
-  },
-  "peerDependenciesMeta": {
-    "zod": {
-      "optional": true
-    }
   },
   "overrides": {
     "zod-to-json-schema": "3.24.6"
@@ -79,6 +73,9 @@
   ],
   "author": "tufantunc",
   "engines": {
-    "node": ">=18"
+    "node": "^18.19.0 || >=20.6.0"
+  },
+  "optionalDependencies": {
+    "@napi-rs/keyring": "^1.1.0"
   }
 }

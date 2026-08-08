@@ -141,6 +141,7 @@ auth = "agent"                      # agent | key | password | keychain
 keyRef = "~/.ssh/id_ed25519"        # for auth=key
 keychainEntry = "ssh-mcp/prod"      # for auth=keychain (requires @napi-rs/keyring)
 via = "bastion"                     # ProxyJump — route through bastion profile
+group = "prod"                      # Policy tier: prod | staging | dev
 workdir = "/var/www"
 trustedHostKey = "SHA256:..."       # Pin host key (optional)
 tty = false
@@ -211,21 +212,33 @@ The certificate file is auto-detected using OpenSSH convention (`keyRef` + `-cer
 | **operator** | read-only, safe, destructive | read-only, safe, destructive | read-only, safe |
 | **admin** | all | all | read-only, safe, destructive |
 
+Which column applies comes from the profile's `group`. Set it explicitly —
+without it the tier is guessed from the profile name (`prod`/`staging`/`dev`,
+`local`, `test`, `sandbox`), and **an unrecognised name resolves to `prod`**,
+the strictest tier. A production host named `web-01` is therefore treated as
+production rather than silently getting dev permissions.
+
 ### Command Classification
 
 Every command is classified before execution:
 
 - **read-only**: Allowlisted commands (`ls`, `cat`, `grep`, `df`, `stat`, `systemctl status`, ...)
 - **safe**: Non-destructive mutations (`npm install`, `git pull`, ...)
-- **destructive**: `rm -rf /`, `mkfs`, `dd of=/dev/`, `shutdown`, `curl|sh`, fork bombs, ...
+- **destructive**: mutations that need approval (`rm -rf /tmp/build`, ...)
 - **privileged**: `sudo`, `su`, `doas`, `pkexec`
+
+A separate **forbidden** list is never allowed, whatever the role or approval
+policy: `rm -rf /`, `mkfs`, `dd of=/dev/`, `shutdown`, `curl|sh`, fork bombs,
+writes to `/etc/cron`, `/etc/systemd` or `authorized_keys`, `iptables -F`, and
+recursive `chmod 777 /` / `chown /`. Add your own patterns via the policy
+denylist; an invalid pattern fails at startup rather than degrading silently.
 
 ### Approval Modes
 
 - `auto` — no prompts (dev only!)
 - `ask-destructive` — prompt for destructive/privileged (default)
 - `ask-all` — prompt for every command
-- `deny` — deny all mutations
+- `deny` — reject destructive/privileged commands outright (no prompt)
 
 ### External Policy Engine (OPA)
 

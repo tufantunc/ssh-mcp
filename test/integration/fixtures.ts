@@ -13,6 +13,9 @@ export const PORTS = { admin: 2222, viewer: 2223, operator: 2224 };
 
 const baseProfile: Omit<Profile, 'name' | 'host' | 'port' | 'user' | 'role'> = {
   auth: 'password',
+  // Explicit tier: these fixtures are dev hosts. Without it the strictest tier
+  // applies, since names like "admin"/"operator" say nothing about environment.
+  group: 'dev',
   tty: false,
   timeout: 15000,
   maxChars: 5000,

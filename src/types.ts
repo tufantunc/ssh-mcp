@@ -15,6 +15,8 @@ export interface Profile {
   keyRef?: string;
   keychainEntry?: string;
   via?: string;
+  /** Explicit policy tier (prod | staging | dev | custom). */
+  group?: string;
   workdir?: string;
   trustedHostKey?: string;
   tty: boolean;
