@@ -98,6 +98,7 @@ function normalizeConfig(raw: RawConfig): AppConfig {
     sessionMaxPerConnection: p.sessionMaxPerConnection ?? defaults.sessionMaxPerConnection,
     sessionIdleTimeoutMs: p.sessionIdleTimeoutMs ?? defaults.sessionIdleTimeoutMs,
     sessionBackgroundMaxMs: p.sessionBackgroundMaxMs ?? defaults.sessionBackgroundMaxMs,
+    commandQuotaPerDay: p.commandQuotaPerDay ?? defaults.commandQuotaPerDay,
   }));
 
   return { defaults, profiles };

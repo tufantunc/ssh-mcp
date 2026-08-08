@@ -101,6 +101,7 @@ async function buildAppConfig(argv: Record<string, string | null>): Promise<AppC
     commandMaxChars: parseMaxChars(argv.maxChars),
     commandMaxOutputBytes: 1_048_576,
     connectionIdleReapMs: 900_000,
+    commandQuotaPerDay: parseInt(argv.commandQuota as string) || 0,
     approvalMode: 'ask-destructive',
   };
 
@@ -123,6 +124,7 @@ async function buildAppConfig(argv: Record<string, string | null>): Promise<AppC
     sessionMaxPerConnection: defaults.sessionMaxPerConnection,
     sessionIdleTimeoutMs: defaults.sessionIdleTimeoutMs,
     sessionBackgroundMaxMs: defaults.sessionBackgroundMaxMs,
+    commandQuotaPerDay: defaults.commandQuotaPerDay,
   };
 
   return { defaults, profiles: [profile] };

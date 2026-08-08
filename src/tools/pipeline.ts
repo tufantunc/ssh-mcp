@@ -6,6 +6,7 @@ import type { AuditStore } from '../audit/store.js';
 import { sanitizeCommand } from '../guard/sanitizer.js';
 import { requestApproval } from '../guard/elicitation.js';
 import { commandOutput, type ToolResult } from './results.js';
+import { CommandQuota } from '../policy/quota.js';
 import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass } from '../types.js';
 
 /**
@@ -56,6 +57,7 @@ export interface ToolDeps {
  * directly, so there is exactly one path from caller input to a remote command.
  */
 export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
+  const quota = new CommandQuota();
   async function resolveConn(profileName?: string) {
     return registry.getOrCreate(profileName);
   }
@@ -237,6 +239,18 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
         throw new Error(`${opts.toolName} only accepts ${opts.enforceClass} commands, got: ${evaluation.commandClass}`);
       }
 
+      // Counted after the policy allowed it and before it runs: a denied
+      // command should not burn quota, and an allowed one should be counted
+      // even if it later fails on the host — the work was still spent.
+      const budget = quota.consume(profileName, profile.commandQuotaPerDay);
+      if (!budget.allowed) {
+        throw new PolicyRefusedError(
+          `QUOTA_EXCEEDED: profile "${profileName}" has used its ${profile.commandQuotaPerDay} commands ` +
+          `for the last 24h. Next slot frees at ${budget.retryAt?.toISOString()}.`,
+          { ...evaluation, decision: 'deny', ruleId: 'command-quota' },
+        );
+      }
+
       const { audited, output } = await run({
         conn, command: effective, profileName, onProgress, abortSignal, extra: opts.extra,
       });
@@ -261,7 +275,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     };
   }
 
-  return { runAudited, execAndReport, defaultProfileName, makeCtx, auditResult, auditFailure, resolveConn };
+  return { runAudited, execAndReport, defaultProfileName, makeCtx, auditResult, auditFailure, resolveConn, quota };
 }
 
 export type Pipeline = ReturnType<typeof createPipeline>;

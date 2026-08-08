@@ -27,6 +27,8 @@ export interface Profile {
   sessionMaxPerConnection: number;
   sessionIdleTimeoutMs: number;
   sessionBackgroundMaxMs: number;
+  /** Max commands per rolling 24h window; 0 = unlimited. */
+  commandQuotaPerDay: number;
 }
 
 export interface Defaults {
@@ -38,6 +40,7 @@ export interface Defaults {
   commandMaxChars: number;
   commandMaxOutputBytes: number;
   connectionIdleReapMs: number;
+  commandQuotaPerDay: number;
   approvalMode: ApprovalMode;
 }
 

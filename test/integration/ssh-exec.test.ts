@@ -24,6 +24,7 @@ const testProfile: Profile = {
   sessionMaxPerConnection: 5,
   sessionIdleTimeoutMs: 60000,
   sessionBackgroundMaxMs: 3600000,
+  commandQuotaPerDay: 0,
 };
 
 let conn: SSHConnection;
