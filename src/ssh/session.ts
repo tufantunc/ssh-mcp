@@ -1,4 +1,5 @@
 import type { ClientChannel } from 'ssh2';
+import { randomBytes } from 'crypto';
 import type { CommandResult, SessionInfo, SessionStatus } from '../types.js';
 import { tracer } from '../observability/tracer.js';
 
@@ -6,6 +7,42 @@ const ANSI_REGEX = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r/g;
 
 export function stripAnsi(text: string): string {
   return text.replace(ANSI_REGEX, '');
+}
+
+/**
+ * Trim leading and trailing newlines by index rather than with /^\n+/ and
+ * /\n+$/.
+ *
+ * The trailing pattern is unanchored at the start, so on output that is mostly
+ * newlines but does not end in one the engine retries `\n+` from every offset:
+ * quadratic in the length of the output. That output is whatever the remote
+ * command printed and the session buffer holds up to 2 MB of it, which measured
+ * at roughly 25 minutes of blocked event loop — and the loop is shared by every
+ * session and connection this server has open.
+ */
+/**
+ * A per-command marker separating the command's own output from the trailer
+ * carrying `$?` and `$PWD`.
+ *
+ * Guessing one is enough to forge an exit code or a working directory — a
+ * failed command reported as successful, in a server whose whole claim is an
+ * auditable record of what ran. Every marker is written to the remote host in
+ * the clear, so anything watching that session collects a stream of them, and
+ * Math.random() is reconstructible from such a stream.
+ *
+ * base64url keeps the value safe both inside the single-quoted printf that
+ * emits it and inside the RegExp built from it: no quotes, no metacharacters.
+ */
+export function generateSessionMarker(): string {
+  return randomBytes(12).toString('base64url');
+}
+
+export function trimNewlines(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && text.charCodeAt(start) === 10) start++;
+  while (end > start && text.charCodeAt(end - 1) === 10) end--;
+  return start === 0 && end === text.length ? text : text.slice(start, end);
 }
 
 export abstract class Session {
@@ -171,7 +208,7 @@ export class InteractiveSession extends Session {
           const endIdx = afterBegin.indexOf(endMarker);
           const between = endIdx >= 0 ? afterBegin.slice(0, endIdx) : afterBegin;
 
-          const output = between.replace(/^\n+/, '').replace(/\n+$/, '');
+          const output = trimNewlines(between);
 
           if (reportedCwd) this.cwd = reportedCwd;
 
@@ -234,7 +271,7 @@ export class InteractiveSession extends Session {
   }
 
   private generateMarker(): string {
-    return Math.random().toString(36).substring(2, 14) + Date.now().toString(36);
+    return generateSessionMarker();
   }
 
   async close(): Promise<void> {

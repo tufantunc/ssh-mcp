@@ -137,3 +137,7 @@ dist
 
 # Ignore build output
 build/
+
+# Local SonarQube scanner config (not shared — points at a local server)
+sonar-project.properties
+.scannerwork/
