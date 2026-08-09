@@ -203,6 +203,40 @@ user = "deploy"
   it('throws for unknown profile', () => {
     expect(() => getProfile(config, 'staging')).toThrow(/not found/);
   });
+
+  // Reported in #54: with several hosts configured and no default chosen, the
+  // old fallback ran the command against profiles[0] — no argument, no warning,
+  // and typically the first host written down, which tends to be production.
+  describe('ambiguous selection', () => {
+    async function configWithoutDefault(...names: string[]): Promise<AppConfig> {
+      const path = await writeConfig(
+        names.map((n) => `\n[[profiles]]\nname = "${n}"\nhost = "${n}.example.com"\nuser = "test"\n`).join(''),
+      );
+      return loadConfig(path);
+    }
+
+    it('refuses to guess between several profiles', async () => {
+      const c = await configWithoutDefault('prod', 'staging', 'dev');
+      expect(() => getProfile(c)).toThrow(/No profile selected/);
+    });
+
+    it('names the candidates and both ways out', async () => {
+      const c = await configWithoutDefault('prod', 'staging');
+      // An error that does not say what to do next just moves the guessing.
+      expect(() => getProfile(c)).toThrow(/prod, staging/);
+      expect(() => getProfile(c)).toThrow(/defaultProfile/);
+    });
+
+    it('still resolves when only one profile exists', async () => {
+      const c = await configWithoutDefault('only');
+      expect(getProfile(c).name).toBe('only');
+    });
+
+    it('still resolves when the caller names one', async () => {
+      const c = await configWithoutDefault('prod', 'staging');
+      expect(getProfile(c, 'staging').name).toBe('staging');
+    });
+  });
 });
 
 describe('checkPermissions', () => {
