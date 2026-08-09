@@ -39,18 +39,31 @@ export class SSHConnection {
     this.sessions = new SessionManager({
       // Live read: the profile object can be replaced after construction.
       profile: () => this.profile,
-      openShell: () => new Promise((resolve, reject) => {
-        this.getClient().shell(
-          { term: 'xterm-256color', cols: 200, rows: 50 },
-          (err, stream) => (err ? reject(err) : resolve(stream)),
-        );
-      }),
-      openExec: (command) => new Promise((resolve, reject) => {
-        this.getClient().exec(
-          this.applyWorkdir(command),
-          (err, stream) => (err ? reject(err) : resolve(stream)),
-        );
-      }),
+      // ensureConnected inside the callback, not just before the retry: these
+      // run under openWithRetry, and Dropbear drops the whole connection under
+      // channel churn rather than merely refusing the channel. openSession does
+      // check the link first, but the link can die between that check and the
+      // channel opening — and then every retry reached getClient() on a dead
+      // client and threw the same "SSH connection not established", so the retry
+      // re-ran a corpse three times. SftpClient already did it this way.
+      openShell: async () => {
+        await this.ensureConnected();
+        return new Promise<ClientChannel>((resolve, reject) => {
+          this.getClient().shell(
+            { term: 'xterm-256color', cols: 200, rows: 50 },
+            (err, stream) => (err ? reject(err) : resolve(stream)),
+          );
+        });
+      },
+      openExec: async (command) => {
+        await this.ensureConnected();
+        return new Promise<ClientChannel>((resolve, reject) => {
+          this.getClient().exec(
+            this.applyWorkdir(command),
+            (err, stream) => (err ? reject(err) : resolve(stream)),
+          );
+        });
+      },
       onChannelOpened: () => { this.activeChannels++; },
       onChannelClosed: () => { this.activeChannels--; },
     });
