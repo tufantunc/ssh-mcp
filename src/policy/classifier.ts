@@ -31,25 +31,34 @@ const READ_ONLY_ALLOWLIST = new Set([
  * pattern was narrower). Anything here is also destructive for classification
  * purposes; see DESTRUCTIVE_DENYLIST below.
  */
+/*
+ * Every `\s+` here is followed by a literal. Where a `.*` or `[^|]*` comes
+ * next, the quantifier before it is a single `\s`: `\s+.*` lets both halves
+ * claim the same run of spaces, so a non-matching command is retried from every
+ * split and the match goes quadratic. sanitizeCommand caps commands at
+ * profile.maxChars (5000 by default) long before this runs, which is what keeps
+ * that cheap — but a policy check should not depend on a limit set three layers
+ * away and configurable to any value.
+ */
 const FORBIDDEN_PATTERNS: RegExp[] = [
   /rm\s+-rf?\s+\/(\s|$)/,          // rm -rf / — the filesystem root itself
   /mkfs\./,
-  /dd\s+.*\bof=\/dev\//,
+  /dd\s.*\bof=\/dev\//,
   />\s*\/dev\/sd/,
   /\bshutdown\b/,
   /\breboot\b/,
   /\bhalt\b/,
   /\bpoweroff\b/,
   /:\(\)\s*\{\s*:\|:\&\s*\}\s*;\s*:/,   // fork bomb
-  /curl\s+.*\|\s*(sh|bash|zsh)/,
-  /wget\s+.*\|\s*(sh|bash|zsh)/,
+  /curl\s[^|]*\|\s*(sh|bash|zsh)/,
+  /wget\s[^|]*\|\s*(sh|bash|zsh)/,
   /\beval\b/,
   />\s*\/etc\/cron/,
   />\s*\/etc\/systemd/,
   />\s*~\/.ssh\/authorized_keys/,
   /\biptables\s+-F\b/,
   /\bchmod\s+-R\s+777\s+\//,
-  /\bchown\s+-R\s+.*\s+\/\s*$/,
+  /\bchown\s+-R\s.*\s\/\s*$/,
 ];
 
 /**

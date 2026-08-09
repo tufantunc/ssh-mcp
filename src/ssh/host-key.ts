@@ -4,7 +4,11 @@ export type HostKeyMode = 'tofu' | 'strict' | 'insecure';
 
 export function fingerprintPublicKey(key: Buffer): string {
   const hash = createHash('sha256').update(key).digest('base64');
-  return `SHA256:${hash.replace(/=+$/, '')}`;
+  // `={0,2}` rather than `=+`: base64 padding is never longer than two
+  // characters, and the bounded form cannot backtrack. Not reachable here — the
+  // input is always a 44-character digest — but an unbounded trailing
+  // quantifier is the shape worth not copying elsewhere.
+  return `SHA256:${hash.replace(/={0,2}$/, '')}`;
 }
 
 export function verifyHostKey(
