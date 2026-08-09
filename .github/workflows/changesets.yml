@@ -3,6 +3,12 @@ name: Changesets
 on:
   push:
     branches: [main]
+  # A release can stop halfway for reasons that live outside the repository —
+  # the npm trusted publisher pointing at the wrong workflow file is what did it
+  # for 2.0.0. Once that is corrected there is nothing to commit, and without a
+  # manual trigger the only ways to retry are re-running a failed job or pushing
+  # an empty commit to main. Neither belongs in a release path.
+  workflow_dispatch:
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
