@@ -22,15 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # No registry-url on purpose. It makes setup-node write a temporary .npmrc
-      # containing `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`, and
-      # NODE_AUTH_TOKEN is deliberately unset here because publishing is done
-      # through OIDC. npm then sends that empty token on every request to the
-      # registry — including the `npm info` that `changeset publish` runs to
-      # decide what still needs publishing. The lookup came back unauthorised,
-      # changesets read that as "2.0.0 is not on npm", and tried to publish it
-      # again on a push that should have been a no-op. Publishing itself was
-      # unaffected, since OIDC supplies that identity separately.
+      # No registry-url: publishing goes through OIDC against the default
+      # registry, so the .npmrc setup-node would write for it — carrying an
+      # authToken line for a token we deliberately do not set — has nothing to
+      # contribute.
       - uses: actions/setup-node@v4
         with:
           node-version: '22.x'
@@ -39,9 +34,18 @@ jobs:
       # npm 10.9.x. Without this the CLI never detects the OIDC environment and
       # silently falls back to token auth — which, with no token configured,
       # means the publish fails at the last step of a release.
-      - name: Upgrade npm for trusted publishing
+      #
+      # Pinned to 11.x rather than @latest. npm 12 changed the shape of
+      # `npm info <pkg> --json`: 11 returns an object carrying a `versions`
+      # array, 12 returns an array. @changesets/cli reads `pkgInfo.versions`,
+      # which is undefined on an array, so under npm 12 it decided an already
+      # published version had never shipped and tried to publish over it. Its
+      # own guard for that case did not catch it either, because npm 12 also
+      # dropped `code` from the error JSON the guard matches on. Publishing was
+      # never affected — 2.0.0 went out under npm 12 — only the read was.
+      - name: Install npm for trusted publishing
         run: |
-          npm install -g npm@latest
+          npm install -g npm@11
           npm -v
 
       - run: npm ci
