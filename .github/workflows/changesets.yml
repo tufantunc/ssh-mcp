@@ -22,10 +22,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No registry-url on purpose. It makes setup-node write a temporary .npmrc
+      # containing `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`, and
+      # NODE_AUTH_TOKEN is deliberately unset here because publishing is done
+      # through OIDC. npm then sends that empty token on every request to the
+      # registry — including the `npm info` that `changeset publish` runs to
+      # decide what still needs publishing. The lookup came back unauthorised,
+      # changesets read that as "2.0.0 is not on npm", and tried to publish it
+      # again on a push that should have been a no-op. Publishing itself was
+      # unaffected, since OIDC supplies that identity separately.
       - uses: actions/setup-node@v4
         with:
           node-version: '22.x'
-          registry-url: 'https://registry.npmjs.org/'
 
       # Trusted publishing needs npm >= 11.5.1, and every Node 22 release ships
       # npm 10.9.x. Without this the CLI never detects the OIDC environment and
@@ -62,8 +70,9 @@ jobs:
           # nothing else produces it. Publishing with npm directly worked — 2.0.0
           # reached the registry that way — but the action saw no released
           # packages, so it silently skipped the git tag and the GitHub release
-          # and still reported success. changeset publish skips versions already
-          # on the registry, so a re-run is safe.
+          # and still reported success. changeset publish decides what to ship
+          # by asking the registry first, which is why the .npmrc above matters:
+          # if that lookup cannot be trusted, neither can this step.
           publish: npx changeset publish
           version: npm run version
           title: 'chore(release): version packages'
