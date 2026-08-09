@@ -67,7 +67,25 @@ jobs:
           # Without this, integration tests silently skip themselves when a
           # server is unreachable and CI reports green with zero of them run.
           SSH_MCP_REQUIRE_SERVERS: "1"
-        run: npm test
+        # Same suite as `npm test`, with the v8 reporter attached so the run
+        # that proves the code works is also the one the coverage report comes
+        # from.
+        run: npm run coverage
+
+      # An empty or missing report uploads happily and renders as 0%, which is
+      # indistinguishable from having no tests. Fail here instead, where the
+      # cause is obvious — but leave the upload itself non-fatal, so our own
+      # mistakes break the build and Codecov's outages do not.
+      - name: Check the coverage report was produced
+        run: |
+          test -s coverage/lcov.info || { echo "coverage/lcov.info missing or empty"; exit 1; }
+          echo "lcov records: $(grep -c '^SF:' coverage/lcov.info)"
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
 
       # Service containers surface their logs in the UI automatically; compose
       # containers do not, so a failure would otherwise be undebuggable.
