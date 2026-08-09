@@ -107,6 +107,18 @@ function normalizeConfig(raw: RawConfig): AppConfig {
 export function getProfile(config: AppConfig, name?: string): Profile {
   const targetName = name || config.defaults.defaultProfile;
   if (!targetName) {
+    // Falling back to profiles[0] meant that with several hosts configured and
+    // no default chosen, a command with no profile argument ran against
+    // whichever host happened to be listed first — silently, and typically the
+    // one written down first, which tends to be production. One profile is
+    // unambiguous; more than one is a question the caller has to answer.
+    if (config.profiles.length > 1) {
+      const names = config.profiles.map((p) => p.name).join(', ');
+      throw new Error(
+        `No profile selected and no default configured, but ${config.profiles.length} profiles exist: ${names}. ` +
+        `Pass a "profile" argument, or set defaults.defaultProfile in the config.`,
+      );
+    }
     return config.profiles[0];
   }
   const profile = config.profiles.find((p) => p.name === targetName);
