@@ -40,7 +40,17 @@ jobs:
         with:
           # No --provenance: trusted publishing generates provenance
           # attestations automatically for a public package from a public repo.
-          publish: npm run build && npm publish --access public
+          #
+          # One command only. The action splits this string on whitespace and
+          # execs it directly rather than handing it to a shell, so a `cmd-a &&
+          # cmd-b` form does not chain: npm receives `&&` and everything after
+          # it as extra arguments and appends them to the script body as escaped
+          # literals, which is how `npm run build && npm publish` turned into
+          # `shx chmod +x build/*.js '&&' 'npm' 'publish'` and failed with
+          # "File not found: &&". The build is already covered twice — by the
+          # Build step above and by the `prepare` lifecycle script, which npm
+          # runs before packing on publish.
+          publish: npm publish --access public
           version: npm run version
           title: 'chore(release): version packages'
           commit: 'chore(release): version packages'
