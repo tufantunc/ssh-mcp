@@ -56,7 +56,15 @@ jobs:
           # "File not found: &&". The build is already covered twice — by the
           # Build step above and by the `prepare` lifecycle script, which npm
           # runs before packing on publish.
-          publish: npm publish --access public
+          #
+          # `changeset publish` rather than `npm publish`: the action learns what
+          # shipped from the structured output the changesets CLI writes, and
+          # nothing else produces it. Publishing with npm directly worked — 2.0.0
+          # reached the registry that way — but the action saw no released
+          # packages, so it silently skipped the git tag and the GitHub release
+          # and still reported success. changeset publish skips versions already
+          # on the registry, so a re-run is safe.
+          publish: npx changeset publish
           version: npm run version
           title: 'chore(release): version packages'
           commit: 'chore(release): version packages'
