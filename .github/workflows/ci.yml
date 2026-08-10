@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main, v2]
 
+# Least privilege by default: every job starts read-only and elevates only what
+# it needs, below. Without a top-level block a job that declares nothing — the
+# `test` job did — inherits the repository's default, which is a setting outside
+# this file and can be widened without touching it. That job sees the Docker Hub
+# and Codecov tokens, so what it is allowed to do should be stated here.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,9 +23,9 @@ jobs:
       # given secrets, resolves it to empty instead of failing.
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
@@ -59,7 +67,7 @@ jobs:
         # Skipped on pull requests from forks, which are never given secrets.
         # Those keep pulling anonymously; the retry is what covers them.
         if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -120,7 +128,7 @@ jobs:
           echo "lcov records: $(grep -c '^SF:' coverage/lcov.info)"
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info
@@ -137,7 +145,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # gitleaks scans a commit range, which the default shallow clone
           # (depth 1) cannot resolve: it fails with "unknown revision" and exits
@@ -146,7 +154,7 @@ jobs:
           fetch-depth: 0
 
       - name: Semgrep Scan
-        uses: returntocorp/semgrep-action@v1
+        uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
         with:
           config: >-
             p/javascript
@@ -156,7 +164,7 @@ jobs:
             p/command-injection
 
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -164,7 +172,7 @@ jobs:
         run: npm audit --audit-level=high || true
 
       - name: Dependency review
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
         if: github.event_name == 'pull_request'
         with:
           fail-on-severity: high
@@ -176,16 +184,16 @@ jobs:
       security-events: write
       actions: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
         with:
           languages: javascript
           config-file: ./.github/codeql-config.yml
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
 
       - name: Analyze
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
