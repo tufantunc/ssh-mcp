@@ -10,6 +10,14 @@ on:
   # an empty commit to main. Neither belongs in a release path.
   workflow_dispatch:
 
+# Least privilege by default: every job starts read-only and elevates only what
+# it needs, below. Without a top-level block a job that declares nothing — the
+# `test` job did — inherits the repository's default, which is a setting outside
+# this file and can be widened without touching it. That job sees the Docker Hub
+# and Codecov tokens, so what it is allowed to do should be stated here.
+permissions:
+  contents: read
+
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 jobs:
@@ -20,13 +28,13 @@ jobs:
       id-token: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # No registry-url: publishing goes through OIDC against the default
       # registry, so the .npmrc setup-node would write for it — carrying an
       # authToken line for a token we deliberately do not set — has nothing to
       # contribute.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.x'
 
@@ -54,7 +62,7 @@ jobs:
         run: npm run build
 
       - name: Create Release Pull Request or Publish
-        uses: changesets/action@v1
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
         with:
           # No --provenance: trusted publishing generates provenance
           # attestations automatically for a public package from a public repo.
