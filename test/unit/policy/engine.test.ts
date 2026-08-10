@@ -141,4 +141,49 @@ describe('PolicyEngine', () => {
     const tagged = makeProfile({ role: 'admin', name: 'web-01', group: 'dev' });
     expect(engine.evaluate('sudo whoami', tagged, 'privileged-command').decision).toBe('require-approval');
   });
+
+  /*
+   * Reported as #91: the refusal read `Role "admin" cannot run "privileged"
+   * commands`, so the reporter concluded the admin role simply cannot sudo and
+   * went looking for a larger role that does not exist. The host group is what
+   * actually decided — admin has `privileged` on staging and dev, not on prod —
+   * and the message never mentioned it.
+   */
+  describe('refusal explains which of the three things decided', () => {
+    function denial(overrides: Parameters<typeof makeProfile>[0]): string {
+      return engine.evaluate('sudo whoami', makeProfile(overrides), 'privileged-command').reason ?? '';
+    }
+
+    it('names the group, not just the role and class', () => {
+      const reason = denial({ role: 'admin', name: 'web-01', group: undefined });
+      expect(reason).toContain('admin');
+      expect(reason).toContain('privileged');
+      expect(reason).toContain('prod');
+    });
+
+    it('lists what the role can run, so the boundary is visible', () => {
+      expect(denial({ role: 'admin', name: 'web-01', group: 'prod' }))
+        .toMatch(/allowed: .*read-only.*safe.*destructive/);
+    });
+
+    // The inferred case is the one worth calling out: nobody wrote "prod"
+    // anywhere, so without saying so the operator cannot see why it applied.
+    it('says the group was inferred when none was set, and how to set one', () => {
+      const reason = denial({ role: 'admin', name: 'web-01', group: undefined });
+      expect(reason).toMatch(/No group is set/);
+      expect(reason).toMatch(/--group/);
+    });
+
+    it('points at the real levers when the group was explicit', () => {
+      const reason = denial({ role: 'admin', name: 'web-01', group: 'prod' });
+      expect(reason).not.toMatch(/No group is set/);
+      expect(reason).toMatch(/roleBindings/);
+    });
+
+    it('explains a read-only profile as read-only rather than as a role problem', () => {
+      const reason = denial({ role: 'admin', name: 'web-01', group: 'dev', readOnly: true });
+      expect(reason).toMatch(/read-only/);
+      expect(reason).toMatch(/readOnly/);
+    });
+  });
 });

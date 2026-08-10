@@ -244,6 +244,25 @@ without it the tier is guessed from the profile name (`prod`/`staging`/`dev`,
 the strictest tier. A production host named `web-01` is therefore treated as
 production rather than silently getting dev permissions.
 
+Note what this means for `sudo`: **`admin` has no `privileged` on `prod`**, so
+`privileged-command` is refused there by design — including on a quick-start
+profile, which has no name to infer from and therefore lands on `prod`. If the
+host is not production, say so:
+
+```bash
+npx ssh-mcp --host=10.0.0.5 --user=deploy --group=dev
+```
+
+```toml
+[[profiles]]
+name = "build-box"
+group = "dev"
+```
+
+Leaving a real production host on `prod` and granting sudo there is a policy
+change, not a flag: add `privileged` to `admin.prod` in the config's
+`roleBindings`.
+
 ### Command Classification
 
 Every command is classified before execution:
@@ -439,6 +458,7 @@ Secrets are **never** passed as CLI arguments.
 | `--port` | 22 | Quick start: SSH port |
 | `--key` | — | Quick start: Path to private key |
 | `--workdir` | — | Quick start: Working directory for commands and sessions |
+| `--group` | prod | Quick start: Policy tier — `prod`, `staging` or `dev` |
 | `--timeout` | 60000 | Command timeout in ms |
 | `--maxChars` | 5000 | Max command length (`none` or `0` disables the limit) |
 | `--sessionMax` | 5 | Max concurrent sessions per connection |

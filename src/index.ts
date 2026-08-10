@@ -4,7 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { loadConfig } from './config/loader.js';
 import { ConnectionRegistry } from './ssh/connection-registry.js';
-import { PolicyEngine, DEFAULT_RULES } from './policy/engine.js';
+import { PolicyEngine, DEFAULT_RULES, HOST_GROUPS } from './policy/engine.js';
 import { AuditStore } from './audit/store.js';
 import { registerTools, registerResources, getToolHashes } from './tools/registry.js';
 import { initKeychain } from './config/credential-resolver.js';
@@ -74,6 +74,28 @@ function resolveHostKeyMode(argv: Record<string, string | null>): HostKeyMode {
   throw new Error(`Invalid --hostKeyMode=${mode}. Expected one of: tofu, strict, insecure.`);
 }
 
+/**
+ * Which policy tier a CLI-configured host belongs to.
+ *
+ * Without this there was no way to say it from the command line at all. The
+ * inline profile carries no group, so it fell to the strictest tier, where the
+ * `admin` role has no `privileged` — meaning `sudo` could never run for anyone
+ * who had not written a config file (#91).
+ *
+ * The default stays `prod`. Guessing an unknown host is production is the safe
+ * direction; what was missing was a way to correct the guess.
+ */
+function resolveHostGroup(argv: Record<string, string | null>): string {
+  const group = argv.group;
+  if (group === null || group === undefined) return 'prod';
+  if ((HOST_GROUPS as readonly string[]).includes(group)) return group;
+  // Falling through would silently apply the prod bindings to a typo, and the
+  // operator would read the refusal as policy rather than as their own slip.
+  throw new Error(
+    `Invalid --group=${group}. Expected one of: ${HOST_GROUPS.join(', ')}.`,
+  );
+}
+
 async function buildAppConfig(argv: Record<string, string | null>): Promise<AppConfig> {
   if (argv.config) {
     return loadConfig(argv.config);
@@ -119,6 +141,7 @@ async function buildAppConfig(argv: Record<string, string | null>): Promise<AppC
     maxChars: defaults.commandMaxChars,
     maxOutputBytes: defaults.commandMaxOutputBytes,
     role: 'admin',
+    group: resolveHostGroup(argv),
     readOnly: false,
     approvalPolicy: argv.disableApproval ? 'auto' : defaults.approvalMode,
     cert: false,
