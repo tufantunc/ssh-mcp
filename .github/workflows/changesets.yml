@@ -51,9 +51,15 @@ jobs:
       # own guard for that case did not catch it either, because npm 12 also
       # dropped `code` from the error JSON the guard matches on. Publishing was
       # never affected — 2.0.0 went out under npm 12 — only the read was.
+      #
+      # Pinned exactly, not to a range. This job holds `id-token: write` — it mints
+      # the OIDC token that publishes ssh-mcp — and this is the one thing it fetches
+      # from the registry outside the lockfile, before `npm ci` runs. A range would
+      # leave the publish path resolving a mutable reference at run time, which is
+      # the property the pinned action SHAs exist to remove. Bump deliberately.
       - name: Install npm for trusted publishing
         run: |
-          npm install -g npm@11
+          npm install -g npm@11.19.0
           npm -v
 
       - run: npm ci
@@ -62,7 +68,7 @@ jobs:
         run: npm run build
 
       - name: Create Release Pull Request or Publish
-        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1 (branch, not a tag)
         with:
           # No --provenance: trusted publishing generates provenance
           # attestations automatically for a public package from a public repo.
