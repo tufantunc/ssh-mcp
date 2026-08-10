@@ -6,11 +6,15 @@ on:
   pull_request:
     branches: [main, v2]
 
-# Least privilege by default: every job starts read-only and elevates only what
-# it needs, below. Without a top-level block a job that declares nothing — the
-# `test` job did — inherits the repository's default, which is a setting outside
-# this file and can be widened without touching it. That job sees the Docker Hub
-# and Codecov tokens, so what it is allowed to do should be stated here.
+# Read-only default for GITHUB_TOKEN. A job that declares nothing — the `test`
+# job does not — would otherwise inherit the repository setting, which lives
+# outside this file and can be widened without anyone editing it.
+#
+# Two things this does NOT do, since the wording invites both mistakes:
+# `permissions` gates GITHUB_TOKEN only and has no effect on `secrets.*`, so the
+# test job still receives the Docker Hub and Codecov tokens. And a job-level
+# block replaces this one rather than extending it — adding a scope here does
+# not reach any job that declares its own.
 permissions:
   contents: read
 
@@ -153,15 +157,35 @@ jobs:
           # found in partial scan". Full history is what makes the scan real.
           fetch-depth: 0
 
+      # Run the image directly instead of returntocorp/semgrep-action. That action
+      # is a Docker action whose action.yml is fifteen lines pointing at
+      # `docker://returntocorp/semgrep-agent:v1`, so pinning its commit freezes the
+      # YAML and none of the code that executes. The project is marked deprecated
+      # and was last pushed in January 2024, and that image can no longer parse the
+      # current rule packs: it died with
+      #
+      #   ValueError: invalid rule severity value: MEDIUM
+      #
+      # exited 0, and the step reported success. This gate had been scanning
+      # nothing while reporting green — which is the failure mode the rest of this
+      # workflow exists to prevent. `--error` is what makes findings fail the job.
       - name: Semgrep Scan
-        uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
-        with:
-          config: >-
-            p/javascript
-            p/nodejs
-            p/typescript
-            p/owasp-top-ten
-            p/command-injection
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src \
+            semgrep/semgrep@sha256:bdf7013b2c3634a487671158da77c554f531742326b543a9464d2adf6c433ac8 \
+            semgrep scan --error --quiet \
+              --config=p/javascript \
+              --config=p/nodejs \
+              --config=p/typescript \
+              --config=p/owasp-top-ten \
+              --config=p/command-injection \
+              --exclude=docker/alpine-sshd/Dockerfile \
+              --exclude=docker/dropbear-sshd/Dockerfile
+
+      # Excluded above rather than suppressed globally: both are throwaway test
+      # fixtures running sshd, which has to be root to authenticate users and open
+      # shells as them, so `missing-user` is wrong for these two files and right
+      # everywhere else.
 
       - name: gitleaks
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
@@ -172,7 +196,7 @@ jobs:
         run: npm audit --audit-level=high || true
 
       - name: Dependency review
-        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4 (branch, not a tag)
         if: github.event_name == 'pull_request'
         with:
           fail-on-severity: high
