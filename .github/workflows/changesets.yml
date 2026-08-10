@@ -10,11 +10,11 @@ on:
   # an empty commit to main. Neither belongs in a release path.
   workflow_dispatch:
 
-# Least privilege by default: every job starts read-only and elevates only what
-# it needs, below. Without a top-level block a job that declares nothing — the
-# `test` job did — inherits the repository's default, which is a setting outside
-# this file and can be widened without touching it. That job sees the Docker Hub
-# and Codecov tokens, so what it is allowed to do should be stated here.
+# Read-only default, so a job added here later starts with no write access until
+# it asks. `release` below is the one job in this file and it opts up explicitly
+# — this block does not scope it. Without a default, a future job that declares
+# nothing would inherit the repository setting instead, which lives outside this
+# file and can be widened without anyone editing it.
 permissions:
   contents: read
 
