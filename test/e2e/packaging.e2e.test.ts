@@ -50,6 +50,17 @@ describe.skipIf(!serverBuilt)('E2E — packaging', () => {
     ).rejects.toMatchObject({ stderr: expect.stringContaining('removed in v2') });
   }, 20000);
 
+  // #91: the CLI profile had no way to declare a host group, so it fell to the
+  // strictest tier and `sudo` could never run without writing a config file.
+  // A mistyped group must not quietly land back on those prod bindings — the
+  // operator would read the refusal as policy rather than as their own typo.
+  it('rejects an unknown --group instead of falling back to the strictest tier', async () => {
+    const { SSH_MCP_DISABLE_MAIN: _omit, ...env } = process.env;
+    await expect(
+      run('node', [SERVER_ENTRY, '--host=x', '--user=y', '--group=production'], { env: env as NodeJS.ProcessEnv }),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining('Invalid --group=production') });
+  }, 20000);
+
   it('requires a bearer token for the HTTP transport', async () => {
     const { SSH_MCP_DISABLE_MAIN: _omit, ...env } = process.env;
     await expect(

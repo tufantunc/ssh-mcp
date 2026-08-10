@@ -18,7 +18,7 @@ export interface PolicyRules {
 }
 
 /** Tiers, most restrictive first. Unknown/unset tiers resolve to the first. */
-const HOST_GROUPS = ['prod', 'staging', 'dev'] as const;
+export const HOST_GROUPS = ['prod', 'staging', 'dev'] as const;
 
 export const DEFAULT_RULES: PolicyRules = {
   roleBindings: {
@@ -97,7 +97,7 @@ export class PolicyEngine {
         commandClass: parsed.class,
         binary: parsed.binary,
         ruleId: 'role-binding',
-        reason: `Role "${profile.role}" cannot run "${parsed.class}" commands`,
+        reason: this.explainRoleDenial(profile, parsed.class),
       };
     }
 
@@ -197,6 +197,44 @@ export class PolicyEngine {
       `POLICY WARNING: OPA evaluation unavailable (${cause}). ` +
       'Falling back to local policy — commands OPA would deny may now be allowed.',
     );
+  }
+
+  /**
+   * Say which three things produced the refusal, not one of them.
+   *
+   * The message used to read `Role "admin" cannot run "privileged" commands`,
+   * which names the role and the class but not the host group — and the group
+   * is usually what decided, because `admin` has `privileged` on staging and
+   * dev but not on prod. A reader concludes their role is simply incapable of
+   * sudo and goes looking for a bigger role that does not exist (#91).
+   *
+   * The inferred case matters most: a profile with no group set lands on the
+   * strictest tier, so the reason is something the operator never wrote down
+   * anywhere and cannot see.
+   */
+  private explainRoleDenial(profile: Profile, commandClass: CommandClass): string {
+    if (profile.readOnly) {
+      return `Profile "${profile.name}" is read-only, so "${commandClass}" commands are refused. ` +
+        `Clear readOnly on the profile to allow them.`;
+    }
+
+    const group = this.resolveHostGroup(profile);
+    const inferred = !profile.group;
+    const allowed = this.getAllowedClasses(profile).join(', ');
+
+    let reason =
+      `Role "${profile.role}" on host group "${group}" cannot run "${commandClass}" commands ` +
+      `(allowed: ${allowed}).`;
+
+    if (inferred) {
+      reason +=
+        ` No group is set for profile "${profile.name}", so it defaulted to the most restrictive tier.` +
+        ` Set group = "dev" or "staging" on the profile, or pass --group, if this host is not production.`;
+    } else {
+      reason += ` Change the profile's group, or grant the class to this role in the policy's roleBindings.`;
+    }
+
+    return reason;
   }
 
   private getAllowedClasses(profile: Profile): CommandClass[] {
