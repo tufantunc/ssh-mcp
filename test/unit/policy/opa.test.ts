@@ -1,0 +1,171 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createServer, type Server } from 'http';
+import { AddressInfo } from 'net';
+import { PolicyEngine, DEFAULT_RULES } from '../../../src/policy/engine.js';
+import type { Profile } from '../../../src/types.js';
+
+/**
+ * OPA is the second authorization layer, and none of it was covered.
+ *
+ * Two guarantees live here and neither is visible from the outside once it
+ * breaks. The deny branch is a gate some operators deploy as their real
+ * authorization boundary — if it stops denying, nothing says so. And the
+ * fallback is deliberately fail-open, which is only defensible because it is
+ * loud: an operator whose OPA is down keeps running commands OPA would have
+ * refused, and the warning is their only signal.
+ *
+ * A real HTTP server rather than a stubbed fetch, so the error paths — a 500, a
+ * refused connection — are the ones the code will actually meet.
+ */
+function makeProfile(overrides: Partial<Profile> = {}): Profile {
+  return {
+    name: 'dev', group: 'dev', host: 'localhost', port: 22, user: 'test',
+    auth: 'agent', tty: false, timeout: 60000, maxChars: 5000,
+    maxOutputBytes: 1048576, role: 'operator', readOnly: false,
+    approvalPolicy: 'ask-destructive', cert: false,
+    sessionMaxPerConnection: 5, sessionIdleTimeoutMs: 60000,
+    sessionBackgroundMaxMs: 3600000, commandQuotaPerDay: 0,
+    ...overrides,
+  };
+}
+
+describe('OPA evaluation', () => {
+  let server: Server | undefined;
+  let url: string;
+  let requests: any[] = [];
+  let errSpy: ReturnType<typeof vi.spyOn>;
+
+  async function startOpa(handler: (req: any) => { status?: number; body?: unknown }) {
+    requests = [];
+    server = createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => (raw += c));
+      req.on('end', () => {
+        const parsed = raw ? JSON.parse(raw) : {};
+        requests.push(parsed);
+        const { status = 200, body = {} } = handler(parsed);
+        res.writeHead(status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(body));
+      });
+    });
+    await new Promise<void>((r) => server!.listen(0, '127.0.0.1', r));
+    url = `http://127.0.0.1:${(server!.address() as AddressInfo).port}`;
+  }
+
+  beforeEach(() => {
+    errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (server) await new Promise<void>((r) => server!.close(() => r()));
+    server = undefined;
+  });
+
+  it('denies when OPA says no, even though the local policy allowed it', async () => {
+    await startOpa(() => ({ body: { result: false } }));
+    const engine = new PolicyEngine(DEFAULT_RULES);
+    engine.setOpaUrl(url);
+
+    const local = engine.evaluate('ls -la', makeProfile(), 'read-command');
+    expect(local.decision).not.toBe('deny');
+
+    const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+    expect(result.decision).toBe('deny');
+    expect(result.ruleId).toBe('opa');
+  });
+
+  it('keeps the local decision when OPA says yes', async () => {
+    await startOpa(() => ({ body: { result: true } }));
+    const engine = new PolicyEngine(DEFAULT_RULES);
+    engine.setOpaUrl(url);
+
+    const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+    expect(result.decision).not.toBe('deny');
+    expect(result.ruleId).not.toBe('opa');
+  });
+
+  // The request body is the whole basis on which an operator writes their rego.
+  // If a field is dropped or renamed, their policy silently stops matching and
+  // evaluates against undefined.
+  it('sends the subject, action, resource and context the policy is written against', async () => {
+    await startOpa(() => ({ body: { result: true } }));
+    const engine = new PolicyEngine(DEFAULT_RULES);
+    engine.setOpaUrl(url);
+
+    await engine.evaluateWithOpa('rm -rf /tmp/build', makeProfile({ role: 'admin', name: 'prod' }), 'run-command');
+
+    expect(requests).toHaveLength(1);
+    const { input } = requests[0];
+    expect(input.subject).toEqual({ role: 'admin', profile: 'prod' });
+    expect(input.action).toEqual({ tool: 'run-command', commandClass: 'destructive' });
+    expect(input.resource.binary).toBe('rm');
+    expect(input.resource.host).toBe('localhost');
+    expect(input.context).toEqual({ readOnly: false });
+  });
+
+  it('does not consult OPA when the local policy already denied', async () => {
+    await startOpa(() => ({ body: { result: true } }));
+    const engine = new PolicyEngine(DEFAULT_RULES);
+    engine.setOpaUrl(url);
+
+    // A forbidden command is denied locally; asking OPA could only overturn it.
+    const result = await engine.evaluateWithOpa('rm -rf /', makeProfile(), 'run-command');
+    expect(result.decision).toBe('deny');
+    expect(requests).toHaveLength(0);
+  });
+
+  describe('when OPA is unavailable', () => {
+    it('falls back to the local decision on an HTTP error, and says so', async () => {
+      await startOpa(() => ({ status: 500, body: { error: 'boom' } }));
+      const engine = new PolicyEngine(DEFAULT_RULES);
+      engine.setOpaUrl(url);
+
+      const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      expect(result.decision).not.toBe('deny');
+
+      const warning = errSpy.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(warning).toContain('POLICY WARNING');
+      // The consequence, not just the symptom: silence here is the whole risk.
+      expect(warning).toMatch(/may now be allowed/);
+    });
+
+    it('falls back when nothing is listening, and says so', async () => {
+      const engine = new PolicyEngine(DEFAULT_RULES);
+      engine.setOpaUrl('http://127.0.0.1:1');
+
+      const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      expect(result.decision).not.toBe('deny');
+      expect(errSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain('POLICY WARNING');
+    });
+
+    // Throttled so a dead OPA cannot bury the log — but a throttle that never
+    // reopens would silence the signal permanently, so both halves are checked.
+    it('warns once per minute rather than on every command', async () => {
+      const engine = new PolicyEngine(DEFAULT_RULES);
+      engine.setOpaUrl('http://127.0.0.1:1');
+
+      await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      expect(errSpy).toHaveBeenCalledTimes(1);
+
+      // shouldAdvanceTime keeps real timers running underneath, so the fetch to
+      // a dead port still rejects while Date.now() jumps past the window.
+      vi.useFakeTimers({ shouldAdvanceTime: true, now: Date.now() + 61_000 });
+      try {
+        await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+        expect(errSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it('skips OPA entirely when no URL is configured', async () => {
+    const engine = new PolicyEngine(DEFAULT_RULES);
+    const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+    expect(result.decision).not.toBe('deny');
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+});
