@@ -168,12 +168,15 @@ jobs:
       #
       # exited 0, and the step reported success. This gate had been scanning
       # nothing while reporting green — which is the failure mode the rest of this
-      # workflow exists to prevent. `--error` is what makes findings fail the job.
+      # workflow exists to prevent. `--error` is what makes findings fail the job,
+      # and the summary is left on deliberately: it ends with a line like
+      # "Ran 112 rules on 90 files: 0 findings", so a clean run leaves evidence it
+      # scanned rather than only the absence of complaint.
       - name: Semgrep Scan
         run: |
           docker run --rm -v "$PWD:/src" -w /src \
             semgrep/semgrep@sha256:bdf7013b2c3634a487671158da77c554f531742326b543a9464d2adf6c433ac8 \
-            semgrep scan --error --quiet \
+            semgrep scan --error --metrics=off \
               --config=p/javascript \
               --config=p/nodejs \
               --config=p/typescript \
