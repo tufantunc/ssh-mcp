@@ -1,5 +1,24 @@
 import type { CommandClass, ParsedCommand } from '../types.js';
 
+/**
+ * Anything through which the shell can start a second command.
+ *
+ * This gate decides whether an allowlisted binary counts as read-only, and the
+ * allowlist only vouches for the binary — never for what a shell might run
+ * beside it. It used to test /[>;|]/, which let `ls $(touch /tmp/x)` through as
+ * read-only: `ls` is allowlisted, no listed metacharacter appears, and the
+ * remote shell expands the substitution and runs the inner command anyway
+ * (GHSA-r8hm-vpm8-cfh6).
+ *
+ * Listing every dangerous construct is a losing game — `$()`, backticks,
+ * `<(...)`, `${x:=...}`, `&&`, a bare newline — so this refuses every character
+ * with syntactic meaning to the shell instead, and `$` wholesale rather than
+ * just `$(`. The cost is that `echo $HOME` is no longer classified read-only.
+ * That is the right trade for the tool whose entire promise is that it cannot
+ * write: run-command still accepts it under policy.
+ */
+const SHELL_CONTROL_CHARS = /[;&|<>`$(){}\n\r]/;
+
 const READ_ONLY_ALLOWLIST = new Set([
   'ls', 'cat', 'grep', 'find', 'stat', 'df', 'du', 'head', 'tail', 'wc',
   'ps', 'uname', 'uptime', 'hostname', 'id', 'who', 'whoami', 'date',
@@ -110,7 +129,7 @@ export function classifyCommand(command: string): ParsedCommand {
 
   const twoWordPrefix = fullCommand.split(/\s+/).slice(0, 2).join(' ');
   if (READ_ONLY_ALLOWLIST.has(binary) || READ_ONLY_ALLOWLIST.has(twoWordPrefix)) {
-    if (/[>;|]/.test(trimmed)) {
+    if (SHELL_CONTROL_CHARS.test(trimmed)) {
       return { binary, fullCommand, class: 'safe' as CommandClass };
     }
     return { binary, fullCommand, class: 'read-only' as CommandClass };
