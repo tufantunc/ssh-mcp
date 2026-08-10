@@ -85,7 +85,7 @@ function resolveHostKeyMode(argv: Record<string, string | null>): HostKeyMode {
  * The default stays `prod`. Guessing an unknown host is production is the safe
  * direction; what was missing was a way to correct the guess.
  */
-function resolveHostGroup(argv: Record<string, string | null>): string {
+export function resolveHostGroup(argv: Record<string, string | null>): string {
   const group = argv.group;
   if (group === null || group === undefined) return 'prod';
   if ((HOST_GROUPS as readonly string[]).includes(group)) return group;
