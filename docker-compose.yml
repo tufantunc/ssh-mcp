@@ -1,7 +1,7 @@
 services:
   # ─── Test SSH Servers (role-based, for integration tests) ──────────────────
   ssh-admin:
-    image: lscr.io/linuxserver/openssh-server:latest
+    image: ghcr.io/linuxserver/openssh-server:latest
     profiles: ["test"]
     environment:
       - USER_NAME=admin
@@ -14,7 +14,7 @@ services:
       - "2222:2222"
 
   ssh-viewer:
-    image: lscr.io/linuxserver/openssh-server:latest
+    image: ghcr.io/linuxserver/openssh-server:latest
     profiles: ["test"]
     environment:
       - USER_NAME=viewer
@@ -26,7 +26,7 @@ services:
       - "2223:2222"
 
   ssh-operator:
-    image: lscr.io/linuxserver/openssh-server:latest
+    image: ghcr.io/linuxserver/openssh-server:latest
     profiles: ["test"]
     environment:
       - USER_NAME=operator
@@ -42,7 +42,7 @@ services:
   # that an init hook enables AllowTcpForwarding, which the base image disables
   # — without it every direct-tcpip channel fails and the hop cannot be tested.
   ssh-bastion:
-    image: lscr.io/linuxserver/openssh-server:latest
+    image: ghcr.io/linuxserver/openssh-server:latest
     profiles: ["test"]
     environment:
       - USER_NAME=bastion

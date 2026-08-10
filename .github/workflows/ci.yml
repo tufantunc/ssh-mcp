@@ -9,6 +9,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Read here rather than in the step's `if:` so the condition can be
+      # evaluated at all — and so a pull request from a fork, which is never
+      # given secrets, resolves it to empty instead of failing.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       - uses: actions/checkout@v4
 
@@ -42,6 +47,39 @@ jobs:
       #
       # Keeping one definition also stops CI and docker-compose.yml drifting:
       # CI used to define three of the six servers and none of the sshd tuning.
+      # Anonymous pulls are rate limited per IP and Actions runners share IPs,
+      # so the quota goes to whoever else is on that address. Authenticating
+      # moves the limit onto this account, where a handful of images is nothing.
+      #
+      # This covers `alpine:3.20` and `node:22-slim`, which the build pulls from
+      # Docker Hub. It does *not* cover the sshd image — that comes from GHCR,
+      # and it was the one that actually failed on 2026-08-10. Both registries
+      # are behind the retry below.
+      - name: Log in to Docker Hub
+        # Skipped on pull requests from forks, which are never given secrets.
+        # Those keep pulling anonymously; the retry is what covers them.
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Pull separately from `up` so a throttled registry is retried rather than
+      # failing the job, and so the failure — if it survives three tries — names
+      # the registry instead of surfacing as an opaque compose error.
+      - name: Pull images
+        run: |
+          for attempt in 1 2 3; do
+            if docker compose --profile test pull --quiet; then exit 0; fi
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 20))
+              echo "::warning::Image pull failed (attempt $attempt/3); retrying in ${delay}s"
+              sleep "$delay"
+            fi
+          done
+          echo "::error::Could not pull the test images after 3 attempts — registry rate limit or outage"
+          exit 1
+
       - name: Start SSH test servers
         run: docker compose --profile test up -d --build --wait
 
