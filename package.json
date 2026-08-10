@@ -47,7 +47,6 @@
     "cross-env": "^7.0.3",
     "fast-check": "^3.23.2",
     "shx": "^0.4.0",
-    "testcontainers": "^11.7.0",
     "ts-node": "^10.9.2",
     "tsx": "^4.20.6",
     "typescript": "^5.9.2",
