@@ -259,9 +259,17 @@ name = "build-box"
 group = "dev"
 ```
 
-Leaving a real production host on `prod` and granting sudo there is a policy
-change, not a flag: add `privileged` to `admin.prod` in the config's
-`roleBindings`.
+**The matrix above is not configurable yet.** `PolicyEngine` is always built
+from the compiled-in defaults, and a `roleBindings` table in the config file is
+accepted by the parser and then silently ignored
+([#95](https://github.com/tufantunc/ssh-mcp/issues/95)).
+
+So on a host labelled `group = "prod"` there is currently no way to allow
+`privileged-command`. An OPA sidecar does not help: OPA is consulted only for
+commands the built-in policy already allows, so it can refuse more but never
+grant. The only thing that works today is labelling the host `staging` or
+`dev` — which is a lie the rest of the policy then acts on, so treat it as a
+stopgap and not a configuration.
 
 ### Command Classification
 
