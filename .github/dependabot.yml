@@ -2,8 +2,8 @@ version: 2
 
 # Grouped and monthly on purpose. The objection to enabling this was a stream of
 # individual pull requests, each needing its own triage — so everything below
-# collapses into at most three PRs a month, and the split between them is the one
-# that decides how much care each needs.
+# collapses into at most three PRs a month, split along the line that decides how
+# much care each one needs.
 updates:
   # The counterpart to pinning every action to a commit SHA. Pinned refs do not
   # move on their own, and codeql-action is the sharpest case: GitHub ages out old
@@ -13,30 +13,41 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    # Do not propose a version until it has been public for a week. Malicious
+    # releases are typically caught and yanked within days, and nothing here is
+    # urgent enough to want the first hour of a new tag. Security advisories
+    # bypass this — Dependabot security updates are a separate feed.
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ['*']
     commit-message:
       prefix: ci
 
-  # Production dependencies ship to users: a bump here changes what `npm i
-  # ssh-mcp` resolves, so it needs a changeset and a release. Kept separate from
-  # dev precisely so that decision is never made by accident in a batch.
+  # One entry, because Dependabot requires a unique ecosystem+directory pair —
+  # but two groups, so production and development arrive as separate pull
+  # requests. That split is the point: a production bump changes what
+  # `npm i ssh-mcp` resolves and needs a changeset and a release, while a dev bump
+  # reaches nothing published (`files` is `build` only) and needs neither.
+  # Batching them together would mean making that call by accident.
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: monthly
     open-pull-requests-limit: 5
     versioning-strategy: increase-if-necessary
-    allow:
-      - dependency-type: production
+    cooldown:
+      default-days: 7
     groups:
       production:
-        patterns: ['*']
+        dependency-type: production
         update-types: [minor, patch]
-    # Majors on the SSH and MCP libraries are not batch work — ssh2 and the SDK
-    # are where a silent behaviour change would surface as a security regression
-    # rather than a failing test.
+      development:
+        dependency-type: development
+    # Majors on the SSH and MCP libraries are not batch work: these are where a
+    # silent behaviour change surfaces as a security regression rather than as a
+    # failing test, so they want a human opening the diff.
     ignore:
       - dependency-name: ssh2
         update-types: [version-update:semver-major]
@@ -45,19 +56,3 @@ updates:
     commit-message:
       prefix: fix
       prefix-development: chore
-
-  # Dev dependencies never reach the published tarball — `files` is `build` only —
-  # so these need no changeset and no release. The full suite runs against real
-  # SSH servers on every PR, which is what actually decides whether a bump is safe.
-  - package-ecosystem: npm
-    directory: /
-    schedule:
-      interval: monthly
-    open-pull-requests-limit: 5
-    allow:
-      - dependency-type: development
-    groups:
-      development:
-        patterns: ['*']
-    commit-message:
-      prefix: chore
