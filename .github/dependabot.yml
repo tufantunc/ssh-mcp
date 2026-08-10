@@ -1,0 +1,63 @@
+version: 2
+
+# Grouped and monthly on purpose. The objection to enabling this was a stream of
+# individual pull requests, each needing its own triage — so everything below
+# collapses into at most three PRs a month, and the split between them is the one
+# that decides how much care each needs.
+updates:
+  # The counterpart to pinning every action to a commit SHA. Pinned refs do not
+  # move on their own, and codeql-action is the sharpest case: GitHub ages out old
+  # CodeQL bundles, so a stale pin first warns and then degrades. Dependabot
+  # understands the `@<sha> # <tag>` convention and rewrites both parts.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+
+  # Production dependencies ship to users: a bump here changes what `npm i
+  # ssh-mcp` resolves, so it needs a changeset and a release. Kept separate from
+  # dev precisely so that decision is never made by accident in a batch.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    versioning-strategy: increase-if-necessary
+    allow:
+      - dependency-type: production
+    groups:
+      production:
+        patterns: ['*']
+        update-types: [minor, patch]
+    # Majors on the SSH and MCP libraries are not batch work — ssh2 and the SDK
+    # are where a silent behaviour change would surface as a security regression
+    # rather than a failing test.
+    ignore:
+      - dependency-name: ssh2
+        update-types: [version-update:semver-major]
+      - dependency-name: '@modelcontextprotocol/sdk'
+        update-types: [version-update:semver-major]
+    commit-message:
+      prefix: fix
+      prefix-development: chore
+
+  # Dev dependencies never reach the published tarball — `files` is `build` only —
+  # so these need no changeset and no release. The full suite runs against real
+  # SSH servers on every PR, which is what actually decides whether a bump is safe.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    allow:
+      - dependency-type: development
+    groups:
+      development:
+        patterns: ['*']
+    commit-message:
+      prefix: chore
