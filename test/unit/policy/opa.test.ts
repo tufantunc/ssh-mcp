@@ -56,6 +56,13 @@ describe('OPA evaluation', () => {
     errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
+  // The parameter needs an annotation: `mock.calls` is typed loosely enough that
+  // a bare `(c) => ...` is an implicit any under stricter compiler settings, and
+  // it failed the build on the TypeScript bump rather than in the run that
+  // introduced it.
+  const warnings = (): string =>
+    errSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('\n');
+
   afterEach(async () => {
     vi.restoreAllMocks();
     if (server) await new Promise<void>((r) => server!.close(() => r()));
@@ -124,7 +131,7 @@ describe('OPA evaluation', () => {
       const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
       expect(result.decision).not.toBe('deny');
 
-      const warning = errSpy.mock.calls.map((c) => String(c[0])).join('\n');
+      const warning = warnings();
       expect(warning).toContain('POLICY WARNING');
       // The consequence, not just the symptom: silence here is the whole risk.
       expect(warning).toMatch(/may now be allowed/);
@@ -136,7 +143,7 @@ describe('OPA evaluation', () => {
 
       const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
       expect(result.decision).not.toBe('deny');
-      expect(errSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain('POLICY WARNING');
+      expect(warnings()).toContain('POLICY WARNING');
     });
 
     // Throttled so a dead OPA cannot bury the log — but a throttle that never
