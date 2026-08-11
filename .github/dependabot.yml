@@ -57,12 +57,27 @@ updates:
       prefix: fix
       prefix-development: chore
 
-  # Keeps the digest pins in docker-compose.yml and the test Dockerfiles from
-  # rotting. Pinning without an updater is how a test fixture quietly ends up
-  # years old — and these fixtures decide whether the SSH security tests are
-  # honest, so a stale sshd is not a cosmetic problem. Dependabot rewrites the
-  # digest and leaves the readable tag alongside it.
+  # Two entries, because Dependabot treats these as separate ecosystems: `docker`
+  # reads Dockerfiles, `docker-compose` reads compose files. Declaring only the
+  # first would leave the four sshd digests in docker-compose.yml — the pins that
+  # matter most, since those containers decide whether the SSH tests are honest —
+  # frozen with nothing to refresh them.
+  #
+  # Pinning without an updater is how a fixture quietly ends up years old. Both
+  # rewrite the digest and leave the readable tag beside it.
   - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      containers:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: docker-compose
     directory: /
     schedule:
       interval: monthly
