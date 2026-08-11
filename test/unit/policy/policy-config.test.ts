@@ -3,7 +3,12 @@ import { mkdtemp, writeFile, chmod, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { loadConfig, getProfile } from '../../../src/config/loader.js';
-import { PolicyEngine, DEFAULT_RULES, mergePolicyRules } from '../../../src/policy/engine.js';
+import {
+  PolicyEngine,
+  DEFAULT_RULES,
+  mergePolicyRules,
+  resolvePolicyRules,
+} from '../../../src/policy/engine.js';
 import type { AppConfig } from '../../../src/types.js';
 
 /**
@@ -34,9 +39,15 @@ async function writeConfig(content: string): Promise<string> {
   return path;
 }
 
-/** config file → the engine an operator would actually be running. */
+/**
+ * config file → the engine an operator would actually be running.
+ *
+ * `resolvePolicyRules`, not `mergePolicyRules`, because that is the call main()
+ * makes: the startup coherence check runs here or these tests assert on an
+ * engine nobody can boot.
+ */
 function engineFor(config: AppConfig): PolicyEngine {
-  return new PolicyEngine(mergePolicyRules(DEFAULT_RULES, config.policy));
+  return new PolicyEngine(resolvePolicyRules(config.profiles, config.policy));
 }
 
 const ADMIN_PROD_PROFILE = `
@@ -118,7 +129,7 @@ prod = ["read-only"]
       .toBe('allow');
   });
 
-  it('makes a custom tier real instead of falling back to prod', async () => {
+  it('makes a custom tier real, and refuses to start when nothing defines it', async () => {
     const profile = `
 [[profiles]]
 name = "build-box"
@@ -128,11 +139,12 @@ role = "admin"
 group = "tier-1"
 approvalPolicy = "auto"
 `;
-    // Without a definition, an unrecognised tier resolves to the strictest one.
+    // An undefined tier used to resolve to the strictest one, which was safe
+    // only while roleBindings were compiled in, because the prod cell was that
+    // role's strictest. Now that a [policy] block can widen prod, an unresolved
+    // tier is a startup error rather than a fallback to whatever prod became.
     const before = await loadConfig(await writeConfig(profile));
-    expect(
-      engineFor(before).evaluate('sudo make install', getProfile(before, 'build-box'), 'privileged-command').decision,
-    ).toBe('deny');
+    expect(() => engineFor(before)).toThrow(/no bindings for group "tier-1"/);
 
     const after = await loadConfig(await writeConfig(`
 ${profile}
@@ -143,6 +155,56 @@ ${profile}
     expect(
       engineFor(after).evaluate('sudo make install', getProfile(after, 'build-box'), 'privileged-command').decision,
     ).toBe('allow');
+  });
+
+  it('makes a custom role real, and refuses to start when nothing defines it', async () => {
+    const profile = `
+[[profiles]]
+name = "deploy-box"
+host = "10.0.0.10"
+user = "ci"
+role = "deployer"
+group = "dev"
+approvalPolicy = "auto"
+`;
+    // An unknown role is demoted to read-only, and at the point of use that is
+    // indistinguishable from a policy decision someone made on purpose. It is the
+    // exact shape of #95, from the profile side rather than the [policy] side.
+    const before = await loadConfig(await writeConfig(profile));
+    expect(() => engineFor(before)).toThrow(/role "deployer" has no role bindings/);
+
+    const after = await loadConfig(await writeConfig(`
+${profile}
+
+[policy.roleBindings.deployer]
+dev = ["read-only", "safe"]
+`));
+    expect(
+      engineFor(after).evaluate('npm install', getProfile(after, 'deploy-box'), 'run-command').decision,
+    ).toBe('allow');
+  });
+
+  it('treats an empty class list as a real lockdown, not as unset', async () => {
+    const config = await loadConfig(await writeConfig(`
+${ADMIN_PROD_PROFILE}
+
+[policy.roleBindings.admin]
+prod = []
+`));
+    // Asserting that the merge copied `[]` through would pass whether or not the
+    // lockdown works: the deny depends on `[]` surviving as a value one layer
+    // down, so drive it to the verdict.
+    const denied = engineFor(config).evaluate(
+      'ls -la',
+      getProfile(config, 'prod-web'),
+      'read-command',
+    );
+    expect(denied.decision).toBe('deny');
+    expect(denied.ruleId).toBe('role-binding');
+
+    // And the lockdown is confined to the cell the operator wrote.
+    expect(mergePolicyRules(DEFAULT_RULES, config.policy).roleBindings.admin.staging)
+      .toEqual(DEFAULT_RULES.roleBindings.admin.staging);
   });
 
   it('applies a denylist from config', async () => {
@@ -259,11 +321,129 @@ describe('mergePolicyRules', () => {
     expect(merged.roleBindings.admin).toEqual(DEFAULT_RULES.roleBindings.admin);
   });
 
-  it('treats an empty class list as a real lockdown, not as unset', () => {
-    const merged = mergePolicyRules(DEFAULT_RULES, {
-      roleBindings: { admin: { prod: [] } },
-    });
-    expect(merged.roleBindings.admin.prod).toEqual([]);
-    expect(merged.roleBindings.admin.staging).toEqual(DEFAULT_RULES.roleBindings.admin.staging);
+});
+
+/**
+ * The merge is additive by design: an unknown role or tier is added rather than
+ * rejected, which is what makes a custom `group` resolve to real bindings. The
+ * cost is that nothing distinguishes "new custom role" from "typo of an existing
+ * one", so a restriction written under a misspelt name merges into a role
+ * nobody holds and the operator reads their config as a lockdown that was never
+ * applied.
+ *
+ * These cases are the cross-check that closes that, in both directions.
+ */
+describe('startup coherence', () => {
+  it('rejects a profile whose group nothing defines', async () => {
+    const config = await loadConfig(await writeConfig(`
+[[profiles]]
+name = "build-box"
+host = "10.0.0.8"
+user = "ci"
+role = "admin"
+group = "teir-1"
+
+[policy.roleBindings.admin]
+prod = ["read-only", "safe", "destructive", "privileged"]
+"tier-1" = ["read-only", "safe", "destructive"]
+`));
+    // Both README examples in one config, and one typo away from the tier the
+    // operator meant. Before the check, "teir-1" fell through to the prod cell
+    // this very config had just widened to privileged.
+    expect(() => engineFor(config)).toThrow(/profile "build-box".*no bindings for group "teir-1"/s);
+  });
+
+  it('rejects a profile whose inferred tier nothing defines', async () => {
+    const config = await loadConfig(await writeConfig(`
+[[profiles]]
+name = "staging-web"
+host = "10.0.0.11"
+user = "deploy"
+role = "deployer"
+
+[[profiles]]
+name = "prod-web"
+host = "10.0.0.12"
+user = "deploy"
+role = "deployer"
+
+[policy.roleBindings.deployer]
+prod = ["read-only", "safe", "destructive", "privileged"]
+`));
+    // No group is set anywhere here, so a check on the explicit field would pass
+    // this config. "staging-web" infers `staging`, the role defines only `prod`,
+    // and the old fallback handed it the privileged prod grant.
+    expect(() => engineFor(config)).toThrow(/profile "staging-web".*inferred from the name as "staging"/s);
+  });
+
+  it('rejects a roleBindings block no profile can reach', async () => {
+    const config = await loadConfig(await writeConfig(`
+[[profiles]]
+name = "prod-web"
+host = "10.0.0.5"
+user = "deploy"
+role = "operator"
+group = "prod"
+
+[policy.roleBindings.operater]
+prod = ["read-only"]
+`));
+    // The typo merges as a fourth role, `operator.prod` keeps its default, and
+    // the profile still runs on defaults the operator believed they had narrowed.
+    expect(() => engineFor(config)).toThrow(/no profile uses role "operater"/);
+  });
+
+  it('rejects a tier key no profile can reach', async () => {
+    const config = await loadConfig(await writeConfig(`
+${ADMIN_PROD_PROFILE}
+
+[policy.roleBindings.admin]
+stagign = ["read-only"]
+`));
+    expect(() => engineFor(config)).toThrow(/key "stagign" matches no profile's group/);
+  });
+
+  it('reports every problem at once rather than the first', async () => {
+    const config = await loadConfig(await writeConfig(`
+[[profiles]]
+name = "build-box"
+host = "10.0.0.8"
+user = "ci"
+role = "admin"
+group = "teir-1"
+
+[policy.roleBindings.operater]
+prod = ["read-only"]
+`));
+    // An operator fixing a config file wants the list, not one round trip per
+    // typo. Same shape as the config validation error in loader.ts.
+    expect(() => engineFor(config)).toThrow(/teir-1[\s\S]*operater/);
+  });
+
+  it('accepts a custom role and tier that a profile actually uses', async () => {
+    const config = await loadConfig(await writeConfig(`
+[[profiles]]
+name = "build-box"
+host = "10.0.0.8"
+user = "ci"
+role = "deployer"
+group = "tier-1"
+approvalPolicy = "auto"
+
+[policy.roleBindings.deployer]
+"tier-1" = ["read-only", "safe", "destructive"]
+`));
+    // The negative control: the check must not make custom names unusable,
+    // which is the feature #95 asked for.
+    expect(() => engineFor(config)).not.toThrow();
+    expect(
+      engineFor(config).evaluate('rm -rf /tmp/build', getProfile(config, 'build-box'), 'run-command').decision,
+    ).toBe('allow');
+  });
+
+  it('accepts a config with no [policy] section at all', async () => {
+    const config = await loadConfig(await writeConfig(ADMIN_PROD_PROFILE));
+    expect(() => engineFor(config)).not.toThrow();
+    expect(resolvePolicyRules(config.profiles, config.policy)).toBe(DEFAULT_RULES);
   });
 });

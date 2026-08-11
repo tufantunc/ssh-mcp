@@ -132,6 +132,35 @@ describe('PolicyEngine', () => {
     expect(engine.evaluate('rm -rf /tmp/x', profile, 'run-command').decision).toBe('require-approval');
   });
 
+  /*
+   * These two can only be reached by constructing the engine directly.
+   * resolvePolicyRules refuses to start on either shape, so a config file
+   * cannot produce them, which is the point: the engine is a public class, and
+   * the fallback below is what a library consumer gets when the startup check
+   * is not in the path.
+   */
+  describe('unresolved bindings fail closed', () => {
+    it('does not hand an unresolved tier the prod cell', () => {
+      const scoped = new PolicyEngine({
+        roleBindings: {
+          deployer: { prod: ['read-only', 'safe', 'destructive', 'privileged'] },
+        },
+      });
+      // Falling back to HOST_GROUPS[0] was safe while the prod cell was always
+      // a role's strictest. A [policy] block can now write it, so the hop would
+      // hand every unresolved tier whatever prod was granted.
+      const staging = makeProfile({ role: 'deployer', name: 'staging-web', group: undefined, approvalPolicy: 'auto' });
+      expect(scoped.evaluate('sudo id', staging, 'privileged-command').decision).toBe('deny');
+      expect(scoped.evaluate('ls -la', staging, 'read-command').decision).toBe('allow');
+    });
+
+    it('demotes an unknown role to read-only', () => {
+      const unknown = makeProfile({ role: 'deployer', name: 'dev', approvalPolicy: 'auto' });
+      expect(engine.evaluate('npm install', unknown, 'run-command').decision).toBe('deny');
+      expect(engine.evaluate('ls -la', unknown, 'read-command').decision).toBe('allow');
+    });
+  });
+
   it('resolves an unrecognised profile name to the strictest tier', () => {
     // Previously any unrecognised name fell through to `dev`, so a production
     // host merely named "web-01" silently got the loosest permissions.

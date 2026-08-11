@@ -179,17 +179,21 @@ sessionIdleTimeoutMs = 300000       # stricter for prod
 commandQuotaPerDay = 200            # per-profile override
 
 # Optional. Merged over the built-in role matrix; see "Policy Engine" below.
-# roleBindings is keyed by role, so the block below applies to profiles with
-# role = "admin" and changes nothing for the operator profile above.
+# roleBindings is keyed by role and then by tier, so the block below changes
+# operator on prod and leaves operator's other tiers, and viewer and admin,
+# on their defaults.
 [policy]
 denylist = ["^terraform\\s+destroy"]
 
-[policy.roleBindings.admin]
-prod = ["read-only", "safe", "destructive", "privileged"]
+[policy.roleBindings.operator]
+prod = ["read-only", "safe", "destructive"]
 ```
 
 Unknown sections and keys are a startup error, not a warning, so a typo cannot
-leave you running defaults you thought you had overridden.
+leave you running defaults you thought you had overridden. That extends to role
+and tier names: every one you write under `[policy.roleBindings]` has to be
+reachable by some profile, and every profile's role and tier has to resolve to
+real bindings. Both directions are checked at startup.
 
 ### ProxyJump (Bastion)
 
@@ -306,14 +310,30 @@ never-allowed list rather than replacing it:
 denylist = ["^terraform\\s+destroy"]
 ```
 
-Two mistakes fail at startup rather than at the point of use:
+Because role and tier names are free strings, nothing in the merge itself can
+tell a new custom role from a misspelling of an existing one. A cross-check at
+startup does, and these all fail there rather than at the point of use:
 
 - a command class outside `read-only | safe | destructive | privileged`, so a
   `priviledged` typo cannot parse into a grant of nothing and then read as a
   policy decision when a command is refused;
 - any unrecognised section or key anywhere in the config, so a block the parser
   does not understand is an error rather than a clean startup with none of the
-  behaviour you configured.
+  behaviour you configured;
+- a role or tier under `[policy.roleBindings]` that no profile uses, so
+  `[policy.roleBindings.operater]` cannot merge in as a fourth role while the
+  profiles you meant to restrict keep running on defaults;
+- a profile whose `role` has no bindings, or whose tier has none under that
+  role, so a host cannot end up on `read-only` for a reason nobody wrote down.
+
+The last one covers the tier you did not set as well as the one you did. A
+profile with no `group` still resolves to one by name, and that inferred tier
+has to exist under the profile's role like any other.
+
+A tier with no bindings for a role grants `read-only`, and never another tier's
+classes. There is no fallback between tiers: while the matrix was compiled in,
+falling back to `prod` meant falling back to a role's strictest cell, but a
+`[policy]` block can write that cell now.
 
 An OPA sidecar is not an alternative route to the same grant. OPA is consulted
 only for commands the local policy already allows, so it can refuse more but
