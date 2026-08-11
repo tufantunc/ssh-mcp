@@ -41,6 +41,14 @@ npm run changeset
 
 This creates a file in `.changeset/` — commit it with your PR. When the PR merges, the changesets bot opens a "Version Packages" PR that bumps the version, updates CHANGELOG.md, and publishes to npm.
 
+## Review Criteria
+
+The `.review-pro/` directory holds the criteria this project's changes are reviewed against — `node/` for general Node.js server concerns (security, correctness, API contracts, tests, performance), and `ssh-mcp/` for signals specific to this codebase: progress and cancellation, OTEL, the HTTP rate limit, ProxyJump, CA certificates, and MCP resources.
+
+They are plain markdown. Reading the files relevant to your change is a useful checklist before you open a PR, and nothing needs to be installed to do that. Anything touching the policy engine, the audit chain, or host-key handling is worth checking against `.review-pro/ssh-mcp/security.md` in particular.
+
+Those same files are the rubric for [review-pro](https://github.com/tufantunc/review-pro) (`npx review-pro`), which runs them as an automated review. That tool is mine and lives in a separate repository; using it is entirely optional, CI does not run it, and no PR is held up for skipping it.
+
 ## Code of Conduct
 - Be respectful and inclusive in all interactions.
 - See the [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) if available.
