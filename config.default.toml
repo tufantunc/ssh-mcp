@@ -70,3 +70,18 @@ keychainEntry = "ssh-mcp/db-observer"
 role = "viewer"
 readOnly = true
 approvalPolicy = "auto"
+
+# Optional. Merged over the built-in role matrix, keyed by role then host group.
+# Uncomment to grant sudo on hosts you have labelled prod, rather than
+# relabelling them as staging. Only the cells you name change: admin on staging
+# and dev, and the other roles, keep their defaults.
+#
+# [policy.roleBindings.admin]
+# prod = ["read-only", "safe", "destructive", "privileged"]
+#
+# Your own deny patterns, as regexes. These are added to the built-in
+# never-allowed list rather than replacing it, and an invalid pattern fails at
+# startup.
+#
+# [policy]
+# denylist = ["^terraform\\s+destroy"]

@@ -198,6 +198,36 @@ allowlist = ["ls"]
     await expect(loadConfig(path)).rejects.toThrow(/Config validation error/);
   });
 
+  it('rejects a role or tier named __proto__ rather than accepting one that cannot exist', async () => {
+    // Merging assigns into a plain object, so this key would land on the
+    // prototype and the role would parse, validate, and then not be there.
+    const path = await writeConfig(`
+${ADMIN_PROD_PROFILE}
+
+[policy.roleBindings."__proto__"]
+prod = ["privileged"]
+`);
+    await expect(loadConfig(path)).rejects.toThrow(/Reserved name/);
+
+    const tier = await writeConfig(`
+${ADMIN_PROD_PROFILE}
+
+[policy.roleBindings.admin]
+"constructor" = ["privileged"]
+`);
+    await expect(loadConfig(tier)).rejects.toThrow(/Reserved name/);
+  });
+
+  it('names the root in a top-level validation error instead of an empty path', async () => {
+    const path = await writeConfig(`
+${ADMIN_PROD_PROFILE}
+
+[policies]
+roleBindings = {}
+`);
+    await expect(loadConfig(path)).rejects.toThrow(/\(root\): Unrecognized key/);
+  });
+
   it('rejects an unknown top-level section rather than dropping it', async () => {
     const path = await writeConfig(`
 ${ADMIN_PROD_PROFILE}
