@@ -34,33 +34,46 @@ jobs:
       # registry, so the .npmrc setup-node would write for it — carrying an
       # authToken line for a token we deliberately do not set — has nothing to
       # contribute.
+      # Node 24 (LTS) rather than 22, because it bundles npm 11.17.0 while every
+      # Node 22 release ships npm 10.9.x — and trusted publishing needs
+      # npm >= 11.5.1. Below that the CLI never detects the OIDC environment and
+      # silently falls back to token auth, which with no token configured means
+      # the publish fails at the last step of a release.
+      #
+      # This replaced a `npm install -g npm@11.19.0` step. That step existed to
+      # clear the 11.5.1 bar on Node 22, and was pinned to an exact 11.x rather
+      # than @latest because npm 12 changed the shape of `npm info <pkg> --json`
+      # from an object carrying a `versions` array to an array: @changesets/cli
+      # read `pkgInfo.versions`, got undefined, decided an already published
+      # version had never shipped, and tried to publish over it. Fixed upstream
+      # in @changesets/cli 2.31.1, which unwraps the array — so nothing is being
+      # dodged by moving Node here, and npm 11.17.0 predates the shape change
+      # anyway.
+      #
+      # The point of dropping the step is not the version. This job holds
+      # `id-token: write` — it mints the OIDC token that publishes ssh-mcp — and
+      # that install was the one thing it fetched from the registry outside the
+      # lockfile, before `npm ci` runs. Taking the npm that ships with a pinned
+      # Node removes a mutable reference from the publish path rather than
+      # bumping it.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22.x'
+          node-version: '24.x'
 
-      # Trusted publishing needs npm >= 11.5.1, and every Node 22 release ships
-      # npm 10.9.x. Without this the CLI never detects the OIDC environment and
-      # silently falls back to token auth — which, with no token configured,
-      # means the publish fails at the last step of a release.
-      #
-      # Pinned to 11.x rather than @latest. npm 12 changed the shape of
-      # `npm info <pkg> --json`: 11 returns an object carrying a `versions`
-      # array, 12 returns an array. @changesets/cli reads `pkgInfo.versions`,
-      # which is undefined on an array, so under npm 12 it decided an already
-      # published version had never shipped and tried to publish over it. Its
-      # own guard for that case did not catch it either, because npm 12 also
-      # dropped `code` from the error JSON the guard matches on. Publishing was
-      # never affected — 2.0.0 went out under npm 12 — only the read was.
-      #
-      # Pinned exactly, not to a range. This job holds `id-token: write` — it mints
-      # the OIDC token that publishes ssh-mcp — and this is the one thing it fetches
-      # from the registry outside the lockfile, before `npm ci` runs. A range would
-      # leave the publish path resolving a mutable reference at run time, which is
-      # the property the pinned action SHAs exist to remove. Bump deliberately.
-      - name: Install npm for trusted publishing
+      # The requirement above is real but invisible: too old an npm does not
+      # fail here, it fails four steps later as an authentication error that
+      # reads like a misconfigured trusted publisher. Assert it instead, so a
+      # Node image whose bundled npm regressed stops the release at the step
+      # that can explain why.
+      - name: Verify npm meets the trusted-publishing minimum
         run: |
-          npm install -g npm@11.19.0
-          npm -v
+          required=11.5.1
+          actual="$(npm -v)"
+          if [ "$(printf '%s\n%s\n' "$required" "$actual" | sort -V | head -n1)" != "$required" ]; then
+            echo "::error::npm $actual is older than $required. Trusted publishing would fall back to token auth, and no token is configured." >&2
+            exit 1
+          fi
+          echo "node $(node -v), npm $actual"
 
       - run: npm ci
 
@@ -89,8 +102,11 @@ jobs:
           # reached the registry that way — but the action saw no released
           # packages, so it silently skipped the git tag and the GitHub release
           # and still reported success. changeset publish decides what to ship
-          # by asking the registry first, which is why the .npmrc above matters:
-          # if that lookup cannot be trusted, neither can this step.
+          # by asking the registry first — `npm info` — which is why the npm
+          # version above matters: if that lookup cannot be trusted, neither can
+          # this step. (This sentence used to point at an .npmrc, from a wrong
+          # diagnosis of the republish loop; there is no .npmrc here, and
+          # removing `registry-url` was not what fixed it.)
           publish: npx changeset publish
           version: npm run version
           title: 'chore(release): version packages'
