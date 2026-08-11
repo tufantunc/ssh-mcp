@@ -5,7 +5,7 @@
 # survive: `bind` is a bash builtin that does not exist here, `set -o history`
 # is unsupported, and the default prompt differs. If the sentinel protocol or
 # the shell priming quietly depend on bash, this is where it shows.
-FROM alpine:3.20
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
 RUN apk add --no-cache openssh-server && ssh-keygen -A
 
