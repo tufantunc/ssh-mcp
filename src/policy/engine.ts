@@ -79,6 +79,127 @@ export function mergePolicyRules(
   };
 }
 
+/**
+ * Which tier's role binding applies to this profile.
+ *
+ * `profile.group` is authoritative. Without it we still infer from the name
+ * for convenience, but an unrecognised name resolves to the most restrictive
+ * tier: the previous default sent every unrecognised profile to `dev`, so a
+ * production host merely named "web-01" silently received the loosest
+ * permissions in the matrix.
+ *
+ * Exported rather than kept private because startup validation has to reach the
+ * same answer the engine will reach, inference included. Checking only the
+ * explicit `group` would pass every profile that never set one, which is where
+ * the widening below actually happens.
+ */
+export function resolveProfileGroup(profile: Profile): string {
+  if (profile.group) return profile.group;
+
+  const name = profile.name.toLowerCase();
+  if (name.includes('prod')) return 'prod';
+  if (name.includes('staging')) return 'staging';
+  if (/\b(dev|local|test|sandbox)\b/.test(name) || /(^|[-_])(dev|local|test|sandbox)([-_]|$)/.test(name)) {
+    return 'dev';
+  }
+  return HOST_GROUPS[0];
+}
+
+/**
+ * Every way a config's policy can mean something other than what it says.
+ *
+ * Checked in both directions, because a silent no-op is reachable from either:
+ * a profile can name a role or tier that nothing defines, and a `[policy]`
+ * block can define a role or tier that no profile can reach. #95 was the second
+ * kind (written, parsed, dropped), and the first kind lands on `['read-only']`,
+ * which at runtime is indistinguishable from a deliberate policy decision.
+ *
+ * The `[policy]` side is checked against `override`, never the merged table:
+ * the merge carries the three compiled-in roles, and no real config references
+ * all of them.
+ *
+ * Returns every problem rather than the first, matching the config validation
+ * error in loader.ts. An operator fixing a config file wants the whole list.
+ */
+export function findPolicyProblems(
+  merged: PolicyRules,
+  profiles: Profile[],
+  override?: PolicyConfig,
+): string[] {
+  const problems: string[] = [];
+
+  for (const profile of profiles) {
+    const roleBinding = merged.roleBindings[profile.role];
+    if (!roleBinding) {
+      problems.push(
+        `profile "${profile.name}": role "${profile.role}" has no role bindings, so it can only ever ` +
+        `run read-only commands. Define [policy.roleBindings.${profile.role}], or set role to one of: ` +
+        `${Object.keys(merged.roleBindings).join(', ')}.`,
+      );
+      continue;
+    }
+
+    const group = resolveProfileGroup(profile);
+    if (roleBinding[group]) continue;
+
+    const tiers = Object.keys(roleBinding).join(', ');
+    problems.push(
+      profile.group
+        ? `profile "${profile.name}": role "${profile.role}" has no bindings for group "${group}". ` +
+          `Add a "${group}" key under [policy.roleBindings.${profile.role}], or set group to one of: ${tiers}.`
+        : `profile "${profile.name}": no group is set, so the tier is inferred from the name as "${group}", ` +
+          `and role "${profile.role}" has no bindings for it. Set group explicitly to one of: ${tiers}, ` +
+          `or add a "${group}" key under [policy.roleBindings.${profile.role}].`,
+    );
+  }
+
+  const rolesInUse = [...new Set(profiles.map((p) => p.role))];
+  for (const [role, tiers] of Object.entries(override?.roleBindings ?? {})) {
+    if (!rolesInUse.includes(role)) {
+      problems.push(
+        `[policy.roleBindings.${role}]: no profile uses role "${role}", so this block changes nothing. ` +
+        `Roles in use: ${rolesInUse.join(', ')}.`,
+      );
+    }
+    for (const tier of Object.keys(tiers)) {
+      if ((HOST_GROUPS as readonly string[]).includes(tier)) continue;
+      if (profiles.some((p) => p.group === tier)) continue;
+      problems.push(
+        `[policy.roleBindings.${role}]: key "${tier}" matches no profile's group and is not a built-in ` +
+        `tier (${HOST_GROUPS.join(', ')}), so it changes nothing. Set group = "${tier}" on a profile, ` +
+        `or remove the key.`,
+      );
+    }
+  }
+
+  return problems;
+}
+
+/**
+ * The rules main() runs on: the compiled-in defaults, the operator's overrides
+ * layered on top, and a refusal to start when the two do not describe the same
+ * world.
+ *
+ * Refusing rather than warning. A warning here goes to stderr, which for a
+ * stdio MCP server means a log file the operator is not reading, and "written,
+ * ignored, nothing said" is the whole of #95.
+ */
+export function resolvePolicyRules(
+  profiles: Profile[],
+  override?: PolicyConfig,
+): PolicyRules {
+  const merged = mergePolicyRules(DEFAULT_RULES, override);
+  const problems = findPolicyProblems(merged, profiles, override);
+  if (problems.length > 0) {
+    throw new Error(
+      'Policy configuration error:\n' +
+      problems.map((p) => `  ${p}`).join('\n') +
+      '\nSee the "Configuring the matrix" section of the README.',
+    );
+  }
+  return merged;
+}
+
 export class PolicyEngine {
   private opaUrl: string | null = null;
   /** Rate-limits the fail-open warning so one outage can't flood stderr. */
@@ -257,7 +378,7 @@ export class PolicyEngine {
         `Clear readOnly on the profile to allow them.`;
     }
 
-    const group = this.resolveHostGroup(profile);
+    const group = resolveProfileGroup(profile);
     const inferred = !profile.group;
     const allowed = this.getAllowedClasses(profile).join(', ');
 
@@ -284,30 +405,19 @@ export class PolicyEngine {
     if (!roleBinding) {
       return ['read-only'];
     }
-    const hostGroup = this.resolveHostGroup(profile);
-    // Falls back to the most restrictive tier, never to the loosest one.
-    return roleBinding[hostGroup] || roleBinding[HOST_GROUPS[0]] || ['read-only'];
-  }
-
-  /**
-   * Which tier's role binding applies to this profile.
-   *
-   * `profile.group` is authoritative. Without it we still infer from the name
-   * for convenience, but an unrecognised name resolves to the most restrictive
-   * tier: the previous default sent every unrecognised profile to `dev`, so a
-   * production host merely named "web-01" silently received the loosest
-   * permissions in the matrix.
-   */
-  private resolveHostGroup(profile: Profile): string {
-    if (profile.group) return profile.group;
-
-    const name = profile.name.toLowerCase();
-    if (name.includes('prod')) return 'prod';
-    if (name.includes('staging')) return 'staging';
-    if (/\b(dev|local|test|sandbox)\b/.test(name) || /(^|[-_])(dev|local|test|sandbox)([-_]|$)/.test(name)) {
-      return 'dev';
-    }
-    return HOST_GROUPS[0];
+    // No hop to another tier when this one has no bindings. While roleBindings
+    // were compiled in, falling back to HOST_GROUPS[0] meant falling back to
+    // that role's *strictest* cell, so the old comment here was true. Once a
+    // [policy] block can write the prod cell, the same hop hands an unresolved
+    // tier whatever prod was granted. That is a widening, and a silent one.
+    //
+    // An unresolved tier is a startup error now (resolvePolicyRules), so
+    // reaching this line means the engine was constructed directly rather than
+    // from a config file. Fail closed.
+    //
+    // `??` rather than `||`: an empty class list is a deliberate lockdown, and
+    // whether it survives should not rest on `[]` being truthy.
+    return roleBinding[resolveProfileGroup(profile)] ?? ['read-only'];
   }
 
   /**
