@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 const authMethodSchema = z.enum(['agent', 'key', 'password', 'keychain']);
 const approvalModeSchema = z.enum(['auto', 'ask-destructive', 'ask-all', 'deny']);
+const commandClassSchema = z.enum(['read-only', 'safe', 'destructive', 'privileged']);
 
 export const defaultsSchema = z.object({
   defaultProfile: z.string().optional(),
@@ -51,11 +52,36 @@ export const profileSchema = z.object({
   commandQuotaPerDay: z.number().int().nonnegative().optional(),
 }).strict();
 
+/**
+ * Overrides merged over the compiled-in DEFAULT_RULES at startup.
+ *
+ * `roleBindings` is keyed role → host group → command classes, and the group
+ * key is a free string on purpose: a config that defines its own tier makes
+ * `group = "tier-1"` on a profile resolve to that tier instead of falling back
+ * to the strictest one.
+ *
+ * Command classes are validated against the enum rather than accepted as free
+ * strings, so `priviledged` fails at load instead of parsing to a grant of
+ * nothing, which reads at runtime exactly like a policy decision.
+ *
+ * `allowlist` is deliberately absent: PolicyRules declares the field but no
+ * code reads it, so accepting it here would document a key that does nothing.
+ */
+export const policySchema = z.object({
+  roleBindings: z.record(z.string(), z.record(z.string(), z.array(commandClassSchema))).optional(),
+  denylist: z.array(z.string()).optional(),
+}).strict();
+
+// .strict() on the root as well: without it an unknown section (a typo, or a
+// key from a newer version) parses cleanly and is dropped with no warning, so
+// the operator gets a clean startup and none of the behaviour they configured.
 export const configSchema = z.object({
   defaults: defaultsSchema.default({}),
   profiles: z.array(profileSchema).min(1),
-});
+  policy: policySchema.optional(),
+}).strict();
 
 export type RawDefaults = z.infer<typeof defaultsSchema>;
 export type RawProfile = z.infer<typeof profileSchema>;
+export type RawPolicy = z.infer<typeof policySchema>;
 export type RawConfig = z.infer<typeof configSchema>;

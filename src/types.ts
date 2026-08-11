@@ -46,9 +46,24 @@ export interface Defaults {
   approvalMode: ApprovalMode;
 }
 
+/**
+ * The optional `[policy]` section of the config file, merged over the
+ * compiled-in DEFAULT_RULES at startup by mergePolicyRules().
+ *
+ * Every field is optional because the merge is additive: a config that names
+ * only `admin.prod` changes only that one cell of the matrix.
+ */
+export interface PolicyConfig {
+  /** role → host group → the command classes that role may run on that tier. */
+  roleBindings?: Record<string, Record<string, CommandClass[]>>;
+  /** Extra deny patterns, as regex source strings. Replaces, not appends. */
+  denylist?: string[];
+}
+
 export interface AppConfig {
   defaults: Defaults;
   profiles: Profile[];
+  policy?: PolicyConfig;
 }
 
 // ─── SSH Connection Types ───────────────────────────────────────────────────

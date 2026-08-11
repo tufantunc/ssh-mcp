@@ -1,5 +1,6 @@
 import type {
   CommandClass,
+  PolicyConfig,
   PolicyEvaluation,
   Profile,
   ApprovalMode,
@@ -39,6 +40,44 @@ export const DEFAULT_RULES: PolicyRules = {
     },
   },
 };
+
+/**
+ * Layer an operator's `[policy]` section over the compiled-in defaults.
+ *
+ * The merge is at role → group depth, not role depth. Replacing a whole role's
+ * bindings from a partial table is the trap here: a config naming only
+ * `admin.prod` would otherwise wipe `admin.staging` and `admin.dev` back to
+ * nothing, widening or narrowing two tiers the operator never mentioned.
+ *
+ * Roles and groups absent from the override keep their defaults, and a role or
+ * tier the defaults have never heard of is added rather than rejected. That is
+ * what makes a custom `group = "tier-1"` resolve to real bindings.
+ *
+ * `denylist` replaces rather than appends, because the defaults carry none and
+ * FORBIDDEN_PATTERNS is applied on top by the engine regardless.
+ */
+export function mergePolicyRules(
+  base: PolicyRules,
+  override?: PolicyConfig,
+): PolicyRules {
+  if (!override?.roleBindings && !override?.denylist) return base;
+
+  // Copy every tier map: assigning base's objects straight through would let a
+  // later merge mutate DEFAULT_RULES, which is a module-level singleton.
+  const roleBindings: Record<string, Record<string, CommandClass[]>> = {};
+  for (const [role, groups] of Object.entries(base.roleBindings)) {
+    roleBindings[role] = { ...groups };
+  }
+  for (const [role, groups] of Object.entries(override.roleBindings ?? {})) {
+    roleBindings[role] = { ...(roleBindings[role] ?? {}), ...groups };
+  }
+
+  return {
+    roleBindings,
+    denylist: override.denylist ?? base.denylist,
+    allowlist: base.allowlist,
+  };
+}
 
 export class PolicyEngine {
   private opaUrl: string | null = null;

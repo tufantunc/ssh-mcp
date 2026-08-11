@@ -101,7 +101,10 @@ function normalizeConfig(raw: RawConfig): AppConfig {
     commandQuotaPerDay: p.commandQuotaPerDay ?? defaults.commandQuotaPerDay,
   }));
 
-  return { defaults, profiles };
+  // Passed through untouched. mergePolicyRules() owns the layering over
+  // DEFAULT_RULES, so the loader has no policy semantics of its own to get
+  // wrong.
+  return { defaults, profiles, policy: raw.policy };
 }
 
 export function getProfile(config: AppConfig, name?: string): Profile {
