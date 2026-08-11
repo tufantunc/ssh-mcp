@@ -1,7 +1,17 @@
+# Test-fixture images are pinned by digest. These containers are the system
+# under test for an SSH security tool: a silently changed sshd could make
+# host-key verification, ProxyJump or an auth-failure test pass when it should
+# fail, and nothing would say so. The tag is kept alongside the digest so the
+# version stays readable; the digest is what resolves.
+#
+# The root Dockerfile's `node:22-slim` is deliberately NOT pinned. That image
+# builds the server rather than deciding whether a test is honest, so picking up
+# base-image security patches on rebuild is worth more there than reproducibility.
+
 services:
   # ─── Test SSH Servers (role-based, for integration tests) ──────────────────
   ssh-admin:
-    image: ghcr.io/linuxserver/openssh-server:latest
+    image: ghcr.io/linuxserver/openssh-server:latest@sha256:96b9a4d3b5106746d08d43a6911650d4d21f7d5c7f2ac9660e792bdb5e63157c
     profiles: ["test"]
     environment:
       - USER_NAME=admin
@@ -14,7 +24,7 @@ services:
       - "2222:2222"
 
   ssh-viewer:
-    image: ghcr.io/linuxserver/openssh-server:latest
+    image: ghcr.io/linuxserver/openssh-server:latest@sha256:96b9a4d3b5106746d08d43a6911650d4d21f7d5c7f2ac9660e792bdb5e63157c
     profiles: ["test"]
     environment:
       - USER_NAME=viewer
@@ -26,7 +36,7 @@ services:
       - "2223:2222"
 
   ssh-operator:
-    image: ghcr.io/linuxserver/openssh-server:latest
+    image: ghcr.io/linuxserver/openssh-server:latest@sha256:96b9a4d3b5106746d08d43a6911650d4d21f7d5c7f2ac9660e792bdb5e63157c
     profiles: ["test"]
     environment:
       - USER_NAME=operator
@@ -42,7 +52,7 @@ services:
   # that an init hook enables AllowTcpForwarding, which the base image disables
   # — without it every direct-tcpip channel fails and the hop cannot be tested.
   ssh-bastion:
-    image: ghcr.io/linuxserver/openssh-server:latest
+    image: ghcr.io/linuxserver/openssh-server:latest@sha256:96b9a4d3b5106746d08d43a6911650d4d21f7d5c7f2ac9660e792bdb5e63157c
     profiles: ["test"]
     environment:
       - USER_NAME=bastion
