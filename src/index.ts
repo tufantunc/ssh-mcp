@@ -4,7 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { loadConfig } from './config/loader.js';
 import { ConnectionRegistry } from './ssh/connection-registry.js';
-import { PolicyEngine, DEFAULT_RULES, HOST_GROUPS } from './policy/engine.js';
+import { PolicyEngine, DEFAULT_RULES, HOST_GROUPS, mergePolicyRules } from './policy/engine.js';
 import { AuditStore } from './audit/store.js';
 import { registerTools, registerResources, getToolHashes } from './tools/registry.js';
 import { initKeychain } from './config/credential-resolver.js';
@@ -176,7 +176,7 @@ async function main() {
   }
 
   const registry = new ConnectionRegistry(config, hostKeyMode);
-  const policy = new PolicyEngine(DEFAULT_RULES);
+  const policy = new PolicyEngine(mergePolicyRules(DEFAULT_RULES, config.policy));
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);
 
   if (argv.opaUrl) {

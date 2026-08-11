@@ -166,7 +166,7 @@ auth = "agent"                      # agent | key | password | keychain
 keyRef = "~/.ssh/id_ed25519"        # for auth=key
 keychainEntry = "ssh-mcp/prod"      # for auth=keychain (requires @napi-rs/keyring)
 via = "bastion"                     # ProxyJump — route through bastion profile
-group = "prod"                      # Policy tier: prod | staging | dev
+group = "prod"                      # Policy tier: prod | staging | dev, or your own (see [policy])
 workdir = "/var/www"
 trustedHostKey = "SHA256:..."       # Pin host key (optional)
 tty = false
@@ -177,7 +177,17 @@ cert = false                        # SSH CA cert auth — auto-detects keyRef-c
 sessionMaxPerConnection = 3         # per-profile override
 sessionIdleTimeoutMs = 300000       # stricter for prod
 commandQuotaPerDay = 200            # per-profile override
+
+# Optional. Merged over the built-in role matrix; see "Policy Engine" below.
+[policy]
+denylist = ["^terraform\\s+destroy"]
+
+[policy.roleBindings.admin]
+prod = ["read-only", "safe", "destructive", "privileged"]
 ```
+
+Unknown sections and keys are a startup error, not a warning, so a typo cannot
+leave you running defaults you thought you had overridden.
 
 ### ProxyJump (Bastion)
 
@@ -259,17 +269,53 @@ name = "build-box"
 group = "dev"
 ```
 
-**The matrix above is not configurable yet.** `PolicyEngine` is always built
-from the compiled-in defaults, and a `roleBindings` table in the config file is
-accepted by the parser and then silently ignored
-([#95](https://github.com/tufantunc/ssh-mcp/issues/95)).
+### Configuring the matrix
 
-So on a host labelled `group = "prod"` there is currently no way to allow
-`privileged-command`. An OPA sidecar does not help: OPA is consulted only for
-commands the built-in policy already allows, so it can refuse more but never
-grant. The only thing that works today is labelling the host `staging` or
-`dev` — which is a lie the rest of the policy then acts on, so treat it as a
-stopgap and not a configuration.
+The table above is the default, not a limit. An optional `[policy]` section is
+merged over it at startup, so granting sudo on a host you have honestly
+labelled `prod` is a reviewable line in a config file rather than a relabelling:
+
+```toml
+[policy.roleBindings.admin]
+prod = ["read-only", "safe", "destructive", "privileged"]
+```
+
+The merge is at role *and* tier depth. That block changes `admin` on `prod` and
+nothing else: `admin` on `staging` and `dev` keep their defaults, and `viewer`
+and `operator` are untouched. Roles and tiers the defaults have never heard of
+are added rather than rejected, which is what makes a custom `group` resolve to
+real bindings instead of falling back to the strictest tier:
+
+```toml
+[[profiles]]
+name = "build-box"
+role = "admin"
+group = "tier-1"
+
+[policy.roleBindings.admin]
+"tier-1" = ["read-only", "safe", "destructive"]
+```
+
+Extra deny patterns live in the same section, and are applied on top of the
+never-allowed list rather than replacing it:
+
+```toml
+[policy]
+denylist = ["^terraform\\s+destroy"]
+```
+
+Two mistakes fail at startup rather than at the point of use:
+
+- a command class outside `read-only | safe | destructive | privileged`, so a
+  `priviledged` typo cannot parse into a grant of nothing and then read as a
+  policy decision when a command is refused;
+- any unrecognised section or key anywhere in the config, so a block the parser
+  does not understand is an error rather than a clean startup with none of the
+  behaviour you configured.
+
+An OPA sidecar is not an alternative route to the same grant. OPA is consulted
+only for commands the local policy already allows, so it can refuse more but
+never widen. Widening happens here or not at all.
 
 ### Command Classification
 
@@ -331,7 +377,11 @@ For organizations that standardize on Open Policy Agent / Rego:
 ssh-mcp --opaUrl=http://localhost:8181
 ```
 
-When `--opaUrl` is set, every command is additionally evaluated by OPA after the built-in policy engine. The request shape follows the AuthZEN Access Evaluation contract:
+When `--opaUrl` is set, commands the built-in engine allows are additionally
+evaluated by OPA. **OPA can only narrow.** A command the built-in engine has
+already denied returns that denial without OPA being consulted at all, so a
+sidecar answering `allow` cannot grant a class the role bindings withhold. To
+widen, edit `[policy]`. The request shape follows the AuthZEN Access Evaluation contract:
 
 ```json
 {
@@ -352,7 +402,8 @@ package ssh.mcp
 
 default allow := false
 
-# Admins can run anything on dev hosts
+# Admins pass the OPA gate on dev hosts. The built-in policy still applies on
+# top: this widens nothing that the role bindings withhold.
 allow if {
   input.subject.role == "admin"
   startswith(input.subject.profile, "dev")
