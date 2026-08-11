@@ -74,6 +74,14 @@ updates:
     groups:
       containers:
         patterns: ['*']
+    # Node majors are a human decision, not a batch one. Dependabot proposed
+    # 22-slim -> 25-slim, and odd-numbered Node releases are Current rather than
+    # LTS: roughly six months of support instead of three years. Choosing the
+    # runtime an SSH access server runs on is not something to accept from a
+    # grouped bump — minors and patches still flow.
+    ignore:
+      - dependency-name: node
+        update-types: [version-update:semver-major]
     commit-message:
       prefix: ci
 
