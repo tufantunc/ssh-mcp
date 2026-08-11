@@ -179,6 +179,8 @@ sessionIdleTimeoutMs = 300000       # stricter for prod
 commandQuotaPerDay = 200            # per-profile override
 
 # Optional. Merged over the built-in role matrix; see "Policy Engine" below.
+# roleBindings is keyed by role, so the block below applies to profiles with
+# role = "admin" and changes nothing for the operator profile above.
 [policy]
 denylist = ["^terraform\\s+destroy"]
 

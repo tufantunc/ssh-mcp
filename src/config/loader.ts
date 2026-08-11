@@ -68,8 +68,11 @@ export async function loadConfig(customPath?: string): Promise<AppConfig> {
 
   const result = configSchema.safeParse(parsed);
   if (!result.success) {
+    // A root-level issue has an empty path, which used to render as a bare
+    // colon. Unreachable while the root schema accepted anything; an unknown
+    // top-level section reaches it now.
     const issues = result.error.issues
-      .map((i) => `  ${i.path.join('.')}: ${i.message}`)
+      .map((i) => `  ${i.path.length ? i.path.join('.') : '(root)'}: ${i.message}`)
       .join('\n');
     throw new Error(`Config validation error:\n${issues}`);
   }

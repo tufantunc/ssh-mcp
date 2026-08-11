@@ -4,6 +4,20 @@ const authMethodSchema = z.enum(['agent', 'key', 'password', 'keychain']);
 const approvalModeSchema = z.enum(['auto', 'ask-destructive', 'ask-all', 'deny']);
 const commandClassSchema = z.enum(['read-only', 'safe', 'destructive', 'privileged']);
 
+/**
+ * Role and tier names, which are free strings so operators can define their own.
+ *
+ * `__proto__` is excluded because merging assigns into a plain object, and that
+ * assignment lands on the prototype instead of creating a key: a role by that
+ * name would be accepted and then not exist. `constructor` and `prototype` are
+ * excluded alongside it rather than reasoned about case by case.
+ */
+const RESERVED_BINDING_KEYS = ['__proto__', 'constructor', 'prototype'];
+const bindingKeySchema = z.string().min(1).refine(
+  (key) => !RESERVED_BINDING_KEYS.includes(key),
+  { message: `Reserved name (${RESERVED_BINDING_KEYS.join(', ')}). Rename the role or tier.` },
+);
+
 export const defaultsSchema = z.object({
   defaultProfile: z.string().optional(),
   sessionMaxPerConnection: z.number().int().positive().default(5),
@@ -68,7 +82,10 @@ export const profileSchema = z.object({
  * code reads it, so accepting it here would document a key that does nothing.
  */
 export const policySchema = z.object({
-  roleBindings: z.record(z.string(), z.record(z.string(), z.array(commandClassSchema))).optional(),
+  roleBindings: z.record(
+    bindingKeySchema,
+    z.record(bindingKeySchema, z.array(commandClassSchema)),
+  ).optional(),
   denylist: z.array(z.string()).optional(),
 }).strict();
 
