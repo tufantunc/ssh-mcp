@@ -48,10 +48,20 @@ updates:
     # Majors on the SSH and MCP libraries are not batch work: these are where a
     # silent behaviour change surfaces as a security regression rather than as a
     # failing test, so they want a human opening the diff.
+    #
+    # TypeScript is here for a different reason, and it is the one the grouping
+    # above got wrong: `prepare` runs `tsc`, and `files` is `build`, so the
+    # compiler is the only development dependency that decides what bytes get
+    # published. A compiler major changes the emit, which no test in this repo
+    # asserts on. It arrived once inside a "development group" batch of eight
+    # (#100) where nothing about the title suggested the published artifact was
+    # in scope.
     ignore:
       - dependency-name: ssh2
         update-types: [version-update:semver-major]
       - dependency-name: '@modelcontextprotocol/sdk'
+        update-types: [version-update:semver-major]
+      - dependency-name: typescript
         update-types: [version-update:semver-major]
     commit-message:
       prefix: fix
