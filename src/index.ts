@@ -29,6 +29,26 @@ function parseArgv(): Record<string, string | null> {
 }
 
 /**
+ * Whether a boolean flag was passed at all.
+ *
+ * `parseArgv` stores `null` for a flag written without `=`, which is how every
+ * documented boolean flag is written. Testing that value for truthiness makes
+ * the flag a no-op: `--disableApproval`, `--auditEntropyScan` and
+ * `--auditTamperEvident` all did nothing unless spelled `--flag=1`, which
+ * nothing documents (#91). The two call sites that got it right already used
+ * `!== undefined`; this gives the check a name so the next one cannot miss it.
+ *
+ * `--flag=false` and `--flag=0` turn it off, because a flag that cannot be
+ * turned off once written into a wrapper script is its own annoyance.
+ */
+function flagEnabled(argv: Record<string, string | null>, name: string): boolean {
+  if (!(name in argv)) return false;
+  const value = argv[name];
+  if (value === null || value === '') return true;
+  return !['false', '0', 'no', 'off'].includes(value.toLowerCase());
+}
+
+/**
  * v1 flags that v2 removed. Silently ignoring them means the user only finds
  * out at the first command, as an auth failure with no hint about the cause.
  */
@@ -67,7 +87,7 @@ function parseMaxChars(raw: string | null | undefined): number {
  * existed. `--insecureHostKey` is kept as an alias for the documented flag.
  */
 function resolveHostKeyMode(argv: Record<string, string | null>): HostKeyMode {
-  if (argv.insecureHostKey !== undefined) return 'insecure';
+  if (flagEnabled(argv, 'insecureHostKey')) return 'insecure';
   const mode = argv.hostKeyMode;
   if (mode === null || mode === undefined) return 'tofu';
   if (mode === 'tofu' || mode === 'strict' || mode === 'insecure') return mode;
@@ -143,7 +163,7 @@ async function buildAppConfig(argv: Record<string, string | null>): Promise<AppC
     role: 'admin',
     group: resolveHostGroup(argv),
     readOnly: false,
-    approvalPolicy: argv.disableApproval ? 'auto' : defaults.approvalMode,
+    approvalPolicy: flagEnabled(argv, 'disableApproval') ? 'auto' : defaults.approvalMode,
     cert: false,
     sessionMaxPerConnection: defaults.sessionMaxPerConnection,
     sessionIdleTimeoutMs: defaults.sessionIdleTimeoutMs,
@@ -165,8 +185,8 @@ async function main() {
 
   const config = await buildAppConfig(argv);
   const hostKeyMode = resolveHostKeyMode(argv);
-  const entropyScan = !!argv.auditEntropyScan;
-  const tamperEvident = !!argv.auditTamperEvident;
+  const entropyScan = flagEnabled(argv, 'auditEntropyScan');
+  const tamperEvident = flagEnabled(argv, 'auditTamperEvident');
 
   await initKeychain();
 
@@ -260,4 +280,4 @@ if (isCliEnabled || isTestMode) {
   });
 }
 
-export { parseArgv, buildAppConfig, checkRemovedFlags, parseMaxChars };
+export { parseArgv, buildAppConfig, checkRemovedFlags, parseMaxChars, flagEnabled, resolveHostKeyMode };

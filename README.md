@@ -378,6 +378,19 @@ distinguishable from a fresh human answer.
 **Off by default** (`0` = always prompt). Auto-approval weakens the gate that
 makes destructive commands safe, so turning it on should be a decision.
 
+#### Answering the prompt
+
+Approval goes through the MCP elicitation request, so what you see is your
+client's dialog. Accepting it approves the command — there is no second field to
+fill in.
+
+You have **10 minutes** to answer. Past that the request expires and the command
+is refused rather than left pending, and the refusal says so; the prompt may
+still be open in your client, in which case run the command again once you are
+ready. If your client does not support elicitation at all, every destructive and
+privileged command is refused with `APPROVAL_UNAVAILABLE` naming that cause —
+approval fails closed by design.
+
 ### Command Quota
 
 `commandQuotaPerDay` bounds how many commands a profile may run in a rolling
