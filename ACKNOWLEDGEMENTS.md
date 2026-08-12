@@ -38,6 +38,15 @@ merged commits, so this file exists to record what that graph cannot.
 - **[@deevus](https://github.com/deevus)** — asked for configuration through
   environment variables ([#32](https://github.com/tufantunc/ssh-mcp/issues/32));
   `SSH_MCP_KEY` is the variable requested.
+- **[@Blackspell01](https://github.com/Blackspell01)** — reported that `sudo`
+  stopped working in v2 ([#91](https://github.com/tufantunc/ssh-mcp/issues/91)),
+  and then kept reporting when the first fix did not clear it. That thread
+  turned out to hold four separate defects across three releases: a quick-start
+  profile that could never reach the `privileged` class, a denylist that refused
+  `last reboot` for containing the word, an approval dialog where choosing
+  Accept came back as "you declined", and `--disableApproval` — the workaround
+  they were told to use — silently doing nothing. Screenshots rather than a
+  summary are what made the second and third of those findable at all.
 
 ## Merged contributions
 
@@ -52,6 +61,17 @@ merged commits, so this file exists to record what that graph cannot.
   production's grant with no typo anywhere to catch it. The startup validation
   that now refuses those configs is theirs, including the inferred-tier case
   neither of us had asked for.
+
+  They then diagnosed the approval dialog on
+  [#91](https://github.com/tufantunc/ssh-mcp/issues/91) from the other side of
+  the same failure, with client logs showing the two responses 30 seconds apart.
+  Requiring a `confirm` boolean on top of the protocol's own accept/decline
+  meant clients rendered a checkbox, and choosing Accept without ticking it
+  submitted an invalid form — so the client sent `cancel` and the user was told
+  they had declined. The argument for dropping it was theirs and correct:
+  `action` already carries the decision. Reading the consumer to check that
+  claim turned up two more defects, including three CLI flags that had never
+  done anything.
 
 ## Contributed implementations
 

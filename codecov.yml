@@ -1,0 +1,38 @@
+# Without this file Codecov applies `target: auto, threshold: 0`, so any drop
+# against the base commit fails the check — however small, and whatever caused
+# it.
+#
+# That fired on #124, which fixed four defects and dropped project coverage by
+# 0.39%. Line coverage had gone *up* (77.33% -> 78.19%); what fell was Codecov's
+# own figure, which counts a partially-covered branch against you where vitest's
+# line metric does not. The two measure different things, and a gate set to zero
+# turns that difference into a failing check.
+#
+# The lines actually uncovered were two inside `main()` in src/index.ts. Unit
+# tests never execute main (SSH_MCP_DISABLE_MAIN=1), so in-process
+# instrumentation cannot reach them, and vitest.config.ts already says so in as
+# many words: index.ts stays in the report despite scoring low, because
+# excluding it "would hide genuinely untested wiring behind a nicer number".
+# A zero threshold penalises exactly the measurement limit that comment accepts,
+# so every change touching main() would fail on arrival.
+#
+# 1% is a noise margin, not a licence. A real regression clears it easily: the
+# project is ~1400 instrumented lines, so 1% is roughly fourteen of them.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    # Left at the default on purpose. Patch coverage asks whether the code in
+    # *this* diff is tested, which is the question worth being strict about, and
+    # it has been passing — 78.57% against a 71.32% target on the change that
+    # prompted this file.
+    patch:
+      default:
+        target: auto
+
+# Report the numbers, do not gate twice on them.
+comment:
+  layout: 'reach, diff, files'
+  require_changes: true
