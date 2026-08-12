@@ -1,5 +1,5 @@
 ---
-"ssh-mcp": major
+"ssh-mcp": minor
 ---
 
 Read policy overrides from the config file, and refuse to start when the policy does not mean what it says.
@@ -22,7 +22,7 @@ All problems are reported at once rather than one per restart.
 
 An unresolved tier no longer falls back to the role's `prod` cell. While the matrix was compiled in, that fallback meant falling back to the strictest cell for that role; once `[policy]` can write `prod`, the same hop hands an unresolved tier whatever production was granted. A partial custom role plus profiles that set no `group` was enough to reach it with no typo involved.
 
-**Upgrade notes.** Two kinds of config that started under 2.x now fail at load. Both failures name the offending line, and both are the point of the release rather than side effects:
+**Upgrade notes — read these before upgrading, even though this is a minor release.** Two kinds of config that started under 2.1.0 now fail at load. That is normally a major, and shipping it as a minor is a deliberate call rather than an oversight: the reach of both is narrow, and neither failure is silent — each names the offending line and tells you what to write instead. But it does mean a `^2.1.0` range will pick this up automatically, so nothing warns you by version number alone. Both failures are the point of the release rather than side effects:
 
 1. **An unrecognised top-level section.** Previously parsed cleanly and was dropped, so an upgrade can surface a typo that has been inert for some time — including a `[policy]` block written against the old README, which said such a block was accepted and ignored. Read any pre-existing `[policy]` section before upgrading: it is live now, and the usual content of one is a grant.
 2. **A custom `role` on a profile.** `role` is a free string that only ever matched `viewer`, `operator` or `admin`; anything else was silently demoted to read-only. That now stops startup, and it is the one new failure that can fire on a config carrying no `[policy]` section at all. Either correct the role, or give it bindings with `[policy.roleBindings.<role>]`.
