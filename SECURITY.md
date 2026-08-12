@@ -32,7 +32,7 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 | Command injection via metadata | Sanitizer strips CR/LF/NUL from all metadata; `description` feature removed |
 | MITM attacks | TOFU host key verification by default; strict mode available |
 | Weak SSH algorithms | Frozen algorithm allow-list per RFC 9142 (no SHA-1, no CBC, no ssh-rsa) |
-| PTY session leaks (MaxSessions) | `exec()`-only architecture; no persistent su shells |
+| PTY session leaks (MaxSessions) | Interactive sessions are bounded, not absent: `sessionMaxPerConnection` (default 5), `sessionIdleTimeoutMs` (10 min), `sessionBackgroundMaxMs` (1 h), and a reaper that sweeps expired sessions every 60s. One-shot commands use `exec()` and hold no channel. No persistent `su` shells |
 | Unbounded agent actions | Per-profile RBAC, rate limits, denylist, approval modes |
 
 ## Safe Deployment Guidelines
@@ -92,7 +92,7 @@ SSH MCP Server v2 implements controls that map to common security frameworks. Th
 |-----------------|-------------|-------------------|
 | A.8.2 | Privileged access rights | RBAC roles, policy engine, approval modes, denylist |
 | A.8.5 | Secure authentication | Credential cascade, no CLI-arg secrets, keychain + SSH agent + CA cert support |
-| A.8.23 | Web filtering | `--transport http` requires bearer auth, rate limiting (planned) |
+| A.8.23 | Web filtering | `--transport http` requires bearer auth, `--rateLimit` token bucket, `--allowedHosts` Host-header allow-list |
 | A.12.4 | Logging and monitoring | Audit log with ECS fields, hash-chain option, redaction |
 | A.13.1 | Network security controls | Host key verification, frozen algorithms, ProxyJump tunnel |
 | A.14.2 | Security in development | Property tests (fast-check), SAST (Semgrep), secret scanning (gitleaks), npm provenance |
