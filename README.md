@@ -150,7 +150,7 @@ sessionMaxPerConnection = 5
 sessionIdleTimeoutMs = 600000       # 10min
 sessionBackgroundMaxMs = 3600000    # 1hr
 commandTimeoutMs = 60000
-commandMaxChars = 5000
+commandMaxChars = 5000              # 0 = unlimited, the config spelling of --maxChars=none
 commandMaxOutputBytes = 1048576     # 1MB
 connectionIdleReapMs = 900000       # 15min
 commandQuotaPerDay = 0              # 0 = unlimited; circuit breaker for runaway agents
@@ -177,6 +177,7 @@ cert = false                        # SSH CA cert auth — auto-detects keyRef-c
 sessionMaxPerConnection = 3         # per-profile override
 sessionIdleTimeoutMs = 300000       # stricter for prod
 commandQuotaPerDay = 200            # per-profile override
+maxChars = 0                        # per-profile override; 0 = unlimited
 
 # Optional. Merged over the built-in role matrix; see "Policy Engine" below.
 # roleBindings is keyed by role and then by tier, so the block below changes
@@ -554,7 +555,7 @@ Secrets are **never** passed as CLI arguments.
 | `--workdir` | — | Quick start: Working directory for commands and sessions |
 | `--group` | prod | Quick start: Policy tier — `prod`, `staging` or `dev` |
 | `--timeout` | 60000 | Command timeout in ms |
-| `--maxChars` | 5000 | Max command length (`none` or `0` disables the limit) |
+| `--maxChars` | 5000 | Max command length (`none` or `0` disables the limit; in a config file the same setting is `commandMaxChars = 0`) |
 | `--sessionMax` | 5 | Max concurrent sessions per connection |
 | `--sessionTtl` | 600000 | Session idle timeout in ms |
 | `--transport` | stdio | `stdio` or `http` |
