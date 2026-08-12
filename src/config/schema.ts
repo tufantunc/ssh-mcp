@@ -24,7 +24,10 @@ export const defaultsSchema = z.object({
   sessionIdleTimeoutMs: z.number().int().positive().default(600_000),
   sessionBackgroundMaxMs: z.number().int().positive().default(3_600_000),
   commandTimeoutMs: z.number().int().positive().default(60_000),
-  commandMaxChars: z.number().int().positive().default(5000),
+  // 0 = unlimited, matching `--maxChars=none` on the CLI. normalizeConfig()
+  // maps it to Number.MAX_SAFE_INTEGER so both surfaces hand the rest of the
+  // code an identical Profile.
+  commandMaxChars: z.number().int().nonnegative().default(5000),
   commandMaxOutputBytes: z.number().int().positive().default(1_048_576),
   connectionIdleReapMs: z.number().int().positive().default(900_000),
   // 0 = unlimited. A circuit breaker for runaway agents, not a rate limit.
@@ -57,7 +60,8 @@ export const profileSchema = z.object({
   // a schema-level .default() would make "user omitted it" indistinguishable
   // from "user set the default value", silently shadowing [defaults].
   timeout: z.number().int().positive().optional(),
-  maxChars: z.number().int().positive().optional(),
+  // 0 = unlimited, as in [defaults].commandMaxChars above.
+  maxChars: z.number().int().nonnegative().optional(),
   maxOutputBytes: z.number().int().positive().optional(),
   approvalPolicy: approvalModeSchema.optional(),
   sessionMaxPerConnection: z.number().int().positive().optional(),

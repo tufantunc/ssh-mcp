@@ -81,6 +81,23 @@ export async function loadConfig(customPath?: string): Promise<AppConfig> {
 }
 
 /**
+ * `0` means unlimited, the convention `commandQuotaPerDay` and
+ * `approvalGrantTtlMs` already use in this config file.
+ *
+ * It has to be *mapped* rather than merely permitted. `sanitizeCommand` tests
+ * `cleaned.length > maxChars`, so a literal `0` arriving there rejects every
+ * non-empty command with "Command is too long (max 0 characters)" — a worse
+ * failure than the one this spelling exists to fix.
+ *
+ * MAX_SAFE_INTEGER is the value `parseMaxChars` produces for `--maxChars=none`,
+ * so the flag and the config file hand the rest of the code an identical
+ * Profile rather than two spellings of uncapped (#123).
+ */
+function uncapZero(maxChars: number): number {
+  return maxChars === 0 ? Number.MAX_SAFE_INTEGER : maxChars;
+}
+
+/**
  * Resolve every profile against [defaults]. Each of these keys is documented as
  * a default that profiles inherit, so all of them must cascade — a key that is
  * accepted by the schema but never applied silently ignores the operator's
@@ -95,7 +112,7 @@ function normalizeConfig(raw: RawConfig): AppConfig {
   const profiles: Profile[] = raw.profiles.map((p) => ({
     ...p,
     timeout: p.timeout ?? defaults.commandTimeoutMs,
-    maxChars: p.maxChars ?? defaults.commandMaxChars,
+    maxChars: uncapZero(p.maxChars ?? defaults.commandMaxChars),
     maxOutputBytes: p.maxOutputBytes ?? defaults.commandMaxOutputBytes,
     approvalPolicy: p.approvalPolicy ?? defaults.approvalMode,
     sessionMaxPerConnection: p.sessionMaxPerConnection ?? defaults.sessionMaxPerConnection,
