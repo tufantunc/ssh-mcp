@@ -4,6 +4,13 @@ import type { PolicyEvaluation } from '../types.js';
 export interface ApprovalResult {
   approved: boolean;
   approver?: string;
+  /**
+   * Set when the client could not be asked at all, as opposed to being asked
+   * and saying no. Both deny the command; only one of them is the user's doing,
+   * and telling the reader they declined something they never saw sends them
+   * looking in the wrong place.
+   */
+  unavailable?: string;
 }
 
 /**
@@ -45,10 +52,20 @@ export async function requestApproval(
     }
     return { approved: false };
   } catch (err) {
+    const cause = err instanceof Error ? err.message : String(err);
+    // stderr still gets it for the operator's logs, but it cannot be the only
+    // copy: for a stdio MCP server that is a client log file nobody reads, so
+    // the caller gets the diagnosis too and can put it in front of the user.
     console.error(
       `Approval request failed for ${evaluation.commandClass} command on "${profileName}" — denying. ` +
-      `Does this client support elicitation? Cause: ${err instanceof Error ? err.message : String(err)}`,
+      `Does this client support elicitation? Cause: ${cause}`,
     );
-    return { approved: false };
+    return {
+      approved: false,
+      unavailable:
+        `this MCP client could not be asked to approve it. The likely cause is a client without ` +
+        `elicitation support; a transport failure or a malformed reply does the same. Approval fails ` +
+        `closed, so the command was refused rather than run. Underlying error: ${cause}`,
+    };
   }
 }

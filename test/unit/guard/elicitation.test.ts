@@ -66,6 +66,26 @@ describe('requestApproval', () => {
     expect(String(errorSpy.mock.calls[0][0])).toMatch(/Approval request failed/);
   });
 
+  /**
+   * The distinction the caller renders as APPROVAL_DENIED vs APPROVAL_UNAVAILABLE.
+   * Both deny; only one of them is the user's doing, and a reader told they
+   * declined a prompt they never saw goes looking in the wrong place (#91).
+   */
+  it('marks a failure to ask as unavailable, carrying the cause', async () => {
+    const server = makeMockServer('error');
+    const result = await requestApproval(server, 'rm /tmp/x', 'dev', mockEvaluation);
+    expect(result.unavailable).toMatch(/could not be asked/);
+    expect(result.unavailable).toMatch(/elicitation support/);
+    // The underlying error travels with it, so stderr is not the only copy.
+    expect(result.unavailable).toContain('Client does not support elicitation');
+  });
+
+  it.each(['decline', 'cancel'] as const)('leaves unavailable unset when the client answers (%s)', async (action) => {
+    const result = await requestApproval(makeMockServer(action), 'rm /tmp/x', 'dev', mockEvaluation);
+    expect(result.approved).toBe(false);
+    expect(result.unavailable).toBeUndefined();
+  });
+
   it('does not approve when the client accepts but confirm is false', async () => {
     const server = {
       server: { elicitInput: vi.fn().mockResolvedValue({ action: 'accept', content: { confirm: false } }) },

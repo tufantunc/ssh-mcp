@@ -64,14 +64,9 @@ const FORBIDDEN_PATTERNS: RegExp[] = [
   /mkfs\./,
   /dd\s.*\bof=\/dev\//,
   />\s*\/dev\/sd/,
-  /\bshutdown\b/,
-  /\breboot\b/,
-  /\bhalt\b/,
-  /\bpoweroff\b/,
   /:\(\)\s*\{\s*:\|:\&\s*\}\s*;\s*:/,   // fork bomb
   /curl\s[^|]*\|\s*(sh|bash|zsh)/,
   /wget\s[^|]*\|\s*(sh|bash|zsh)/,
-  /\beval\b/,
   />\s*\/etc\/cron/,
   />\s*\/etc\/systemd/,
   />\s*~\/.ssh\/authorized_keys/,
@@ -81,6 +76,115 @@ const FORBIDDEN_PATTERNS: RegExp[] = [
 ];
 
 /**
+ * Words that are forbidden when *invoked*, which the patterns above cannot
+ * express.
+ *
+ * These used to be `/\breboot\b/` and friends, matching the word anywhere in
+ * the string. `last reboot` reads a log and was refused for containing the
+ * word; so were `grep -r reboot /etc/`, `cat /var/run/reboot-required` and
+ * `journalctl | grep shutdown`. On a NAS an agent checking boot history trips
+ * this on its first command, which is how it was reported (#91).
+ *
+ * Matching an invocation rather than a mention needs to know where a command
+ * word can start, and that is a tokenizer's job, not a regex's — the regex
+ * forms that come close all reintroduce the `\S*` backtracking the block above
+ * exists to avoid.
+ */
+const FORBIDDEN_INVOCATIONS = new Set(['shutdown', 'reboot', 'halt', 'poweroff', 'eval']);
+
+/** Binaries that take the dangerous action as an argument: `systemctl reboot`. */
+const ACTION_MULTIPLEXERS = new Set(['systemctl', 'init', 'telinit']);
+
+const PRIVILEGE_PREFIXES = new Set(['sudo', 'su', 'doas', 'pkexec']);
+
+/**
+ * Privilege-prefix flags that consume the next argument, so `sudo -u root
+ * reboot` is not read as invoking `root`. Enumerable because it is one tool's
+ * option set, unlike "every flag of every binary".
+ */
+const PREFIX_VALUE_FLAGS = new Set([
+  '-u', '-g', '-p', '-C', '-h', '-r', '-t', '-U', '-c',
+  '--user', '--group', '--prompt', '--close-from', '--host', '--role', '--type',
+  '--other-user', '--command',
+]);
+
+/** `/sbin/reboot` and `reboot` are the same invocation. */
+function stripPath(word: string): string {
+  const slash = word.lastIndexOf('/');
+  return slash === -1 ? word : word.slice(slash + 1);
+}
+
+/**
+ * The command words a shell would actually execute — the head of every
+ * `;`/`&&`/`||`/`|`/newline-separated segment, past any privilege prefix, plus
+ * the arguments of a multiplexer like `systemctl`.
+ *
+ * Pure string work: split, trim, set lookups. No quantifiers, so nothing here
+ * can backtrack.
+ */
+function invokedWords(command: string): string[] {
+  const invoked: string[] = [];
+
+  for (const segment of command.split(/[;&|\n]/)) {
+    const words = segment.trim().split(/\s+/).filter(Boolean).map(stripPath);
+
+    let i = 0;
+    while (i < words.length && PRIVILEGE_PREFIXES.has(words[i])) {
+      i++;
+      while (i < words.length && words[i].startsWith('-')) {
+        const consumesValue = PREFIX_VALUE_FLAGS.has(words[i]);
+        i++;
+        if (consumesValue) i++;
+      }
+    }
+
+    const head = words[i];
+    if (!head) continue;
+    invoked.push(head);
+
+    // `systemctl reboot` restarts the host. Reading a unit that happens to be
+    // named after a power action is rare enough that erring towards refusal
+    // here costs little.
+    if (ACTION_MULTIPLEXERS.has(head)) {
+      invoked.push(...words.slice(i + 1).filter((w) => !w.startsWith('-')));
+    }
+  }
+
+  return invoked;
+}
+
+/** A forbidden rule, paired with wording a refusal can quote back. */
+interface ForbiddenRule {
+  label: string;
+  test: (command: string) => boolean;
+}
+
+const FORBIDDEN_RULES: ForbiddenRule[] = [
+  ...FORBIDDEN_PATTERNS.map((re) => ({ label: String(re), test: (c: string) => re.test(c) })),
+  {
+    label: 'invoking a power-state command (shutdown, reboot, halt, poweroff) or eval',
+    test: (command) => invokedWords(command).some((w) => FORBIDDEN_INVOCATIONS.has(w)),
+  },
+];
+
+/**
+ * Which never-allowed rule this command trips, or null. The single entry point:
+ * FORBIDDEN_PATTERNS is deliberately not exported, because half of the list
+ * lives in FORBIDDEN_RULES and a caller checking only the regexes would quietly
+ * permit `sudo reboot`.
+ */
+export function findForbiddenMatch(command: string): string | null {
+  for (const rule of FORBIDDEN_RULES) {
+    if (rule.test(command)) return rule.label;
+  }
+  return null;
+}
+
+export function isForbidden(command: string): boolean {
+  return findForbiddenMatch(command) !== null;
+}
+
+/**
  * Commands that are destructive but legitimate under approval — e.g.
  * `rm -rf /tmp/build`, which must NOT be confused with `rm -rf /`.
  */
@@ -88,8 +192,17 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
   /rm\s+-rf?\s+\//,
 ];
 
-/** Everything that classifies as destructive: forbidden commands included. */
-const DESTRUCTIVE_DENYLIST: RegExp[] = [...FORBIDDEN_PATTERNS, ...DESTRUCTIVE_PATTERNS];
+/**
+ * Everything that classifies as destructive: forbidden commands included.
+ *
+ * Goes through isForbidden() rather than the regex list, so a command caught by
+ * an invocation rule is classified destructive too — and, just as importantly,
+ * reading a log that mentions `reboot` is no longer classified destructive
+ * either.
+ */
+function isDestructive(command: string): boolean {
+  return isForbidden(command) || DESTRUCTIVE_PATTERNS.some((re) => re.test(command));
+}
 
 const PRIVILEGED_INDICATORS = [
   /^\s*sudo\b/,
@@ -121,10 +234,8 @@ export function classifyCommand(command: string): ParsedCommand {
     return { binary, fullCommand, class: 'privileged' as CommandClass };
   }
 
-  for (const pattern of DESTRUCTIVE_DENYLIST) {
-    if (pattern.test(trimmed)) {
-      return { binary, fullCommand, class: 'destructive' as CommandClass };
-    }
+  if (isDestructive(trimmed)) {
+    return { binary, fullCommand, class: 'destructive' as CommandClass };
   }
 
   const twoWordPrefix = fullCommand.split(/\s+/).slice(0, 2).join(' ');
@@ -138,4 +249,4 @@ export function classifyCommand(command: string): ParsedCommand {
   return { binary, fullCommand, class: 'safe' as CommandClass };
 }
 
-export { READ_ONLY_ALLOWLIST, DESTRUCTIVE_DENYLIST, FORBIDDEN_PATTERNS };
+export { READ_ONLY_ALLOWLIST, isDestructive };

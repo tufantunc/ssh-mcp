@@ -5,7 +5,7 @@ import type {
   Profile,
   ApprovalMode,
 } from '../types.js';
-import { classifyCommand, FORBIDDEN_PATTERNS } from './classifier.js';
+import { classifyCommand, findForbiddenMatch } from './classifier.js';
 
 export interface PolicyRules {
   roleBindings: Record<string, Record<string, CommandClass[]>>;
@@ -207,14 +207,14 @@ export class PolicyEngine {
   private opaUrl: string | null = null;
   /** Rate-limits the fail-open warning so one outage can't flood stderr. */
   private lastOpaWarning = 0;
-  /** Canonical patterns plus the operator's, compiled once at construction. */
-  private readonly denyPatterns: RegExp[];
+  /** The operator's patterns, compiled once. The built-ins live in classifier.ts. */
+  private readonly userPatterns: RegExp[];
 
   constructor(private rules: PolicyRules = DEFAULT_RULES) {
     // Compile eagerly: a deny rule that silently degrades (the old code fell
     // back to substring-matching the command against the regex *source*) is
     // worse than a startup failure, because nothing surfaces the degradation.
-    const userPatterns = (rules.denylist ?? []).map((pattern) => {
+    this.userPatterns = (rules.denylist ?? []).map((pattern) => {
       try {
         return new RegExp(pattern);
       } catch (err) {
@@ -223,7 +223,6 @@ export class PolicyEngine {
         );
       }
     });
-    this.denyPatterns = [...FORBIDDEN_PATTERNS, ...userPatterns];
   }
 
   setOpaUrl(url: string | null): void {
@@ -239,13 +238,14 @@ export class PolicyEngine {
     const allowedClasses = this.getAllowedClasses(profile);
     const classAllowed = allowedClasses.includes(parsed.class);
 
-    if (this.matchesDenylist(command)) {
+    const denied = this.findDenyMatch(command);
+    if (denied) {
       return {
         decision: 'deny',
         commandClass: parsed.class,
         binary: parsed.binary,
         ruleId: 'denylist',
-        reason: 'Command matches denylist pattern',
+        reason: denied,
       };
     }
 
@@ -440,7 +440,30 @@ export class PolicyEngine {
     return needsApproval;
   }
 
-  private matchesDenylist(command: string): boolean {
-    return this.denyPatterns.some((pattern) => pattern.test(command));
+  /**
+   * Which deny rule refused this command, worded so the reader can act on it.
+   *
+   * The old message was `Command matches denylist pattern` and named nothing —
+   * not the rule, not where it came from, not whether the operator could change
+   * it. A user who hit it had no way to tell a built-in refusal from one they
+   * had written themselves (#91). explainRoleDenial already names the role, the
+   * group, the class and the allowed set; this path never got the same
+   * treatment.
+   */
+  private findDenyMatch(command: string): string | null {
+    const builtIn = findForbiddenMatch(command);
+    if (builtIn) {
+      return `Command matches a built-in never-allowed rule: ${builtIn}. ` +
+        `This list cannot be switched off — the [policy].denylist key adds patterns, it does not remove these.`;
+    }
+
+    for (const pattern of this.userPatterns) {
+      if (pattern.test(command)) {
+        return `Command matches /${pattern.source}/, a pattern from [policy].denylist in your config file. ` +
+          `Remove or narrow it there to allow this command.`;
+      }
+    }
+
+    return null;
   }
 }
