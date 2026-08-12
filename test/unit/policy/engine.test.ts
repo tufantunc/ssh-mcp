@@ -66,6 +66,34 @@ describe('PolicyEngine', () => {
     expect(result.ruleId).toBe('denylist');
   });
 
+  /**
+   * The refusal used to read `Command matches denylist pattern` and name
+   * nothing — not the rule, not where it came from, not whether the reader
+   * could change it. That is what the #91 reporter was left staring at.
+   */
+  describe('denylist refusals say what matched', () => {
+    const profile = makeProfile({ role: 'admin', name: 'dev', group: 'dev', approvalPolicy: 'auto' });
+
+    it('names the built-in rule and that it cannot be switched off', () => {
+      const result = engine.evaluate('reboot', profile, 'run-command');
+      expect(result.ruleId).toBe('denylist');
+      expect(result.reason).toMatch(/built-in/);
+      expect(result.reason).toMatch(/power-state/);
+      // The reader's next question is "can I turn this off?" — answer it.
+      expect(result.reason).toMatch(/does not remove these/);
+    });
+
+    it('quotes the operator pattern and points at the config file', () => {
+      const withDeny = new PolicyEngine({ ...DEFAULT_RULES, denylist: ['^terraform\\s+destroy'] });
+      const result = withDeny.evaluate('terraform destroy -auto-approve', profile, 'run-command');
+      expect(result.ruleId).toBe('denylist');
+      expect(result.reason).toContain('terraform');
+      expect(result.reason).toMatch(/\[policy\]\.denylist/);
+      // Distinguishable from a built-in: this one the operator can edit.
+      expect(result.reason).not.toMatch(/built-in/);
+    });
+  });
+
   it('readOnly profile only allows read-only', () => {
     const profile = makeProfile({ readOnly: true, name: 'prod-db' });
     expect(engine.evaluate('ls', profile, 'read-command').decision).toBe('allow');

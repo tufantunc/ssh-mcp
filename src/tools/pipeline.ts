@@ -97,7 +97,15 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
 
         const approval = await requestApproval(server, command, conn.profile.name, evaluation);
         if (!approval.approved) {
-          throw new PolicyRefusedError('APPROVAL_DENIED: User did not approve this command', evaluation);
+          // Two different failures used to share one message. "User did not
+          // approve" is true when the user declined and a lie when the client
+          // could not be asked, and the reader cannot tell which they got (#91).
+          throw new PolicyRefusedError(
+            approval.unavailable
+              ? `APPROVAL_UNAVAILABLE: ${approval.unavailable}`
+              : 'APPROVAL_DENIED: User did not approve this command',
+            evaluation,
+          );
         }
         grants.record(conn.profile.name, command, evaluation.commandClass);
         return { conn, evaluation, approver: approval.approver };
