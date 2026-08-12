@@ -141,3 +141,20 @@ build/
 # Local SonarQube scanner config (not shared — points at a local server)
 sonar-project.properties
 .scannerwork/
+
+# Internal research and planning drafts. Working notes, not documentation:
+# each describes the codebase at the moment it was written and then goes stale
+# without anything saying so. SECURITY_BRIEF.md was the case that mattered — it
+# analysed v1 in the present tense ("as shipped today"), and sitting at the repo
+# root it read as a statement about the shipped version long after v2 closed
+# what it described.
+#
+# Paths are anchored with a leading slash on purpose: docs/superpowers/specs/,
+# docs/v2-*.md and the 2026-07-10 plan are tracked deliberately and must not be
+# caught by a broader pattern.
+/RESEARCH-BRIEF*.md
+/SECURITY_BRIEF.md
+/research-prompt.md
+/research/
+/docs/ssh-hardening-brief.md
+/docs/superpowers/plans/2026-07-08-ssh-mcp-v2.md
