@@ -290,16 +290,18 @@ roleBindings = {}
     await expect(loadConfig(path)).rejects.toThrow(/\(root\): Unrecognized key/);
   });
 
-  it('rejects an unknown top-level section rather than dropping it', async () => {
+  it('names the unrecognised section rather than failing generically', async () => {
     const path = await writeConfig(`
 ${ADMIN_PROD_PROFILE}
 
-[policies]
-roleBindings = {}
+[telemetry]
+enabled = true
 `);
     // Before the root schema was strict, this parsed cleanly and vanished: a
-    // clean startup, no warning, and none of the configured behaviour.
-    await expect(loadConfig(path)).rejects.toThrow(/Config validation error/);
+    // clean startup, no warning, and none of the configured behaviour. Asserting
+    // on the section name rather than the wrapper, so the test still means
+    // something if the message ever stops saying which key was rejected.
+    await expect(loadConfig(path)).rejects.toThrow(/telemetry/);
   });
 });
 

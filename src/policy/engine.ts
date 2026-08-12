@@ -15,7 +15,6 @@ export interface PolicyRules {
    * classifier.ts and is always applied on top of these — not repeated here.
    */
   denylist?: string[];
-  allowlist?: string[];
 }
 
 /** Tiers, most restrictive first. Unknown/unset tiers resolve to the first. */
@@ -55,6 +54,11 @@ export const DEFAULT_RULES: PolicyRules = {
  *
  * `denylist` replaces rather than appends, because the defaults carry none and
  * FORBIDDEN_PATTERNS is applied on top by the engine regardless.
+ *
+ * With nothing to layer, `base` is returned as-is rather than copied. The
+ * result is read-only either way — PolicyEngine only reads `rules`, and the
+ * copying below exists so a *later* merge cannot reach DEFAULT_RULES through a
+ * shared tier object, not because callers are expected to mutate what they get.
  */
 export function mergePolicyRules(
   base: PolicyRules,
@@ -75,7 +79,6 @@ export function mergePolicyRules(
   return {
     roleBindings,
     denylist: override.denylist ?? base.denylist,
-    allowlist: base.allowlist,
   };
 }
 
@@ -368,9 +371,9 @@ export class PolicyEngine {
    * dev but not on prod. A reader concludes their role is simply incapable of
    * sudo and goes looking for a bigger role that does not exist (#91).
    *
-   * The inferred case matters most: a profile with no group set lands on the
-   * strictest tier, so the reason is something the operator never wrote down
-   * anywhere and cannot see.
+   * The inferred case matters most: a profile with no group set has its tier
+   * guessed from its name, so the reason is something the operator never wrote
+   * down anywhere and cannot see.
    */
   private explainRoleDenial(profile: Profile, commandClass: CommandClass): string {
     if (profile.readOnly) {
@@ -387,9 +390,14 @@ export class PolicyEngine {
       `(allowed: ${allowed}).`;
 
     if (inferred) {
+      // Not "defaulted to the most restrictive tier": the name is matched
+      // against prod/staging/dev first, so a profile called "staging-web" lands
+      // on staging and the old wording described a fallback that did not
+      // happen. What the operator needs to know is that nothing they wrote
+      // chose this tier.
       reason +=
-        ` No group is set for profile "${profile.name}", so it defaulted to the most restrictive tier.` +
-        ` Set group = "dev" or "staging" on the profile, or pass --group, if this host is not production.`;
+        ` No group is set for profile "${profile.name}", so the tier was inferred from its name as "${group}".` +
+        ` Set group explicitly on the profile, or pass --group, if that is not where this host belongs.`;
     } else {
       reason += ` Change the profile's group, or grant the class to this role in the policy's roleBindings.`;
     }
