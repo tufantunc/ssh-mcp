@@ -56,7 +56,13 @@ export interface Defaults {
 export interface PolicyConfig {
   /** role → host group → the command classes that role may run on that tier. */
   roleBindings?: Record<string, Record<string, CommandClass[]>>;
-  /** Extra deny patterns, as regex source strings. Replaces, not appends. */
+  /**
+   * Extra deny patterns, as regex source strings. Appended to the built-in
+   * never-allowed list (FORBIDDEN_PATTERNS in classifier.ts), which always
+   * applies — setting this cannot switch off the canonical protections. It
+   * does replace any `denylist` on the base PolicyRules, which the compiled-in
+   * defaults do not set.
+   */
   denylist?: string[];
 }
 

@@ -39,6 +39,20 @@ merged commits, so this file exists to record what that graph cannot.
   environment variables ([#32](https://github.com/tufantunc/ssh-mcp/issues/32));
   `SSH_MCP_KEY` is the variable requested.
 
+## Merged contributions
+
+- **[@nordscope-fi](https://github.com/nordscope-fi)** — made the role matrix
+  configurable ([#108](https://github.com/tufantunc/ssh-mcp/pull/108), closing
+  [#95](https://github.com/tufantunc/ssh-mcp/issues/95)), and then went past the
+  brief in the direction that mattered. Their own review of the work found a
+  prototype-pollution hole in the merge before anyone else saw the branch. In
+  review they corrected a claim in mine — a cost I had attributed to removing
+  the tier fallback was not reachable — and produced the case that was: a
+  partial custom role whose profiles set no `group` at all, silently handed
+  production's grant with no typo anywhere to catch it. The startup validation
+  that now refuses those configs is theirs, including the inferred-tier case
+  neither of us had asked for.
+
 ## Contributed implementations
 
 Merged in spirit rather than as commits — these pull requests were built on v1
