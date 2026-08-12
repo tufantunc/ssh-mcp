@@ -9,7 +9,7 @@
 
 **SSH MCP Server** is a security-first Model Context Protocol server that gives LLM agents controlled SSH access to remote hosts — with command classification, policy-based authorization, human-in-the-loop approval, and full audit logging.
 
-> **WARNING — Lethal Trifecta Risk.** Giving an LLM SSH access creates a ["Lethal Trifecta"](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/) (private data + untrusted input + network egress). **Never run as root. Never enable `auto` approval on production.** See [SECURITY.md](./SECURITY.md) for the full threat model and mitigation checklist.
+> **The risk this server exists to manage.** Giving an LLM shell access on a remote host puts private data, untrusted input and network egress in one place — Simon Willison's ["lethal trifecta"](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/). Prompt injection has no general fix, so ssh-mcp assumes any command may be attacker-influenced: it classifies before executing, authorizes against a role × host-group matrix, gates destructive work behind approval, and records the decision either way. That narrows the blast radius; it does not remove the risk. Two things stay yours: **never point it at a root account**, and **never set `auto` approval on a production profile**. [SECURITY.md](./SECURITY.md) has the full threat model.
 
 ---
 
