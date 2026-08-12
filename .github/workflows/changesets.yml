@@ -80,6 +80,32 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The "Version Packages" pull request this opens will never show a green
+      # `test`, and that is expected rather than broken. This action pushes
+      # `changeset-release/main` using GITHUB_TOKEN, and GitHub does not start
+      # workflows for pushes made with that token — the loop-breaker that stops
+      # a workflow from triggering itself. So ci.yml never runs on that branch,
+      # the `test` context required by the "Main Branch Protection" ruleset
+      # never reports, and the PR sits at BLOCKED.
+      #
+      # Merging it therefore takes an admin bypass (`gh pr merge --admin`),
+      # which the ruleset already allows: its bypass_actors carries the Admin
+      # repository role at bypass_mode "always". Nothing needs adding, and
+      # nothing narrower is available — ruleset bypasses are granted to actors
+      # (roles, teams, apps, deploy keys), never to a branch, so "let only
+      # changeset-release/main through" is not expressible.
+      #
+      # What makes that acceptable is that the check would not tell us anything
+      # new. The ruleset sets strict_required_status_checks_policy, so the
+      # release branch must be up to date with main before it can merge, and
+      # ci.yml runs `test` on every push to main. The source being published has
+      # already passed there; the release PR adds a version number and a
+      # CHANGELOG entry on top of it.
+      #
+      # Before merging one, confirm exactly that: the PR touches only
+      # package.json's version, CHANGELOG.md and the consumed changeset files,
+      # and main is green at the commit it sits on. An admin merge of anything
+      # wider is skipping a real check.
       - name: Create Release Pull Request or Publish
         uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1 (branch, not a tag)
         with:
