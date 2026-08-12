@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { requestApproval } from '../../../src/guard/elicitation.js';
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { requestApproval, APPROVAL_TIMEOUT_MS } from '../../../src/guard/elicitation.js';
 import type { PolicyEvaluation } from '../../../src/types.js';
 
 const mockEvaluation: PolicyEvaluation = {
@@ -86,6 +87,73 @@ describe('requestApproval', () => {
     expect(result.unavailable).toBeUndefined();
   });
 
+  /**
+   * Requiring a `confirm` boolean on top of `action` made clients render a
+   * checkbox beside the accept/decline row. Choosing Accept without ticking it
+   * submits a form missing a required field, so the client sends `cancel` — and
+   * the user who picked Approve was told they had declined (#91).
+   */
+  describe('the decision comes from action, not a second checkbox', () => {
+    it('does not mark confirm as required', () => {
+      const server = makeMockServer('accept');
+      requestApproval(server, 'rm /tmp/x', 'dev', mockEvaluation);
+      const params = server.server.elicitInput.mock.calls[0][0];
+      expect(params.requestedSchema.required ?? []).not.toContain('confirm');
+    });
+
+    it('approves a bare accept that carries no content at all', async () => {
+      const server = { server: { elicitInput: vi.fn().mockResolvedValue({ action: 'accept' }) } } as any;
+      const result = await requestApproval(server, 'rm /tmp/x', 'dev', mockEvaluation);
+      expect(result.approved).toBe(true);
+    });
+
+    it('still honours an explicit confirm: false', async () => {
+      // Reading an explicit "no" as approval would be indefensible, whatever
+      // `action` says.
+      const server = {
+        server: { elicitInput: vi.fn().mockResolvedValue({ action: 'accept', content: { confirm: false } }) },
+      } as any;
+      expect((await requestApproval(server, 'rm /tmp/x', 'dev', mockEvaluation)).approved).toBe(false);
+    });
+  });
+
+  /**
+   * The elicitation request inherited the SDK's DEFAULT_REQUEST_TIMEOUT_MSEC of
+   * 60s, setting a human's reading time from a default meant for machine round
+   * trips. Worse, the expiry then reported "a client without elicitation
+   * support" — the wrong cause, in the very message added to stop reporting the
+   * wrong cause.
+   */
+  describe('timeout', () => {
+    it('asks for a human-scale budget rather than inheriting the SDK default', () => {
+      const server = makeMockServer('accept');
+      requestApproval(server, 'rm /tmp/x', 'dev', mockEvaluation);
+      const options = server.server.elicitInput.mock.calls[0][1];
+      expect(options?.timeout).toBe(APPROVAL_TIMEOUT_MS);
+      expect(APPROVAL_TIMEOUT_MS).toBeGreaterThan(60_000);
+    });
+
+    it('names the timeout instead of guessing at missing elicitation support', async () => {
+      const server = {
+        server: {
+          elicitInput: vi.fn().mockRejectedValue(
+            new McpError(ErrorCode.RequestTimeout, 'Request timed out'),
+          ),
+        },
+      } as any;
+      const result = await requestApproval(server, 'rm /tmp/x', 'dev', mockEvaluation);
+      expect(result.approved).toBe(false);
+      expect(result.unavailable).toMatch(/no answer arrived within/);
+      expect(result.unavailable).not.toMatch(/elicitation support/);
+    });
+
+    it('keeps the missing-support wording for errors that are not timeouts', async () => {
+      const result = await requestApproval(makeMockServer('error'), 'rm /tmp/x', 'dev', mockEvaluation);
+      expect(result.unavailable).toMatch(/elicitation support/);
+      expect(result.unavailable).not.toMatch(/no answer arrived/);
+    });
+  });
+
   it('does not approve when the client accepts but confirm is false', async () => {
     const server = {
       server: { elicitInput: vi.fn().mockResolvedValue({ action: 'accept', content: { confirm: false } }) },
@@ -101,6 +169,8 @@ describe('requestApproval', () => {
     expect(params.message).toContain('destructive');
     expect(params.message).toContain('prod-web-1');
     expect(params.message).toContain('rm -rf /tmp/x');
-    expect(params.requestedSchema.required).toContain('confirm');
+    // `confirm` is still offered so a client that wants a field has one; it is
+    // no longer required, which is what turned Accept into a decline (#91).
+    expect(params.requestedSchema.properties.confirm).toBeDefined();
   });
 });
