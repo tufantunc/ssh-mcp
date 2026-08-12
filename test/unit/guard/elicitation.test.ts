@@ -152,6 +152,31 @@ describe('requestApproval', () => {
       expect(result.unavailable).toMatch(/elicitation support/);
       expect(result.unavailable).not.toMatch(/no answer arrived/);
     });
+
+    it('reads a non-timeout McpError as missing support, which is what it is', async () => {
+      // The real shape of "this client does not support elicitation": the SDK
+      // raises MethodNotFound, an McpError like the timeout but not one. The
+      // check has to discriminate on the code, not on the error type.
+      const server = {
+        server: {
+          elicitInput: vi.fn().mockRejectedValue(
+            new McpError(ErrorCode.MethodNotFound, 'Method not found: elicitation/create'),
+          ),
+        },
+      } as any;
+      const result = await requestApproval(server, 'rm /tmp/x', 'dev', mockEvaluation);
+      expect(result.unavailable).toMatch(/elicitation support/);
+      expect(result.unavailable).toContain('Method not found');
+    });
+
+    it('survives a rejection that is not an Error at all', async () => {
+      // A client or transport that rejects with a string would otherwise reach
+      // `err.message` on a string and report `undefined` as the cause.
+      const server = { server: { elicitInput: vi.fn().mockRejectedValue('socket closed') } } as any;
+      const result = await requestApproval(server, 'rm /tmp/x', 'dev', mockEvaluation);
+      expect(result.approved).toBe(false);
+      expect(result.unavailable).toContain('socket closed');
+    });
   });
 
   it('does not approve when the client accepts but confirm is false', async () => {
