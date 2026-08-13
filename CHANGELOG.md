@@ -1,5 +1,31 @@
 # ssh-mcp
 
+## 2.2.3
+
+### Patch Changes
+
+- [#127](https://github.com/tufantunc/ssh-mcp/pull/127) [`a3fcc35`](https://github.com/tufantunc/ssh-mcp/commit/a3fcc35ab2d0bbdda2b1b7889a227e7d53f95f45) Thanks [@nordscope-fi](https://github.com/nordscope-fi)! - Let a config file say "no command-length limit", the way the CLI flag already can ([#123](https://github.com/tufantunc/ssh-mcp/issues/123)).
+
+  `--maxChars=none` disables the cap and the README documents `none` or `0` as doing so. The TOML schema was `positive()`, so `commandMaxChars = 0` was a startup error and the config file had no spelling for it. Moving a flags-based invocation into a config file therefore tightened the limit back to the 5000 default, and the only way to express uncapped was to write `9007199254740991` out in full.
+
+  `commandMaxChars` and the per-profile `maxChars` are now `nonnegative()`, with `0` meaning unlimited. That is the convention this config file already uses for `commandQuotaPerDay` and `approvalGrantTtlMs`, so `commandMaxChars` was the odd one out rather than the key needing a new spelling invented for it.
+
+  **`0` is mapped rather than merely permitted.** `sanitizeCommand` tests `cleaned.length > maxChars`, so a literal `0` arriving there would reject every non-empty command with `Command is too long (max 0 characters)` — a worse failure than the one being fixed. `normalizeConfig` maps it to `Number.MAX_SAFE_INTEGER`, the same value `parseMaxChars` produces for the flag, so the two surfaces hand the rest of the code an identical `Profile` rather than two spellings of uncapped.
+
+  Negatives stay rejected. `--maxChars=-1` means unlimited only as a wart of `parseInt` handling, it is undocumented, and it is likelier to be a typo than an intent; parity is worth having between the documented behaviours, not between the accidents.
+
+- [#129](https://github.com/tufantunc/ssh-mcp/pull/129) [`369bfca`](https://github.com/tufantunc/ssh-mcp/commit/369bfca5d14d832d0dde679353bf23d93a4e9a31) Thanks [@tufantunc](https://github.com/tufantunc)! - Make command classification linear, so an unbounded command cannot stall the server.
+
+  Four of the fourteen never-allowed patterns were quadratic: `dd\s.*\bof=/dev/`, the two `curl`/`wget` pipe-into-shell forms, and `chown\s+-R\s.*\s/\s*$`. Each has a cheap literal head, so the engine matched it at O(n) offsets and dragged a `.*` or `[^|]*` across the remainder from each one. A command built by repeating those literals cost 255 ms at 64 KB and **65 seconds at 1 MB**, all of it blocking the single-threaded event loop.
+
+  The stall sits inside `classifyCommand`, which runs _before_ the approval gate and before the allow/deny decision — so `approvalPolicy = "ask-all"`, `role = "viewer"` and `readOnly = true` gave no protection. One `run-command` call was enough to stop every other profile, session and in-flight command on the server.
+
+  The four are now segment checks over the same tokenizer that already decides power-state invocations: split on shell separators, read the head binary past any `sudo`, and look at its arguments. Nothing there can backtrack. The same 1 MB command now classifies in 45 ms, and behaviour is unchanged — `curl x | sh`, `dd if=x of=/dev/sda`, `chown -R root:root /` and the rest are refused exactly as before, while `curl http://x/data.json`, `dd if=/dev/zero of=/tmp/scratch` and `chown -R app:app /srv/app` still are not.
+
+  `classifier.ts` predicted this in writing: _"a policy check should not depend on a limit set three layers away and configurable to any value."_ Until now `sanitizeCommand`'s `maxChars` was that limit and the default 5000 kept the cost invisible. Letting a config file say `commandMaxChars = 0` removed it, which is what turned a latent property into a reachable one. The check no longer depends on it either way.
+
+  Also in this change: `[defaults].commandMaxChars = 0` is now mapped to the same sentinel as the per-profile `maxChars`, so no literal `0` survives anywhere in the resolved config — a value that would otherwise reject every non-empty command if any caller copied it into a profile. And the README's annotated production profile no longer demonstrates the uncapped spelling on a host it calls `prod-web-1`; the `[defaults]` line documents it instead.
+
 ## 2.2.2
 
 ### Patch Changes
