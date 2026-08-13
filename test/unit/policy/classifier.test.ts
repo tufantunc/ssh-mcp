@@ -121,6 +121,41 @@ describe('forbidden pattern matching cost', () => {
     // them by orders of magnitude in both directions.
     expect(elapsedMs).toBeLessThan(1000);
   });
+
+  /**
+   * The seeds above are runs of spaces, and that is why they missed it.
+   *
+   * A space never matches the literal head of `dd\s`, `curl\s`, `wget\s` or
+   * `chown\s+-R\s`, so the engine rejects each start offset immediately and the
+   * scan stays linear. The cost lives at the *other* end: a string built from
+   * those literals matches the head at O(n) offsets, and each one then drags a
+   * `.*` or `[^|]*` across the remainder. Four of fourteen patterns were
+   * quadratic on this shape while passing the block above.
+   *
+   * Measured on the chain, before the rewrite to segment checks: 64 KB took
+   * 255 ms, 512 KB took 17.4 s, 1 MB took 65 s of blocked event loop — and the
+   * stall sits inside classifyCommand, before the approval gate and before the
+   * allow/deny decision, so no role or approval mode limits it. Afterwards the
+   * same 1 MB is 45 ms.
+   *
+   * This became reachable when a config file could say `commandMaxChars = 0`
+   * (#123). It is asserted at 1 MB because that is the HTTP transport's body
+   * cap; stdio's is the SDK's 10 MB, so a linear check is the only thing that
+   * makes the ceiling irrelevant.
+   */
+  it('stays linear on a command built from the pattern heads themselves', () => {
+    const seed = 'dd curl wget chown -R x ';
+    const oneMegabyte = seed.repeat(Math.ceil(1_000_000 / seed.length)).slice(0, 1_000_000);
+
+    const started = process.hrtime.bigint();
+    classifyCommand(oneMegabyte);
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+    // 45 ms measured, against 65_000 ms before. A second is far enough below
+    // the old figure to fail loudly on a regression and far enough above the
+    // new one to survive a slow CI runner.
+    expect(elapsedMs).toBeLessThan(1000);
+  });
 });
 
 describe('forbidden patterns still match after the rewrite', () => {

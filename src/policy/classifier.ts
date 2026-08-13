@@ -51,28 +51,38 @@ const READ_ONLY_ALLOWLIST = new Set([
  * purposes; see DESTRUCTIVE_DENYLIST below.
  */
 /*
- * Every `\s+` here is followed by a literal. Where a `.*` or `[^|]*` comes
- * next, the quantifier before it is a single `\s`: `\s+.*` lets both halves
- * claim the same run of spaces, so a non-matching command is retried from every
- * split and the match goes quadratic. sanitizeCommand caps commands at
- * profile.maxChars (5000 by default) long before this runs, which is what keeps
- * that cheap — but a policy check should not depend on a limit set three layers
- * away and configurable to any value.
+ * These are the patterns that stayed regexes, and every one of them is linear.
+ *
+ * The four that were not — `dd\s.*\bof=/dev/`, the two `curl|wget …\|\s*(sh…)`
+ * forms, and `chown\s+-R\s.*\s/\s*$` — are now segment checks below. An earlier
+ * comment here reasoned that ambiguity *within* a match was the only cost, and
+ * that was wrong: the engine also restarts at every offset where the cheap
+ * literal head matches, so a command built from `dd curl wget chown -R x `
+ * repeated ran at 4x per doubling. Measured on the real chain: 64 KB took
+ * 255 ms, 1 MB took 65 seconds of blocked event loop, and the stall lands in
+ * classifyCommand — before the approval gate and before the allow/deny
+ * decision, so no role, approval mode or readOnly flag protects against it.
+ *
+ * The old note said sanitizeCommand's maxChars cap kept this cheap, "but a
+ * policy check should not depend on a limit set three layers away and
+ * configurable to any value". Once a config file could say `commandMaxChars = 0`
+ * (#123) that limit went away, and the prediction came true. The rewrite below
+ * is what that sentence was asking for: the policy check is now safe on its own
+ * terms, whatever maxChars says.
+ *
+ * The existing cost test did not catch it because its seeds are runs of spaces,
+ * which never match the literal heads and so never trigger the restart.
  */
 const FORBIDDEN_PATTERNS: RegExp[] = [
   /rm\s+-rf?\s+\/(\s|$)/,          // rm -rf / — the filesystem root itself
   /mkfs\./,
-  /dd\s.*\bof=\/dev\//,
   />\s*\/dev\/sd/,
   /:\(\)\s*\{\s*:\|:\&\s*\}\s*;\s*:/,   // fork bomb
-  /curl\s[^|]*\|\s*(sh|bash|zsh)/,
-  /wget\s[^|]*\|\s*(sh|bash|zsh)/,
   />\s*\/etc\/cron/,
   />\s*\/etc\/systemd/,
   />\s*~\/.ssh\/authorized_keys/,
   /\biptables\s+-F\b/,
   /\bchmod\s+-R\s+777\s+\//,
-  /\bchown\s+-R\s.*\s\/\s*$/,
 ];
 
 /**
@@ -122,14 +132,21 @@ function stripPath(word: string): string {
  * Pure string work: split, trim, set lookups. No quantifiers, so nothing here
  * can backtrack.
  */
-function invokedWords(command: string): string[] {
-  const invoked: string[] = [];
+interface Segment {
+  /** The binary being run, with any directory part and privilege prefix removed. */
+  head: string;
+  /** Everything after it, verbatim — `of=/dev/sda` must not be path-stripped. */
+  args: string[];
+}
 
-  for (const segment of command.split(/[;&|\n]/)) {
-    const words = segment.trim().split(/\s+/).filter(Boolean).map(stripPath);
+function parseSegments(command: string): Segment[] {
+  const segments: Segment[] = [];
+
+  for (const raw of command.split(/[;&|\n]/)) {
+    const words = raw.trim().split(/\s+/).filter(Boolean);
 
     let i = 0;
-    while (i < words.length && PRIVILEGE_PREFIXES.has(words[i])) {
+    while (i < words.length && PRIVILEGE_PREFIXES.has(stripPath(words[i]))) {
       i++;
       while (i < words.length && words[i].startsWith('-')) {
         const consumesValue = PREFIX_VALUE_FLAGS.has(words[i]);
@@ -138,19 +155,69 @@ function invokedWords(command: string): string[] {
       }
     }
 
-    const head = words[i];
-    if (!head) continue;
+    if (i < words.length) {
+      segments.push({ head: stripPath(words[i]), args: words.slice(i + 1) });
+    }
+  }
+
+  return segments;
+}
+
+function invokedWords(command: string): string[] {
+  const invoked: string[] = [];
+
+  for (const { head, args } of parseSegments(command)) {
     invoked.push(head);
 
     // `systemctl reboot` restarts the host. Reading a unit that happens to be
     // named after a power action is rare enough that erring towards refusal
     // here costs little.
     if (ACTION_MULTIPLEXERS.has(head)) {
-      invoked.push(...words.slice(i + 1).filter((w) => !w.startsWith('-')));
+      invoked.push(...args.filter((w) => !w.startsWith('-')).map(stripPath));
     }
   }
 
   return invoked;
+}
+
+const SHELLS = new Set(['sh', 'bash', 'zsh']);
+const DOWNLOADERS = new Set(['curl', 'wget']);
+
+/**
+ * A download piped into a shell.
+ *
+ * Split on `|` rather than reading the whole string, so cost is linear in the
+ * command's length no matter how the two halves are spaced. `||` produces an
+ * empty part between them, and this deliberately still matches: `curl x || sh`
+ * runs a shell when the download fails, which is not meaningfully safer than
+ * running one when it succeeds.
+ */
+function pipesDownloadIntoShell(command: string): boolean {
+  const heads = command.split('|').map((part) => parseSegments(part)[0]?.head);
+  const firstDownload = heads.findIndex((h) => h !== undefined && DOWNLOADERS.has(h));
+  if (firstDownload === -1) return false;
+  return heads.slice(firstDownload + 1).some((h) => h !== undefined && SHELLS.has(h));
+}
+
+/** `dd … of=/dev/sda` — writing an image straight onto a block device. */
+function writesToDevice(command: string): boolean {
+  return parseSegments(command).some(
+    ({ head, args }) => head === 'dd' && args.some((a) => a.startsWith('of=/dev/')),
+  );
+}
+
+/**
+ * `chown -R … /` — a recursive chown whose target is the filesystem root.
+ *
+ * The last non-flag argument is the target; `chown -R app:app /srv/app` is
+ * ordinary and stays allowed.
+ */
+function chownsRoot(command: string): boolean {
+  return parseSegments(command).some(({ head, args }) => {
+    if (head !== 'chown' || !args.includes('-R')) return false;
+    const positional = args.filter((a) => !a.startsWith('-'));
+    return positional[positional.length - 1] === '/';
+  });
 }
 
 /** A forbidden rule, paired with wording a refusal can quote back. */
@@ -165,6 +232,12 @@ const FORBIDDEN_RULES: ForbiddenRule[] = [
     label: 'invoking a power-state command (shutdown, reboot, halt, poweroff) or eval',
     test: (command) => invokedWords(command).some((w) => FORBIDDEN_INVOCATIONS.has(w)),
   },
+  {
+    label: 'piping a download into a shell (curl or wget into sh, bash or zsh)',
+    test: pipesDownloadIntoShell,
+  },
+  { label: 'dd writing to a block device (of=/dev/…)', test: writesToDevice },
+  { label: 'a recursive chown of the filesystem root', test: chownsRoot },
 ];
 
 /**

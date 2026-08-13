@@ -177,7 +177,7 @@ cert = false                        # SSH CA cert auth — auto-detects keyRef-c
 sessionMaxPerConnection = 3         # per-profile override
 sessionIdleTimeoutMs = 300000       # stricter for prod
 commandQuotaPerDay = 200            # per-profile override
-maxChars = 0                        # per-profile override; 0 = unlimited
+maxChars = 2000                     # per-profile override; stricter for prod
 
 # Optional. Merged over the built-in role matrix; see "Policy Engine" below.
 # roleBindings is keyed by role and then by tier, so the block below changes

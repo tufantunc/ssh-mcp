@@ -84,13 +84,49 @@ maxChars = 0
     expect(sanitizeCommand(LONG_COMMAND, maxChars)).toBe(LONG_COMMAND);
   });
 
-  it('a profile inherits an unlimited default', async () => {
-    const maxChars = await maxCharsFor(`
+  /**
+   * The property `uncapZero`'s placement decides, and the only shape that pins
+   * it: the mapping runs inside `raw.profiles.map()`, so one profile's `0` must
+   * not reach its siblings. Every other case here declares a single profile,
+   * which cannot tell a per-profile map from a global one.
+   */
+  it('uncaps only the profile that asked, not its siblings', async () => {
+    const config = await loadConfig(await writeConfig(`
+[defaults]
+commandMaxChars = 100
+
+[[profiles]]
+name = "web"
+host = "10.0.0.5"
+user = "deploy"
+maxChars = 0
+
+[[profiles]]
+name = "db"
+host = "10.0.0.6"
+user = "deploy"
+`));
+
+    expect(getProfile(config, 'web').maxChars).toBe(Number.MAX_SAFE_INTEGER);
+    expect(getProfile(config, 'db').maxChars).toBe(100);
+  });
+
+  /**
+   * `defaults` is mapped as well as the profile, so AppConfig carries one
+   * encoding of "unlimited" rather than two. Asserted rather than assumed
+   * because index.ts:161 copies this field straight into a Profile, and a
+   * literal `0` arriving at sanitizeCommand rejects every non-empty command —
+   * the failure this whole file exists to prevent, reached from the other side.
+   */
+  it('leaves no literal 0 anywhere in the resolved config', async () => {
+    const config = await loadConfig(await writeConfig(`
 [defaults]
 commandMaxChars = 0
-${PROFILE}`);
+${PROFILE}`));
 
-    expect(sanitizeCommand('uptime', maxChars)).toBe('uptime');
+    expect(config.defaults.commandMaxChars).toBe(Number.MAX_SAFE_INTEGER);
+    expect(getProfile(config, 'web').maxChars).toBe(Number.MAX_SAFE_INTEGER);
+    expect(sanitizeCommand(LONG_COMMAND, config.defaults.commandMaxChars)).toBe(LONG_COMMAND);
   });
 });
 
