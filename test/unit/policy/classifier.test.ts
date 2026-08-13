@@ -17,6 +17,52 @@ describe('classifyCommand', () => {
     expect(classifyCommand('doas whoami').class).toBe('privileged');
   });
 
+  // A privilege prefix only counted at the very start of the string, so any
+  // harmless leading segment carried sudo past the approval gate as `safe`.
+  it('classifies elevation as privileged after every shell separator', () => {
+    expect(classifyCommand('echo hi; sudo id').class).toBe('privileged');
+    expect(classifyCommand('true && sudo id').class).toBe('privileged');
+    expect(classifyCommand('false || sudo id').class).toBe('privileged');
+    expect(classifyCommand('cat /etc/hosts | sudo tee /etc/hosts.bak').class).toBe('privileged');
+    expect(classifyCommand('cd /tmp\nsudo id').class).toBe('privileged');
+    expect(classifyCommand('ls / ; sudo systemctl restart nginx').class).toBe('privileged');
+  });
+
+  it('classifies elevation as privileged regardless of which prefix or path', () => {
+    expect(classifyCommand('echo hi; /usr/bin/sudo id').class).toBe('privileged');
+    expect(classifyCommand('echo hi; doas id').class).toBe('privileged');
+    expect(classifyCommand('echo hi; pkexec id').class).toBe('privileged');
+    expect(classifyCommand('echo hi; sudo -u root id').class).toBe('privileged');
+  });
+
+  // The mirror of #91: matching the word anywhere would refuse commands that
+  // only read about sudo. These invoke nothing, so they must stay unprivileged.
+  it('does not treat a mention of sudo as an invocation', () => {
+    expect(classifyCommand('grep sudo /var/log/auth.log').class).toBe('read-only');
+    expect(classifyCommand('cat /etc/sudoers').class).toBe('read-only');
+    expect(classifyCommand('ls -la /usr/bin/sudo').class).toBe('read-only');
+    expect(classifyCommand('echo sudo').class).toBe('read-only');
+    expect(classifyCommand('journalctl -u sudo').class).toBe('read-only');
+  });
+
+  it('does not treat a binary that merely starts with a prefix name as elevation', () => {
+    expect(classifyCommand('sudoedit /etc/hosts').class).not.toBe('privileged');
+    expect(classifyCommand('subl file.txt').class).not.toBe('privileged');
+  });
+
+  it('treats a bare privilege prefix with no command as privileged', () => {
+    expect(classifyCommand('sudo').class).toBe('privileged');
+    expect(classifyCommand('sudo -u root').class).toBe('privileged');
+    expect(classifyCommand('echo hi; sudo').class).toBe('privileged');
+  });
+
+  // privileged is checked before destructive, and both must still win over the
+  // read-only allowlist that the leading segment would otherwise earn.
+  it('ranks elevation above the leading segment classification', () => {
+    expect(classifyCommand('ls -la; sudo id').class).toBe('privileged');
+    expect(classifyCommand('df -h && sudo reboot').class).toBe('privileged');
+  });
+
   it('classifies destructive patterns', () => {
     expect(classifyCommand('rm -rf /').class).toBe('destructive');
     expect(classifyCommand('mkfs.ext4 /dev/sda').class).toBe('destructive');

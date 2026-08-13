@@ -137,6 +137,8 @@ interface Segment {
   head: string;
   /** Everything after it, verbatim — `of=/dev/sda` must not be path-stripped. */
   args: string[];
+  /** Whether a privilege prefix (sudo, su, doas, pkexec) introduced this segment. */
+  privileged: boolean;
 }
 
 function parseSegments(command: string): Segment[] {
@@ -146,7 +148,9 @@ function parseSegments(command: string): Segment[] {
     const words = raw.trim().split(/\s+/).filter(Boolean);
 
     let i = 0;
+    let privileged = false;
     while (i < words.length && PRIVILEGE_PREFIXES.has(stripPath(words[i]))) {
+      privileged = true;
       i++;
       while (i < words.length && words[i].startsWith('-')) {
         const consumesValue = PREFIX_VALUE_FLAGS.has(words[i]);
@@ -156,11 +160,35 @@ function parseSegments(command: string): Segment[] {
     }
 
     if (i < words.length) {
-      segments.push({ head: stripPath(words[i]), args: words.slice(i + 1) });
+      segments.push({ head: stripPath(words[i]), args: words.slice(i + 1), privileged });
+    } else if (privileged) {
+      // `sudo`, or `sudo -u root`, with nothing after it. No binary runs, but
+      // privilege was still requested, and the old anchored regex classified it
+      // as privileged. Keep that: a head-less segment is inert for every other
+      // consumer here (none of them match an empty head).
+      segments.push({ head: '', args: [], privileged });
     }
   }
 
   return segments;
+}
+
+/**
+ * Whether the command asks for elevation *anywhere a shell would act on it*.
+ *
+ * This used to be `PRIVILEGED_INDICATORS.some((re) => re.test(command))` with
+ * every pattern anchored at `^`, so only a leading prefix counted. `sudo id`
+ * was privileged; `echo hi; sudo id` was `safe` and ran with no approval at
+ * all. Any harmless first segment — `true &&`, `cd /tmp;`, a `|` — was enough
+ * to drop elevation past the gate.
+ *
+ * Scanning the raw string for `\bsudo\b` instead would re-break what #91 fixed
+ * for `reboot`: `grep sudo /var/log/auth.log` and `cat /etc/sudoers` mention
+ * the word without invoking it. Segment heads are already the distinction
+ * between an invocation and a mention, so this reuses them.
+ */
+function isPrivileged(command: string): boolean {
+  return parseSegments(command).some((segment) => segment.privileged);
 }
 
 function invokedWords(command: string): string[] {
@@ -277,7 +305,16 @@ function isDestructive(command: string): boolean {
   return isForbidden(command) || DESTRUCTIVE_PATTERNS.some((re) => re.test(command));
 }
 
-const PRIVILEGED_INDICATORS = [
+/**
+ * Leading privilege prefixes, stripped so `sudo systemctl status` is *named*
+ * after `systemctl`.
+ *
+ * Naming only. The privilege *decision* is isPrivileged(), which walks every
+ * segment — these are anchored at `^` and answer a different question: "what
+ * should this command be called?", not "does it elevate?". Conflating the two
+ * is what let `echo hi; sudo id` through.
+ */
+const LEADING_PRIVILEGE_PREFIXES = [
   /^\s*sudo\b/,
   /^\s*su\b/,
   /^\s*doas\b/,
@@ -286,7 +323,7 @@ const PRIVILEGED_INDICATORS = [
 
 export function extractBinary(command: string): string {
   let cmd = command.trim();
-  for (const prefix of PRIVILEGED_INDICATORS) {
+  for (const prefix of LEADING_PRIVILEGE_PREFIXES) {
     cmd = cmd.replace(prefix, '').trim();
   }
   if (cmd.startsWith('-c ')) {
@@ -301,9 +338,7 @@ export function classifyCommand(command: string): ParsedCommand {
   const binary = extractBinary(trimmed);
   const fullCommand = trimmed;
 
-  const isPrivileged = PRIVILEGED_INDICATORS.some((re) => re.test(trimmed));
-
-  if (isPrivileged) {
+  if (isPrivileged(trimmed)) {
     return { binary, fullCommand, class: 'privileged' as CommandClass };
   }
 
