@@ -105,8 +105,18 @@ function uncapZero(maxChars: number): number {
  * downgrade, not just a papercut).
  */
 function normalizeConfig(raw: RawConfig): AppConfig {
+  // commandMaxChars is mapped here as well as on the profile below, so no `0`
+  // survives anywhere in AppConfig. Leaving the raw value on `defaults` left one
+  // object carrying two encodings of "unlimited" — `profile.maxChars` as
+  // MAX_SAFE_INTEGER, `defaults.commandMaxChars` as 0 — with nothing in the
+  // types to tell them apart. index.ts:161 already copies straight across
+  // (`maxChars: defaults.commandMaxChars`), and was correct only because that
+  // path's value comes from parseMaxChars, which never returns 0. Correct by
+  // coincidence of another surface is not a property to leave standing when the
+  // wrong encoding rejects every non-empty command.
   const defaults: Defaults = {
     ...raw.defaults,
+    commandMaxChars: uncapZero(raw.defaults.commandMaxChars),
   };
 
   const profiles: Profile[] = raw.profiles.map((p) => ({
