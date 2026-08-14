@@ -114,7 +114,27 @@ const FORBIDDEN_INVOCATIONS = new Set(['shutdown', 'reboot', 'halt', 'poweroff',
 /** Binaries that take the dangerous action as an argument: `systemctl reboot`. */
 const ACTION_MULTIPLEXERS = new Set(['systemctl', 'init', 'telinit']);
 
-const PRIVILEGE_PREFIXES = new Set(['sudo', 'su', 'doas', 'pkexec']);
+/**
+ * Binaries that run the rest of the command as another user.
+ *
+ * The list is explicit rather than a pattern, because a pattern cannot tell
+ * `sudoedit` — which edits a file and is not elevation — from `sudo-rs`, which
+ * is sudo. It has to be maintained by hand as new implementations appear; the
+ * cost of missing one is that its commands classify `safe`.
+ *
+ * The last five were added in 2.2.5 (#132). Until 2.2.4 the check was
+ * `/^\s*su\b/` and friends, and `\b` matched between `su` and the hyphen, so
+ * `su-exec` and `sudo-rs` were caught — by accident of the regex, not by
+ * intent. Moving to exact membership dropped them, which narrowed a security
+ * control inside a security release. `gosu` and `run0` were never caught by
+ * either form.
+ */
+const PRIVILEGE_PREFIXES = new Set([
+  'sudo', 'su', 'doas', 'pkexec',
+  // BusyBox/Alpine, Docker entrypoints, the Rust sudo now default on some
+  // distributions, systemd's replacement, and the Solaris/illumos spelling.
+  'su-exec', 'gosu', 'sudo-rs', 'run0', 'pfexec',
+]);
 
 /**
  * Binaries whose job is to run another command.
