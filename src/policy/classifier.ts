@@ -22,7 +22,7 @@ const SHELL_CONTROL_CHARS = /[;&|<>`$(){}\n\r]/;
 const READ_ONLY_ALLOWLIST = new Set([
   'ls', 'cat', 'grep', 'find', 'stat', 'df', 'du', 'head', 'tail', 'wc',
   'ps', 'uname', 'uptime', 'hostname', 'id', 'who', 'whoami', 'date',
-  'env', 'printenv', 'pwd', 'echo', 'printf', 'test', 'true', 'false',
+  'printenv', 'pwd', 'echo', 'printf', 'test', 'true', 'false',
   'which', 'whereis', 'file', 'readlink', 'realpath', 'basename', 'dirname',
   'seq', 'sort', 'uniq', 'cut', 'tr', 'diff', 'comm',
   'systemctl status', 'journalctl', 'docker ps', 'docker logs', 'docker inspect',
@@ -31,6 +31,15 @@ const READ_ONLY_ALLOWLIST = new Set([
   'host', 'ping', 'traceroute', 'git status', 'git log',
   'git diff', 'git branch', 'git show', 'git remote',
 ]);
+// Deliberately NOT read-only: `env`, because it is an exec wrapper. `env <cmd>`
+// runs <cmd>, so allowlisting the name `env` vouched for a command the
+// classifier never looked at — `env sudo rm -f /etc/passwd` classified
+// `read-only` and ran on a profile whose whole contract is that it cannot
+// write. It carries no shell metacharacter, so the SHELL_CONTROL_CHARS gate
+// below did not catch it either. Falls through to `safe`, so run-command can
+// still reach it under policy; a bare `env` that only prints the environment
+// loses read-only status with it, which is the price of a name-based allowlist.
+//
 // Deliberately NOT read-only: `curl` and `wget` fetch arbitrary URLs (SSRF to
 // cloud metadata / internal services), post local files to a remote host
 // (`curl -d @/etc/passwd`), and write remote files (`curl -o`, `wget -O`) —
@@ -108,6 +117,55 @@ const ACTION_MULTIPLEXERS = new Set(['systemctl', 'init', 'telinit']);
 const PRIVILEGE_PREFIXES = new Set(['sudo', 'su', 'doas', 'pkexec']);
 
 /**
+ * Binaries whose job is to run another command.
+ *
+ * The allowlist and the privilege check both name a binary, so a wrapper hides
+ * whatever it wraps: `env sudo id` was classified by the name `env`. These are
+ * stepped over when deciding whether a segment elevates, so the check sees the
+ * command that will actually run.
+ *
+ * `env` is the one that was also allowlisted, and it has been removed from
+ * READ_ONLY_ALLOWLIST above. The rest were never read-only, so before this they
+ * hid elevation rather than granting it — `nohup sudo systemctl stop nginx`
+ * classified `safe`, which the default bindings grant to admin and operator on
+ * every tier.
+ */
+const EXEC_WRAPPERS = new Set([
+  'env', 'nohup', 'nice', 'ionice', 'command', 'exec', 'setsid', 'stdbuf',
+  'timeout', 'chrt', 'taskset', 'xargs', 'watch',
+]);
+
+/**
+ * Arguments that turn an allowlisted binary into one that writes or executes.
+ *
+ * The allowlist vouches for a name; these are the flags that make the name a
+ * lie. `find /var/www -delete` removes a directory tree and `find / -exec sudo
+ * id +` runs a command as root, and both classified `read-only` — the `-exec …
+ * \;` form only escaped because `;` happens to be a shell metacharacter, while
+ * the `+` terminator carries none.
+ */
+const DISQUALIFYING_ARGS: Record<string, RegExp> = {
+  find: /^-(exec|execdir|ok|okdir|delete|fprintf?|fls)$/,
+};
+
+/** A leading `NAME=value`, which a shell treats as an assignment, not a command. */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/** `timeout 5s`, `nice 10` — a bare argument some wrappers take before the command. */
+const BARE_NUMERIC = /^\d+(\.\d+)?[smhd]?$/;
+
+/**
+ * Remove the quoting a shell would remove before looking up a command.
+ *
+ * `\sudo`, `'sudo'` and `"sudo"` all execute sudo — the backslash only
+ * suppresses alias expansion — but a verbatim string comparison sees three
+ * different words. Without this, a one-character edit walks around the check.
+ */
+function unquote(word: string): string {
+  return word.replace(/^(['"])(.*)\1$/, '$2').replace(/\\(.)/g, '$1');
+}
+
+/**
  * Privilege-prefix flags that consume the next argument, so `sudo -u root
  * reboot` is not read as invoking `root`. Enumerable because it is one tool's
  * option set, unlike "every flag of every binary".
@@ -161,6 +219,59 @@ function parseSegments(command: string): Segment[] {
   }
 
   return segments;
+}
+
+/**
+ * Whether a segment asks for elevation, reading past anything that is not yet
+ * the command.
+ *
+ * A shell resolves the command word after assignments, and a wrapper runs what
+ * follows it, so all of these execute sudo while naming something else first:
+ *
+ *   env sudo id            nohup sudo id         timeout 5 sudo id
+ *   FOO=1 sudo id          nice -n 10 sudo id    command sudo id
+ *
+ * The scan walks left to right and stops at the first word that is a real
+ * command. Reaching a privilege prefix before that is elevation; reaching
+ * anything else is not, which is what keeps `grep sudo /var/log/auth.log` a
+ * mention rather than an invocation.
+ */
+function segmentElevates(words: string[]): boolean {
+  for (const raw of words) {
+    const word = stripPath(unquote(raw));
+
+    if (PRIVILEGE_PREFIXES.has(word)) return true;
+
+    if (ASSIGNMENT.test(raw)) continue;
+    if (EXEC_WRAPPERS.has(word)) continue;
+    if (raw.startsWith('-')) continue;
+    if (BARE_NUMERIC.test(raw)) continue;
+
+    return false;
+  }
+
+  return false;
+}
+
+/**
+ * Does this command elevate anywhere a shell would act on it?
+ *
+ * Replaces four `^`-anchored regexes that only saw a *leading* prefix. Elevation
+ * behind a wrapper, behind an assignment, or after a separator all reached root
+ * with the command classified `safe` or `read-only`.
+ */
+function elevates(command: string): boolean {
+  return command
+    .split(/[;&|\n]/)
+    .some((segment) => segmentElevates(segment.trim().split(/\s+/).filter(Boolean)));
+}
+
+/** An allowlisted binary carrying a flag that makes it write or execute. */
+function hasDisqualifyingArgs(command: string): boolean {
+  return parseSegments(command).some(({ head, args }) => {
+    const rule = DISQUALIFYING_ARGS[head];
+    return rule !== undefined && args.some((arg) => rule.test(arg));
+  });
 }
 
 function invokedWords(command: string): string[] {
@@ -277,7 +388,7 @@ function isDestructive(command: string): boolean {
   return isForbidden(command) || DESTRUCTIVE_PATTERNS.some((re) => re.test(command));
 }
 
-const PRIVILEGED_INDICATORS = [
+const LEADING_PRIVILEGE_PREFIXES = [
   /^\s*sudo\b/,
   /^\s*su\b/,
   /^\s*doas\b/,
@@ -286,7 +397,7 @@ const PRIVILEGED_INDICATORS = [
 
 export function extractBinary(command: string): string {
   let cmd = command.trim();
-  for (const prefix of PRIVILEGED_INDICATORS) {
+  for (const prefix of LEADING_PRIVILEGE_PREFIXES) {
     cmd = cmd.replace(prefix, '').trim();
   }
   if (cmd.startsWith('-c ')) {
@@ -301,13 +412,11 @@ export function classifyCommand(command: string): ParsedCommand {
   const binary = extractBinary(trimmed);
   const fullCommand = trimmed;
 
-  const isPrivileged = PRIVILEGED_INDICATORS.some((re) => re.test(trimmed));
-
-  if (isPrivileged) {
+  if (elevates(trimmed)) {
     return { binary, fullCommand, class: 'privileged' as CommandClass };
   }
 
-  if (isDestructive(trimmed)) {
+  if (isDestructive(trimmed) || hasDisqualifyingArgs(trimmed)) {
     return { binary, fullCommand, class: 'destructive' as CommandClass };
   }
 

