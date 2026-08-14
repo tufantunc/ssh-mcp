@@ -142,6 +142,36 @@ describe('elevation and exec wrappers (GHSA-6f54-mjqq-2jp8)', () => {
     expect(classifyCommand('\\sudo id').class).toBe('privileged');
   });
 
+  /**
+   * A narrowing 2.2.4 introduced while fixing the advisory, and a gap that
+   * predates both.
+   *
+   * Until 2.2.4 the check was `/^\s*su\b/`, and `\b` matched between `su` and a
+   * hyphen — so `su-exec` and `sudo-rs` were classified privileged by accident
+   * of the regex. Exact `Set` membership dropped them, and on a prod profile
+   * that turned a `deny` into an `allow`. `gosu` was caught by neither form.
+   *
+   * These are the elevation binaries of container images and of distributions
+   * that have replaced sudo, so a host running one had no elevation gate at all.
+   */
+  it('recognises elevation binaries beyond the four classic names', () => {
+    expect(classifyCommand('su-exec deploy cat /etc/shadow').class).toBe('privileged');
+    expect(classifyCommand('gosu root id').class).toBe('privileged');
+    expect(classifyCommand('sudo-rs id').class).toBe('privileged');
+    expect(classifyCommand('run0 systemctl restart nginx').class).toBe('privileged');
+    expect(classifyCommand('pfexec id').class).toBe('privileged');
+    // And behind a wrapper or a separator, like the four already were.
+    expect(classifyCommand('env gosu root id').class).toBe('privileged');
+    expect(classifyCommand('echo hi; su-exec deploy id').class).toBe('privileged');
+  });
+
+  // The reason this is a list and not a pattern: `sudo*` would swallow both.
+  it('still does not treat sudoedit or an unrelated binary as elevation', () => {
+    expect(classifyCommand('sudoedit /etc/hosts').class).toBe('safe');
+    expect(classifyCommand('subl file.txt').class).toBe('safe');
+    expect(classifyCommand('sudoku').class).toBe('safe');
+  });
+
   it('treats find as writing when it carries an action flag', () => {
     expect(classifyCommand('find /var/www -delete').class).toBe('destructive');
     expect(classifyCommand('find / -name x -exec sudo id +').class).toBe('destructive');
