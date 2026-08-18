@@ -25,8 +25,20 @@ export function verifyHostKey(
 
   if (stored) {
     if (stored !== fingerprint) {
+      // Two very different things produce this, and the message has to let the
+      // reader tell them apart — otherwise the reflex is --insecureHostKey,
+      // which turns the check off for every host rather than for this one.
       throw new Error(
-        `HOST_KEY_MISMATCH: ${host}:${port} key changed (expected ${stored.slice(0, 20)}..., got ${fingerprint.slice(0, 20)}...)`,
+        `HOST_KEY_MISMATCH: the key presented by ${host}:${port} is not the one seen before.\n` +
+        `  expected ${stored}\n` +
+        `  received ${fingerprint}\n` +
+        'Either the server was rebuilt, reinstalled or had its address reused — in which case the new key is ' +
+        'genuine — or something is intercepting this connection, which is what this check exists to catch. ' +
+        'Nothing here can tell those apart; confirm the fingerprint out of band, from the host itself ' +
+        '(`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server) or from whoever rebuilt it.\n' +
+        'If it matches, pin it with trustedHostKey on the profile. Do not reach for --insecureHostKey to get ' +
+        'past this: it disables verification for every host and every future connection, including the case ' +
+        'this message is warning you about.',
       );
     }
     return true;
