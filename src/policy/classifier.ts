@@ -256,22 +256,63 @@ function parseSegments(command: string): Segment[] {
  * anything else is not, which is what keeps `grep sudo /var/log/auth.log` a
  * mention rather than an invocation.
  */
-function segmentElevates(words: string[]): boolean {
-  for (const raw of words) {
+function elevatedBinary(words: string[]): string | null {
+  let i = 0;
+  let prefix: string | null = null;
+
+  while (i < words.length) {
+    const raw = words[i];
     const word = stripPath(unquote(raw));
 
-    if (PRIVILEGE_PREFIXES.has(word)) return true;
+    if (PRIVILEGE_PREFIXES.has(word)) {
+      prefix ??= word;
+      i++;
+      // The prefix's own options, some of which swallow the next word.
+      while (i < words.length && words[i].startsWith('-')) {
+        const consumesValue = PREFIX_VALUE_FLAGS.has(words[i]);
+        i++;
+        if (consumesValue) i++;
+      }
+      continue;
+    }
 
-    if (ASSIGNMENT.test(raw)) continue;
-    if (EXEC_WRAPPERS.has(word)) continue;
-    if (raw.startsWith('-')) continue;
-    if (BARE_NUMERIC.test(raw)) continue;
+    // Words that are not yet the command: an assignment, a wrapper, an option,
+    // or the bare number `timeout`/`nice` take before theirs.
+    if (ASSIGNMENT.test(raw) || EXEC_WRAPPERS.has(word)
+      || raw.startsWith('-') || BARE_NUMERIC.test(raw)) {
+      i++;
+      continue;
+    }
 
-    return false;
+    // A real command. Before any prefix it means the segment does not elevate —
+    // which is what keeps `grep sudo /var/log/auth.log` a mention. After one, it
+    // is what actually runs as root.
+    return prefix === null ? null : word;
   }
 
-  return false;
+  // `sudo`, or `sudo -u root`, with nothing after it: the prefix is all there is
+  // to name.
+  return prefix;
 }
+
+/**
+ * The binary this command runs under elevation, or null if it runs none.
+ *
+ * Returning the name rather than a boolean is what lets `ParsedCommand.binary`
+ * describe the same command the class does. Until 2.2.4 a `privileged` class
+ * implied a leading prefix, so the anchored `extractBinary` always named the
+ * elevated binary; once elevation could be found in any segment that stopped
+ * holding, and `echo hi; sudo id` recorded `binary: "echo"` against a
+ * privileged decision — in the audit log, the OTel span and OPA's input (#134).
+ */
+function elevatedBinaryOf(command: string): string | null {
+  for (const segment of command.split(/[;&|\n]/)) {
+    const found = elevatedBinary(segment.trim().split(/\s+/).filter(Boolean));
+    if (found !== null) return found;
+  }
+  return null;
+}
+
 
 /**
  * Does this command elevate anywhere a shell would act on it?
@@ -280,11 +321,7 @@ function segmentElevates(words: string[]): boolean {
  * behind a wrapper, behind an assignment, or after a separator all reached root
  * with the command classified `safe` or `read-only`.
  */
-function elevates(command: string): boolean {
-  return command
-    .split(/[;&|\n]/)
-    .some((segment) => segmentElevates(segment.trim().split(/\s+/).filter(Boolean)));
-}
+
 
 /** An allowlisted binary carrying a flag that makes it write or execute. */
 function hasDisqualifyingArgs(command: string): boolean {
@@ -432,8 +469,12 @@ export function classifyCommand(command: string): ParsedCommand {
   const binary = extractBinary(trimmed);
   const fullCommand = trimmed;
 
-  if (elevates(trimmed)) {
-    return { binary, fullCommand, class: 'privileged' as CommandClass };
+  // `binary` names the subject of the class. For everything below it is the
+  // leading command; here it is the one that runs as root, which are the same
+  // thing only when the prefix leads.
+  const elevated = elevatedBinaryOf(trimmed);
+  if (elevated !== null) {
+    return { binary: elevated, fullCommand, class: 'privileged' as CommandClass };
   }
 
   if (isDestructive(trimmed) || hasDisqualifyingArgs(trimmed)) {

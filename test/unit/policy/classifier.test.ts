@@ -172,6 +172,47 @@ describe('elevation and exec wrappers (GHSA-6f54-mjqq-2jp8)', () => {
     expect(classifyCommand('sudoku').class).toBe('safe');
   });
 
+  /**
+   * `binary` names the subject of the class (#134).
+   *
+   * Until 2.2.4 a `privileged` class implied a leading prefix, so the anchored
+   * `extractBinary` always happened to name the elevated binary. Once elevation
+   * could be found in any segment that stopped holding, and `echo hi; sudo id`
+   * recorded `binary: "echo"` against a privileged decision — which is what
+   * reaches the audit log, the OTel span and OPA's `resource.binary`. An auditor
+   * filtering by binary would not have found it.
+   */
+  describe('binary names what the class is about', () => {
+    const binaryOf = (c: string) => classifyCommand(c).binary;
+
+    it('names the elevated command, not the one that happened to be first', () => {
+      expect(binaryOf('echo hi; sudo id')).toBe('id');
+      expect(binaryOf('cd /srv && sudo systemctl restart app')).toBe('systemctl');
+      expect(binaryOf('df -h && sudo reboot')).toBe('reboot');
+    });
+
+    it('looks past wrappers, assignments and the prefix\'s own flags', () => {
+      expect(binaryOf('env sudo id')).toBe('id');
+      expect(binaryOf('nice -n 10 sudo id')).toBe('id');
+      expect(binaryOf('FOO=1 sudo systemctl restart app')).toBe('systemctl');
+      // -u swallows `root`, so the command is the word after it.
+      expect(binaryOf('sudo -u root reboot')).toBe('reboot');
+      expect(binaryOf('"sudo" id')).toBe('id');
+    });
+
+    it('falls back to the prefix when nothing follows it', () => {
+      expect(binaryOf('sudo')).toBe('sudo');
+      expect(binaryOf('sudo -u root')).toBe('sudo');
+    });
+
+    it('leaves every other class naming the leading command', () => {
+      expect(binaryOf('ls -la')).toBe('ls');
+      expect(binaryOf('grep sudo /var/log/auth.log')).toBe('grep');
+      expect(binaryOf('find /var/www -delete')).toBe('find');
+      expect(binaryOf('npm install')).toBe('npm');
+    });
+  });
+
   it('treats find as writing when it carries an action flag', () => {
     expect(classifyCommand('find /var/www -delete').class).toBe('destructive');
     expect(classifyCommand('find / -name x -exec sudo id +').class).toBe('destructive');

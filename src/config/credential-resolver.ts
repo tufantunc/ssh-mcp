@@ -107,9 +107,22 @@ export async function resolveCredentials(profile: Profile): Promise<ResolvedCred
   }
 
   if (!creds.password && !creds.privateKey && !creds.agentSocket) {
+    // Naming the method the profile asked for, rather than listing all four,
+    // is the difference between "fix the one you chose" and "pick whichever is
+    // easiest" — and the easiest is a plaintext password in the environment.
+    const asked = profile.auth;
+    const why: Record<string, string> = {
+      agent: 'SSH_AUTH_SOCK is unset or the agent holds no usable key',
+      key: `no key was read${profile.keyRef ? ` from ${profile.keyRef}` : ' — keyRef is not set on the profile'}`,
+      keychain: `the OS keychain returned nothing${profile.keychainEntry ? ` for "${profile.keychainEntry}"` : ' — keychainEntry is not set on the profile'}`,
+      password: `SSH_MCP_PASSWORD and SSH_MCP_${profile.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_PASSWORD are both unset`,
+    };
+
     throw new Error(
-      `No credentials resolved for profile "${profile.name}". ` +
-      `Available methods: SSH agent (SSH_AUTH_SOCK), OS keychain (auth=keychain), env vars (SSH_MCP_PASSWORD), or key file (SSH_MCP_KEY).`,
+      `No credentials resolved for profile "${profile.name}", which asks for auth = "${asked}": ${why[asked] ?? 'nothing was found'}.\n` +
+      'Fix that method rather than switching to another if you can — the fallbacks are ordered by how much ' +
+      'they expose. In order: an SSH agent (nothing on disk), an encrypted key with SSH_MCP_KEY, the OS ' +
+      `keychain, and last a password in SSH_MCP_PASSWORD, which is readable by every process running as you.`,
     );
   }
 
