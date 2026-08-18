@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/tufantunc-ssh-mcp-badge.png)](https://mseep.ai/app/tufantunc-ssh-mcp)
+
 # SSH MCP Server v2
 
 [![NPM Version](https://img.shields.io/npm/v/ssh-mcp)](https://www.npmjs.com/package/ssh-mcp)
