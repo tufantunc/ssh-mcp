@@ -1,5 +1,37 @@
 # ssh-mcp
 
+## 2.3.0
+
+### Minor Changes
+
+- [#139](https://github.com/tufantunc/ssh-mcp/pull/139) [`d9a6345`](https://github.com/tufantunc/ssh-mcp/commit/d9a6345bda0f7b077183eff51b52676f699d5184) Thanks [@tufantunc](https://github.com/tufantunc)! - Make the config file usable on Windows, check its ACL there, and stop reporting one failure as another.
+
+  `minor` rather than `patch` because a server that started yesterday can refuse to start today — see **Behaviour changes** at the end. The work itself is a bug fix; the version reflects what upgrading can do to you.
+
+  **The config file has never worked on Windows** ([#138](https://github.com/tufantunc/ssh-mcp/issues/138)). `checkPermissions` refuses a config that is group- or world-readable by testing POSIX mode bits. Windows has none; Node synthesises `0o666` for every readable file there, so the check failed for every Windows operator that has ever run it — since 2.0.0, when the TOML loader landed. Measured on Windows 11: the file reports `0o666`, and `chmod(path, 0o600)` — the fix the message prescribed — leaves it at `0o666`, because `fs.chmod` on Windows only toggles the read-only bit. Following the instruction exactly returned you to the start.
+
+  **Windows now gets the same question asked of its own access-control system.** `checkPermissions` reads the file's and directory's ACL and requires that only this account, `SYSTEM` and `Administrators` hold access — an allowlist, matching what the POSIX branch enforces and what the refusal message claims. That matters because `%APPDATA%` inherits exactly those three, but a config anywhere else does not: measured, a file created in `C:\sshcfg\` inherits `BUILTIN\Users` read-and-execute and `Authenticated Users` modify from the drive root, so every local account can read it and any authenticated one can rewrite it. Until now Windows loaded that without a word.
+
+  The ACL is read as SDDL via `icacls /save`, because SDDL names principals by alias and SID while `icacls`' ordinary output prints account names, which depend on the installed language. It is also the fast path: 8-22ms per call against 740-830ms to spawn PowerShell for `Get-Acl`, on a check that runs at every start. `icacls` and `whoami` are invoked by absolute path, so PATH and the working directory — which belongs to whichever MCP client spawned the server — cannot decide the verdict.
+
+  An ACL that cannot be read is refused rather than assumed private, with two exceptions: `icacls` being absent from the machine, and the check running out of time. Both are statements about the machine rather than about the file, so both warn and load. `--allowUncheckedConfigAcl` loads unverified in the remaining cases — a refused DACL read, an unparseable descriptor, an identity that could not be established — so nobody is stuck with no way forward.
+
+  **A config that exists and is broken is no longer reported as missing.** `buildAppConfig` swallowed every config error with a bare `catch {}` so it could fall through to `--host`/`--user`, which is right only when there is no file. A malformed TOML, a schema violation or a permission failure was discarded unread and reported as "No config file found" — so the Windows operator was told to create a file that was already there. Only a genuine absence falls through now. A config that cannot be opened at all (a mode or ACL that denies reading, a directory passed as `--config`) now arrives as a message naming the path instead of a raw `EACCES`.
+
+  **Failure messages name the path this code actually reads.** The fallback hardcoded `~/.config/ssh-mcp/config.toml` on every platform, contradicting `getConfigPath`, which sends Windows to `%APPDATA%` and macOS to `Library`. The README documented only the Linux path for macOS; it now names all three. An explicit `--config` pointing nowhere used to escape as the raw `ENOENT` syscall error.
+
+  **An invocation mistake no longer looks like a crash.** Everything reached the operator through `console.error('Fatal error:', error)`, which prints the Error object — so a mistyped flag arrived as a stack trace through `buildAppConfig` and `main`, burying the explanation written for them. Errors about how the server was invoked or configured now print as their message alone and **exit 2**; a real defect keeps its stack and exits 1, so a supervisor can tell the two apart. The same treatment was applied to the other startup failures still printing stacks: a missing `--bearerToken`, an invalid `[policy]` section, an unparseable denylist pattern, credential-resolution failures and host-key refusals.
+
+  **CI now runs the unit and property suites on `windows-latest`**, with coverage uploaded, since win32 branches are unreachable from the Ubuntu job and would otherwise count as untested however well they are covered. Windows has been a documented target since 2.0.0 and no job had ever executed a single win32 branch, which is why a check that could not pass survived twelve releases.
+
+  ## Behaviour changes
+
+  - **A config file at the default path is no longer ignored when it cannot be loaded.** If you have one there with mode `0644` (the default under `umask 022`), or a stale or malformed one, and you have been running off `--host`/`--user`, the server now refuses to start instead of silently ignoring the file. Fix it, `chmod 600` it, remove it, or point `--config` elsewhere — and note the _directory_ must be `0700`, which `chmod 600` on the file does not achieve.
+  - **The published Docker image created its config directory `0755`**, which that same check refuses. The image now creates it `0700`. If you build your own image or mount a config directory, it must be `0700`.
+  - **On Windows the config file is now read _and its ACL checked_, so it can refuse to start.** A config whose ACL grants anyone beyond your account, `SYSTEM` and `Administrators` is refused where it was previously ignored — as is one whose ACL cannot be read (except when `icacls` is absent or the check times out, which warn and load). Fix it with the two `icacls` commands the refusal prints, move it under `%APPDATA%\ssh-mcp`, or pass `--allowUncheckedConfigAcl` for the unreadable cases; the flag does not override a known-broad ACL. Separately, a config at `%APPDATA%` that previously could not load now takes effect, so an operator also passing `--host`/`--user` was silently running off the flags and the file now wins — a note on stderr says so.
+  - **Operator errors now exit 2** instead of 1; a defect still exits 1. Anything matching on status 1 to detect a startup failure needs updating.
+  - `loadConfig` no longer rejects with Node's `ENOENT` SystemError for a missing file; it rejects with `ConfigNotFoundError`, which carries `code: 'ENOENT'` for anything that was matching on it.
+
 ## 2.2.6
 
 ### Patch Changes
