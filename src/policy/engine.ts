@@ -6,6 +6,7 @@ import type {
   ApprovalMode,
 } from '../types.js';
 import { classifyCommand, findForbiddenMatch } from './classifier.js';
+import { OperatorError } from '../errors.js';
 
 export interface PolicyRules {
   roleBindings: Record<string, Record<string, CommandClass[]>>;
@@ -194,7 +195,7 @@ export function resolvePolicyRules(
   const merged = mergePolicyRules(DEFAULT_RULES, override);
   const problems = findPolicyProblems(merged, profiles, override);
   if (problems.length > 0) {
-    throw new Error(
+    throw new OperatorError(
       'Policy configuration error:\n' +
       problems.map((p) => `  ${p}`).join('\n') +
       '\nSee the "Configuring the matrix" section of the README.',
@@ -218,7 +219,7 @@ export class PolicyEngine {
       try {
         return new RegExp(pattern);
       } catch (err) {
-        throw new Error(
+        throw new OperatorError(
           `Invalid denylist pattern ${JSON.stringify(pattern)}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }

@@ -1,6 +1,7 @@
 import { readFile } from 'fs/promises';
 import { resolve } from 'path';
 import type { Profile, ResolvedCredentials } from '../types.js';
+import { OperatorError } from '../errors.js';
 
 let keyringGet: ((service: string, account: string) => Promise<string | null>) | null = null;
 let keyringSet: ((service: string, account: string, password: string) => Promise<void>) | null = null;
@@ -28,7 +29,7 @@ export async function initKeychain(): Promise<boolean> {
 }
 
 export async function setKeychainEntry(service: string, account: string, password: string): Promise<void> {
-  if (!keyringSet) throw new Error('Keychain not initialized. Install @napi-rs/keyring.');
+  if (!keyringSet) throw new OperatorError('Keychain not initialized. Install @napi-rs/keyring.');
   await keyringSet(service, account, password);
 }
 
@@ -118,7 +119,7 @@ export async function resolveCredentials(profile: Profile): Promise<ResolvedCred
       password: `SSH_MCP_PASSWORD and SSH_MCP_${profile.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_PASSWORD are both unset`,
     };
 
-    throw new Error(
+    throw new OperatorError(
       `No credentials resolved for profile "${profile.name}", which asks for auth = "${asked}": ${why[asked] ?? 'nothing was found'}.\n` +
       'Fix that method rather than switching to another if you can — the fallbacks are ordered by how much ' +
       'they expose. In order: an SSH agent (nothing on disk), an encrypted key with SSH_MCP_KEY, the OS ' +

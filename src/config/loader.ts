@@ -3,6 +3,8 @@ import { homedir, platform } from 'os';
 import { join, dirname } from 'path';
 import { parse as parseTOML } from 'smol-toml';
 import { configSchema, type RawConfig } from './schema.js';
+import { OperatorError, ConfigNotFoundError } from '../errors.js';
+import { assertPrivateOnWindows, type AclOptions } from './windows-acl.js';
 import type { AppConfig, Profile, Defaults } from '../types.js';
 
 export function getConfigPath(customPath?: string): string {
@@ -21,49 +23,101 @@ export function getConfigPath(customPath?: string): string {
   return join(xdgConfig, 'ssh-mcp', 'config.toml');
 }
 
-export async function checkPermissions(filePath: string): Promise<void> {
-  try {
-    const fileStat = await stat(filePath);
-    const mode = fileStat.mode & 0o777;
-    if (mode & 0o077) {
-      throw new Error(
-        `Config file ${filePath} is group/world accessible (mode ${mode.toString(8)}). Required: 0600. Run: chmod 600 ${filePath}`,
-      );
+/**
+ * Refuse a config file that anyone but its owner can read, because it holds the
+ * hosts, roles and policy rules that decide what this server will run.
+ *
+ * One question, asked of two different access-control systems. Mode bits are
+ * POSIX's answer and are meaningless on Windows, which is the whole of #138:
+ * Node synthesises `0o666` for every readable file there, so `& 0o077` was
+ * non-zero unconditionally and every Windows config that has ever existed was
+ * rejected. The `chmod 600` it prescribed could not lift that rejection —
+ * measured on Windows 11, `chmod(path, 0o600)` leaves the mode at `0o666`,
+ * because `fs.chmod` there only toggles the read-only bit. Following the
+ * instruction exactly returned the operator to where they started.
+ *
+ * Windows reads the ACL instead; see assertPrivateOnWindows.
+ */
+export async function checkPermissions(filePath: string, opts: AclOptions = {}): Promise<void> {
+  return platform() === 'win32'
+    ? assertPrivateOnWindows(filePath, opts)
+    : checkPosixMode(filePath);
+}
+
+/**
+ * Split out so its own refusals do not pass back through the `catch` that
+ * tolerates ENOENT. They survived it only because an OperatorError carries no
+ * `.code`, which was a coincidence rather than a design.
+ */
+async function checkPosixMode(filePath: string): Promise<void> {
+  const dir = dirname(filePath);
+  const modeOf = async (path: string): Promise<number | null> => {
+    try {
+      return (await stat(path)).mode & 0o777;
+    } catch (err: any) {
+      if (err.code === 'ENOENT') return null;
+      throw err;
     }
-    const dirMode = (await stat(dirname(filePath))).mode & 0o777;
-    if (dirMode & 0o077) {
-      throw new Error(
-        `Config directory is group/world accessible (mode ${dirMode.toString(8)}). Required: 0700.`,
-      );
-    }
-  } catch (err: any) {
-    if (err.code === 'ENOENT') return;
-    throw err;
+  };
+
+  // The file is tested before the directory is even stat'd, which is the order
+  // main used: batching both stats first meant a 0644 file whose directory
+  // vanished in between took the ENOENT path and was accepted.
+  const fileMode = await modeOf(filePath);
+  if (fileMode === null) return;
+
+  if (fileMode & 0o077) {
+    throw new OperatorError(
+      `Config file ${filePath} is group/world accessible (mode ${fileMode.toString(8)}). ` +
+      `Required: 0600. Run: chmod 600 ${filePath}`,
+    );
+  }
+  const dirMode = await modeOf(dir);
+  if (dirMode !== null && dirMode & 0o077) {
+    throw new OperatorError(
+      `Config directory ${dir} is group/world accessible (mode ${dirMode.toString(8)}). ` +
+      `Required: 0700. Run: chmod 700 ${dir}\n` +
+      // The published Docker image created this directory 0755, so a container
+      // with a config bind-mounted at the default path met this on every start
+      // with no way to chmod a path baked into the image.
+      'If the directory is not yours to change — a container image, or a mount point — ' +
+      'bind-mount a 0700 directory over it, or point --config at one you control.',
+    );
   }
 }
 
-export async function loadConfig(customPath?: string): Promise<AppConfig> {
+export async function loadConfig(customPath?: string, opts: AclOptions = {}): Promise<AppConfig> {
   const configPath = getConfigPath(customPath);
 
   let raw: string;
   try {
     raw = await readFile(configPath, 'utf8');
   } catch (err: any) {
-    if (err.code === 'ENOENT' && !customPath) {
-      throw new Error(
-        `No config file found at ${configPath}. Create one or use --config <path>. See documentation for the TOML schema.`,
-      );
-    }
-    throw err;
+    // Also for an explicit --config that points nowhere. That used to escape
+    // as the raw system error ("ENOENT: no such file or directory, open ..."),
+    // which says the same thing in the vocabulary of a syscall.
+    if (err.code === 'ENOENT') throw new ConfigNotFoundError(configPath);
+    // Everything else here is still the operator's file — a directory passed as
+    // --config, a mode or ACL that denies reading, a mount that went away. Those
+    // escaped raw too, so `reportFatal` printed them with a stack through our
+    // own frames: the presentation this change exists to remove.
+    // `.code` is carried through for the same reason ConfigNotFoundError keeps it: a
+    // wrapper script distinguishing "unreadable, remount and retry" from "absent, run the
+    // installer" was matching on it, and preserving it on one branch while dropping it on
+    // the adjacent one is a half-applied rule.
+    throw Object.assign(
+      new OperatorError(`Config file ${configPath} could not be read: ${err.message}`),
+      { code: err.code, cause: err },
+    );
   }
 
-  await checkPermissions(configPath);
+  await checkPermissions(configPath, opts);
 
   let parsed: unknown;
   try {
     parsed = parseTOML(raw);
   } catch (err: any) {
-    throw new Error(`Failed to parse TOML config at ${configPath}: ${err.message}`);
+    throw new OperatorError(`Failed to parse TOML config at ${configPath}: ${err.message}`);
   }
 
   const result = configSchema.safeParse(parsed);
@@ -74,7 +128,7 @@ export async function loadConfig(customPath?: string): Promise<AppConfig> {
     const issues = result.error.issues
       .map((i) => `  ${i.path.length ? i.path.join('.') : '(root)'}: ${i.message}`)
       .join('\n');
-    throw new Error(`Config validation error:\n${issues}`);
+    throw new OperatorError(`Config validation error:\n${issues}`);
   }
 
   return normalizeConfig(result.data);
@@ -109,9 +163,10 @@ function normalizeConfig(raw: RawConfig): AppConfig {
   // survives anywhere in AppConfig. Leaving the raw value on `defaults` left one
   // object carrying two encodings of "unlimited" — `profile.maxChars` as
   // MAX_SAFE_INTEGER, `defaults.commandMaxChars` as 0 — with nothing in the
-  // types to tell them apart. index.ts:161 already copies straight across
-  // (`maxChars: defaults.commandMaxChars`), and was correct only because that
-  // path's value comes from parseMaxChars, which never returns 0. Correct by
+  // types to tell them apart. buildAppConfig's quick-start path already copies it
+  // straight across (`maxChars: defaults.commandMaxChars`), and was correct only
+  // because that path's value comes from parseMaxChars, which never returns 0.
+  // Correct by
   // coincidence of another surface is not a property to leave standing when the
   // wrong encoding rejects every non-empty command.
   const defaults: Defaults = {
@@ -147,7 +202,7 @@ export function getProfile(config: AppConfig, name?: string): Profile {
     // unambiguous; more than one is a question the caller has to answer.
     if (config.profiles.length > 1) {
       const names = config.profiles.map((p) => p.name).join(', ');
-      throw new Error(
+      throw new OperatorError(
         `No profile selected and no default configured, but ${config.profiles.length} profiles exist: ${names}. ` +
         `Pass a "profile" argument, or set defaults.defaultProfile in the config.`,
       );
@@ -155,6 +210,6 @@ export function getProfile(config: AppConfig, name?: string): Profile {
     return config.profiles[0];
   }
   const profile = config.profiles.find((p) => p.name === targetName);
-  if (!profile) throw new Error(`Profile "${targetName}" not found`);
+  if (!profile) throw new OperatorError(`Profile "${targetName}" not found`);
   return profile;
 }

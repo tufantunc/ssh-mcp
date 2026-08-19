@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdtemp, rm, writeFile } from 'fs/promises';
+import { mkdtemp, rm, writeFile, readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
@@ -43,10 +43,36 @@ describe.skipIf(!serverBuilt)('E2E — packaging', () => {
     expect(SERVER_VERSION).toBe(pkg.version);
   });
 
-  it('refuses removed v1 flags with a migration hint instead of failing later', async () => {
+  /**
+   * Spawns the server with the home directory pointed at an empty temp dir.
+   *
+   * Every one of these tests asserts on a message the server prints *before* it
+   * connects, and the config file is read first — so without this they read the
+   * developer's real config, and since a present-but-unusable config now refuses
+   * to start rather than being silently ignored, they fail on any machine that has
+   * one. That is the intended behaviour change catching its own test suite.
+   */
+  async function runIsolated(args: string[]) {
     const { SSH_MCP_DISABLE_MAIN: _omit, ...env } = process.env;
+    const home = await mkdtemp(join(tmpdir(), 'ssh-mcp-e2e-home-'));
+    try {
+      return await run('node', args, {
+        env: {
+          ...(env as NodeJS.ProcessEnv),
+          HOME: home,
+          USERPROFILE: home,
+          XDG_CONFIG_HOME: join(home, '.config'),
+          APPDATA: home,
+        },
+      });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+
+  it('refuses removed v1 flags with a migration hint instead of failing later', async () => {
     await expect(
-      run('node', [SERVER_ENTRY, '--host=x', '--user=y', '--password=secret'], { env: env as NodeJS.ProcessEnv }),
+      runIsolated([SERVER_ENTRY, '--host=x', '--user=y', '--password=secret']),
     ).rejects.toMatchObject({ stderr: expect.stringContaining('removed in v2') });
   }, 20000);
 
@@ -55,16 +81,76 @@ describe.skipIf(!serverBuilt)('E2E — packaging', () => {
   // A mistyped group must not quietly land back on those prod bindings — the
   // operator would read the refusal as policy rather than as their own typo.
   it('rejects an unknown --group instead of falling back to the strictest tier', async () => {
-    const { SSH_MCP_DISABLE_MAIN: _omit, ...env } = process.env;
     await expect(
-      run('node', [SERVER_ENTRY, '--host=x', '--user=y', '--group=production'], { env: env as NodeJS.ProcessEnv }),
+      runIsolated([SERVER_ENTRY, '--host=x', '--user=y', '--group=production']),
     ).rejects.toMatchObject({ stderr: expect.stringContaining('Invalid --group=production') });
   }, 20000);
 
+  /**
+   * How the error is *presented*, which only a spawned process can show.
+   *
+   * Every failure used to go through `console.error('Fatal error:', error)`,
+   * which prints the Error object: name, message, and a stack through
+   * buildAppConfig and main. A mistyped flag therefore reached the operator
+   * looking like a crash in our code, with the explanation we wrote for them
+   * wrapped in frames that only matter to someone debugging this repo. It is
+   * the first thing the reporter of #138 pasted, and it told them nothing.
+   *
+   * The complementary half — a real defect keeps its stack — is asserted in
+   * test/unit/cli-fatal-reporting.test.ts, which can construct one.
+   */
+  it('reports an invocation mistake as a message, with exit status 2', async () => {
+    // --group is only validated on the no-config-file path — `resolveHostGroup` is called
+    // from the CLI-args branch of `buildAppConfig` — so the run cannot be pinned with
+    // --config; `runIsolated` points the home directory at an empty temp dir instead.
+    const err = await runIsolated([SERVER_ENTRY, '--host=x', '--user=y', '--group=production'])
+      .then(
+        () => { throw new Error('expected a non-zero exit for --group=production'); },
+        (e: { stderr: string; code: number }) => e,
+      );
+
+    // Asserted on the report rather than the whole stream: an unrelated Node
+    // ExperimentalWarning can carry indented `at ` frames of its own.
+    const report = err.stderr.slice(err.stderr.indexOf('Invalid --group=production'));
+    expect(report).not.toBe('');
+    expect(report.trimEnd()).toBe(
+      'Invalid --group=production. Expected one of: prod, staging, dev.',
+    );
+    expect(err.stderr).not.toContain('Fatal error:');
+    // The distinction reportFatal draws is only machine-readable through this.
+    expect(err.code).toBe(2);
+  }, 20000);
+
+  /**
+   * The image has to satisfy the server's own permission check.
+   *
+   * `mkdir -p` under Docker's default umask produces 0755, and checkPermissions
+   * refuses a config whose directory is group- or world-readable — so a container
+   * with a config bind-mounted at the default path met that refusal on every
+   * start, and the remedy it printed was a chmod on a directory baked into the
+   * image. Asserted against the Dockerfile text rather than a built image as the
+   * cheap proxy — the `test` job does have a Docker daemon (it brings up the sshd
+   * containers), so a real `docker build` here is possible and would be stronger;
+   * the mode is what drifts, and this catches that much.
+   */
+  it('builds a config directory the loader will accept', async () => {
+    // Comment lines stripped: this repo comments heavily, so `# RUN chmod 700 …` in a
+    // commented-out line would satisfy the positive assertion while the image builds 0755,
+    // and a comment mentioning the old `--from=builder … config.default.toml` would fail
+    // the negative one on a Dockerfile that is correct.
+    const dockerfile = (await readFile(join(REPO_ROOT, 'Dockerfile'), 'utf8'))
+      .split('\n')
+      .filter((l) => !l.trimStart().startsWith('#'))
+      .join('\n');
+    expect(dockerfile).toMatch(/chmod 700 [^\n]*\.config/);
+    // And the sources the runtime stage needs must come from somewhere that has
+    // them: config.default.toml was copied --from=builder, which never had it.
+    expect(dockerfile).not.toMatch(/--from=builder [^\n]*config\.default\.toml/);
+  });
+
   it('requires a bearer token for the HTTP transport', async () => {
-    const { SSH_MCP_DISABLE_MAIN: _omit, ...env } = process.env;
     await expect(
-      run('node', [SERVER_ENTRY, '--host=x', '--user=y', '--transport=http'], { env: env as NodeJS.ProcessEnv }),
+      runIsolated([SERVER_ENTRY, '--host=x', '--user=y', '--transport=http']),
     ).rejects.toMatchObject({ stderr: expect.stringContaining('bearerToken') });
   }, 20000);
 });

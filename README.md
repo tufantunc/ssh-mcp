@@ -23,7 +23,13 @@ npm install -g ssh-mcp
 
 ### 2. Configure
 
-Create `~/.config/ssh-mcp/config.toml` (Linux/macOS) or `%APPDATA%\ssh-mcp\config.toml` (Windows):
+Create the config file at the path for your platform:
+
+| Platform | Path |
+|---|---|
+| Linux | `~/.config/ssh-mcp/config.toml` (or `$XDG_CONFIG_HOME/ssh-mcp/config.toml`) |
+| macOS | `~/Library/Application Support/ssh-mcp/config.toml` |
+| Windows | `%APPDATA%\ssh-mcp\config.toml` |
 
 ```toml
 [defaults]
@@ -42,8 +48,38 @@ approvalPolicy = "auto"    # dev is permissive
 ```
 
 ```bash
-chmod 600 ~/.config/ssh-mcp/config.toml
+chmod 700 ~/.config/ssh-mcp && chmod 600 ~/.config/ssh-mcp/config.toml
 ```
+
+The server refuses to start if anyone but you can read the config, since it
+decides which hosts, roles and policy rules this server honours.
+
+On Linux and macOS that is the mode check above — the directory too, which is why
+`chmod 700` is in that command: `mkdir -p` under the default umask leaves it 0755. On Windows there are no mode
+bits, so it reads the ACL instead and requires that only your account, `SYSTEM`
+and `Administrators` hold access. A config under `%APPDATA%` inherits exactly
+that and needs nothing done to it. One created elsewhere does not — a file under
+`C:\` inherits read access for every local account and modify for every
+authenticated one — and the refusal names the two `icacls` commands that fix it,
+or, when the directory is a filesystem root or sits outside your user profile, leads with
+moving the config instead — it still prints the commands, but removing entries from a
+directory other accounts share is a judgement only you can make.
+
+If the ACL cannot be read at all, the server refuses rather than assuming the file is
+private, and `--allowUncheckedConfigAcl` loads it unverified. Two cases do not need the
+flag — `icacls` being absent from the machine, and the check running out of time — because
+both are statements about the machine rather than about the file. Each warns and loads.
+
+### Exit statuses
+
+| Status | Meaning |
+|---|---|
+| `0` | Clean shutdown |
+| `1` | A defect in the server — printed with a stack trace; please report it |
+| `2` | How it was invoked or configured — printed as a message, no stack |
+
+A supervisor that treats any non-zero status as a failure needs no change. One
+that matched on `1` to detect a startup problem should match on `2` as well.
 
 ### 3. Set credentials via environment variables
 
@@ -479,7 +515,7 @@ See [SECURITY.md](./SECURITY.md) for the full threat model, vulnerability report
 - [ ] Restrict network egress on target hosts
 - [ ] Use `readOnly = true` for monitoring profiles
 - [ ] Review audit logs regularly
-- [ ] Run `chmod 600 config.toml`
+- [ ] Run `chmod 700 <config dir> && chmod 600 config.toml` (Windows: the ACL under `%APPDATA%` is already restricted)
 
 ---
 
@@ -547,7 +583,7 @@ Secrets are **never** passed as CLI arguments.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--config` | XDG path | Path to TOML config file |
+| `--config` | platform config dir (see [Configure](#2-configure)) | Path to TOML config file |
 | `--host` | — | Quick start: SSH host (creates single-profile config) |
 | `--user` | — | Quick start: SSH username |
 | `--port` | 22 | Quick start: SSH port |
@@ -565,6 +601,7 @@ Secrets are **never** passed as CLI arguments.
 | `--rateLimit` | 0 | HTTP requests per minute on the MCP route (0 = unlimited) |
 | `--allowedHosts` | bind address + localhost | Comma-separated Host headers accepted by the DNS-rebinding guard |
 | `--insecureHostKey` | false | Disable host key verification (test only!) |
+| `--allowUncheckedConfigAcl` | false | Windows: load the config even if its ACL could not be read |
 | `--disableApproval` | false | Skip the approval gate (quick start profile only) |
 | `--opaUrl` | — | OPA sidecar URL for external policy |
 | `--commandQuota` | 0 (off) | Max commands per rolling 24h per profile |

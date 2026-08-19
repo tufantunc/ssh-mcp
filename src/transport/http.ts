@@ -5,6 +5,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ConnectionRegistry } from '../ssh/connection-registry.js';
 import { SERVER_VERSION } from '../version.js';
+import { OperatorError } from '../errors.js';
 
 const MAX_BODY_SIZE = 1_048_576; // 1MB
 /** Cap on concurrent MCP sessions, so unauthenticated-adjacent churn can't grow the map without bound. */
@@ -73,7 +74,7 @@ export async function startHttpServer(
   const { port, host = '127.0.0.1', bearerToken, registry } = opts;
 
   if (!bearerToken) {
-    throw new Error(
+    throw new OperatorError(
       'HTTP transport requires --bearerToken. Example: --transport=http --bearerToken=secret\n' +
       'Without authentication, any network client can execute SSH commands on your hosts.',
     );
@@ -271,9 +272,16 @@ export async function startHttpServer(
   // immediately regardless, so the caller carried on as if the server was up.
   await new Promise<void>((resolve, reject) => {
     httpServer.once('error', (err: NodeJS.ErrnoException) => {
-      reject(err.code === 'EADDRINUSE'
-        ? new Error(`Cannot bind ${host}:${port} — address already in use.`)
-        : err);
+      // OperatorError, not Error: every listen failure at this point is about how the
+      // server was invoked — a port already taken, a privileged port, a mistyped
+      // --httpHost. Leaving them on the defect path printed a stack and exited 1, which
+      // under this codebase's rule invites the operator to report their own port choice
+      // as a bug.
+      reject(new OperatorError(
+        err.code === 'EADDRINUSE'
+          ? `Cannot bind ${host}:${port} — address already in use.`
+          : `Cannot bind ${host}:${port}: ${err.message}`,
+      ));
     });
     httpServer.listen(port, host, () => {
       console.error(`SSH MCP Server v2 (HTTP) listening on http://${host}:${port}`);
