@@ -1,26 +1,23 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, writeFile, chmod, rm } from 'fs/promises';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { chmod } from 'fs/promises';
+import { platform } from 'os';
+import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from './helpers.js';
 import { loadConfig, getProfile, checkPermissions } from '../../../src/config/loader.js';
 import type { AppConfig } from '../../../src/types.js';
 
+let cfg: ConfigDir;
 let tempDir: string;
 
 beforeEach(async () => {
-  tempDir = await mkdtemp(join(tmpdir(), 'ssh-mcp-test-'));
+  cfg = await makeConfigDir();
+  tempDir = cfg.dir;
 });
 
 afterEach(async () => {
-  await rm(tempDir, { recursive: true, force: true });
+  await cfg.cleanup();
 });
 
-async function writeConfig(content: string, mode = 0o600): Promise<string> {
-  const path = join(tempDir, 'config.toml');
-  await writeFile(path, content, 'utf8');
-  await chmod(path, mode);
-  return path;
-}
+const writeConfig = (content: string, mode = 0o600): Promise<string> => cfg.write(content, mode);
 
 describe('loadConfig', () => {
   it('loads a valid config with defaults applied', async () => {
@@ -138,7 +135,10 @@ approvalPolicy = "yolo"
     await expect(loadConfig(path)).rejects.toThrow();
   });
 
-  it('rejects world-readable config', async () => {
+  // POSIX only. Windows has no mode bits — Node synthesises 0o666 for every
+  // file there, chmod cannot change it, and the check is skipped as a result
+  // (#138). Running the assertion on Windows would test the emulation layer.
+  it.skipIf(platform() === 'win32')('rejects world-readable config', async () => {
     const path = await writeConfig(`
 [[profiles]]
 name = "dev"
@@ -240,26 +240,41 @@ user = "deploy"
 });
 
 describe('checkPermissions', () => {
+  // The reproduction for #138, and the reason the Windows CI job exists: this
+  // is the exact shape of config that used to be rejected there — a normal
+  // file, created normally, in the documented location.
+  it.runIf(platform() === 'win32')('accepts an ordinary Windows file', async () => {
+    const path = await writeConfig(MINIMAL_CONFIG);
+    await expect(checkPermissions(path)).resolves.toBeUndefined();
+    // Asserts the config was actually parsed, and — via inspectAcl — that the ACL
+    // check produced a verdict rather than being waved through. `toBeTruthy()`
+    // was satisfied by the fail-open path, so this test used to pass whether or
+    // not the check ran at all.
+    const { inspectAcl } = await import('../../../src/config/windows-acl.js');
+    expect((await inspectAcl(path)).status).toBe('restricted');
+    expect((await loadConfig(path)).profiles[0].host).toBe('localhost');
+  });
+
   it('passes for 0600 file', async () => {
     const path = await writeConfig(``, 0o600);
     await expect(checkPermissions(path)).resolves.not.toThrow();
   });
 
-  it('fails for 0644 file', async () => {
+  it.skipIf(platform() === 'win32')('fails for 0644 file', async () => {
     const path = await writeConfig(``, 0o644);
     await expect(checkPermissions(path)).rejects.toThrow(/accessible/);
   });
 
-  it('fails for world-readable directory', async () => {
-    const subdir = join(tempDir, 'insecure-dir');
-    await mkdtemp(subdir).catch(async () => {
-      await import('fs/promises').then((fs) => fs.mkdir(subdir, { recursive: true }));
-    });
-    const cfgPath = join(tempDir, 'config.toml');
-    await writeFile(cfgPath, '', 'utf8');
-    await chmod(cfgPath, 0o600);
+  it.skipIf(platform() === 'win32')('fails for world-readable directory', async () => {
+    const cfgPath = await writeConfig('', 0o600);
     await chmod(tempDir, 0o777);
-    await expect(checkPermissions(cfgPath)).rejects.toThrow(/directory.*accessible/i);
-    await chmod(tempDir, 0o700);
+    try {
+      await expect(checkPermissions(cfgPath)).rejects.toThrow(/directory.*accessible/i);
+      // A directory nobody can chmod is the Docker case: the message has to say
+      // what to do when tightening it is not an option.
+      await expect(checkPermissions(cfgPath)).rejects.toThrow(/bind-mount|--config/);
+    } finally {
+      await chmod(tempDir, 0o700);
+    }
   });
 });

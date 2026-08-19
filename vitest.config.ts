@@ -2,7 +2,10 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    exclude: ['**/node_modules/**', '**/dist/**', 'test/legacy/**'],
+    // .claude/worktrees holds full checkouts created by review tooling; without
+    // this, a local run collects their test files too and reports several times the
+    // real count against several copies of the source.
+    exclude: ['**/node_modules/**', '**/dist/**', 'test/legacy/**', '.claude/worktrees/**'],
     // Integration test files each open real SSH connections to the Docker test
     // servers. Running the files in parallel multiplies concurrent handshakes,
     // and connections start getting dropped before the handshake completes —

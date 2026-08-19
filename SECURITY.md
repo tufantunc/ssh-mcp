@@ -43,7 +43,10 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 4. **Restrict network egress** on the target host (iptables/Cilium) to prevent data exfiltration.
 5. **Use read-only profiles** (`readOnly = true`) for monitoring/observer access.
 6. **Review audit logs** regularly — all commands are logged with redaction.
-7. **Encrypt your config file** — set permissions to `0600` (`chmod 600 config.toml`).
+7. **Restrict your config file** — `chmod 700` the directory and `chmod 600` the file; the
+   server refuses to start otherwise, and `chmod 600` alone does not satisfy the directory
+   check. On Windows there are no mode bits: the ACL must grant only your account, `SYSTEM`
+   and `Administrators`, which a config under `%APPDATA%` inherits automatically.
 
 ## Supported Versions
 
@@ -74,7 +77,7 @@ SSH MCP Server v2 implements controls that map to common security frameworks. Th
 | CC7.1 | System monitoring | Audit log (JSONL + ECS fields), 3-layer output redaction (field/regex/entropy) |
 | CC7.2 | Detection of security events | Command classification (read-only/safe/destructive/privileged), policy denial logging |
 | CC8.1 | Change management | `approvalPolicy` modes (auto/ask-destructive/ask-all/deny), MCP elicitation for destructive commands |
-| CC9.1 | Risk mitigation | Credential cascade (agent > keychain > env, never CLI args), config file permission checks (0600) |
+| CC9.1 | Risk mitigation | Credential cascade (agent > keychain > env, never CLI args), config file and directory permission checks (0600/0700), ACL check on Windows |
 
 ### PCI-DSS v4.0
 

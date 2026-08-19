@@ -158,3 +158,6 @@ sonar-project.properties
 /research/
 /docs/ssh-hardening-brief.md
 /docs/superpowers/plans/2026-07-08-ssh-mcp-v2.md
+
+# Agent worktrees, created by review tooling.
+.claude/worktrees/

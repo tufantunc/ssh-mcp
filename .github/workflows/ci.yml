@@ -32,6 +32,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+          # 90 of the windows job's 140 seconds were an uncached install, and that job
+          # is now the critical path of every PR (test is 112s). Caching npm's own
+          # store changes nothing about what gets installed or built.
+          cache: npm
 
       # The pnpm packaging test is the only real check that the OTEL imports are
       # declared rather than resolved by npm's hoisting. Without pnpm on the
@@ -142,6 +146,88 @@ jobs:
       - name: SSH server logs
         if: failure()
         run: docker compose --profile test logs --tail=100
+
+  # Windows has been a documented target since 2.0.0 — getConfigPath and
+  # getAuditLogPath both branch on win32 — and until #138 no job had ever
+  # executed either branch. The config file turned out to have never worked
+  # there: checkPermissions read POSIX mode bits, Windows synthesises 0o666 for
+  # every file, and the operator was told their config did not exist.
+  #
+  # Unit and property tests only. The integration suite drives six sshd
+  # containers from docker-compose.yml, all Linux images; a Windows runner adds
+  # nothing there and cannot run them. What it does cover is every path that
+  # asks the OS a question — paths, permissions, the audit log location.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          # 90 of the windows job's 140 seconds were an uncached install, and that job
+          # is now the critical path of every PR (test is 112s). Caching npm's own
+          # store changes nothing about what gets installed or built.
+          cache: npm
+
+      # `prepare` runs `npm run build` on npm ci, so there is no separate Build
+      # step here: a second `tsc` on the slowest and most expensive runner buys
+      # nothing, and nothing in the unit or property suites reads build/.
+      - run: npm ci
+
+      - name: Typecheck (src + tests)
+        run: npm run typecheck
+
+      # With coverage, and uploaded, because the win32 branches are unreachable
+      # from the Ubuntu job by construction. Without this, every Windows-only
+      # line counts as uncovered no matter how thoroughly it is tested here, and
+      # the patch target rejects the next Windows fix on that basis.
+      #
+      # Codecov merges the uploads for a commit by taking the union of hits, so
+      # a line covered on either OS counts as covered. Scoped to unit and
+      # property — the integration suite needs the Linux sshd containers, and
+      # letting it skip here would report its files as untested rather than
+      # unrun.
+      - name: Run unit and property tests with coverage
+        run: npm run coverage:unit
+
+      - name: Check the coverage report was produced
+        shell: bash
+        run: |
+          test -s coverage/lcov.info || { echo "coverage/lcov.info missing or empty"; exit 1; }
+          echo "lcov records: $(grep -c '^SF:' coverage/lcov.info)"
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+
+  # One context that fails if any other job fails.
+  #
+  # The repository ruleset requires `test` and nothing else, so a red `windows`
+  # job was visible but could not block a merge — and deleting the win32 branch in
+  # checkPermissions would leave every required check green, which is how the
+  # regression this change fixes could come straight back. Requiring `ci` instead
+  # covers every job listed in `needs`, which is why security-scan and codeql are
+  # there too: swapping `test` for a gate that quietly dropped them would trade
+  # one hole for another. Changing the ruleset is a repository setting and cannot
+  # be done from this file; until it is switched, this job is advisory.
+  ci:
+    runs-on: ubuntu-latest
+    needs: [test, windows, security-scan, codeql]
+    # Not `always()`: that reports red for a run someone cancelled on purpose.
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Report the job results
+        run: echo '${{ toJSON(needs) }}'
+      # One expression over `needs.*`, so adding a job to `needs` above covers it
+      # by construction. Three explicit comparisons was the first shape, and it
+      # made the gate's correctness depend on three lists staying in step — the
+      # same failure mode one level up from the one this job exists to prevent.
+      - name: Fail if any job did not succeed
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        run: exit 1
 
   security-scan:
     runs-on: ubuntu-latest

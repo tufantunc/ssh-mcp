@@ -2,7 +2,9 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { loadConfig } from './config/loader.js';
+import { loadConfig, getConfigPath } from './config/loader.js';
+import { OperatorError, ConfigNotFoundError, reportFatal } from './errors.js';
+import type { UnverifiedAcl } from './config/windows-acl.js';
 import { ConnectionRegistry } from './ssh/connection-registry.js';
 import { PolicyEngine, HOST_GROUPS, resolvePolicyRules } from './policy/engine.js';
 import { AuditStore } from './audit/store.js';
@@ -62,7 +64,7 @@ const REMOVED_V1_FLAGS: Record<string, string> = {
 function checkRemovedFlags(argv: Record<string, string | null>): void {
   const found = Object.keys(REMOVED_V1_FLAGS).filter((f) => f in argv);
   if (found.length === 0) return;
-  throw new Error(
+  throw new OperatorError(
     'These flags were removed in v2:\n' +
     found.map((f) => `  --${f}: ${REMOVED_V1_FLAGS[f]}`).join('\n') +
     '\nSee the "Migrating from v1" section of the README.',
@@ -91,7 +93,7 @@ function resolveHostKeyMode(argv: Record<string, string | null>): HostKeyMode {
   const mode = argv.hostKeyMode;
   if (mode === null || mode === undefined) return 'tofu';
   if (mode === 'tofu' || mode === 'strict' || mode === 'insecure') return mode;
-  throw new Error(`Invalid --hostKeyMode=${mode}. Expected one of: tofu, strict, insecure.`);
+  throw new OperatorError(`Invalid --hostKeyMode=${mode}. Expected one of: tofu, strict, insecure.`);
 }
 
 /**
@@ -111,26 +113,82 @@ export function resolveHostGroup(argv: Record<string, string | null>): string {
   if ((HOST_GROUPS as readonly string[]).includes(group)) return group;
   // Falling through would silently apply the prod bindings to a typo, and the
   // operator would read the refusal as policy rather than as their own slip.
-  throw new Error(
+  throw new OperatorError(
     `Invalid --group=${group}. Expected one of: ${HOST_GROUPS.join(', ')}.`,
   );
 }
 
+/**
+ * ACL checks that could not be performed, in the order they happened.
+ *
+ * Collected rather than only printed so `main()` can act on them once there is somewhere
+ * durable to put them; see the note at the sink below.
+ */
+const unverified: UnverifiedAcl[] = [];
+
 async function buildAppConfig(argv: Record<string, string | null>): Promise<AppConfig> {
-  if (argv.config) {
-    return loadConfig(argv.config);
+  // The way past an ACL that could not be read, rather than an operator with no
+  // exit. See assertPrivateOnWindows.
+  // The sink is supplied here rather than left to the module's default, which is the
+  // point of having one: "this security check did not run" is a decision about what the
+  // operator must be told, and the loader is not the layer that owns that. Routing it to
+  // the audit store as well needs an AuditRecord variant for a startup event — that type
+  // is hash-chained and tamper-evident, so it is its own change, and it is queued.
+  const aclOpts = {
+    allowUnchecked: flagEnabled(argv, 'allowUncheckedConfigAcl'),
+    onUnverified: (e: UnverifiedAcl) => {
+      unverified.push(e);
+      console.error(
+        `Warning: the ACL of ${e.path} was not checked (${e.reason}: ${e.detail}), so ` +
+        'whether other accounts can read your config is unverified. Loading it anyway.',
+      );
+    },
+  };
+
+  if (argv.config !== undefined) {
+    // `parseArgv` stores null for a flag written without `=`, so a bare `--config` used to
+    // be falsy here and fall into the default-path branch — which now refuses rather than
+    // silently ignoring an unusable file, so the operator got a refusal naming a path they
+    // never asked for.
+    if (argv.config === null || argv.config === '') {
+      throw new OperatorError('--config needs a path: --config=<path>');
+    }
+    return loadConfig(argv.config, aclOpts);
   }
 
   try {
-    return await loadConfig();
-  } catch {
-    // No config file — fall through to CLI args
+    const fromFile = await loadConfig(undefined, aclOpts);
+    // Before #138 every Windows config was rejected by the mode-bit check and
+    // the rejection was swallowed, so an operator who also passed --host/--user
+    // was silently running off the flags. Now that the file loads, it takes
+    // precedence — a flip worth one line rather than a surprise about which host
+    // a command reached.
+    if (argv.host || argv.user) {
+      console.error(
+        `Note: ${getConfigPath()} was loaded, so --host/--user are ignored. ` +
+        'Pass --config <path> to choose a different file.',
+      );
+    }
+    return fromFile;
+  } catch (err) {
+    // Only "there is no file" means fall through. A file that exists and is
+    // unusable — malformed TOML, a schema violation, a permission failure —
+    // used to be swallowed here too and reported as a missing config, which is
+    // how #138 stayed unfindable: the operator's file was in the right place,
+    // and the real error was discarded before anyone could read it.
+    //
+    // Falling through would also be wrong on its own terms whenever
+    // --host/--user happen to be present: the server would start, silently
+    // ignoring every profile, policy and role binding the operator wrote.
+    if (!(err instanceof ConfigNotFoundError)) throw err;
   }
 
   if (!argv.host || !argv.user) {
-    throw new Error(
+    throw new OperatorError(
       'No config file found and missing required --host/--user.\n' +
-      'Either create a config file at ~/.config/ssh-mcp/config.toml or pass --config <path>.\n' +
+      // Was hardcoded to ~/.config/ssh-mcp/config.toml on every platform, so on
+      // Windows and macOS it named a path this code never reads.
+      `Either create a config file at ${getConfigPath()} or pass --config <path>.\n` +
       'For quick start: --host=<host> --user=<user> (credentials via env vars).',
     );
   }
@@ -275,8 +333,7 @@ const isCliEnabled = process.env.SSH_MCP_DISABLE_MAIN !== '1';
 
 if (isCliEnabled || isTestMode) {
   main().catch((error) => {
-    console.error('Fatal error:', error);
-    process.exit(1);
+    process.exit(reportFatal(error));
   });
 }
 

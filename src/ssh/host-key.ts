@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { OperatorError } from '../errors.js';
 
 export type HostKeyMode = 'tofu' | 'strict' | 'insecure';
 
@@ -28,7 +29,7 @@ export function verifyHostKey(
       // Two very different things produce this, and the message has to let the
       // reader tell them apart — otherwise the reflex is --insecureHostKey,
       // which turns the check off for every host rather than for this one.
-      throw new Error(
+      throw new OperatorError(
         `HOST_KEY_MISMATCH: the key presented by ${host}:${port} is not the one seen before.\n` +
         `  expected ${stored}\n` +
         `  received ${fingerprint}\n` +
@@ -45,7 +46,7 @@ export function verifyHostKey(
   }
 
   if (mode === 'strict') {
-    throw new Error(
+    throw new OperatorError(
       `HOST_KEY_UNKNOWN: No known key for ${host}:${port} and --hostKeyMode=strict is set. ` +
       'Pin the key with trustedHostKey in the profile, or use --hostKeyMode=tofu to trust on first use.',
     );
