@@ -8,6 +8,19 @@ import { tracer } from '../observability/tracer.js';
 import { redactText } from '../guard/redactor.js';
 import { shellSingleQuote } from '../guard/sanitizer.js';
 import { openWithRetry } from './channel-retry.js';
+import { terminateChannel } from './channel-signal.js';
+
+/**
+ * Appended when a command was stopped on our side but the signal never left the
+ * client, so the process may still be running on the host.
+ *
+ * It should be unreachable: `terminateChannel` only reports failure when ssh2 has
+ * neither a usable public method nor the internals to route around it. That is
+ * exactly the case a future ssh2 could introduce, and the whole of #146 was a
+ * stop that silently did nothing — so if it ever comes back, it says so instead.
+ */
+const MAY_STILL_RUN =
+  ' The remote command could not be signalled and may still be running on the host.';
 
 export class SSHConnection {
   readonly profile: Profile;
@@ -224,16 +237,13 @@ export class SSHConnection {
       const timeoutId = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          if (activeStream) {
-            try { activeStream.signal('INT'); } catch { /* */ }
-            setTimeout(() => {
-              try { activeStream?.signal('TERM'); } catch { /* */ }
-              setTimeout(() => { try { activeStream?.close(); } catch { /* */ } }, 1000);
-            }, 1000);
-          }
+          // No stream means the channel never opened, so there is nothing running
+          // on the host to stop — and nothing to warn about.
+          const unstopped = activeStream !== null && !terminateChannel(activeStream);
           span.setAttribute('ssh.timedOut', true);
+          if (unstopped) span.setAttribute('ssh.unstopped', true);
           span.end();
-          reject(new Error(`Command timed out after ${timeoutMs}ms`));
+          reject(new Error(`Command timed out after ${timeoutMs}ms${unstopped ? MAY_STILL_RUN : ''}`));
         }
       }, timeoutMs);
 
@@ -283,27 +293,26 @@ export class SSHConnection {
           if (opts.abortSignal.aborted) {
             resolved = true;
             clearTimeout(timeoutId);
+            // Decremented here rather than on 'close', because the close listener
+            // below is never attached on this path. The channel now outlives the
+            // count by as long as the kill ladder takes.
             this.activeChannels--;
             // client.exec() has already dispatched the command, so rejecting
             // without signalling left it running to completion on the host and
-            // held a channel until it finished.
-            try { stream.signal('INT'); } catch { /* */ }
-            try { stream.close(); } catch { /* */ }
+            // held a channel until it finished. Closing the channel does not stop
+            // it either — only a delivered signal does (#146).
+            const unstopped = !terminateChannel(stream);
             span.end();
-            reject(new Error('Command aborted before execution'));
+            reject(new Error(`Command aborted before execution${unstopped ? MAY_STILL_RUN : ''}`));
             return;
           }
           const onAbort = () => {
             if (!resolved) {
               resolved = true;
               clearTimeout(timeoutId);
-              try { stream.signal('INT'); } catch { /* */ }
-              setTimeout(() => {
-                try { stream.signal('TERM'); } catch { /* */ }
-                setTimeout(() => { try { stream.close(); } catch { /* */ } }, 1000);
-              }, 1000);
+              const unstopped = !terminateChannel(stream);
               span.end();
-              reject(new Error('Command aborted'));
+              reject(new Error(`Command aborted${unstopped ? MAY_STILL_RUN : ''}`));
             }
           };
           opts.abortSignal.addEventListener('abort', onAbort, { once: true });
