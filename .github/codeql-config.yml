@@ -4,8 +4,12 @@ queries:
   - uses: security-and-quality
   - uses: security-extended
 
+# `src` for the JavaScript analysis, `.github/workflows` for the Actions one — a
+# single `paths` list applies to every language in this config, so both have to be
+# named or the Actions analysis has nothing in scope.
 paths:
   - src
+  - .github/workflows
 
 paths-ignore:
   - node_modules
