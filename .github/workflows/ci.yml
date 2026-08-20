@@ -302,7 +302,13 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
-          languages: javascript
+          # `actions` as well as `javascript`. The workflows in this repository are
+          # worth analysing on their own terms: one of them publishes to npm over
+          # OIDC, and the reasoning about `permissions` blocks and `${{ }}`
+          # interpolation lives in comments rather than in anything enforced. The
+          # Actions queries check exactly that class — untrusted input reaching a
+          # `run:` block, over-broad tokens, unpinned actions.
+          languages: javascript,actions
           config-file: ./.github/codeql-config.yml
 
       - name: Autobuild
