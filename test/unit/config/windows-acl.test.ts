@@ -362,3 +362,51 @@ describe('classifyReadFailure — what a failed descriptor read means', () => {
       .toMatchObject({ failure: 'read-refused' });
   });
 });
+
+describe('the rights field decides read from write', () => {
+  // The classifier, not the decision above it. The decisions suite builds Grant objects
+  // by hand, so `grantsWrite` could return a constant and nothing would fail — which is
+  // the gap that let a modify grant be reported as merely readable in the first place.
+  const grantsOf = (rights: string) => {
+    const v = parseDacl(`D:(A;;${rights};;;WD)`, ALLOWED);
+    return v.status === 'broad' ? v.grants[0] : null;
+  };
+
+  it('reads a real read-and-execute mask as read-only', () => {
+    // 0x1200a9 is what a file under C:\ inherits for BUILTIN\Users. Measured.
+    expect(grantsOf('0x1200a9')?.writes).toBe(false);
+  });
+
+  it('reads a real modify mask as write', () => {
+    // 0x1301bf is what the same inheritance gives Authenticated Users. Measured.
+    expect(grantsOf('0x1301bf')?.writes).toBe(true);
+  });
+
+  it.each(['FA', 'FW', 'WD', 'WO', 'SD', 'GA', 'GW'])('treats %s as write', (rights) => {
+    // WD here is WRITE_DAC, not Everyone: whoever can rewrite the DAC can grant
+    // themselves anything, so it is a write however narrow the other bits look.
+    expect(grantsOf(rights)?.writes).toBe(true);
+  });
+
+  it.each(['FR', 'FX', 'GR', 'FRFX'])('treats %s as read-only', (rights) => {
+    expect(grantsOf(rights)?.writes).toBe(false);
+  });
+
+  it('treats a rights field it cannot classify as write', () => {
+    // The safe direction: an unrecognised code refuses rather than reporting.
+    for (const rights of ['ZZ', 'FRZZ', 'F', '']) {
+      expect(grantsOf(rights)?.writes ?? true, rights).toBe(true);
+    }
+  });
+
+  it('distinguishes the two principals of a real drive-root descriptor', () => {
+    const v = parseDacl(DRIVE_ROOT, ALLOWED);
+    expect(v.status).toBe('broad');
+    if (v.status !== 'broad') return;
+    const byName = Object.fromEntries(v.grants.map((g) => [g.name, g.writes]));
+    // The whole basis of the default posture: one of these is a disclosure, the other is
+    // an authorization bypass, and they arrive in the same descriptor.
+    expect(byName['BUILTIN\\Users']).toBe(false);
+    expect(byName['Authenticated Users']).toBe(true);
+  });
+});

@@ -60,18 +60,32 @@ which is why `chmod 700` is in that command, since `mkdir -p` under the default 
 leaves the directory 0755. The server refuses to start otherwise. "Only the owner" is
 unambiguous here and `chmod` is a one-line fix.
 
-**Windows: reported.** There are no mode bits, so it reads the ACL and tells you what it
-grants — a config under `%APPDATA%` inherits access for you, `SYSTEM` and `Administrators`
-and needs nothing done to it, while one created elsewhere does not: a file under `C:\`
-inherits read for every local account and modify for every authenticated one. The message
-names the two `icacls` commands that fix it, and then the config loads anyway.
+**Windows: split by what the ACL actually allows.** There are no mode bits, so the ACL is
+read instead — and read exposure and write exposure are not treated alike, because Windows
+is much clearer about one of them than the other.
 
-Advisory rather than enforced because enforced was tried first: 2.3.0 refused, and it
-blocked a config at the documented `%APPDATA%` location whose ACL carried a principal the
-allowlist had never seen ([#138](https://github.com/tufantunc/ssh-mcp/issues/138)). A check
-whose worst outcome is locking you out of your own config is not worth that. Pass
-`--strictConfigAcl` to refuse instead; under it, `--allowUncheckedConfigAcl` still loads a
-config whose ACL could not be determined at all.
+| The ACL lets another account… | Default |
+|---|---|
+| only **read** the config | reported, and the server starts |
+| **change** the config | refused |
+| nothing (no ACL at all) | refused — that is full control for everyone |
+| …and if the ACL could not be read | refused, except when `icacls` is absent or the check timed out |
+
+A config under `%APPDATA%` inherits access for you, `SYSTEM` and `Administrators` and needs
+nothing done to it. One created elsewhere does not: a file under `C:\` inherits *read* for
+every local account and *modify* for every authenticated one. The message names the two
+`icacls` commands that fix it either way.
+
+Read exposure is reported rather than refused because that is where Windows is genuinely
+muddier than POSIX, and refusing over it blocked a config at the documented location
+([#138](https://github.com/tufantunc/ssh-mcp/issues/138)). Write exposure is refused
+because it is not muddy at all: another account being able to rewrite the file that decides
+which hosts, roles and approval policy this server honours is an authorization bypass, not
+a disclosure.
+
+Two flags move the whole thing: `--strictConfigAcl` refuses everything the check objects
+to, read-only grants included; `--allowUncheckedConfigAcl` reports everything and refuses
+nothing. Neither combination leaves you without an exit, which is the lesson of #138.
 
 ### Exit statuses
 
@@ -604,8 +618,8 @@ Secrets are **never** passed as CLI arguments.
 | `--rateLimit` | 0 | HTTP requests per minute on the MCP route (0 = unlimited) |
 | `--allowedHosts` | bind address + localhost | Comma-separated Host headers accepted by the DNS-rebinding guard |
 | `--insecureHostKey` | false | Disable host key verification (test only!) |
-| `--allowUncheckedConfigAcl` | false | Windows: load the config even if its ACL could not be read |
-| `--strictConfigAcl` | Windows: refuse to start on a broad or unreadable config ACL instead of reporting it |
+| `--allowUncheckedConfigAcl` | false | Windows: report every ACL finding and refuse none |
+| `--strictConfigAcl` | false | Windows: refuse on every ACL finding, including a read-only over-grant |
 | `--disableApproval` | false | Skip the approval gate (quick start profile only) |
 | `--opaUrl` | — | OPA sidecar URL for external policy |
 | `--commandQuota` | 0 (off) | Max commands per rolling 24h per profile |

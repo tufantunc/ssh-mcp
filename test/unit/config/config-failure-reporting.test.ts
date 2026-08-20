@@ -224,8 +224,30 @@ describe('buildAppConfig threads --allowUncheckedConfigAcl to the loader', () =>
     // Three reviewers pointed out the seam existed and nothing used it: the option was
     // documented as letting main() decide, while main() took the module's stderr default.
     const mock = await build({ config: '/x/config.toml' });
-    const opts = mock.mock.calls[0][1] as { onUnverified?: unknown };
-    expect(typeof opts.onUnverified).toBe('function');
+    const opts = mock.mock.calls[0][1] as { onFinding?: unknown };
+    expect(typeof opts.onFinding).toBe('function');
+  });
+
+  it.each([
+    ['strictConfigAcl', 'enforce'],
+    ['allowUncheckedConfigAcl', 'allowUnchecked'],
+  ] as const)('threads --%s to the loader as %s', async (flag, option) => {
+    // Both flags, at their wiring rather than below it. `strict: true` — reinstating the
+    // 2.3.0 default that blocked the reporter of #138 — survived the whole suite, exactly
+    // as the allowUnchecked mutations did a round earlier. The flag's presence is the
+    // evidence an operator relies on, so an unconnected flag is worse than none.
+    const on = await build({ config: '/x/config.toml', [flag]: null });
+    expect(on).toHaveBeenCalledWith('/x/config.toml', expect.objectContaining({ [option]: true }));
+
+    const off = await build({ config: '/x/config.toml' });
+    expect(off).toHaveBeenCalledWith('/x/config.toml', expect.objectContaining({ [option]: false }));
+
+    const explicit = await build({ config: '/x/config.toml', [flag]: 'false' });
+    expect(explicit).toHaveBeenCalledWith('/x/config.toml', expect.objectContaining({ [option]: false }));
+
+    // The default-path branch passes the same object, so neither can drift.
+    const viaDefault = await build({ [flag]: null });
+    expect(viaDefault).toHaveBeenCalledWith(undefined, expect.objectContaining({ [option]: true }));
   });
 
   it('honours an explicit --allowUncheckedConfigAcl=false', async () => {

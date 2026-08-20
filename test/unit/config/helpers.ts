@@ -39,3 +39,14 @@ export async function makeConfigDir(prefix = 'ssh-mcp-test-'): Promise<ConfigDir
     },
   };
 }
+
+/**
+ * Ask the Windows ACL check to enforce rather than report.
+ *
+ * One spelling for both config suites: they had a frozen `STRICT` literal in one and a
+ * spreading `strict()` builder in the other, for one concept — and the literal forced
+ * `{ ...STRICT, allowUnchecked: true }` at the one call site that extends it, which is
+ * the spread a builder exists to hide.
+ */
+export const enforceAcl = <T extends object>(extra: T = {} as T) =>
+  ({ ...extra, enforce: true as const });

@@ -4,7 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { loadConfig, getConfigPath } from './config/loader.js';
 import { OperatorError, ConfigNotFoundError, reportFatal } from './errors.js';
-import type { UnverifiedAcl } from './config/windows-acl.js';
+import type { AclFinding } from './config/windows-acl.js';
 import { ConnectionRegistry } from './ssh/connection-registry.js';
 import { PolicyEngine, HOST_GROUPS, resolvePolicyRules } from './policy/engine.js';
 import { AuditStore } from './audit/store.js';
@@ -119,12 +119,13 @@ export function resolveHostGroup(argv: Record<string, string | null>): string {
 }
 
 /**
- * ACL checks that could not be performed, in the order they happened.
+ * Every ACL finding, in the order it happened — both "readable beyond its owner" and
+ * "could not be checked".
  *
  * Collected rather than only printed so `main()` can act on them once there is somewhere
  * durable to put them; see the note at the sink below.
  */
-const unverified: UnverifiedAcl[] = [];
+const aclFindings: AclFinding[] = [];
 
 async function buildAppConfig(argv: Record<string, string | null>): Promise<AppConfig> {
   // The way past an ACL that could not be read, rather than an operator with no
@@ -135,14 +136,11 @@ async function buildAppConfig(argv: Record<string, string | null>): Promise<AppC
   // the audit store as well needs an AuditRecord variant for a startup event — that type
   // is hash-chained and tamper-evident, so it is its own change, and it is queued.
   const aclOpts = {
-    strict: flagEnabled(argv, 'strictConfigAcl'),
+    enforce: flagEnabled(argv, 'strictConfigAcl'),
     allowUnchecked: flagEnabled(argv, 'allowUncheckedConfigAcl'),
-    onUnverified: (e: UnverifiedAcl) => {
-      unverified.push(e);
-      console.error(
-        `Warning: the ACL of ${e.path} was not checked (${e.reason}: ${e.detail}), so ` +
-        'whether other accounts can read your config is unverified. Loading it anyway.',
-      );
+    onFinding: (f: AclFinding) => {
+      aclFindings.push(f);
+      console.error(`Warning: ${f.message}`);
     },
   };
 
