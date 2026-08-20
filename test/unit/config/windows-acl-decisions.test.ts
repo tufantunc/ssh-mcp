@@ -410,3 +410,62 @@ describe('assertPrivateOnWindows — the three postures', () => {
     expect(String(warn.mock.calls[0][0])).toMatch(/Warning: /);
   });
 });
+
+describe('when the platform will not name the current account', () => {
+  /**
+   * `userInfo()` throws ENOENT for a process with no loaded profile — a Windows
+   * service under a virtual account, or a container. The guard around it was
+   * added because an unhandled throw there turns a *report* into a raw stack
+   * trace, which is #138 one environment over: the operator loses their config to
+   * a crash inside the code that was only trying to warn them.
+   *
+   * Untested until now, and it is the branch that runs in exactly the environment
+   * nobody reviews interactively.
+   */
+  async function messageWithBrokenUserInfo(): Promise<string> {
+    vi.resetModules();
+    // Set so the assertion below bites on every platform. Without it USERNAME is
+    // simply unset on the Linux and macOS jobs, the old code fell through to the
+    // same placeholder, and reinstating `process.env.USERNAME` would have passed.
+    vi.stubEnv('USERNAME', 'MACHINE$');
+    vi.doMock('os', async () => {
+      const actual = await vi.importActual<typeof import('os')>('os');
+      return {
+        ...actual,
+        userInfo: () => {
+          throw Object.assign(new Error('ENOENT: no such file or directory, uv_os_get_passwd'), {
+            code: 'ENOENT',
+          });
+        },
+      };
+    });
+    const acl = await import('../../../src/config/windows-acl.js');
+    const err = await acl
+      .assertPrivateOnWindows(FILE, { enforce: true }, async (p) =>
+        p === FILE ? { status: 'broad', grants: [EVERYONE] } : { status: 'restricted' },
+      )
+      .then(() => null, (e: Error) => e);
+    vi.doUnmock('os');
+    vi.unstubAllEnvs();
+    vi.resetModules();
+    expect(err, 'expected a refusal, not a resolve').toBeInstanceOf(Error);
+    return (err as Error).message;
+  }
+
+  it('still produces the finding instead of escaping as a crash', async () => {
+    const message = await messageWithBrokenUserInfo();
+    expect(message).toContain('Everyone');
+    expect(message).toContain('/remove:g *S-1-1-0');
+  });
+
+  it('prints a placeholder the operator must fill in, not a guess', async () => {
+    // The first spelling of this fallback read process.env.USERNAME. In the
+    // environments where userInfo() actually throws that variable is either unset
+    // or holds something icacls rejects — `MACHINE$`, or a virtual service
+    // account — so it printed a command that fails while looking runnable. A
+    // command with a visible hole in it cannot be pasted by mistake.
+    const message = await messageWithBrokenUserInfo();
+    expect(message).toContain('"<your account>:F"');
+    expect(message).not.toContain('MACHINE$');
+  });
+});

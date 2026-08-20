@@ -879,16 +879,24 @@ function remediation(path: string, kind: 'file' | 'directory', grants: Grant[] =
   // reaches icacls literally, which reports "Failed processing 1 files" and
   // changes nothing. Measured. An instruction that only works in one shell is
   // the same defect as the `chmod 600` this whole change replaced.
+  //
   // Guarded because this is now on the *reporting* path, not only the throwing one. A
   // Windows service under a virtual account, or a container with no loaded profile, makes
   // `userInfo()` throw ENOENT — which escaped as a raw stack and cost the operator their
   // config, which is #138 one environment over. A message that cannot name the account is
   // still worth printing.
+  //
+  // A visible placeholder rather than `process.env.USERNAME`, which was the first spelling
+  // of this fallback. In the environments where `userInfo()` actually throws the env var is
+  // either unset or holds something icacls will not accept — a virtual service account, or
+  // `MACHINE$` — so it would print a command that fails, which is the defect class this
+  // whole change exists to remove. A placeholder the operator has to fill in cannot be
+  // followed by mistake.
   let account: string;
   try {
     account = userInfo().username;
   } catch {
-    account = process.env.USERNAME || '<your account>';
+    account = '<your account>';
   }
   return (
     'Restrict it with these two commands, in this order:\n' +
