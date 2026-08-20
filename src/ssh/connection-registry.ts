@@ -115,9 +115,10 @@ export class ConnectionRegistry {
   }
 
   async closeAll(): Promise<void> {
-    for (const conn of this.connections.values()) {
-      await conn.close().catch(() => {});
-    }
+    // Concurrently, for the reason SessionManager.closeAll gives: each connection now waits
+    // for its sessions' kill ladders, and serialising multiplied that wait by the number of
+    // profiles.
+    await Promise.all([...this.connections.values()].map((conn) => conn.close().catch(() => {})));
     this.connections.clear();
   }
 }

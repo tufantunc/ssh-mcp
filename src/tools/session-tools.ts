@@ -1,17 +1,50 @@
 import { z } from 'zod';
 import { sanitizeSessionName } from '../guard/sanitizer.js';
 import { redactText } from '../guard/redactor.js';
-import { BackgroundSession } from '../ssh/session.js';
+import { BackgroundSession, type CloseOutcome } from '../ssh/session.js';
+import { COULD_NOT_SIGNAL } from '../ssh/channel-signal.js';
 import { TOOL_DESCRIPTIONS as D } from './descriptions.js';
 import { syntheticSuccess, textResult } from './results.js';
 import type { ToolDeps, Pipeline } from './pipeline.js';
+import type { PolicyEvaluation } from '../types.js';
 
 /** Connection and session discovery/lifecycle tools. */
+/**
+ * The evaluation recorded for a session release.
+ *
+ * Releasing a session is audited but never refused, which is why this is a constant rather
+ * than an engine call. The first version of this routed the close through `runAudited`, and
+ * that made the stop *refusable*: `session:close <name>` classifies as `safe`, so a
+ * `readOnly` profile — which can open a background session, because a `tail -f` classifies
+ * `read-only` — was denied permission to close it, and had no other way to stop the
+ * command for an hour. `ask-all` prompted on every close, and an exhausted
+ * `commandQuotaPerDay` wedged the profile entirely.
+ *
+ * A control whose refusal mode is "the thing you asked me to stop keeps running" is worse
+ * than the unaudited stop it replaced. The record was the part worth having; the veto was
+ * not. `ruleId` says so, so the log distinguishes this from an engine `allow`.
+ */
+const RELEASE: PolicyEvaluation = {
+  decision: 'allow',
+  commandClass: 'safe',
+  binary: 'session:close',
+  ruleId: 'session-release',
+  reason: 'A session release is audited but not policy-gated; see SECURITY.md.',
+};
+
+/** What to append to the caller's confirmation for each outcome. */
+const CLOSE_NOTES: Record<CloseOutcome, string> = {
+  closed: '',
+  unsignalled: COULD_NOT_SIGNAL,
+  'stop-unconfirmed':
+    ' The command was signalled but the channel had not closed in time, so it may still be running on the host.',
+};
+
 export function registerSessionTools(
   { server, registry }: ToolDeps,
   pipeline: Pipeline,
 ) {
-  const { runAudited, resolveConn } = pipeline;
+  const { runAudited, resolveConn, auditResult, auditFailure, makeCtx, defaultProfileName } = pipeline;
 
   // ─── list-connections ──────────────────────────────────────────────────
   server.tool(
@@ -108,10 +141,35 @@ export function registerSessionTools(
       profile: z.string().optional().describe('Profile name'),
     },
     { destructiveHint: true },
-    async ({ name, profile }) => {
+    async ({ name, profile }, extra) => {
+      const cleanName = sanitizeSessionName(name);
+      const profileName = defaultProfileName(profile);
+      const ctx = makeCtx(extra, profileName, cleanName);
       const conn = await resolveConn(profile);
-      await conn.closeSession(name);
-      return textResult(`Session "${name}" closed.`);
+      // Recorded with the session's kind, so a remote SIGKILL is greppable in the log and
+      // distinguishable from ending a local shell — `open-session` encodes its type the
+      // same way.
+      // Through `toInfo()` rather than an `instanceof` check: the type is public API, and a
+      // tool handler reaching for a constructor identity is the layer leak this repo's own
+      // rules call out.
+      const kind = conn.getSession(cleanName)?.toInfo().type ?? 'unknown';
+      const command = `session:close ${kind} ${cleanName}`;
+      const startedAt = Date.now();
+
+      try {
+        const outcome = await conn.closeSession(cleanName);
+        await auditResult(ctx, profileName, command, RELEASE, {
+          stdout: '',
+          stderr: '',
+          exitCode: outcome === 'closed' ? 0 : 1,
+          durationMs: Date.now() - startedAt,
+          profile: profileName,
+        });
+        return textResult(`Session "${cleanName}" closed.${CLOSE_NOTES[outcome]}`);
+      } catch (err) {
+        await auditFailure(ctx, profileName, { command }, 'safe', err);
+        throw err;
+      }
     },
   );
 

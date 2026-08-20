@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ClientChannel } from 'ssh2';
-import { signalChannel, terminateChannel } from '../../../src/ssh/channel-signal.js';
+import { EventEmitter } from 'events';
+import { signalChannel, terminateChannel, waitForChannelClose } from '../../../src/ssh/channel-signal.js';
 
 /**
  * #146: every signal ssh-mcp sent to stop a timed-out command was a silent no-op,
@@ -17,6 +18,7 @@ import { signalChannel, terminateChannel } from '../../../src/ssh/channel-signal
 
 interface WireEntry { id: number; name: string }
 
+
 function fakeChannel(overrides: Record<string, unknown> = {}) {
   const wire: WireEntry[] = [];
   const closeHandlers: Array<() => void> = [];
@@ -24,7 +26,13 @@ function fakeChannel(overrides: Record<string, unknown> = {}) {
     type: 'session',
     writable: true,
     outgoing: { id: 7, state: 'open' },
-    _client: { _protocol: { signal: (id: number, name: string) => { wire.push({ id, name }); } } },
+    // The transport, in the shape a live connection has. `onTheWire` fails closed on an
+    // unreadable one, so every fake has to carry it — which is the point: a guard that
+    // assumed the best when it could not see the socket was the earlier defect.
+    _client: {
+      _sock: { writable: true, _readableState: { ended: false } },
+      _protocol: { signal: (id: number, name: string) => { wire.push({ id, name }); } },
+    },
     // The real gate, reproduced.
     signal(name: string) {
       const self = channel as unknown as { type: string; writable: boolean; outgoing: { id: number; state: string } };
@@ -98,11 +106,77 @@ describe('signalChannel', () => {
   });
 
   it('reports failure when the protocol call throws', () => {
-    const { channel } = fakeChannel({
-      ...afterStdinClosed,
-      _client: { _protocol: { signal: () => { throw new Error('closed'); } } },
+    // `afterStdinClosed()`, called. Spread as a bare function it contributes no own
+    // properties, so this channel stayed writable-and-open, the *public* path ran, and
+    // the fallback's catch — the only line in this module that depends on ssh2 internals
+    // — had no coverage while a test claimed otherwise.
+    const { channel, wire } = fakeChannel({
+      ...afterStdinClosed(),
+      _client: {
+        _sock: { writable: true, _readableState: { ended: false } },
+        _protocol: { signal: () => { throw new Error('closed'); } },
+      },
     });
+    const spy = vi.spyOn(channel, 'signal');
     expect(signalChannel(channel, 'INT')).toBe(false);
+    expect(spy, 'the fallback branch must be the one under test here').not.toHaveBeenCalled();
+    expect(wire).toEqual([]);
+  });
+
+  it('reports failure when the socket will no longer carry a packet', () => {
+    // ssh2 hands packets to `onWrite`, which is `if (isWritable(sock)) sock.write(data)`
+    // (lib/client.js:303) — an unwritable socket drops the packet with no error and no
+    // return value. Measured against 1.17.0: immediately after `client.end()`,
+    // `sock.writable` is false while `outgoing.state` is still `'eof'`, so every guard
+    // below passed and `signalChannel` reported delivery of a packet ssh2 threw away.
+    // Reachable via `SSHConnection.close()` or the idle reaper closing a connection
+    // under a running command.
+    const { channel, wire } = fakeChannel({
+      ...afterStdinClosed(),
+      _client: {
+        _sock: { writable: false, _readableState: { ended: true } },
+        _protocol: { signal: (id: number, name: string) => { wire.push({ id, name }); } },
+      },
+    });
+    expect(signalChannel(channel, 'TERM')).toBe(false);
+    expect(wire, 'nothing may be claimed as sent through a dead socket').toEqual([]);
+  });
+
+  it('refuses a half-open socket ssh2 would not write to', () => {
+    // The ProxyJump shape, and the case the first version of this guard missed: the peer
+    // closed its side, so `writable` is still true while ssh2's `isWritable` — which also
+    // requires `_readableState.ended === false` — is false. Measured: a socket with
+    // allowHalfOpen sits in that state indefinitely, and ssh2's transport for a `via`
+    // profile is a forwarded channel, which defaults to allowHalfOpen.
+    const { channel, wire } = fakeChannel({
+      ...afterStdinClosed(),
+      _client: {
+        _sock: { writable: true, _readableState: { ended: true } },
+        _protocol: { signal: (id: number, name: string) => { wire.push({ id, name }); } },
+      },
+    });
+    expect(signalChannel(channel, 'TERM')).toBe(false);
+    expect(wire).toEqual([]);
+  });
+
+  it('refuses when the transport cannot be read at all', () => {
+    // Fail closed, matching every other unknown-shape branch in the module.
+    const { channel, wire } = fakeChannel({ ...afterStdinClosed(), _client: { _protocol: { signal: () => {} } } });
+    expect(signalChannel(channel, 'TERM')).toBe(false);
+    expect(wire).toEqual([]);
+  });
+
+  it('sends through a socket that is still writable', () => {
+    // The other half, so the guard cannot be satisfied by refusing everything.
+    const { channel, wire } = fakeChannel({
+      ...afterStdinClosed(),
+      _client: {
+        _sock: { writable: true, _readableState: { ended: false } },
+        _protocol: { signal: (id: number, name: string) => { wire.push({ id, name }); } },
+      },
+    });
+    expect(signalChannel(channel, 'TERM')).toBe(true);
+    expect(wire).toEqual([{ id: 7, name: 'TERM' }]);
   });
 
   it('reports failure when ssh2\'s own method throws', () => {
@@ -168,6 +242,47 @@ describe('terminateChannel', () => {
   });
 });
 
+describe('waitForChannelClose', () => {
+  /** A channel that only ever does what the test makes it do. */
+  function bare() {
+    const ch = new EventEmitter() as unknown as ClientChannel & { incoming: { state: string } };
+    (ch as unknown as { incoming: { state: string } }).incoming = { state: 'open' };
+    return ch;
+  }
+
+  it('resolves false when the budget expires with the channel still open', async () => {
+    // The bounded half of the bound. Every other call in the suite resolves through the
+    // `'close'` event, so this arm — the only producer of `false`, and the evidence that a
+    // command survived INT, TERM *and* KILL — had no test at all.
+    expect(await waitForChannelClose(bare(), 20)).toBe(false);
+  });
+
+  it('resolves true when the channel closes inside the budget', async () => {
+    const ch = bare();
+    setTimeout(() => ch.emit('close'), 5);
+    expect(await waitForChannelClose(ch, 500)).toBe(true);
+  });
+
+  it('settles once when the channel closes after the budget', async () => {
+    // A late `'close'` must not settle a promise the timeout already settled, and must not
+    // leave the listener attached to a channel that outlives the wait.
+    const ch = bare();
+    expect(await waitForChannelClose(ch, 20)).toBe(false);
+    expect(ch.listenerCount('close'), 'the timed-out wait left its listener attached').toBe(0);
+    ch.emit('close');
+  });
+
+  it('does not wait for a channel that has already closed', async () => {
+    // ssh2 emits `'close'` exactly once and skips it for an already-closed channel, so a
+    // listener attached afterwards never fires and the caller would burn the full budget.
+    const ch = bare();
+    (ch as unknown as { incoming: { state: string } }).incoming.state = 'closed';
+    const started = Date.now();
+    expect(await waitForChannelClose(ch, 5000)).toBe(true);
+    expect(Date.now() - started, 'waited on a channel that was already gone').toBeLessThan(200);
+  });
+});
+
 describe('the ssh2 internals this depends on', () => {
   /**
    * A tripwire, not a test of our code. `signalChannel` falls back to
@@ -185,16 +300,53 @@ describe('the ssh2 internals this depends on', () => {
     expect(typeof Protocol.prototype.signal).toBe('function');
   });
 
+  it('still exposes the socket onTheWire reads', async () => {
+    // `_sock` is as undocumented as `_protocol`, and if ssh2 renames it `onTheWire` would
+    // fail closed on every signal — every stop would start warning instead of working.
+    const { createRequire } = await import('module');
+    const { Client } = createRequire(import.meta.url)('ssh2');
+    expect(
+      '_sock' in new Client(),
+      'ssh2 renamed _sock: onTheWire in channel-signal.ts now refuses every signal',
+    ).toBe(true);
+  });
+
   it('still refuses to signal a channel whose stdin is closed', async () => {
-    // The reason the fallback exists, read out of ssh2 rather than assumed. If
-    // this stops being true, the fallback is dead weight and can go.
-    const { readFile } = await import('fs/promises');
-    const source = await readFile(
-      new URL('../../../node_modules/ssh2/lib/Channel.js', import.meta.url),
-      'utf8',
+    // Behavioural, not textual. The previous version grepped Channel.js for
+    // `this.writable` and `outgoing.state === 'open'` — and mscdex/ssh2#1510, the very
+    // upgrade this tripwire exists to announce, relaxes the gate to
+    // `(state === 'open' || state === 'eof')` while dropping the `writable` check. The
+    // first substring disappears, the second survives, and a text probe could pass
+    // straight through the change. Calling the real method cannot.
+    const { createRequire } = await import('module');
+    const { Channel } = createRequire(import.meta.url)('ssh2/lib/Channel.js');
+    expect(
+      typeof Channel.prototype.signal,
+      'ssh2 moved Channel.prototype.signal: re-derive ssh2WillSend in channel-signal.ts',
+    ).toBe('function');
+
+    let sent = 0;
+    const afterEnd = {
+      server: false,
+      type: 'session',
+      writable: false,
+      outgoing: { id: 7, state: 'eof' },
+      _client: { _protocol: { signal: () => { sent++; } } },
+    };
+    Channel.prototype.signal.call(afterEnd, 'TERM');
+    expect(
+      sent,
+      'ssh2 now signals after EOF: widen ssh2WillSend in channel-signal.ts and delete the _protocol fallback',
+    ).toBe(0);
+
+    // And the state the public path is still good for, so the tripwire cannot pass by
+    // ssh2 having stopped signalling altogether.
+    let sentWhileOpen = 0;
+    Channel.prototype.signal.call(
+      { ...afterEnd, writable: true, outgoing: { id: 7, state: 'open' },
+        _client: { _protocol: { signal: () => { sentWhileOpen++; } } } },
+      'TERM',
     );
-    const signalMethod = source.slice(source.indexOf('  signal(signalName) {'));
-    expect(signalMethod).toContain('this.writable');
-    expect(signalMethod.slice(0, signalMethod.indexOf('}'))).toContain("outgoing.state === 'open'");
+    expect(sentWhileOpen, 'ssh2 stopped signalling even on an open channel').toBe(1);
   });
 });

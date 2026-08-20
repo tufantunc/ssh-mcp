@@ -35,6 +35,57 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 | PTY session leaks (MaxSessions) | Interactive sessions are bounded, not absent: `sessionMaxPerConnection` (default 5), `sessionIdleTimeoutMs` (10 min), `sessionBackgroundMaxMs` (1 h), and a reaper that sweeps expired sessions every 60s. One-shot commands use `exec()` and hold no channel. No persistent `su` shells |
 | Unbounded agent actions | Per-profile RBAC, rate limits, denylist, approval modes |
 
+## Stopping a Command
+
+Six things stop a command, and they all escalate the same way on the exec channel —
+`SIGINT` immediately, `SIGTERM` after 1s, `SIGKILL` after 2s, then the channel is closed:
+
+| trigger | policy check | audit record |
+|---|---|---|
+| the command's timeout | no | the failed command's own record |
+| an MCP client cancelling the request | no | the failed command's own record |
+| a channel that arrives after the request already timed out | no | trace only (`ssh.exec.lateStop`) |
+| `close-session` on a background session | **no** | yes (`session:close …`, `ruleId session-release`) |
+| the session reaper (idle TTL, or `sessionBackgroundMaxMs`, 1h by default) | no | **no** |
+| connection teardown — shutdown, or the idle-connection reaper | no | **no** |
+
+**Nothing on that list is policy-gated, and two of them leave no record.** The first four
+are the server stopping something policy already authorised when it started, which is
+strictly less authority than starting it. `close-session` is audited because it is
+caller-initiated, but it is deliberately *not* refusable: routing it through the policy
+engine meant a `readOnly` profile could open a background session and then be denied
+permission to close it, with no other way to stop the command for an hour. A control whose
+refusal mode is "the thing you asked me to stop keeps running" is worse than no control.
+
+The last two rows are the ones to weigh before pointing this at something that matters: a
+background `tail -f` that passes its TTL is `SIGKILL`ed by a timer, with no tool call, no
+policy check and no audit row. Set `sessionBackgroundMaxMs` and the idle TTL accordingly.
+
+**Note that `kill` classifies as `safe`.** The `signal-process` tool *is* policy-evaluated
+and audited, but the command it builds (`kill -SIGNAL pid`) is not matched by any
+destructive pattern, so `approvalPolicy = "ask-destructive"` will not prompt for it. Use
+`ask-all`, a `readOnly` profile, or a role whose bindings exclude `safe` if an agent must
+not signal arbitrary processes — those settings gate `signal-process`, and they do not gate
+any row in the table above.
+
+**The blast radius is the process group, not one process.** OpenSSH answers a `signal`
+channel request with `killpg()` on the command's group (`session.c`,
+`session_signal_req`), so an ordinary process tree does die — measured against 10.3p1, a
+shell and its child share one process group and both are gone after a single `SIGKILL`
+request. This is the server's behaviour rather than a protocol guarantee: RFC 4254 §6.9
+does not specify delivery semantics, sshd refuses signal requests for forced-command and
+subsystem sessions, and another server (this project also tests Dropbear) may differ.
+
+**Nothing acknowledges a signal request.** For `exec`, the absence of a warning in the
+error means the request was dispatched, not that the process died; when it could not be
+dispatched at all the error says so ("could not be signalled, so it may still be running on
+the host"). The `ssh.unstopped` span attribute carries the same fact for every `exec` stop
+that had a channel to signal — a timeout that fires before the channel exists records
+`ssh.stopDeferred` instead, and the outcome then lands on a separate `ssh.exec.lateStop`
+span. `close-session` reports its own outcome in the tool result and in the audit record's
+exit code rather than on a span: it distinguishes a confirmed close from a signal that was
+dispatched but never took, and from one that could not be dispatched at all.
+
 ## Safe Deployment Guidelines
 
 1. **Never run as root.** Create a dedicated low-privilege service account.

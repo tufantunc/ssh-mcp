@@ -138,7 +138,7 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 | `list-connections` | Discover available hosts and connection status | ✅ | — |
 | `list-sessions` | List active sessions per host | ✅ | — |
 | `open-session` | Create a named interactive (stateful) or background session | — | — |
-| `close-session` | Close a session, releasing resources | — | ✅ |
+| `close-session` | Close a session. A background session's command is signalled (INT/TERM/KILL) before its channel is dropped | — | ✅ |
 | `read-session-output` | Read output from background sessions (e.g., `tail -f`) | ✅ | — |
 | `read-command` | Execute allowlisted read-only commands (`ls`, `cat`, `grep`, ...) | ✅ | — |
 | `run-command` | Execute arbitrary commands (destructive ones need approval) | — | — |
