@@ -18,6 +18,22 @@
 #
 # 1% is a noise margin, not a licence. A real regression clears it easily: the
 # project is ~1400 instrumented lines, so 1% is roughly fourteen of them.
+# Two jobs upload coverage — `test` on Linux and `windows` — and Codecov posts a status
+# as soon as the first one lands, then revises it when the second arrives. In that window
+# the project status is computed from a report missing everything only the Windows job
+# covers, so it reports a drop and goes red. Every PR this week (#144, #147, #148, #149,
+# #151) showed that transient red and then settled green a minute later, once on a change
+# whose final number was +0.24%.
+#
+# `after_n_builds` makes Codecov wait for both before notifying at all, so the only status
+# posted is the one computed from the whole picture. Safe to gate on here: `windows` runs
+# unconditionally, the only required check is the `ci` aggregate — a Codecov status that
+# never posts cannot block a merge — and if a job fails before its upload step, `ci` has
+# already failed for a better reason.
+codecov:
+  notify:
+    after_n_builds: 2
+
 coverage:
   status:
     project:
