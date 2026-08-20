@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveHostGroup } from '../../src/index.js';
+import { resolveHostGroup } from '../../src/cli.js';
 import { HOST_GROUPS } from '../../src/policy/engine.js';
 
 /**

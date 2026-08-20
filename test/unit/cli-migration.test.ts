@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { checkRemovedFlags, parseMaxChars } from '../../src/index.js';
+import { checkRemovedFlags, parseMaxChars } from '../../src/cli.js';
 
 describe('checkRemovedFlags', () => {
   // Removed v1 credential flags used to be swallowed silently, so an upgraded
