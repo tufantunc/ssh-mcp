@@ -51,24 +51,27 @@ approvalPolicy = "auto"    # dev is permissive
 chmod 700 ~/.config/ssh-mcp && chmod 600 ~/.config/ssh-mcp/config.toml
 ```
 
-The server refuses to start if anyone but you can read the config, since it
-decides which hosts, roles and policy rules this server honours.
+The config decides which hosts, roles and policy rules this server honours, so it checks
+that nobody but you can read it — and treats the two platforms differently, because the
+question has a much clearer answer on one of them.
 
-On Linux and macOS that is the mode check above — the directory too, which is why
-`chmod 700` is in that command: `mkdir -p` under the default umask leaves it 0755. On Windows there are no mode
-bits, so it reads the ACL instead and requires that only your account, `SYSTEM`
-and `Administrators` hold access. A config under `%APPDATA%` inherits exactly
-that and needs nothing done to it. One created elsewhere does not — a file under
-`C:\` inherits read access for every local account and modify for every
-authenticated one — and the refusal names the two `icacls` commands that fix it,
-or, when the directory is a filesystem root or sits outside your user profile, leads with
-moving the config instead — it still prints the commands, but removing entries from a
-directory other accounts share is a judgement only you can make.
+**Linux and macOS: enforced.** The mode check above, on the file *and* the directory —
+which is why `chmod 700` is in that command, since `mkdir -p` under the default umask
+leaves the directory 0755. The server refuses to start otherwise. "Only the owner" is
+unambiguous here and `chmod` is a one-line fix.
 
-If the ACL cannot be read at all, the server refuses rather than assuming the file is
-private, and `--allowUncheckedConfigAcl` loads it unverified. Two cases do not need the
-flag — `icacls` being absent from the machine, and the check running out of time — because
-both are statements about the machine rather than about the file. Each warns and loads.
+**Windows: reported.** There are no mode bits, so it reads the ACL and tells you what it
+grants — a config under `%APPDATA%` inherits access for you, `SYSTEM` and `Administrators`
+and needs nothing done to it, while one created elsewhere does not: a file under `C:\`
+inherits read for every local account and modify for every authenticated one. The message
+names the two `icacls` commands that fix it, and then the config loads anyway.
+
+Advisory rather than enforced because enforced was tried first: 2.3.0 refused, and it
+blocked a config at the documented `%APPDATA%` location whose ACL carried a principal the
+allowlist had never seen ([#138](https://github.com/tufantunc/ssh-mcp/issues/138)). A check
+whose worst outcome is locking you out of your own config is not worth that. Pass
+`--strictConfigAcl` to refuse instead; under it, `--allowUncheckedConfigAcl` still loads a
+config whose ACL could not be determined at all.
 
 ### Exit statuses
 
@@ -602,6 +605,7 @@ Secrets are **never** passed as CLI arguments.
 | `--allowedHosts` | bind address + localhost | Comma-separated Host headers accepted by the DNS-rebinding guard |
 | `--insecureHostKey` | false | Disable host key verification (test only!) |
 | `--allowUncheckedConfigAcl` | false | Windows: load the config even if its ACL could not be read |
+| `--strictConfigAcl` | Windows: refuse to start on a broad or unreadable config ACL instead of reporting it |
 | `--disableApproval` | false | Skip the approval gate (quick start profile only) |
 | `--opaUrl` | — | OPA sidecar URL for external policy |
 | `--commandQuota` | 0 (off) | Max commands per rolling 24h per profile |
