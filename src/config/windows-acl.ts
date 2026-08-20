@@ -274,6 +274,24 @@ export interface UnverifiedAcl {
 
 export interface AclOptions {
   /**
+   * Refuse rather than warn when the ACL is readable beyond its owner.
+   * `--strictConfigAcl`. Off by default, and that default is the point.
+   *
+   * Refusing was the default in 2.3.0, and it blocked a reporter's config at the
+   * documented `%APPDATA%` location on the first day — their ACL carried a fourth
+   * principal, which the allowlist was built without knowing about because it was
+   * measured on one machine. `--allowUncheckedConfigAcl` deliberately did not cover a
+   * known-bad verdict, so there was no way past it at all: a security check whose worst
+   * outcome is locking an operator out of their own config, over a guarantee Windows
+   * states less clearly than POSIX does.
+   *
+   * So the finding is reported and the config loads. What the check knows is still worth
+   * saying — a config under `C:\` really does grant `BUILTIN\Users` read and
+   * `Authenticated Users` modify — but saying it and refusing are different things, and
+   * only one of them can strand somebody.
+   */
+  strict?: boolean;
+  /**
    * Load the config even when the ACL could not be determined.
    * `--allowUncheckedConfigAcl`.
    */
@@ -870,25 +888,26 @@ export async function assertPrivateOnWindows(
 
     if (verdict.status === 'restricted') continue;
 
-    if (verdict.status === 'broad') {
-      const named = verdict.grants.map((g) => g.name).join(', ');
-      throw new OperatorError(
-        `Config ${kind} ${path} is readable beyond its owner: access is granted to ${named}. ` +
-        'Required: this account, SYSTEM and Administrators only.\n' +
-        (isTightenable(path, kind) ? remediation(path, kind, verdict.grants) : relocation(path, kind, verdict.grants)),
-      );
-    }
+    if (verdict.status === 'broad' || verdict.status === 'no-dacl') {
+      const grants = verdict.status === 'broad' ? verdict.grants : [];
+      const what = verdict.status === 'broad'
+        ? `is readable beyond its owner: access is granted to ${grants.map((g) => g.name).join(', ')}. ` +
+          'Required: this account, SYSTEM and Administrators only.'
+        : 'has no access control list at all, which on Windows means full control for ' +
+          'every account on the machine.';
+      const message =
+        `Config ${kind} ${path} ${what}\n` +
+        (isTightenable(path, kind) ? remediation(path, kind, grants) : relocation(path, kind, grants));
 
-    if (verdict.status === 'no-dacl') {
-      throw new OperatorError(
-        `Config ${kind} ${path} has no access control list at all, which on Windows means ` +
-        'full control for every account on the machine.\n' +
-        (isTightenable(path, kind) ? remediation(path, kind) : relocation(path, kind, [])),
-      );
+      if (opts.strict) throw new OperatorError(message);
+      // Advisory by default; see AclOptions.strict for why.
+      console.error(`Warning: ${message}`);
+      continue;
     }
 
     // status === 'unknown'
-    if (verdict.reason === 'tool-missing' || verdict.reason === 'timed-out' || opts.allowUnchecked) {
+    if (!opts.strict || verdict.reason === 'tool-missing' || verdict.reason === 'timed-out'
+      || opts.allowUnchecked) {
       report({ path, reason: verdict.reason, detail: verdict.detail });
       continue;
     }
@@ -896,7 +915,7 @@ export async function assertPrivateOnWindows(
     throw new OperatorError(
       `Config ${kind} ${path} could not be checked for access by other accounts ` +
       `(${verdict.reason}: ${verdict.detail}).\n` +
-      'This is refused rather than assumed safe, because the config decides which hosts, ' +
+      'Refused because --strictConfigAcl was given, and the config decides which hosts, ' +
       'roles and policy rules this server honours.\n' +
       'Either fix the cause, move the config under %APPDATA%\\ssh-mcp, or pass ' +
       '--allowUncheckedConfigAcl to load it unverified.',

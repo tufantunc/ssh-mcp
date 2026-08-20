@@ -43,10 +43,12 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 4. **Restrict network egress** on the target host (iptables/Cilium) to prevent data exfiltration.
 5. **Use read-only profiles** (`readOnly = true`) for monitoring/observer access.
 6. **Review audit logs** regularly — all commands are logged with redaction.
-7. **Restrict your config file** — `chmod 700` the directory and `chmod 600` the file; the
-   server refuses to start otherwise, and `chmod 600` alone does not satisfy the directory
-   check. On Windows there are no mode bits: the ACL must grant only your account, `SYSTEM`
-   and `Administrators`, which a config under `%APPDATA%` inherits automatically.
+7. **Restrict your config file** — `chmod 700` the directory and `chmod 600` the file; on
+   Linux and macOS the server refuses to start otherwise, and `chmod 600` alone does not
+   satisfy the directory check. On Windows there are no mode bits: the ACL should grant only
+   your account, `SYSTEM` and `Administrators`, which a config under `%APPDATA%` inherits
+   automatically. There the finding is reported rather than enforced — `--strictConfigAcl`
+   enforces it if you want that.
 
 ## Supported Versions
 

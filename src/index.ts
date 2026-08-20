@@ -135,6 +135,7 @@ async function buildAppConfig(argv: Record<string, string | null>): Promise<AppC
   // the audit store as well needs an AuditRecord variant for a startup event — that type
   // is hash-chained and tamper-evident, so it is its own change, and it is queued.
   const aclOpts = {
+    strict: flagEnabled(argv, 'strictConfigAcl'),
     allowUnchecked: flagEnabled(argv, 'allowUncheckedConfigAcl'),
     onUnverified: (e: UnverifiedAcl) => {
       unverified.push(e);
