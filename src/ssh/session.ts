@@ -2,6 +2,7 @@ import type { ClientChannel } from 'ssh2';
 import { randomBytes } from 'crypto';
 import type { CommandResult, SessionInfo, SessionStatus } from '../types.js';
 import { tracer } from '../observability/tracer.js';
+import { terminateChannel } from './channel-signal.js';
 
 const ANSI_REGEX = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r/g;
 
@@ -385,7 +386,12 @@ export class BackgroundSession extends Session {
   }
 
   async close(): Promise<void> {
-    try { this.stream.close(); } catch { /* ignore */ }
+    // Signalled, not just closed. A background session runs on an exec channel, and
+    // closing such a channel was measured not to stop the command (#146) — so
+    // `close-session` reported `status: 'closed'` while `tail -f` kept running on the
+    // host, which is the same false claim the exec path stopped making. The ladder
+    // closes the channel as its last rung, so nothing is lost by going through it.
+    terminateChannel(this.stream);
     this._status = 'closed';
   }
 }

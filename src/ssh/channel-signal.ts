@@ -6,13 +6,14 @@ import type { ClientChannel } from 'ssh2';
  *
  * `SSHConnection.exec()` closes stdin the moment the command is dispatched, because
  * a command that reads stdin would otherwise wait for input nobody is going to send.
- * ssh2 1.17's `Channel.signal()` (lib/Channel.js) writes the request only while
+ * ssh2 1.17's `Channel.signal()` (lib/Channel.js:237) writes the request only while
  *
  *     this.type === 'session' && this.writable && this.outgoing.state === 'open'
  *
- * and `end()` clears the last two: `_final` calls `eof()`, moving the outgoing state
- * to `'eof'`, and sets `writable = false`. It does not throw or report anything — it
- * simply returns. So every signal sent to stop a timed-out command was discarded
+ * and `end()` clears the last two: it fires `prefinish`/`finish`, and ssh2's `onFinish`
+ * listener (lib/Channel.js:268) calls `eof()` — moving the outgoing state to `'eof'` —
+ * and sets `writable = false`. It does not throw or report anything — it simply
+ * returns. So every signal sent to stop a timed-out command was discarded
  * inside ssh2, and the command ran to completion on the host while the caller was
  * told it had timed out (#146).
  *
@@ -36,10 +37,20 @@ import type { ClientChannel } from 'ssh2';
  * method would have used. The SSH protocol allows a channel request after EOF: EOF
  * ends the data stream, not the channel. Only ssh2's bookkeeping objected.
  *
- * When ssh2 relaxes the gate the public path starts covering the `'eof'` case by
- * itself, this fallback stops being reached, and it can be deleted — the tests in
- * channel-signal.test.ts pin the ssh2 shape this depends on, so the upgrade that
- * makes it unnecessary announces itself.
+ * Retiring this fallback is a code change, not something that happens by itself. The
+ * public path is gated by `ssh2WillSend` below, which is a deliberate copy of ssh2
+ * 1.17's condition — so even with mscdex/ssh2#1510 released, our own copy still refuses
+ * and the fallback stays on the hot path until someone widens it. `ssh2WillSend` is the
+ * one place to change, and the behavioural tripwire in channel-signal.test.ts fails the
+ * moment ssh2 starts signalling after EOF, which is the signal to change it. An earlier
+ * version of this comment claimed the fallback would stop being reached on its own; it
+ * could not, and a plan that cannot fire is worse than no plan.
+ *
+ * What this does NOT achieve, measured: the request reaches the command's *session
+ * leader*, not its process group. `sh -c 'trap "" INT TERM; sleep 30'` loses the shell
+ * to KILL and leaves the `sleep` orphaned. So a stopped command can still leave
+ * children behind, and no rung of the ladder changes that — which is why nothing here
+ * claims the process is gone. See `signalChannel`'s return value.
  */
 
 /** The parts of a channel ssh2 does not put in its public typings. */
@@ -47,20 +58,59 @@ type ChannelInternals = {
   type?: string;
   writable?: boolean;
   outgoing?: { id?: number; state?: string };
-  _client?: { _protocol?: { signal?: (id: number, name: string) => void } };
+  _client?: {
+    _protocol?: { signal?: (id: number, name: string) => void };
+    /** ssh2 drops any write to this silently once it is unwritable; see `onTheWire`. */
+    _sock?: { writable?: boolean };
+  };
 };
+
+/** The signals this module sends. Typed so a name ssh2 rejects is a compile error. */
+export type SignalName = 'INT' | 'TERM' | 'KILL';
 
 /** Outgoing states in which the far end still has a channel to receive a request. */
 const OPEN_STATES = new Set(['open', 'eof']);
 
 /**
+ * Whether ssh2's own `Channel.signal()` would put this request on the wire.
+ *
+ * A deliberate copy of lib/Channel.js:241-243 in ssh2 1.17, and the single place to
+ * update when that changes. Copying it is what lets us tell "ssh2 will handle this"
+ * from "ssh2 will silently discard it" — the distinction the whole module exists for.
+ */
+function ssh2WillSend(ch: ClientChannel & ChannelInternals): boolean {
+  return ch.type === 'session' && ch.writable === true && ch.outgoing?.state === 'open';
+}
+
+/**
+ * Whether the transport can still carry a packet.
+ *
+ * ssh2 hands every packet to `onWrite`, which is `if (isWritable(sock)) sock.write(data)`
+ * (lib/client.js:303) — an unwritable socket means the packet is dropped with no error
+ * and no return value. Measured against 1.17.0: immediately after `client.end()`,
+ * `sock.writable` is false while `outgoing.state` is still `'eof'`, so the state guard
+ * below passes and the signal call returns without throwing. Reporting that as delivery
+ * is #146 one layer down, and it is reachable whenever a connection is closed under a
+ * running command — `SSHConnection.close()`, or the idle reaper, which does not consult
+ * `activeChannels`.
+ */
+function onTheWire(ch: ClientChannel & ChannelInternals): boolean {
+  const writable = ch._client?._sock?.writable;
+  return writable === undefined || writable === true;
+}
+
+/**
  * Send `name` to the process behind `channel`.
  *
- * Returns whether the request left the client. That answer is the point: a signal
- * that goes nowhere while reporting success is the defect this module exists to
- * remove, so "I could not signal it" has to be sayable.
+ * Returns whether the request was **dispatched to the wire** — not whether the command
+ * stopped. Nothing in SSH acknowledges a signal request, the signal reaches the session
+ * leader rather than the process group, and a target may refuse it outright, so
+ * "the process is gone" is not a fact this function can produce. What it can produce
+ * honestly is "I could not even ask", which is what the caller warns about, because a
+ * signal that goes nowhere while reporting success is the defect this module exists to
+ * remove.
  */
-export function signalChannel(channel: ClientChannel, name: string): boolean {
+export function signalChannel(channel: ClientChannel, name: SignalName): boolean {
   const ch = channel as ClientChannel & ChannelInternals;
   const state = ch.outgoing?.state;
 
@@ -70,10 +120,12 @@ export function signalChannel(channel: ClientChannel, name: string): boolean {
   // Already closing or closed: the request would have no channel to arrive on, and
   // ssh2 may have handed the id to a new channel.
   if (state !== undefined && !OPEN_STATES.has(state)) return false;
+  // Nothing can be dispatched through a socket ssh2 will not write to, and it will not
+  // tell us — so this has to be asked before either path claims success.
+  if (!onTheWire(ch)) return false;
 
-  // The supported path, taken whenever ssh2 will actually write the request. This is
-  // also the path that grows once ssh2 accepts `'eof'`.
-  if (ch.writable === true && state === 'open') {
+  // The supported path, taken whenever ssh2 will actually write the request.
+  if (ssh2WillSend(ch)) {
     try {
       channel.signal(name);
       return true;
@@ -112,12 +164,14 @@ const ESCALATION_MS = 1000;
  * because the rung below it used to be `close()`, and closing a channel was measured
  * not to stop anything. A command that ignores INT and TERM used to run forever.
  *
- * Returns whether the *first* signal left the client — known synchronously, so the
- * caller can say "and it may still be running" in the same breath as the timeout it
- * is already reporting.
+ * Returns whether the *first* signal was dispatched — known synchronously, so the
+ * caller can say "I could not even ask" in the same breath as the timeout it is already
+ * reporting. It is not a claim that the command stopped, and callers must not read it
+ * as one: the later rungs have not run yet, no rung is acknowledged, and the signal
+ * does not reach the process group.
  */
 export function terminateChannel(channel: ClientChannel): boolean {
-  const delivered = signalChannel(channel, 'INT');
+  const dispatched = signalChannel(channel, 'INT');
 
   const pending: NodeJS.Timeout[] = [];
   const later = (fn: () => void, ms: number) => {
@@ -135,5 +189,5 @@ export function terminateChannel(channel: ClientChannel): boolean {
   later(() => { signalChannel(channel, 'KILL'); }, ESCALATION_MS * 2);
   later(() => { try { channel.close(); } catch { /* already gone */ } }, ESCALATION_MS * 3);
 
-  return delivered;
+  return dispatched;
 }

@@ -11,16 +11,21 @@ import { openWithRetry } from './channel-retry.js';
 import { terminateChannel } from './channel-signal.js';
 
 /**
- * Appended when a command was stopped on our side but the signal never left the
- * client, so the process may still be running on the host.
+ * Appended when the stop request could not even be dispatched, so nothing was asked of
+ * the host at all.
  *
- * It should be unreachable: `terminateChannel` only reports failure when ssh2 has
- * neither a usable public method nor the internals to route around it. That is
- * exactly the case a future ssh2 could introduce, and the whole of #146 was a
- * stop that silently did nothing — so if it ever comes back, it says so instead.
+ * Deliberately narrower than "the command is still running", which is not knowable
+ * here: SSH does not acknowledge a signal request, and the request reaches the session
+ * leader rather than the process group. Its *absence* therefore means "we asked", not
+ * "it died" — see terminateChannel's contract.
+ *
+ * It should be unreachable: dispatch fails only when the transport is already gone or
+ * ssh2 offers neither a usable method nor the internals to route around it. That is
+ * exactly what a future ssh2 could introduce, and the whole of #146 was a stop that
+ * silently did nothing — so if it ever comes back, it says so instead.
  */
-const MAY_STILL_RUN =
-  ' The remote command could not be signalled and may still be running on the host.';
+const COULD_NOT_SIGNAL =
+  ' The remote command could not be signalled, so it may still be running on the host.';
 
 export class SSHConnection {
   readonly profile: Profile;
@@ -234,16 +239,41 @@ export class SSHConnection {
       let activeStream: ClientChannel | null = null;
       let resolved = false;
 
+      /**
+       * Stop the command, record why we stopped it, and hand back the sentence the
+       * rejection should carry.
+       *
+       * One helper for all three settle paths. They used to inline this, and two of them
+       * computed `unstopped` for the message and then dropped it before the span — so
+       * `ssh.unstopped` was structurally incapable of being true for a cancellation,
+       * which is the most common way an MCP client stops a command.
+       */
+      const stopAndDescribe = (reason: 'ssh.timedOut' | 'ssh.aborted', channel: ClientChannel | null): string => {
+        span.setAttribute(reason, true);
+        // A null channel means the exec callback has not arrived yet. It does NOT mean
+        // nothing is running — ssh2 invokes that callback on CHANNEL_SUCCESS, which
+        // OpenSSH sends after forking the command — but there is nothing to warn about
+        // either: `onExecChannel` stops such a late channel the moment it arrives (see
+        // the `resolved` check there). Warning here would put "may still be running" on
+        // every timeout that races a slow channel open, and a warning that fires when
+        // nothing is wrong stops being read.
+        if (channel === null) {
+          span.setAttribute('ssh.unstopped', false);
+          return '';
+        }
+        const dispatched = terminateChannel(channel);
+        // Set on every settle path, always, so "stopped cleanly" and "ran an older
+        // build" are not the same absent-attribute query.
+        span.setAttribute('ssh.unstopped', !dispatched);
+        return dispatched ? '' : COULD_NOT_SIGNAL;
+      };
+
       const timeoutId = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          // No stream means the channel never opened, so there is nothing running
-          // on the host to stop — and nothing to warn about.
-          const unstopped = activeStream !== null && !terminateChannel(activeStream);
-          span.setAttribute('ssh.timedOut', true);
-          if (unstopped) span.setAttribute('ssh.unstopped', true);
+          const note = stopAndDescribe('ssh.timedOut', activeStream);
           span.end();
-          reject(new Error(`Command timed out after ${timeoutMs}ms${unstopped ? MAY_STILL_RUN : ''}`));
+          reject(new Error(`Command timed out after ${timeoutMs}ms${note}`));
         }
       }, timeoutMs);
 
@@ -275,6 +305,17 @@ export class SSHConnection {
           }
           return;
         }
+        // The promise may already have settled — the timeout can fire while
+        // `openWithRetry` is still in flight, and ssh2 only invokes this callback once
+        // the server has replied CHANNEL_SUCCESS, which OpenSSH sends *after* forking
+        // the command. Without this the command ran to completion on the host after the
+        // caller had been told it timed out, holding a channel and discarding its
+        // output: #146 exactly, in the one path the first fix did not cover.
+        if (resolved) {
+          terminateChannel(stream);
+          return;
+        }
+
         activeStream = stream;
         this.activeChannels++;
 
@@ -301,18 +342,18 @@ export class SSHConnection {
             // without signalling left it running to completion on the host and
             // held a channel until it finished. Closing the channel does not stop
             // it either — only a delivered signal does (#146).
-            const unstopped = !terminateChannel(stream);
+            const note = stopAndDescribe('ssh.aborted', stream);
             span.end();
-            reject(new Error(`Command aborted before execution${unstopped ? MAY_STILL_RUN : ''}`));
+            reject(new Error(`Command aborted before execution${note}`));
             return;
           }
           const onAbort = () => {
             if (!resolved) {
               resolved = true;
               clearTimeout(timeoutId);
-              const unstopped = !terminateChannel(stream);
+              const note = stopAndDescribe('ssh.aborted', stream);
               span.end();
-              reject(new Error(`Command aborted${unstopped ? MAY_STILL_RUN : ''}`));
+              reject(new Error(`Command aborted${note}`));
             }
           };
           opts.abortSignal.addEventListener('abort', onAbort, { once: true });

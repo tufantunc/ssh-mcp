@@ -86,3 +86,41 @@ describe.skipIf(!allServersUp(await checkAllServers()))('BackgroundSession', () 
     await conn.closeSession('ring-test').catch(() => {});
   }, 15000);
 });
+
+describe.skipIf(!allServersUp(await checkAllServers()))('closing a background session stops it on the host', () => {
+  /**
+   * `close()` used to be `stream.close()` alone — the rung this project measured as
+   * stopping nothing on a non-tty exec channel (#146). So `close-session` reported
+   * `status: 'closed'` while the command kept running on the host: the same false claim
+   * `exec` stopped making, in the sibling path the fix did not reach.
+   *
+   * A distinctive `sleep` duration acts as the process name; `grep "[s]leep N"` so the
+   * shell that runs the check does not match its own command line.
+   */
+  const MARKER = 4820;
+
+  async function alive(): Promise<number> {
+    const { stdout } = await conn.exec(`ps -ef | grep -c "[s]leep ${MARKER}"`, { timeoutMs: 5000 });
+    return Number(stdout.trim());
+  }
+
+  it('kills the command instead of only dropping the channel', async () => {
+    const session = await conn.openSession({ name: 'bg-kill', type: 'background', command: `sleep ${MARKER}` });
+    expect(session).toBeInstanceOf(BackgroundSession);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(await alive(), 'the background command never started').toBeGreaterThan(0);
+
+    await conn.closeSession('bg-kill');
+
+    // A generous budget on purpose: the ladder itself needs up to 3s, and each poll is a
+    // real exec round trip, which slows down measurably when the whole suite is running
+    // against the same container. 8s passed in isolation and failed inside `npm test`.
+    const deadline = Date.now() + 20000;
+    for (;;) {
+      if (await alive() === 0) break;
+      if (Date.now() > deadline) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    expect(await alive(), 'the background command outlived close-session').toBe(0);
+  }, 30000);
+});

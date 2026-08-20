@@ -19,6 +19,8 @@ let conn: SSHConnection;
 
 const TIMEOUT_MARKER = 4711;
 const ABORT_MARKER = 4712;
+const PRE_ABORT_MARKER = 4714;
+const TRAPPING_MARKER = 4716;
 
 beforeAll(async () => {
   status = await checkAllServers();
@@ -41,7 +43,24 @@ async function running(marker: number): Promise<number> {
   return Number(stdout.trim());
 }
 
-/** Polls, because the kill ladder is asynchronous by design (INT, then TERM, then close). */
+/**
+ * Every process whose command line mentions the marker — the shell wrapper included.
+ *
+ * `grep "[s]leep N"` rather than `pgrep -f N`: the shell sshd wraps this very command in
+ * carries the marker in its own argv, so `pgrep -f` counted itself and reported one
+ * survivor too many. The bracket makes the pattern not match the literal text of the
+ * command that is searching.
+ */
+async function tree(marker: number): Promise<number> {
+  const { stdout } = await conn.exec(`ps -ef | grep -c "[s]leep ${marker}"`, { timeoutMs: 5000 });
+  return Number(stdout.trim());
+}
+
+/**
+ * Polls, because the kill ladder is asynchronous by design: INT now, TERM at +1s, KILL
+ * at +2s, the channel closed at +3s. The 8000ms budget below covers all three gaps plus
+ * polling.
+ */
 async function goneWithin(marker: number, ms: number): Promise<boolean> {
   const deadline = Date.now() + ms;
   for (;;) {
@@ -84,5 +103,58 @@ describe.skipIf(!allServersUp(await checkAllServers()))('a stopped exec stops on
     expect(err?.message).not.toMatch(/may still be running/);
 
     expect(await goneWithin(ABORT_MARKER, 8000), 'the remote process outlived the cancellation').toBe(true);
+  }, 30000);
+
+  it('kills the remote process when the signal was already aborted', async () => {
+    // The third rewired settle path, and the one with the highest leak risk: the abort
+    // lands between `client.exec()` dispatching the command and its callback, so the
+    // command is already running on the host. Nothing in the suite passed a pre-aborted
+    // signal before, so this branch could have been deleted and everything stayed green.
+    const ac = new AbortController();
+    ac.abort();
+    const err = await conn
+      .exec(`sleep ${PRE_ABORT_MARKER}`, { timeoutMs: 60000, abortSignal: ac.signal })
+      .then(() => null, (e: Error) => e);
+    expect(err?.message).toMatch(/aborted before execution/);
+    expect(err?.message).not.toMatch(/may still be running/);
+
+    // No in-flight sample here — the command may never become visible — so this asserts
+    // only that nothing is left behind.
+    expect(await goneWithin(PRE_ABORT_MARKER, 8000), 'the remote process outlived the cancellation').toBe(true);
+  }, 30000);
+});
+
+describe.skipIf(!allServersUp(await checkAllServers()))('what the ladder cannot do', () => {
+  /**
+   * A signal request reaches the command's session leader, not its process group. This
+   * test exists so that limitation is a recorded fact rather than a surprise: it pins
+   * what actually happens to a process tree whose root ignores INT and TERM.
+   *
+   * If a future change makes the whole tree die — a process-group signal, or a server
+   * that kills the group — this test fails, and that failure is good news to be acted
+   * on rather than a regression.
+   */
+  it('kills the signalled process but not the children it left behind', async () => {
+    const started = conn.exec(
+      `sh -c 'trap "" INT TERM; sleep ${TRAPPING_MARKER}'`,
+      { timeoutMs: 1500 },
+    );
+    await new Promise((r) => setTimeout(r, 400));
+    // The shell and its child: `pgrep -f` matches both, so this counts the tree.
+    expect(await tree(TRAPPING_MARKER), 'the command tree never appeared').toBeGreaterThanOrEqual(2);
+
+    const err = await started.then(() => null, (e: Error) => e);
+    expect(err?.message).toMatch(/timed out/i);
+    // The request was dispatched, so nothing warns — which is exactly why the warning's
+    // absence must not be read as "the process is gone".
+    expect(err?.message).not.toMatch(/may still be running/);
+
+    // INT and TERM are trapped; KILL takes the shell at +2s. Measured in the container:
+    // the `sh` wrapper is gone and `sleep` is left reparented to PID 1.
+    await new Promise((r) => setTimeout(r, 4000));
+    const left = await tree(TRAPPING_MARKER);
+    expect(left, 'the signalled shell survived KILL').toBeLessThan(2);
+    expect(left, 'the orphaned child died too — the ladder reaches the process group now, so update this test')
+      .toBe(1);
   }, 30000);
 });

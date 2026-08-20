@@ -35,6 +35,31 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 | PTY session leaks (MaxSessions) | Interactive sessions are bounded, not absent: `sessionMaxPerConnection` (default 5), `sessionIdleTimeoutMs` (10 min), `sessionBackgroundMaxMs` (1 h), and a reaper that sweeps expired sessions every 60s. One-shot commands use `exec()` and hold no channel. No persistent `su` shells |
 | Unbounded agent actions | Per-profile RBAC, rate limits, denylist, approval modes |
 
+## Stopping a Command
+
+When a command hits its timeout, or the MCP client cancels the request, ssh-mcp escalates
+on the exec channel: `SIGINT` immediately, `SIGTERM` after 1s, `SIGKILL` after 2s, then it
+closes the channel. Three properties of that are worth knowing before you point this at
+something that matters.
+
+**`SIGKILL` is part of it, and cancellation reaches it without a separate approval.** The
+`signal-process` tool classifies `INT`/`TERM`/`KILL` as destructive and evaluates them
+against your policy. A timeout or a client cancellation is not routed through that check —
+it is the server stopping a command it already started on your behalf. A command that must
+never be `SIGKILL`ed therefore needs a timeout long enough that it finishes first, or a
+wrapper that survives its parent.
+
+**A signal reaches the command, not its children.** SSH delivers the request to the
+session leader. Measured: `sh -c 'trap "" INT TERM; sleep 30'` loses the shell to `SIGKILL`
+and leaves `sleep` reparented to PID 1. If your commands spawn process trees, closing the
+channel does not reap them.
+
+**Nothing acknowledges a signal request.** The absence of a warning in the error means the
+request was dispatched, not that the process died — a target may refuse it, and SSH gives
+no reply either way. When the request could not even be dispatched, the error says so
+explicitly ("could not be signalled, so it may still be running on the host") and the
+`ssh.unstopped` span attribute is set.
+
 ## Safe Deployment Guidelines
 
 1. **Never run as root.** Create a dedicated low-privilege service account.
