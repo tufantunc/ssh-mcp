@@ -2,7 +2,7 @@ import type { ClientChannel } from 'ssh2';
 import { randomBytes } from 'crypto';
 import type { CommandResult, SessionInfo, SessionStatus } from '../types.js';
 import { tracer } from '../observability/tracer.js';
-import { terminateChannel } from './channel-signal.js';
+import { terminateChannel, waitForChannelClose } from './channel-signal.js';
 
 const ANSI_REGEX = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r/g;
 
@@ -45,6 +45,15 @@ export function trimNewlines(text: string): string {
   while (end > start && text.charCodeAt(end - 1) === 10) end--;
   return start === 0 && end === text.length ? text : text.slice(start, end);
 }
+
+/**
+ * What closing a session achieved.
+ *
+ * `'unsignalled'` means the stop request could not be dispatched at all — the honest
+ * counterpart to `exec`'s COULD_NOT_SIGNAL. A boolean was the first spelling and it read
+ * as "did it stop", which is exactly the conflation this whole change removes.
+ */
+export type CloseOutcome = 'closed' | 'unsignalled';
 
 export abstract class Session {
   readonly id: string;
@@ -95,7 +104,7 @@ export abstract class Session {
   }
 
   abstract run(command: string, timeoutMs?: number, abortSignal?: AbortSignal): Promise<CommandResult>;
-  abstract close(): Promise<void>;
+  abstract close(): Promise<CloseOutcome>;
 
   markDisconnected(): void {
     if (this._status === 'active') {
@@ -275,11 +284,14 @@ export class InteractiveSession extends Session {
     return generateSessionMarker();
   }
 
-  async close(): Promise<void> {
+  async close(): Promise<CloseOutcome> {
     try {
       this.stream.end();
     } catch { /* ignore */ }
     this._status = 'closed';
+    // Nothing remote is signalled here: an interactive session's stop is `^C` written into
+    // its live pty during a command, and closing the session just ends the shell.
+    return 'closed';
   }
 
   get currentCwd(): string {
@@ -385,13 +397,23 @@ export class BackgroundSession extends Session {
     throw new Error('Background sessions do not support run(). The command was started when the session was opened.');
   }
 
-  async close(): Promise<void> {
+  async close(): Promise<CloseOutcome> {
     // Signalled, not just closed. A background session runs on an exec channel, and
     // closing such a channel was measured not to stop the command (#146) — so
     // `close-session` reported `status: 'closed'` while `tail -f` kept running on the
-    // host, which is the same false claim the exec path stopped making. The ladder
-    // closes the channel as its last rung, so nothing is lost by going through it.
-    terminateChannel(this.stream);
+    // host, which is the same false claim the exec path stopped making.
+    const dispatched = terminateChannel(this.stream);
+    // Awaited, because the ladder's later rungs are timers and whatever happens next may
+    // tear the transport down: `SSHConnection.close()` calls `client.end()` on the line
+    // after `closeAll()`, and shutdown calls `process.exit`. Returning early meant a
+    // command that ignored INT received nothing further and survived — the KILL rung
+    // exists precisely for that command. The wait is bounded by the ladder's own length,
+    // so a command that dies to INT costs one round trip, not three seconds.
+    //
+    // The old `stream.close()` released the channel synchronously; this releases it when
+    // the ladder finishes, which is why the wait is here rather than left to the caller.
+    await waitForChannelClose(this.stream);
     this._status = 'closed';
+    return dispatched ? 'closed' : 'unsignalled';
   }
 }

@@ -2,30 +2,52 @@ import { Client, type ClientChannel, type ConnectConfig, type ExecOptions } from
 import type { ConnectionInfo, Profile, ResolvedCredentials, ExecOpts, CommandResult, SessionOpts } from '../types.js';
 import { FROZEN_ALGORITHMS } from './algorithms.js';
 import { verifyHostKey, fingerprintPublicKey, type HostKeyMode } from './host-key.js';
-import type { Session } from './session.js';
+import type { Session, CloseOutcome } from './session.js';
 import { SessionManager } from './session-manager.js';
+import type { Span } from '@opentelemetry/api';
 import { tracer } from '../observability/tracer.js';
 import { redactText } from '../guard/redactor.js';
 import { shellSingleQuote } from '../guard/sanitizer.js';
 import { openWithRetry } from './channel-retry.js';
-import { terminateChannel } from './channel-signal.js';
+import { terminateChannel, COULD_NOT_SIGNAL } from './channel-signal.js';
 
 /**
- * Appended when the stop request could not even be dispatched, so nothing was asked of
- * the host at all.
+ * Stop the command behind `channel`, record why on the span, and return the sentence the
+ * rejection should carry.
  *
- * Deliberately narrower than "the command is still running", which is not knowable
- * here: SSH does not acknowledge a signal request, and the request reaches the session
- * leader rather than the process group. Its *absence* therefore means "we asked", not
- * "it died" — see terminateChannel's contract.
- *
- * It should be unreachable: dispatch fails only when the transport is already gone or
- * ssh2 offers neither a usable method nor the internals to route around it. That is
- * exactly what a future ssh2 could introduce, and the whole of #146 was a stop that
- * silently did nothing — so if it ever comes back, it says so instead.
+ * Module scope rather than a closure inside `exec`: it captures nothing but the span, and
+ * at module scope it is directly testable with a stub span and a fake channel. It exists
+ * at all because the three settle paths used to inline this, and two of them computed the
+ * "unstopped" value for the message and then dropped it before the span — so
+ * `ssh.unstopped` was structurally incapable of being true for a cancelled command, which
+ * is the most common way an MCP client stops one.
  */
-const COULD_NOT_SIGNAL =
-  ' The remote command could not be signalled, so it may still be running on the host.';
+export function stopAndDescribe(
+  span: Span,
+  reason: 'ssh.timedOut' | 'ssh.aborted',
+  channel: ClientChannel | null,
+): string {
+  span.setAttribute(reason, true);
+  // A null channel means the exec callback has not arrived yet. It does NOT mean nothing is
+  // running — ssh2 invokes that callback on CHANNEL_SUCCESS, which OpenSSH sends after
+  // forking the command — but there is nothing to warn about either: `onExecChannel` stops
+  // such a late channel the moment it arrives. Warning here would put "may still be
+  // running" on every timeout that races a slow channel open, and a warning that fires when
+  // nothing is wrong stops being read.
+  //
+  // Recorded as its own attribute rather than as `ssh.unstopped: false`, which would assert
+  // a clean stop this path cannot yet know about. The late-arrival handler emits the real
+  // answer on its own span.
+  if (channel === null) {
+    span.setAttribute('ssh.stopDeferred', true);
+    return '';
+  }
+  const dispatched = terminateChannel(channel);
+  // Set on every settle path, always, so "stopped cleanly" and "ran an older build" are not
+  // the same absent-attribute query.
+  span.setAttribute('ssh.unstopped', !dispatched);
+  return dispatched ? '' : COULD_NOT_SIGNAL;
+}
 
 export class SSHConnection {
   readonly profile: Profile;
@@ -239,39 +261,10 @@ export class SSHConnection {
       let activeStream: ClientChannel | null = null;
       let resolved = false;
 
-      /**
-       * Stop the command, record why we stopped it, and hand back the sentence the
-       * rejection should carry.
-       *
-       * One helper for all three settle paths. They used to inline this, and two of them
-       * computed `unstopped` for the message and then dropped it before the span — so
-       * `ssh.unstopped` was structurally incapable of being true for a cancellation,
-       * which is the most common way an MCP client stops a command.
-       */
-      const stopAndDescribe = (reason: 'ssh.timedOut' | 'ssh.aborted', channel: ClientChannel | null): string => {
-        span.setAttribute(reason, true);
-        // A null channel means the exec callback has not arrived yet. It does NOT mean
-        // nothing is running — ssh2 invokes that callback on CHANNEL_SUCCESS, which
-        // OpenSSH sends after forking the command — but there is nothing to warn about
-        // either: `onExecChannel` stops such a late channel the moment it arrives (see
-        // the `resolved` check there). Warning here would put "may still be running" on
-        // every timeout that races a slow channel open, and a warning that fires when
-        // nothing is wrong stops being read.
-        if (channel === null) {
-          span.setAttribute('ssh.unstopped', false);
-          return '';
-        }
-        const dispatched = terminateChannel(channel);
-        // Set on every settle path, always, so "stopped cleanly" and "ran an older
-        // build" are not the same absent-attribute query.
-        span.setAttribute('ssh.unstopped', !dispatched);
-        return dispatched ? '' : COULD_NOT_SIGNAL;
-      };
-
       const timeoutId = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          const note = stopAndDescribe('ssh.timedOut', activeStream);
+          const note = stopAndDescribe(span, 'ssh.timedOut', activeStream);
           span.end();
           reject(new Error(`Command timed out after ${timeoutMs}ms${note}`));
         }
@@ -312,7 +305,14 @@ export class SSHConnection {
         // caller had been told it timed out, holding a channel and discarding its
         // output: #146 exactly, in the one path the first fix did not cover.
         if (resolved) {
-          terminateChannel(stream);
+          // On its own span: the exec span was ended when the promise settled, and an
+          // attribute set on an ended span is silently dropped. Without this the one
+          // outcome `stopAndDescribe` deferred would be unobservable — the shape this
+          // whole change exists to remove.
+          const late = tracer.startSpan('ssh.exec.lateStop');
+          late.setAttribute('ssh.host', this.profile.host);
+          late.setAttribute('ssh.unstopped', !terminateChannel(stream));
+          late.end();
           return;
         }
 
@@ -342,7 +342,7 @@ export class SSHConnection {
             // without signalling left it running to completion on the host and
             // held a channel until it finished. Closing the channel does not stop
             // it either — only a delivered signal does (#146).
-            const note = stopAndDescribe('ssh.aborted', stream);
+            const note = stopAndDescribe(span, 'ssh.aborted', stream);
             span.end();
             reject(new Error(`Command aborted before execution${note}`));
             return;
@@ -351,7 +351,7 @@ export class SSHConnection {
             if (!resolved) {
               resolved = true;
               clearTimeout(timeoutId);
-              const note = stopAndDescribe('ssh.aborted', stream);
+              const note = stopAndDescribe(span, 'ssh.aborted', stream);
               span.end();
               reject(new Error(`Command aborted${note}`));
             }
@@ -420,7 +420,7 @@ export class SSHConnection {
     return this.sessions.list();
   }
 
-  async closeSession(name: string): Promise<void> {
+  async closeSession(name: string): Promise<CloseOutcome> {
     return this.sessions.close(name);
   }
 

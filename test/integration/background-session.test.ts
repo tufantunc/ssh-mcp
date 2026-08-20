@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { checkAllServers, allServersUp, setupEnv, createConnection, type ServerStatus } from './fixtures.js';
 import type { SSHConnection } from '../../src/ssh/connection.js';
 import { BackgroundSession } from '../../src/ssh/session.js';
@@ -104,23 +104,56 @@ describe.skipIf(!allServersUp(await checkAllServers()))('closing a background se
     return Number(stdout.trim());
   }
 
+  afterEach(async () => {
+    // `kill -9`: a failed run used to leave `sleep 4820` in the fixture for its full 80
+    // minutes, and nothing reaped it — this file had no cleanup hook and exec-kill's
+    // pattern does not match this marker. Every later run then saw a survivor and failed
+    // for a reason that had nothing to do with the code.
+    await conn?.exec(`pkill -9 -f "^sleep ${MARKER}" || true`, { timeoutMs: 5000 }).catch(() => {});
+  });
+
+  it('waits for the escalation instead of tearing the transport down mid-ladder', async () => {
+    // A command that ignores INT and TERM only dies to the KILL rung at +2s. Those rungs are
+    // timers, so if `close()` returned as soon as INT was dispatched, the caller's next move
+    // — `SSHConnection.close()` calling `client.end()`, or the process exiting — cancelled
+    // the rest of the ladder and the command survived. That is the case KILL exists for, so
+    // it is the case worth testing.
+    const trapping = 4821;
+    try {
+      await conn.openSession({
+        name: 'bg-trap',
+        type: 'background',
+        command: `sh -c 'trap "" INT TERM; sleep ${trapping}; true'`,
+      });
+      await new Promise((r) => setTimeout(r, 400));
+      const { stdout: before } = await conn.exec(`ps -ef | grep -c "[s]leep ${trapping}"`, { timeoutMs: 5000 });
+      expect(Number(before.trim()), 'the trapping tree never appeared').toBe(2);
+
+      await conn.closeSession('bg-trap');
+
+      const { stdout: after } = await conn.exec(`ps -ef | grep -c "[s]leep ${trapping}"`, { timeoutMs: 5000 });
+      expect(Number(after.trim()), 'the trapping command outlived close-session').toBe(0);
+    } finally {
+      await conn.exec(`pkill -9 -f "sleep ${trapping}" || true`, { timeoutMs: 5000 }).catch(() => {});
+    }
+  }, 30000);
+
   it('kills the command instead of only dropping the channel', async () => {
     const session = await conn.openSession({ name: 'bg-kill', type: 'background', command: `sleep ${MARKER}` });
     expect(session).toBeInstanceOf(BackgroundSession);
     await new Promise((r) => setTimeout(r, 400));
     expect(await alive(), 'the background command never started').toBeGreaterThan(0);
 
+    const started = Date.now();
     await conn.closeSession('bg-kill');
+    const elapsed = Date.now() - started;
 
-    // A generous budget on purpose: the ladder itself needs up to 3s, and each poll is a
-    // real exec round trip, which slows down measurably when the whole suite is running
-    // against the same container. 8s passed in isolation and failed inside `npm test`.
-    const deadline = Date.now() + 20000;
-    for (;;) {
-      if (await alive() === 0) break;
-      if (Date.now() > deadline) break;
-      await new Promise((r) => setTimeout(r, 250));
-    }
+    // Asserted on elapsed time, not on a poll budget. The stream's stdin is never ended, so
+    // ssh2's own `signal()` sends INT on the public path and the command dies in one round
+    // trip — measured at 5ms inside a full suite run. A 20s poll ceiling could not tell that
+    // apart from "nothing worked until the channel closed at +3s", which is exactly the
+    // regression this test exists to catch.
     expect(await alive(), 'the background command outlived close-session').toBe(0);
+    expect(elapsed, 'closeSession waited far longer than one round trip').toBeLessThan(5000);
   }, 30000);
 });

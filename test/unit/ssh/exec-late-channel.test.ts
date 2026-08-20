@@ -18,17 +18,46 @@ import type { Profile } from '../../../src/types.js';
 
 interface Signalled { id: number; name: string }
 
-/** Everything `terminateChannel` touches, and nothing else — the early return uses no more. */
+/**
+ * A channel in the state ssh2 hands to `client.exec`'s callback: writable, outgoing state
+ * `'open'`.
+ *
+ * The first version of this fake used the post-`stream.end()` shape (`writable: false`,
+ * state `'eof'`) copied from the other test file — but the late-channel path returns
+ * *before* `stream.end()` runs, so production takes ssh2's **public** `signal()` there.
+ * The fake had no `signal` method at all, so the assertions were riding the `_protocol`
+ * fallback: a branch this path does not use. Measured against a real server:
+ *
+ *   at the exec callback: writable=true  outgoing.state=open
+ *   after end():          writable=false outgoing.state=eof
+ *
+ * So `signal()` here reproduces ssh2's real gate and funnels into the same `signalled`
+ * array, which makes that array mean "the request left the client" by either route.
+ */
 function fakeStream(signalled: Signalled[]) {
   const stream = Object.assign(new EventEmitter(), {
     type: 'session',
-    writable: false,
-    outgoing: { id: 42, state: 'eof' },
-    _client: { _sock: { writable: true }, _protocol: { signal: (id: number, name: string) => { signalled.push({ id, name }); } } },
+    writable: true,
+    outgoing: { id: 42, state: 'open' },
+    _client: {
+      _sock: { writable: true, _readableState: { ended: false } },
+      _protocol: { signal: (id: number, name: string) => { signalled.push({ id, name }); } },
+    },
+    signal(name: string) {
+      const self = stream as unknown as { type: string; writable: boolean; outgoing: { id: number; state: string } };
+      if (self.type === 'session' && self.writable && self.outgoing.state === 'open') {
+        signalled.push({ id: self.outgoing.id, name });
+      }
+    },
     close: vi.fn(),
     stderr: new EventEmitter(),
     write: vi.fn(),
-    end: vi.fn(),
+    // `end()` performs the real transition, so a test that lets the channel arrive in time
+    // exercises the post-EOF shape rather than a hardcoded guess at it.
+    end: vi.fn(() => {
+      (stream as { writable: boolean }).writable = false;
+      (stream as { outgoing: { state: string } }).outgoing.state = 'eof';
+    }),
   });
   return stream;
 }

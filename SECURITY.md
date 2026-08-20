@@ -37,28 +37,39 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 
 ## Stopping a Command
 
-When a command hits its timeout, or the MCP client cancels the request, ssh-mcp escalates
-on the exec channel: `SIGINT` immediately, `SIGTERM` after 1s, `SIGKILL` after 2s, then it
-closes the channel. Three properties of that are worth knowing before you point this at
-something that matters.
+Three things stop a command: its timeout, an MCP client cancelling the request, and
+`close-session` on a background session. All three escalate the same way on the exec
+channel — `SIGINT` immediately, `SIGTERM` after 1s, `SIGKILL` after 2s, then the channel is
+closed. Some properties of that are worth knowing before you point this at something that
+matters.
 
-**`SIGKILL` is part of it, and cancellation reaches it without a separate approval.** The
-`signal-process` tool classifies `INT`/`TERM`/`KILL` as destructive and evaluates them
-against your policy. A timeout or a client cancellation is not routed through that check —
-it is the server stopping a command it already started on your behalf. A command that must
-never be `SIGKILL`ed therefore needs a timeout long enough that it finishes first, or a
-wrapper that survives its parent.
+**`SIGKILL` is part of it, and a timeout or cancellation reaches it without a policy
+check.** That is deliberate: the command was already authorised when it started, and
+stopping it is less authority than starting it. `close-session` *is* policy-evaluated and
+audited, because it is a caller-initiated action rather than the server cleaning up after
+itself. A command that must never be `SIGKILL`ed needs a timeout long enough that it
+finishes first.
 
-**A signal reaches the command, not its children.** SSH delivers the request to the
-session leader. Measured: `sh -c 'trap "" INT TERM; sleep 30'` loses the shell to `SIGKILL`
-and leaves `sleep` reparented to PID 1. If your commands spawn process trees, closing the
-channel does not reap them.
+**Note that `kill` classifies as `safe`.** The `signal-process` tool is policy-evaluated and
+audited, but the command it builds (`kill -SIGNAL pid`) is not matched by any destructive
+pattern, so `approvalPolicy = "ask-destructive"` will *not* prompt for it. Use `ask-all`, a
+`readOnly` profile, or a role whose bindings exclude `safe` if an agent must not signal
+arbitrary processes.
+
+**The blast radius is the process group, not one process.** OpenSSH answers a `signal`
+channel request with `killpg()` on the command's group (`session.c`,
+`session_signal_req`), so an ordinary process tree does die — measured against 10.3p1, a
+shell and its child share one process group and both are gone after a single `SIGKILL`
+request. This is the server's behaviour rather than a protocol guarantee: RFC 4254 §6.9
+does not specify delivery semantics, sshd refuses signal requests for forced-command and
+subsystem sessions, and another server (this project also tests Dropbear) may differ.
 
 **Nothing acknowledges a signal request.** The absence of a warning in the error means the
 request was dispatched, not that the process died — a target may refuse it, and SSH gives
 no reply either way. When the request could not even be dispatched, the error says so
-explicitly ("could not be signalled, so it may still be running on the host") and the
-`ssh.unstopped` span attribute is set.
+explicitly ("could not be signalled, so it may still be running on the host"). The
+`ssh.unstopped` span attribute carries the same fact as a boolean, and is set on every
+stop, so its absence means an older build rather than a clean stop.
 
 ## Safe Deployment Guidelines
 

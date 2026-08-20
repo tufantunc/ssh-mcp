@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { sanitizeSessionName } from '../guard/sanitizer.js';
 import { redactText } from '../guard/redactor.js';
 import { BackgroundSession } from '../ssh/session.js';
+import { COULD_NOT_SIGNAL } from '../ssh/channel-signal.js';
 import { TOOL_DESCRIPTIONS as D } from './descriptions.js';
 import { syntheticSuccess, textResult } from './results.js';
 import type { ToolDeps, Pipeline } from './pipeline.js';
@@ -108,10 +109,40 @@ export function registerSessionTools(
       profile: z.string().optional().describe('Profile name'),
     },
     { destructiveHint: true },
-    async ({ name, profile }) => {
-      const conn = await resolveConn(profile);
-      await conn.closeSession(name);
-      return textResult(`Session "${name}" closed.`);
+    async ({ name, profile }, extra) => {
+      const cleanName = sanitizeSessionName(name);
+      // Through the pipeline, like open-session. Closing a *background* session now
+      // signals its command on the host — INT, then TERM, then KILL — and every other
+      // path that reaches a remote signal is policy-evaluated and audited
+      // (`signal-process` classifies the same three signals as destructive). Before the
+      // signals were added this call only dropped a local channel, which was measured to
+      // do nothing on the host, so going around the pipeline was harmless. It is not any
+      // more: an unaudited SIGKILL on a production host is exactly the record an operator
+      // cannot reconstruct afterwards.
+      return runAudited(
+        `session:close ${cleanName}`,
+        {
+          toolName: 'close-session',
+          failureClass: 'destructive',
+          profile,
+          session: cleanName,
+          extra,
+          synthetic: true,
+        },
+        async (rt) => {
+          const outcome = await rt.conn.closeSession(cleanName);
+          return {
+            audited: syntheticSuccess(rt.profileName),
+            // The same sentence `exec` uses, from the same constant: if the stop could not
+            // be dispatched, saying "closed" would be the false claim this change removes.
+            output: textResult(
+              outcome === 'unsignalled'
+                ? `Session "${cleanName}" closed.${COULD_NOT_SIGNAL}`
+                : `Session "${cleanName}" closed.`,
+            ),
+          };
+        },
+      );
     },
   );
 

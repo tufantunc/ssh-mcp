@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createRequire } from 'module';
 import type { ClientChannel } from 'ssh2';
 import { signalChannel, terminateChannel } from '../../../src/ssh/channel-signal.js';
 
@@ -18,14 +17,6 @@ import { signalChannel, terminateChannel } from '../../../src/ssh/channel-signal
 
 interface WireEntry { id: number; name: string }
 
-const { SIGNALS } = createRequire(import.meta.url)('ssh2/lib/protocol/constants.js');
-
-/** What `Protocol.signal` does before writing anything (lib/protocol/Protocol.js:1303). */
-function assertRealSignal(name: string): void {
-  if (SIGNALS[String(name).toUpperCase().replace(/^SIG/, '')] !== 1) {
-    throw new Error(`Invalid signal: ${name}`);
-  }
-}
 
 function fakeChannel(overrides: Record<string, unknown> = {}) {
   const wire: WireEntry[] = [];
@@ -34,10 +25,13 @@ function fakeChannel(overrides: Record<string, unknown> = {}) {
     type: 'session',
     writable: true,
     outgoing: { id: 7, state: 'open' },
-    // Validated against ssh2's own table rather than a copy of it: the real
-    // `Protocol.signal` throws `Invalid signal` for anything outside SIGNALS, so a fake
-    // that accepted any name would let a mistyped rung look delivered in all 15 tests.
-    _client: { _protocol: { signal: (id: number, name: string) => { assertRealSignal(name); wire.push({ id, name }); } } },
+    // The transport, in the shape a live connection has. `onTheWire` fails closed on an
+    // unreadable one, so every fake has to carry it — which is the point: a guard that
+    // assumed the best when it could not see the socket was the earlier defect.
+    _client: {
+      _sock: { writable: true, _readableState: { ended: false } },
+      _protocol: { signal: (id: number, name: string) => { wire.push({ id, name }); } },
+    },
     // The real gate, reproduced.
     signal(name: string) {
       const self = channel as unknown as { type: string; writable: boolean; outgoing: { id: number; state: string } };
@@ -117,7 +111,10 @@ describe('signalChannel', () => {
     // — had no coverage while a test claimed otherwise.
     const { channel, wire } = fakeChannel({
       ...afterStdinClosed(),
-      _client: { _protocol: { signal: () => { throw new Error('closed'); } } },
+      _client: {
+        _sock: { writable: true, _readableState: { ended: false } },
+        _protocol: { signal: () => { throw new Error('closed'); } },
+      },
     });
     const spy = vi.spyOn(channel, 'signal');
     expect(signalChannel(channel, 'INT')).toBe(false);
@@ -136,7 +133,7 @@ describe('signalChannel', () => {
     const { channel, wire } = fakeChannel({
       ...afterStdinClosed(),
       _client: {
-        _sock: { writable: false },
+        _sock: { writable: false, _readableState: { ended: true } },
         _protocol: { signal: (id: number, name: string) => { wire.push({ id, name }); } },
       },
     });
@@ -144,12 +141,36 @@ describe('signalChannel', () => {
     expect(wire, 'nothing may be claimed as sent through a dead socket').toEqual([]);
   });
 
+  it('refuses a half-open socket ssh2 would not write to', () => {
+    // The ProxyJump shape, and the case the first version of this guard missed: the peer
+    // closed its side, so `writable` is still true while ssh2's `isWritable` — which also
+    // requires `_readableState.ended === false` — is false. Measured: a socket with
+    // allowHalfOpen sits in that state indefinitely, and ssh2's transport for a `via`
+    // profile is a forwarded channel, which defaults to allowHalfOpen.
+    const { channel, wire } = fakeChannel({
+      ...afterStdinClosed(),
+      _client: {
+        _sock: { writable: true, _readableState: { ended: true } },
+        _protocol: { signal: (id: number, name: string) => { wire.push({ id, name }); } },
+      },
+    });
+    expect(signalChannel(channel, 'TERM')).toBe(false);
+    expect(wire).toEqual([]);
+  });
+
+  it('refuses when the transport cannot be read at all', () => {
+    // Fail closed, matching every other unknown-shape branch in the module.
+    const { channel, wire } = fakeChannel({ ...afterStdinClosed(), _client: { _protocol: { signal: () => {} } } });
+    expect(signalChannel(channel, 'TERM')).toBe(false);
+    expect(wire).toEqual([]);
+  });
+
   it('sends through a socket that is still writable', () => {
     // The other half, so the guard cannot be satisfied by refusing everything.
     const { channel, wire } = fakeChannel({
       ...afterStdinClosed(),
       _client: {
-        _sock: { writable: true },
+        _sock: { writable: true, _readableState: { ended: false } },
         _protocol: { signal: (id: number, name: string) => { wire.push({ id, name }); } },
       },
     });
@@ -237,6 +258,17 @@ describe('the ssh2 internals this depends on', () => {
     expect(typeof Protocol.prototype.signal).toBe('function');
   });
 
+  it('still exposes the socket onTheWire reads', async () => {
+    // `_sock` is as undocumented as `_protocol`, and if ssh2 renames it `onTheWire` would
+    // fail closed on every signal — every stop would start warning instead of working.
+    const { createRequire } = await import('module');
+    const { Client } = createRequire(import.meta.url)('ssh2');
+    expect(
+      '_sock' in new Client(),
+      'ssh2 renamed _sock: onTheWire in channel-signal.ts now refuses every signal',
+    ).toBe(true);
+  });
+
   it('still refuses to signal a channel whose stdin is closed', async () => {
     // Behavioural, not textual. The previous version grepped Channel.js for
     // `this.writable` and `outgoing.state === 'open'` — and mscdex/ssh2#1510, the very
@@ -246,6 +278,10 @@ describe('the ssh2 internals this depends on', () => {
     // straight through the change. Calling the real method cannot.
     const { createRequire } = await import('module');
     const { Channel } = createRequire(import.meta.url)('ssh2/lib/Channel.js');
+    expect(
+      typeof Channel.prototype.signal,
+      'ssh2 moved Channel.prototype.signal: re-derive ssh2WillSend in channel-signal.ts',
+    ).toBe('function');
 
     let sent = 0;
     const afterEnd = {

@@ -329,6 +329,21 @@ describe('sessions', () => {
 
     const closed = await call('close-session', { name: 'work' });
     expect(closed.isError).toBeFalsy();
+    // And the close, too. Closing a *background* session signals its command on the host —
+    // INT, then TERM, then KILL — and this tool used to reach the connection directly,
+    // around the pipeline, so a caller-invoked SIGKILL on a production host produced no
+    // audit row at all. Every other path to a remote signal is audited.
+    expect(h.auditRecords.at(-1).command).toContain('session:close');
+  });
+
+  it('audits closing a background session as destructive', async () => {
+    h = await createHarness();
+    await call('open-session', { name: 'logs', type: 'background', command: 'tail -f /var/log/syslog' });
+    const closed = await call('close-session', { name: 'logs' });
+    expect(closed.isError).toBeFalsy();
+    const record = h.auditRecords.at(-1);
+    expect(record.command).toContain('session:close');
+    expect(record.decision).toBe('allow');
   });
 
   it('rejects a session name with shell metacharacters', async () => {

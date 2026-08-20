@@ -309,8 +309,11 @@ async function main() {
     isShuttingDown = true;
     console.error('Shutting down SSH MCP Server...');
     clearInterval(reaperInterval);
-    try { await audit.close(); } catch (e) { console.error('audit.close failed:', e); }
+    // Connections first, audit second. Closing a connection now closes its sessions, and
+    // closing a background session is an audited action — with the old order those records
+    // were written to an already-closed stream and silently dropped.
     try { await registry.closeAll(); } catch (e) { console.error('closeAll failed:', e); }
+    try { await audit.close(); } catch (e) { console.error('audit.close failed:', e); }
     process.exit(0);
   };
 

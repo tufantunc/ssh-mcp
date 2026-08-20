@@ -46,11 +46,23 @@ import type { ClientChannel } from 'ssh2';
  * version of this comment claimed the fallback would stop being reached on its own; it
  * could not, and a plan that cannot fire is worse than no plan.
  *
- * What this does NOT achieve, measured: the request reaches the command's *session
- * leader*, not its process group. `sh -c 'trap "" INT TERM; sleep 30'` loses the shell
- * to KILL and leaves the `sleep` orphaned. So a stopped command can still leave
- * children behind, and no rung of the ladder changes that — which is why nothing here
- * claims the process is gone. See `signalChannel`'s return value.
+ * What a delivered request achieves is the *server's* choice, not ours. OpenSSH answers a
+ * `signal` channel request with `killpg()` on the command's process group
+ * (session.c, `session_signal_req`), so an ordinary process tree does die — measured
+ * against 10.3p1: `sh -c 'trap "" INT TERM; sleep N; true'` and its child share one pgid
+ * and both are gone after a single KILL request.
+ *
+ * An earlier version of this comment claimed the opposite — that the signal reached only
+ * the session leader and orphaned children. That was wrong, and the "orphan" it cited was
+ * debris leaked by an earlier experiment rather than a result. Recording the mistake
+ * because it was asserted in SECURITY.md in the direction that *understates* the blast
+ * radius, which is the worse way to be wrong about a SIGKILL.
+ *
+ * None of that is ours to promise, though. RFC 4254 §6.9 does not specify the delivery
+ * semantics, sshd refuses signal requests for forced-command and subsystem sessions, and
+ * this project deliberately supports a second server implementation (Dropbear). Nothing
+ * acknowledges the request either way — which is why the return value below is about
+ * dispatch and nothing here claims the process is gone.
  */
 
 /** The parts of a channel ssh2 does not put in its public typings. */
@@ -61,7 +73,7 @@ type ChannelInternals = {
   _client?: {
     _protocol?: { signal?: (id: number, name: string) => void };
     /** ssh2 drops any write to this silently once it is unwritable; see `onTheWire`. */
-    _sock?: { writable?: boolean };
+    _sock?: { writable?: boolean; _readableState?: { ended?: boolean } };
   };
 };
 
@@ -93,18 +105,35 @@ function ssh2WillSend(ch: ClientChannel & ChannelInternals): boolean {
  * is #146 one layer down, and it is reachable whenever a connection is closed under a
  * running command — `SSHConnection.close()`, or the idle reaper, which does not consult
  * `activeChannels`.
+ *
+ * All three of `isWritable`'s conjuncts, not just the first. The first version of this
+ * checked `sock.writable` alone, and ssh2 added the other two for a reason
+ * (nodejs/node#36029: `writable` stays true after the stream has ended). Measured:
+ *
+ *   allowHalfOpen=false, peer FIN -> writable=false, isWritable()=false   (agree)
+ *   allowHalfOpen=true,  peer FIN -> writable=true,  isWritable()=false   (disagree)
+ *
+ * and a ProxyJump connection's transport is exactly the second case — `connectConfig.sock`
+ * is a `forwardOut` channel, and ssh2's channels default to `allowHalfOpen: true`
+ * (lib/Channel.js:90). So the one-conjunct version was blind on the path that has its own
+ * integration test. Mirroring the whole predicate is also what `ssh2WillSend` does, and
+ * the asymmetry between the two was the actual defect.
  */
 function onTheWire(ch: ClientChannel & ChannelInternals): boolean {
-  const writable = ch._client?._sock?.writable;
-  return writable === undefined || writable === true;
+  const sock = ch._client?._sock;
+  // Fail closed on a shape we cannot read: every other unknown in this module is reported
+  // as "not dispatched", and a guard whose job is to refuse when unsure must not be the
+  // one place that assumes the best.
+  if (sock === undefined || typeof sock.writable !== 'boolean') return false;
+  return sock.writable && sock._readableState?.ended === false;
 }
 
 /**
  * Send `name` to the process behind `channel`.
  *
  * Returns whether the request was **dispatched to the wire** — not whether the command
- * stopped. Nothing in SSH acknowledges a signal request, the signal reaches the session
- * leader rather than the process group, and a target may refuse it outright, so
+ * stopped. Nothing in SSH acknowledges a signal request, the delivery semantics are the
+ * server's choice rather than the protocol's, and a target may refuse it outright, so
  * "the process is gone" is not a fact this function can produce. What it can produce
  * honestly is "I could not even ask", which is what the caller warns about, because a
  * signal that goes nowhere while reporting success is the defect this module exists to
@@ -153,6 +182,21 @@ export function signalChannel(channel: ClientChannel, name: SignalName): boolean
   return false;
 }
 
+/**
+ * Appended when a stop request could not even be dispatched, so nothing was asked of the
+ * host at all.
+ *
+ * Deliberately narrower than "the command is still running", which is not knowable from
+ * here: nothing acknowledges a signal request. Its *absence* therefore means "we asked",
+ * not "it died".
+ *
+ * It lives beside the function that decides it because two callers now need the same
+ * sentence — a timed-out or cancelled `exec`, and `close-session` on a background
+ * session. One contract, one place.
+ */
+export const COULD_NOT_SIGNAL =
+  ' The remote command could not be signalled, so it may still be running on the host.';
+
 /** How long each signal is given to work before the next one is tried. */
 const ESCALATION_MS = 1000;
 
@@ -167,8 +211,7 @@ const ESCALATION_MS = 1000;
  * Returns whether the *first* signal was dispatched — known synchronously, so the
  * caller can say "I could not even ask" in the same breath as the timeout it is already
  * reporting. It is not a claim that the command stopped, and callers must not read it
- * as one: the later rungs have not run yet, no rung is acknowledged, and the signal
- * does not reach the process group.
+ * as one: the later rungs have not run yet, and no rung is acknowledged by anything.
  */
 export function terminateChannel(channel: ClientChannel): boolean {
   const dispatched = signalChannel(channel, 'INT');
@@ -190,4 +233,36 @@ export function terminateChannel(channel: ClientChannel): boolean {
   later(() => { try { channel.close(); } catch { /* already gone */ } }, ESCALATION_MS * 3);
 
   return dispatched;
+}
+
+/**
+ * Wait for a channel to actually close, bounded.
+ *
+ * The ladder's rungs are timers, so `terminateChannel` returns long before the escalation
+ * has finished. Anything that tears the transport down afterwards — `SSHConnection.close()`
+ * calling `client.end()`, or the process exiting — cancels the rest of it, and a command
+ * that ignored INT then survives with no further escalation possible. Callers that are
+ * about to do that must wait here first.
+ *
+ * Resolves true if the channel closed, false on timeout. The default budget is the ladder
+ * plus a little, so a command that only dies to KILL still gets there.
+ */
+export function waitForChannelClose(
+  channel: ClientChannel,
+  ms: number = ESCALATION_MS * 3 + 500,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (closed: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(closed);
+    };
+    const timer = setTimeout(() => done(false), ms);
+    // Unreferenced so a hung channel cannot hold the process open; the caller is awaiting
+    // this, so the loop stays alive for as long as the caller itself does.
+    timer.unref();
+    channel.once('close', () => done(true));
+  });
 }

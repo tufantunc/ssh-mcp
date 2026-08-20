@@ -1,6 +1,6 @@
 import type { ClientChannel } from 'ssh2';
 import type { Profile, SessionOpts } from '../types.js';
-import { InteractiveSession, BackgroundSession, stripAnsi, type Session } from './session.js';
+import { InteractiveSession, BackgroundSession, stripAnsi, type Session , type CloseOutcome } from './session.js';
 import { shellSingleQuote } from '../guard/sanitizer.js';
 import { openWithRetry } from './channel-retry.js';
 import { randomUUID } from 'crypto';
@@ -178,11 +178,12 @@ export class SessionManager {
     return Array.from(this.sessions.values());
   }
 
-  async close(name: string): Promise<void> {
+  async close(name: string): Promise<CloseOutcome> {
     const session = this.sessions.get(name);
     if (!session) throw new Error(`Session "${name}" not found on ${this.deps.profile().name}`);
-    await session.close();
+    const outcome = await session.close();
     this.sessions.delete(name);
+    return outcome;
   }
 
   async closeAll(): Promise<void> {
