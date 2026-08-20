@@ -73,7 +73,7 @@ const CHILD_ENV: NodeJS.ProcessEnv = { SystemRoot: join(SYSTEM32, '..'), Path: S
  *
  * Generous, because running out is not evidence about the file: five seconds across
  * three process creations plus two temp-directory round trips, so that on-access
- * virus scanning or a loaded host does not turn a private config into a refusal.
+ * virus scanning or a loaded host does not turn a private config into a finding.
  * Expiry gets its own verdict for the same reason — see `timed-out`.
  */
 const ACL_TIMEOUT_MS = 5_000;
@@ -215,6 +215,54 @@ const ACE_FLAG_CODES: ReadonlySet<string> = new Set([
   'CI', 'OI', 'IO', 'NP', 'ID', 'SA', 'FA', 'TP', 'CR',
 ]);
 
+/**
+ * Rights that let a trustee change the object, as SDDL letter codes. `WD` here is
+ * WRITE_DAC, not Everyone — the rights field and the trustee field have separate
+ * vocabularies that happen to share spellings.
+ */
+const WRITE_RIGHT_CODES: ReadonlySet<string> = new Set([
+  'FA', 'FW', 'KA', 'KW', 'GA', 'GW', 'SD', 'WD', 'WO', 'CC', 'DC', 'SW', 'WP', 'DT',
+]);
+
+/** Rights that only let a trustee look. Anything unrecognised counts as write. */
+const READ_RIGHT_CODES: ReadonlySet<string> = new Set([
+  'FR', 'FX', 'GR', 'GX', 'KR', 'RC', 'RP', 'LC', 'LO',
+]);
+
+/**
+ * FILE_WRITE_DATA, FILE_APPEND_DATA, FILE_WRITE_EA, FILE_WRITE_ATTRIBUTES, DELETE,
+ * WRITE_DAC, WRITE_OWNER, GENERIC_WRITE, GENERIC_ALL.
+ */
+const WRITE_MASK = 0x2 | 0x4 | 0x10 | 0x100 | 0x10000 | 0x40000 | 0x80000 | 0x40000000 | 0x10000000;
+
+/**
+ * Whether a rights field lets its trustee *change* the object rather than only read it.
+ *
+ * This distinction is the basis of the default posture, and the field used to be parsed
+ * and discarded. Read exposure on Windows is genuinely muddier than under POSIX — a
+ * shared volume grants `BUILTIN\Users` read, and refusing over that stranded the reporter
+ * of #138 — but write exposure is not muddy at all: "an ACE grants a non-owner
+ * FILE_WRITE_DATA or WRITE_DAC" is exactly as unambiguous as `0o022`, and a config another
+ * account can rewrite decides which hosts, roles and approval policy this server honours.
+ * That is an authorization bypass, not a disclosure, and it was being reported as one.
+ *
+ * Measured from real inheritance: `0x1200a9` is read-and-execute, `0x1301bf` is modify.
+ * Anything this cannot classify counts as write, because refusing is the safe direction.
+ */
+function grantsWrite(rights: string): boolean {
+  const field = rights.trim().toUpperCase();
+  if (field === '') return true;
+  if (/^0X[0-9A-F]+$/.test(field)) return (Number.parseInt(field.slice(2), 16) & WRITE_MASK) !== 0;
+  if (/^[0-9]+$/.test(field)) return (Number.parseInt(field, 10) & WRITE_MASK) !== 0;
+  if (field.length % 2 !== 0) return true;
+  for (let i = 0; i < field.length; i += 2) {
+    const code = field.slice(i, i + 2);
+    if (WRITE_RIGHT_CODES.has(code)) return true;
+    if (!READ_RIGHT_CODES.has(code)) return true;
+  }
+  return false;
+}
+
 export interface Grant {
   /** How the operator will see it in `icacls` output; falls back to the trustee. */
   name: string;
@@ -236,6 +284,8 @@ export interface Grant {
    * the verdict cannot disagree, on any host.
    */
   sid: string | null;
+  /** Whether this grant lets the trustee change the file, not merely read it. */
+  writes: boolean;
 }
 
 /** Why the ACL could not be determined. Decides whether we refuse or continue. */
@@ -265,12 +315,25 @@ export type AclVerdict =
   /** No answer. The caller decides what an absent answer means. */
   | { status: 'unknown'; reason: UnknownReason; detail: string };
 
-/** Reported when a check could not be performed and the config was loaded anyway. */
-export interface UnverifiedAcl {
-  path: string;
-  reason: UnknownReason;
-  detail: string;
-}
+/**
+ * A finding the caller is told about, whether or not it also refuses.
+ *
+ * Discriminated because the two kinds are not the same statement and a reader of a log has
+ * to tell them apart: "this ACL lets Authenticated Users modify your config" and "I could
+ * not read this ACL" are different facts, and the first is the more actionable. The earlier
+ * shape could only express the second, so the stronger finding went straight to
+ * `console.error` and no caller could reach it — which is what `onFinding`'s own doc says
+ * must not happen.
+ */
+export type AclFinding =
+  | {
+      path: string; kind: 'file' | 'directory';
+      status: 'unchecked'; reason: UnknownReason; detail: string; message: string;
+    }
+  | {
+      path: string; kind: 'file' | 'directory';
+      status: 'broad' | 'no-dacl'; grants: Grant[]; message: string;
+    };
 
 export interface AclOptions {
   /**
@@ -290,7 +353,7 @@ export interface AclOptions {
    * `Authenticated Users` modify — but saying it and refusing are different things, and
    * only one of them can strand somebody.
    */
-  strict?: boolean;
+  enforce?: boolean;
   /**
    * Load the config even when the ACL could not be determined.
    * `--allowUncheckedConfigAcl`.
@@ -306,7 +369,7 @@ export interface AclOptions {
    * which is also the only place that could ever reach the audit store. Defaults
    * to stderr so the module stands on its own.
    */
-  onUnverified?: (event: UnverifiedAcl) => void;
+  onFinding?: (finding: AclFinding) => void;
 }
 
 /**
@@ -371,7 +434,8 @@ async function currentUserSid(signal?: AbortSignal): Promise<string | null> {
  * executed by nothing.
  *
  * Two failures say nothing about the file — icacls being absent from the machine, and
- * the check running out of time — and those are the two the caller loads anyway.
+ * the check running out of time — and those are the two the caller loads anyway even
+ * under `--strictConfigAcl`.
  * Everything else (a non-zero exit, output we could not read) is about this path.
  *
  * Which makes "absent" worth being sure of: absent *here* is not enough, because a
@@ -635,7 +699,9 @@ export function parseDacl(descriptor: string, identity: AclIdentity): AclVerdict
     const sid = resolveTrustee(trustee, accountDomain);
     if (sid !== null && allowedSids.has(sid)) continue;
 
-    grants.set(sid ?? trustee, { name: nameFor(trustee), trustee, sid });
+    grants.set(sid ?? trustee, {
+      name: nameFor(trustee), trustee, sid, writes: grantsWrite(fields[2]),
+    });
   }
 
   return grants.size === 0 ? { status: 'restricted' } : { status: 'broad', grants: [...grants.values()] };
@@ -683,7 +749,7 @@ export function aclIdentity(sid: string): AclIdentity {
   // RID 500 is the built-in Administrator. In a default configuration it belongs
   // to the Administrators group, which is already allowed, so naming the account
   // directly grants nobody new access — while refusing it is a false positive,
-  // and here that means refusing to start a server whose config is fine. (On a
+  // and here that means refusing, or at best warning, about a config that is fine. (On a
   // domain-joined host the account domain is the domain, so this authorises
   // DOMAIN\Administrator, whose local-admin status comes from Domain Admins
   // nesting — a GPO default rather than a law.)
@@ -813,7 +879,25 @@ function remediation(path: string, kind: 'file' | 'directory', grants: Grant[] =
   // reaches icacls literally, which reports "Failed processing 1 files" and
   // changes nothing. Measured. An instruction that only works in one shell is
   // the same defect as the `chmod 600` this whole change replaced.
-  const account = userInfo().username;
+  //
+  // Guarded because this is now on the *reporting* path, not only the throwing one. A
+  // Windows service under a virtual account, or a container with no loaded profile, makes
+  // `userInfo()` throw ENOENT — which escaped as a raw stack and cost the operator their
+  // config, which is #138 one environment over. A message that cannot name the account is
+  // still worth printing.
+  //
+  // A visible placeholder rather than `process.env.USERNAME`, which was the first spelling
+  // of this fallback. In the environments where `userInfo()` actually throws the env var is
+  // either unset or holds something icacls will not accept — a virtual service account, or
+  // `MACHINE$` — so it would print a command that fails, which is the defect class this
+  // whole change exists to remove. A placeholder the operator has to fill in cannot be
+  // followed by mistake.
+  let account: string;
+  try {
+    account = userInfo().username;
+  } catch {
+    account = '<your account>';
+  }
   return (
     'Restrict it with these two commands, in this order:\n' +
     `  icacls "${path}" /inheritance:d\n` +
@@ -849,15 +933,95 @@ function relocation(path: string, kind: 'file' | 'directory', grants: Grant[]): 
 }
 
 /**
- * Refuse a config the owner is not alone in being able to read — the Windows
- * half of `checkPermissions`.
+ * What a verdict means for one subject, as text and as data — and nothing else.
  *
- * Both the file and its directory are examined. An unreadable ACL is refused rather
- * than waved through, with two exceptions: `icacls` absent from the machine, and the
- * check running out of time. Both are statements about the machine rather than about
- * the file, and refusing over a question that cannot be asked here is what #138 was.
- * `--allowUncheckedConfigAcl` is the way past the rest, so an operator is never stuck
- * with no exit.
+ * Pure, so every message is assertable without a subprocess or a `console.error` spy, and
+ * so the refusal and the report cannot drift apart: they sat fifteen lines apart and had
+ * already diverged, one calling the same condition "was not checked" and the other "could
+ * not be checked".
+ */
+function describe(path: string, kind: 'file' | 'directory', verdict: AclVerdict): AclFinding | null {
+  if (verdict.status === 'restricted') return null;
+
+  if (verdict.status === 'unknown') {
+    return {
+      path,
+      kind,
+      status: 'unchecked',
+      reason: verdict.reason,
+      detail: verdict.detail,
+      message:
+        `Config ${kind} ${path} could not be checked for access by other accounts ` +
+        `(${verdict.reason}: ${verdict.detail}).\n` +
+        'Either fix the cause, move the config under %APPDATA%\\ssh-mcp, or pass ' +
+        '--allowUncheckedConfigAcl to accept it unverified.',
+    };
+  }
+
+  // An empty grants list for a NULL DACL is deliberate: there is nothing to `/remove:g`,
+  // and the fix is to give the object an ACL at all. `remediation` reads that emptiness.
+  const grants = verdict.status === 'broad' ? verdict.grants : [];
+  const writers = grants.filter((g) => g.writes);
+  const readers = grants.filter((g) => !g.writes);
+  const what = verdict.status === 'no-dacl'
+    ? 'has no access control list at all, which on Windows means full control for every ' +
+      'account on the machine.'
+    : writers.length > 0
+      // Named as modifiable, not "readable". Calling a modify grant readable understated an
+      // integrity failure as a disclosure — and the two now decide different postures, so
+      // the wording has to tell them apart.
+      ? `can be modified by accounts other than its owner: ${writers.map((g) => g.name).join(', ')}` +
+        `${readers.length ? `, and read by ${readers.map((g) => g.name).join(', ')}` : ''}. ` +
+        'Required: this account, SYSTEM and Administrators only.'
+      : `is readable beyond its owner: access is granted to ${grants.map((g) => g.name).join(', ')}. ` +
+        'Required: this account, SYSTEM and Administrators only.';
+
+  return {
+    path,
+    kind,
+    status: verdict.status,
+    grants,
+    message:
+      `Config ${kind} ${path} ${what}\n` +
+      (isTightenable(path, kind) ? remediation(path, kind, grants) : relocation(path, kind, grants)),
+  };
+}
+
+/**
+ * Whether a finding is reported rather than refused.
+ *
+ * Three postures, two flags, and deliberately no combination that leaves an operator with
+ * no exit — the lesson of #138, and why this is a function rather than one boolean.
+ *
+ * By default: a grant that only lets another account *read* is reported, because that is
+ * where Windows is muddier than POSIX and refusing over it stranded a real operator. A
+ * grant that lets another account *change* the config is refused, because that is an
+ * authorization bypass and Windows is not muddy about it. An ACL that could not be
+ * determined is refused too — #138 was a known-bad verdict, never an undeterminable one,
+ * and flipping those open would let an attacker swap a loud finding for a vague one for
+ * free. The two exceptions stay: `icacls` absent, and the check running out of time, both
+ * statements about the machine rather than about the file.
+ *
+ * `--allowUncheckedConfigAcl` reports everything and refuses nothing — the single exit.
+ * `--strictConfigAcl` refuses everything the check objects to, read-only grants included.
+ */
+function waived(finding: AclFinding, opts: AclOptions): boolean {
+  if (opts.allowUnchecked) return true;
+  if (opts.enforce) return false;
+  if (finding.status === 'unchecked') {
+    return finding.reason === 'tool-missing' || finding.reason === 'timed-out';
+  }
+  // A NULL DACL is full control for everyone, so it is never read-only.
+  return finding.status === 'broad' && !finding.grants.some((g) => g.writes);
+}
+
+/**
+ * Report what a config's ACL grants beyond its owner, and refuse when it is not merely
+ * readable — the Windows half of `checkPermissions`.
+ *
+ * Both the file and its directory are examined. What happens to a finding is
+ * `waived`'s decision; see it for the three postures and why the default is not to refuse
+ * a read-only over-grant.
  */
 export async function assertPrivateOnWindows(
   filePath: string,
@@ -872,53 +1036,20 @@ export async function assertPrivateOnWindows(
     const signal = AbortSignal.timeout(ACL_TIMEOUT_MS);
     return raceDeadline(inspectAcl(p, signal), signal);
   });
-  const report = opts.onUnverified ?? ((e: UnverifiedAcl) => {
-    console.error(
-      `Warning: the ACL of ${e.path} was not checked (${e.reason}: ${e.detail}), so whether ` +
-      'other accounts can read your config is unverified. Loading it anyway.',
-    );
-  });
+  const report = opts.onFinding ?? ((f: AclFinding) => console.error(`Warning: ${f.message}`));
   const subjects = [
     { path: filePath, kind: 'file' as const },
     { path: parsePath(filePath).dir || '.', kind: 'directory' as const },
   ];
 
   for (const { path, kind } of subjects) {
-    const verdict = await look(path);
+    const finding = describe(path, kind, await look(path));
+    if (finding === null) continue;
 
-    if (verdict.status === 'restricted') continue;
-
-    if (verdict.status === 'broad' || verdict.status === 'no-dacl') {
-      const grants = verdict.status === 'broad' ? verdict.grants : [];
-      const what = verdict.status === 'broad'
-        ? `is readable beyond its owner: access is granted to ${grants.map((g) => g.name).join(', ')}. ` +
-          'Required: this account, SYSTEM and Administrators only.'
-        : 'has no access control list at all, which on Windows means full control for ' +
-          'every account on the machine.';
-      const message =
-        `Config ${kind} ${path} ${what}\n` +
-        (isTightenable(path, kind) ? remediation(path, kind, grants) : relocation(path, kind, grants));
-
-      if (opts.strict) throw new OperatorError(message);
-      // Advisory by default; see AclOptions.strict for why.
-      console.error(`Warning: ${message}`);
-      continue;
-    }
-
-    // status === 'unknown'
-    if (!opts.strict || verdict.reason === 'tool-missing' || verdict.reason === 'timed-out'
-      || opts.allowUnchecked) {
-      report({ path, reason: verdict.reason, detail: verdict.detail });
-      continue;
-    }
-
-    throw new OperatorError(
-      `Config ${kind} ${path} could not be checked for access by other accounts ` +
-      `(${verdict.reason}: ${verdict.detail}).\n` +
-      'Refused because --strictConfigAcl was given, and the config decides which hosts, ' +
-      'roles and policy rules this server honours.\n' +
-      'Either fix the cause, move the config under %APPDATA%\\ssh-mcp, or pass ' +
-      '--allowUncheckedConfigAcl to load it unverified.',
-    );
+    // One decision, read once. Refusing and reporting used to be decided in three places —
+    // twice on the same flag for the same question — with two `continue`s and two throw
+    // sites, and the advisory path wrote to stderr directly rather than through the sink.
+    if (!waived(finding, opts)) throw new OperatorError(finding.message);
+    report(finding);
   }
 }

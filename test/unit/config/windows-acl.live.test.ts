@@ -6,17 +6,14 @@ import { tmpdir, platform } from 'os';
 import { join } from 'path';
 import { checkPermissions } from '../../../src/config/loader.js';
 import { inspectAcl } from '../../../src/config/windows-acl.js';
-import { MINIMAL_CONFIG } from './helpers.js';
+import { MINIMAL_CONFIG, enforceAcl } from './helpers.js';
 
 const run = promisify(execFile);
 const shell = promisify(exec);
 
-/**
- * Refusal is opt-in since the reporter of #138 was blocked by the default.
- * These cases are about what the check *finds*, so they ask it to enforce; the
- * default posture gets its own case at the end.
- */
-const STRICT = { strict: true } as const;
+// Refusal is opt-in since the reporter of #138 was blocked by the default. These cases
+// are about what the check *finds*, so they ask it to enforce; the default posture gets
+// its own describe at the end.
 const onWindows = platform() === 'win32';
 
 /**
@@ -66,34 +63,34 @@ describe.runIf(onWindows)('Windows ACL check, against real ACLs', () => {
   }
 
   it('accepts a file that only its owner can reach', async () => {
-    await expect(checkPermissions(file, STRICT)).resolves.toBeUndefined();
+    await expect(checkPermissions(file, enforceAcl())).resolves.toBeUndefined();
   });
 
   it('refuses a file granted to Everyone', async () => {
     await run('icacls', [file, '/grant', '*S-1-1-0:(R)']);
-    await expect(checkPermissions(file, STRICT)).rejects.toThrow(/Everyone/);
+    await expect(checkPermissions(file, enforceAcl())).rejects.toThrow(/Everyone/);
   });
 
   it('refuses a file granted to BUILTIN\\Users', async () => {
     await run('icacls', [file, '/grant', '*S-1-5-32-545:(R)']);
-    await expect(checkPermissions(file, STRICT)).rejects.toThrow(/Users/);
+    await expect(checkPermissions(file, enforceAcl())).rejects.toThrow(/Users/);
   });
 
   it('refuses a file granted to a group no denylist would have named', async () => {
     // Power Users is the point of the allowlist rewrite: it is neither Everyone
     // nor Users, and the first version passed it as owner-only.
     await run('icacls', [file, '/grant', '*S-1-5-32-547:(R)']);
-    await expect(checkPermissions(file, STRICT)).rejects.toThrow(/Power Users/);
+    await expect(checkPermissions(file, enforceAcl())).rejects.toThrow(/Power Users/);
   });
 
   it('refuses when the directory is open even though the file is not', async () => {
     await run('icacls', [dir, '/grant', '*S-1-1-0:(R)']);
-    await expect(checkPermissions(file, STRICT)).rejects.toThrow(/directory/);
+    await expect(checkPermissions(file, enforceAcl())).rejects.toThrow(/directory/);
   });
 
   it('names the principal and the path, not just the fact of a refusal', async () => {
     await run('icacls', [file, '/grant', '*S-1-1-0:(R)']);
-    const err = await refusal(checkPermissions(file, STRICT));
+    const err = await refusal(checkPermissions(file, enforceAcl()));
     expect(err.message).toContain('Everyone');
     expect(err.message).toContain(file);
     expect(err.message).toContain('icacls');
@@ -126,19 +123,19 @@ describe.runIf(onWindows)('Windows ACL check, against real ACLs', () => {
   async function fixUntilClean(path: string): Promise<void> {
     const subjects: string[] = [];
     for (let round = 0; round < 3; round++) {
-      const err = await checkPermissions(path, STRICT).then(() => null, (e: Error) => e);
+      const err = await checkPermissions(path, enforceAcl()).then(() => null, (e: Error) => e);
       if (err === null) break;
       subjects.push(err.message.match(/^Config (?:file|directory) (\S+)/)?.[1] ?? '?');
       await runPrescription(err.message);
     }
-    await expect(checkPermissions(path, STRICT)).resolves.toBeUndefined();
+    await expect(checkPermissions(path, enforceAcl())).resolves.toBeUndefined();
     expect(new Set(subjects).size, `a subject needed fixing twice: ${subjects.join(', ')}`)
       .toBe(subjects.length);
   }
 
   it('prescribes commands that actually fix an explicit grant', async () => {
     await run('icacls', [file, '/grant', '*S-1-1-0:(R)']);
-    await expect(checkPermissions(file, STRICT)).rejects.toThrow();
+    await expect(checkPermissions(file, enforceAcl())).rejects.toThrow();
 
     await fixUntilClean(file);
     expect((await inspectAcl(file)).status).toBe('restricted');
@@ -166,7 +163,7 @@ describe.runIf(onWindows)('Windows ACL check, against real ACLs', () => {
     // too, and the file is examined first, so the message would be about the
     // file and this test would silently exercise the arm it already covers.
     await run('icacls', [dir, '/grant', '*S-1-1-0:(R)']);
-    const err = await refusal(checkPermissions(file, STRICT));
+    const err = await refusal(checkPermissions(file, enforceAcl()));
     expect(err.message).toContain('directory');
     expect(err.message).toContain('(OI)(CI)F');
 
@@ -199,7 +196,7 @@ describe.runIf(onWindows)('Windows ACL check, against real ACLs', () => {
     // The fail-closed direction, end to end: a path whose ACL icacls will not
     // report must not become "unchecked, loaded anyway".
     await expect(
-      checkPermissions(join(dir, 'no-such-dir', 'config.toml'), STRICT),
+      checkPermissions(join(dir, 'no-such-dir', 'config.toml'), enforceAcl()),
     ).rejects.toThrow(/could not be checked/);
   });
 
@@ -207,7 +204,7 @@ describe.runIf(onWindows)('Windows ACL check, against real ACLs', () => {
     await expect(
       // Both flags: without `strict` the load happens anyway, so the assertion would
       // pass whether or not allowUnchecked did anything.
-      checkPermissions(join(dir, 'no-such-dir', 'config.toml'), { ...STRICT, allowUnchecked: true }),
+      checkPermissions(join(dir, 'no-such-dir', 'config.toml'), enforceAcl({ allowUnchecked: true })),
     ).resolves.toBeUndefined();
   });
 });
@@ -237,7 +234,7 @@ describe.runIf(onWindows)('the default posture, against a real ACL', () => {
       expect(warnings.join('\n')).toContain('/remove:g *S-1-5-32-545');
 
       // And the same ACL still refuses when asked to enforce.
-      await expect(checkPermissions(file, STRICT)).rejects.toThrow(/readable beyond its owner/);
+      await expect(checkPermissions(file, enforceAcl())).rejects.toThrow(/readable beyond its owner/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -24,19 +24,21 @@ export function getConfigPath(customPath?: string): string {
 }
 
 /**
- * Refuse a config file that anyone but its owner can read, because it holds the
- * hosts, roles and policy rules that decide what this server will run.
+ * Check that nobody but the owner can reach a config file, because it holds the hosts,
+ * roles and policy rules that decide what this server will run.
  *
- * One question, asked of two different access-control systems. Mode bits are
- * POSIX's answer and are meaningless on Windows, which is the whole of #138:
- * Node synthesises `0o666` for every readable file there, so `& 0o077` was
- * non-zero unconditionally and every Windows config that has ever existed was
- * rejected. The `chmod 600` it prescribed could not lift that rejection —
- * measured on Windows 11, `chmod(path, 0o600)` leaves the mode at `0o666`,
- * because `fs.chmod` there only toggles the read-only bit. Following the
- * instruction exactly returned the operator to where they started.
+ * The two platforms answer differently on purpose. POSIX refuses: "only the owner" is
+ * unambiguous there and `chmod` is a one-line fix. Windows refuses a config another
+ * account can *change* and reports one it can only *read*, because read exposure is where
+ * the platform is genuinely muddier — see `waived` in windows-acl.ts.
  *
- * Windows reads the ACL instead; see assertPrivateOnWindows.
+ * Mode bits are POSIX's answer and are meaningless on Windows, which is the whole of #138:
+ * Node synthesises `0o666` for every readable file there, so `& 0o077` was non-zero
+ * unconditionally and every Windows config that has ever existed was rejected. The
+ * `chmod 600` it prescribed could not lift that rejection — measured on Windows 11,
+ * `chmod(path, 0o600)` leaves the mode at `0o666`, because `fs.chmod` there only toggles
+ * the read-only bit. Following the instruction exactly returned the operator to where
+ * they started.
  */
 export async function checkPermissions(filePath: string, opts: AclOptions = {}): Promise<void> {
   return platform() === 'win32'

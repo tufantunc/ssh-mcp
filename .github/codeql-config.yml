@@ -4,12 +4,21 @@ queries:
   - uses: security-and-quality
   - uses: security-extended
 
-# `src` for the JavaScript analysis, `.github/workflows` for the Actions one — a
-# single `paths` list applies to every language in this config, so both have to be
-# named or the Actions analysis has nothing in scope.
+# `src` for the JavaScript analysis, `.github` for the Actions one.
+#
+# A single `paths` list applies to every language in this config — GitHub documents it as
+# config-wide, and codeql-action's own repository works around that by splitting configs
+# per language — so both have to be named here. Whether the `actions` extractor honours
+# path filters at all is undocumented (the docs enumerate only interpreted languages and
+# build-less compiled ones), so this is the safe direction rather than a known
+# requirement; the run's per-database file counts are what confirm it.
+#
+# `.github` rather than `.github/workflows`: the Actions extractor also covers composite
+# actions, and an `action.yml` added under `.github/actions/` later would otherwise be
+# silently out of scope while the list still matched something.
 paths:
   - src
-  - .github/workflows
+  - .github
 
 paths-ignore:
   - node_modules

@@ -3,13 +3,14 @@ import { join, parse } from 'path';
 import {
   inspectAcl,
   type AclOptions,
-  type UnverifiedAcl,
+  type AclFinding,
   assertPrivateOnWindows,
   type AclVerdict,
   type Grant,
   type UnknownReason,
 } from '../../../src/config/windows-acl.js';
 import { OperatorError } from '../../../src/errors.js';
+import { enforceAcl } from './helpers.js';
 
 /**
  * What the Windows branch *decides*, as opposed to what the parser reads.
@@ -34,7 +35,10 @@ const PROFILE = join(ROOT, 'Users', 'me');
 const FILE = join(PROFILE, 'AppData', 'Roaming', 'ssh-mcp', 'config.toml');
 const DIR = join(PROFILE, 'AppData', 'Roaming', 'ssh-mcp');
 
-const grant = (name: string, trustee: string, sid: string | null): Grant => ({ name, trustee, sid });
+const grant = (name: string, trustee: string, sid: string | null, writes = false): Grant =>
+  ({ name, trustee, sid, writes });
+/** A grant that lets another account change the config — refused by default. */
+const writer = (name: string, trustee: string, sid: string) => grant(name, trustee, sid, true);
 const EVERYONE = grant('Everyone', 'WD', 'S-1-1-0');
 
 /** Answers `path` with `verdict`, everything else `restricted`. */
@@ -49,15 +53,19 @@ const broad = (...grants: Grant[]): AclVerdict => ({ status: 'broad', grants });
 
 /** Awaits the refusal and names the behaviour if there isn't one. */
 /** The default posture: report, do not refuse. */
-function warned(): { events: UnverifiedAcl[]; warnings: string[]; opts: AclOptions } {
-  const events: UnverifiedAcl[] = [];
+function warned(): { events: AclFinding[]; warnings: string[]; opts: AclOptions } {
+  const events: AclFinding[] = [];
   const warnings: string[] = [];
   vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => { warnings.push(String(a[0])); });
-  return { events, warnings, opts: { onUnverified: (e) => events.push(e) } };
+  // Both halves are used: `opts` wires the sink so a test can assert the structured
+  // finding, `warnings` catches the module's default when no sink is supplied. The
+  // helper returned both before and every caller ignored `opts` — which was the sink
+  // bug showing up in the tests as scaffolding nothing could use.
+  return { events, warnings, opts: { onFinding: (e) => events.push(e) } };
 }
 
 /** Refusal is opt-in now, so every refusal test says so. */
-const strict = (extra: AclOptions = {}): AclOptions => ({ ...extra, strict: true });
+const strict = enforceAcl;
 
 async function refusal(p: Promise<void>): Promise<Error> {
   const err = await p.then(() => null, (e: Error) => e);
@@ -273,138 +281,191 @@ describe('assertPrivateOnWindows — a NULL DACL', () => {
   });
 });
 
-describe('assertPrivateOnWindows — an unknown ACL', () => {
-  it('loads anyway, reporting it, when icacls is not on the machine', async () => {
-    // One of two fail-open cases. Server Core and stripped images exist, and a
-    // check that cannot run there must not be a reason to refuse the config.
-    const reported: unknown[] = [];
-    await expect(
-      assertPrivateOnWindows(
-        FILE,
-        strict({ onUnverified: (e) => reported.push(e) }),
-        only(FILE, unknown('tool-missing', 'no icacls.exe')),
-      ),
-    ).resolves.toBeUndefined();
-    expect(reported).toEqual([{ path: FILE, reason: 'tool-missing', detail: 'no icacls.exe' }]);
+describe('assertPrivateOnWindows — the three postures', () => {
+  /**
+   * Three postures, two flags, and no combination that strands anybody — which is the
+   * whole lesson of #138 and why this is a table rather than a boolean.
+   *
+   * Default: a read-only over-grant is reported, because that is where Windows is muddier
+   * than POSIX and refusing over it blocked a real operator. A grant that lets another
+   * account *change* the config is refused, because that is an authorization bypass and
+   * Windows is not muddy about it. An undeterminable ACL is refused too — #138 was a
+   * known-bad verdict, never an undeterminable one, and flipping those open would let an
+   * attacker swap a loud finding for a vague one at no cost.
+   */
+  const READ_ONLY = broad(grant('BUILTIN\\Users', 'BU', 'S-1-5-32-545'));
+  const WRITABLE = broad(writer('Authenticated Users', 'AU', 'S-1-5-11'));
+  const UNDETERMINABLE = unknown('read-refused', 'Access is denied');
+  const MACHINE_SAYS_NOTHING = unknown('tool-missing', 'no icacls.exe');
+
+  it('reports a read-only over-grant and loads the config', async () => {
+    const { warnings, events, opts } = warned();
+    await expect(assertPrivateOnWindows(FILE, opts, only(FILE, READ_ONLY))).resolves.toBeUndefined();
+    // Through the caller's sink, not only to stderr: the advisory branch wrote straight to
+    // console.error, so the strongest finding the check can make was the one thing no
+    // caller could reach while "I could not read the ACL" was delivered structurally.
+    expect(events).toEqual([expect.objectContaining({ path: FILE, kind: 'file', status: 'broad' })]);
+    expect(warnings).toEqual([]);
   });
 
-  it('loads anyway when the check ran out of time', async () => {
-    // Also a statement about the machine: process creation under on-access
-    // scanning can outlast any budget, and refusing then is #138's shape.
-    const reported: unknown[] = [];
-    await expect(
-      assertPrivateOnWindows(
-        FILE,
-        strict({ onUnverified: (e) => reported.push(e) }),
-        only(FILE, unknown('timed-out', 'exceeded 5000ms')),
-      ),
-    ).resolves.toBeUndefined();
-    expect(reported).toHaveLength(1);
+  it('names a read-only grant as readable', async () => {
+    const { warnings } = warned();
+    await assertPrivateOnWindows(FILE, {}, only(FILE, READ_ONLY));
+    // The severity marker is part of the deliverable — it is the only thing separating an
+    // advisory finding from the fatal this used to be, in an operator's startup log.
+    expect(warnings[0]).toMatch(/^Warning: Config file /);
+    expect(warnings[0]).toMatch(/is readable beyond its owner/);
+    expect(warnings[0]).toContain('/remove:g *S-1-5-32-545');
+  });
+
+  it('refuses a write-granting ACL, and says modified rather than readable', async () => {
+    // `parseDacl` used to discard the rights mask, so a modify grant and a read grant were
+    // the same verdict with the same wording — an integrity failure described as a
+    // disclosure. The config decides which hosts, roles and approval policy this server
+    // honours, so another account being able to rewrite it is an authorization bypass.
+    const err = await refusal(assertPrivateOnWindows(FILE, {}, only(FILE, WRITABLE)));
+    expect(err.message).toMatch(/can be modified by accounts other than its owner/);
+    expect(err.message).toContain('Authenticated Users');
+  });
+
+  it('names both when one trustee writes and another only reads', async () => {
+    const mixed = broad(
+      writer('Authenticated Users', 'AU', 'S-1-5-11'),
+      grant('BUILTIN\\Users', 'BU', 'S-1-5-32-545'),
+    );
+    const err = await refusal(assertPrivateOnWindows(FILE, {}, only(FILE, mixed)));
+    expect(err.message).toMatch(/modified by accounts other than its owner: Authenticated Users/);
+    expect(err.message).toMatch(/and read by BUILTIN\\Users/);
+  });
+
+  it('refuses a NULL DACL, which is full control rather than read access', async () => {
+    const err = await refusal(assertPrivateOnWindows(FILE, {}, only(FILE, { status: 'no-dacl' })));
+    expect(err.message).toContain('no access control list');
+    // Nothing to remove; the fix is to give the object an ACL at all.
+    expect(err.message).toContain('/grant:r');
+    expect(err.message).not.toContain('/remove:g');
+  });
+
+  it('refuses an undeterminable ACL by default', async () => {
+    // Not what #138 was about, and flipping it open hands an attacker a free downgrade:
+    // make the descriptor unparseable and the loud finding becomes a vague one.
+    const err = await refusal(assertPrivateOnWindows(FILE, {}, only(FILE, UNDETERMINABLE)));
+    expect(err.message).toContain('could not be checked');
+    expect(err.message).toContain('--allowUncheckedConfigAcl');
+  });
+
+  it.each(['tool-missing', 'timed-out'] as const)(
+    'reports %s and loads, because it says nothing about the file',
+    async (reason) => {
+      const { warnings } = warned();
+      await expect(
+        assertPrivateOnWindows(FILE, {}, only(FILE, unknown(reason, 'detail'))),
+      ).resolves.toBeUndefined();
+      expect(warnings.join('\n')).toMatch(/could not be checked/);
+    },
+  );
+
+  it('reports everything and refuses nothing under --allowUncheckedConfigAcl', async () => {
+    // The single exit, and it has to cover every verdict — the 2.3.0 version covered only
+    // an undeterminable ACL, which is how the reporter of #138 ended up with none.
+    for (const verdict of [READ_ONLY, WRITABLE, UNDETERMINABLE, { status: 'no-dacl' } as const]) {
+      const { warnings } = warned();
+      await expect(
+        assertPrivateOnWindows(FILE, { allowUnchecked: true }, only(FILE, verdict)),
+      ).resolves.toBeUndefined();
+      expect(warnings, JSON.stringify(verdict)).toHaveLength(1);
+    }
+  });
+
+  it('refuses everything the check objects to under --strictConfigAcl', async () => {
+    for (const verdict of [READ_ONLY, WRITABLE, UNDETERMINABLE, MACHINE_SAYS_NOTHING]) {
+      await refusal(assertPrivateOnWindows(FILE, strict(), only(FILE, verdict)));
+    }
+  });
+
+  it('refuses instead of reporting, rather than as well', async () => {
+    const { warnings, events, opts } = warned();
+    await refusal(assertPrivateOnWindows(FILE, strict(opts), only(FILE, READ_ONLY)));
+    expect(warnings).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it('still examines the directory after reporting on the file', async () => {
+    const seen: string[] = [];
+    const { warnings } = warned();
+    await assertPrivateOnWindows(FILE, {}, async (p) => {
+      seen.push(p);
+      return READ_ONLY;
+    });
+    expect(seen).toEqual([FILE, DIR]);
+    // Two subjects, two findings — not one report covering both.
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toContain(FILE);
+    expect(warnings[1]).toContain(DIR);
   });
 
   it('falls back to stderr when the caller supplies no sink', async () => {
     const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
-    await expect(
-      assertPrivateOnWindows(FILE, strict(), only(FILE, unknown('tool-missing'))),
-    ).resolves.toBeUndefined();
-    expect(String(warn.mock.calls[0][0])).toMatch(/was not checked/);
-  });
-
-  it('refuses when icacls ran and would not describe the path', async () => {
-    // Access denied on a DACL read is evidence about the file. The first version
-    // collapsed every failure to "unchecked, load anyway", so breaking icacls was
-    // enough to disable the check.
-    const err = await refusal(
-      assertPrivateOnWindows(FILE, strict(), only(FILE, unknown('read-refused', 'Access is denied'))),
-    );
-    expect(err.message).toContain('read-refused');
-    expect(err.message).toContain('--allowUncheckedConfigAcl');
-  });
-
-  it('refuses a descriptor it cannot parse', async () => {
-    const err = await refusal(
-      assertPrivateOnWindows(FILE, strict(), only(FILE, unknown('unparsable', 'no DACL component'))),
-    );
-    expect(err.message).toContain('unparsable');
-  });
-
-  it("refuses when this account's own SID could not be read", async () => {
-    // Without an identity there is no allowlist to compare against, so a verdict
-    // would be meaningless rather than merely uncertain.
-    await refusal(assertPrivateOnWindows(FILE, strict(), only(FILE, unknown('identity-unknown'))));
-  });
-
-  it('honours --allowUncheckedConfigAcl for the refusing reasons', async () => {
-    const reported: unknown[] = [];
-    await expect(
-      assertPrivateOnWindows(
-        FILE,
-        strict({ allowUnchecked: true, onUnverified: (e) => reported.push(e) }),
-        only(FILE, unknown('read-refused', 'Access is denied')),
-      ),
-    ).resolves.toBeUndefined();
-    expect(reported).toHaveLength(1);
-  });
-
-  it('does not let the escape hatch turn a broad ACL into a warning', async () => {
-    // The flag is about an unanswered question, not about a known-bad answer.
-    await expect(
-      assertPrivateOnWindows(FILE, strict({ allowUnchecked: true }), only(FILE, broad(EVERYONE))),
-    ).rejects.toThrow(/Everyone/);
+    await assertPrivateOnWindows(FILE, {}, only(FILE, READ_ONLY));
+    expect(String(warn.mock.calls[0][0])).toMatch(/Warning: /);
   });
 });
 
-describe('assertPrivateOnWindows — advisory by default', () => {
+describe('when the platform will not name the current account', () => {
   /**
-   * The posture this settled on, and why.
+   * `userInfo()` throws ENOENT for a process with no loaded profile — a Windows
+   * service under a virtual account, or a container. The guard around it was
+   * added because an unhandled throw there turns a *report* into a raw stack
+   * trace, which is #138 one environment over: the operator loses their config to
+   * a crash inside the code that was only trying to warn them.
    *
-   * 2.3.0 refused a broad ACL, and on the first day it blocked a reporter's config at the
-   * documented `%APPDATA%` location: their ACL carried a principal the allowlist did not
-   * know about, because the allowlist was measured on one machine. `--allowUncheckedConfigAcl`
-   * deliberately did not cover a known-bad verdict, so there was no way past it — a check
-   * whose worst outcome is stranding an operator in their own config.
+   * Untested until now, and it is the branch that runs in exactly the environment
+   * nobody reviews interactively.
    */
-  it('reports a broad ACL and loads the config', async () => {
-    const { warnings } = warned();
-    await expect(
-      assertPrivateOnWindows(FILE, {}, only(FILE, broad(EVERYONE))),
-    ).resolves.toBeUndefined();
-    expect(warnings.join('\n')).toMatch(/readable beyond its owner/);
-    // The commands are still printed: the finding is worth stating, and stating it is not
-    // the same act as refusing.
-    expect(warnings.join('\n')).toContain('/remove:g *S-1-1-0');
-  });
-
-  it('reports a NULL DACL and loads the config', async () => {
-    const { warnings } = warned();
-    await expect(
-      assertPrivateOnWindows(FILE, {}, only(FILE, { status: 'no-dacl' })),
-    ).resolves.toBeUndefined();
-    expect(warnings.join('\n')).toMatch(/no access control list/);
-  });
-
-  it('reports an undeterminable ACL and loads the config', async () => {
-    const { warnings } = warned();
-    await expect(
-      assertPrivateOnWindows(FILE, {}, only(FILE, unknown('read-refused', 'Access is denied'))),
-    ).resolves.toBeUndefined();
-    expect(warnings.join('\n')).toMatch(/was not checked/);
-  });
-
-  it('still examines the directory after warning about the file', async () => {
-    // Warning must not short-circuit what refusing used to.
-    const seen: string[] = [];
-    warned();
-    await assertPrivateOnWindows(FILE, {}, async (p) => {
-      seen.push(p);
-      return broad(EVERYONE);
+  async function messageWithBrokenUserInfo(): Promise<string> {
+    vi.resetModules();
+    // Set so the assertion below bites on every platform. Without it USERNAME is
+    // simply unset on the Linux and macOS jobs, the old code fell through to the
+    // same placeholder, and reinstating `process.env.USERNAME` would have passed.
+    vi.stubEnv('USERNAME', 'MACHINE$');
+    vi.doMock('os', async () => {
+      const actual = await vi.importActual<typeof import('os')>('os');
+      return {
+        ...actual,
+        userInfo: () => {
+          throw Object.assign(new Error('ENOENT: no such file or directory, uv_os_get_passwd'), {
+            code: 'ENOENT',
+          });
+        },
+      };
     });
-    expect(seen).toEqual([FILE, DIR]);
+    const acl = await import('../../../src/config/windows-acl.js');
+    const err = await acl
+      .assertPrivateOnWindows(FILE, { enforce: true }, async (p) =>
+        p === FILE ? { status: 'broad', grants: [EVERYONE] } : { status: 'restricted' },
+      )
+      .then(() => null, (e: Error) => e);
+    vi.doUnmock('os');
+    vi.unstubAllEnvs();
+    vi.resetModules();
+    expect(err, 'expected a refusal, not a resolve').toBeInstanceOf(Error);
+    return (err as Error).message;
+  }
+
+  it('still produces the finding instead of escaping as a crash', async () => {
+    const message = await messageWithBrokenUserInfo();
+    expect(message).toContain('Everyone');
+    expect(message).toContain('/remove:g *S-1-1-0');
   });
 
-  it('refuses only when --strictConfigAcl asks it to', async () => {
-    await expect(
-      refusal(assertPrivateOnWindows(FILE, strict(), only(FILE, broad(EVERYONE)))),
-    ).resolves.toBeInstanceOf(OperatorError);
+  it('prints a placeholder the operator must fill in, not a guess', async () => {
+    // The first spelling of this fallback read process.env.USERNAME. In the
+    // environments where userInfo() actually throws that variable is either unset
+    // or holds something icacls rejects — `MACHINE$`, or a virtual service
+    // account — so it printed a command that fails while looking runnable. A
+    // command with a visible hole in it cannot be pasted by mistake.
+    const message = await messageWithBrokenUserInfo();
+    expect(message).toContain('"<your account>:F"');
+    expect(message).not.toContain('MACHINE$');
   });
 });

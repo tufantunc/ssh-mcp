@@ -220,7 +220,15 @@ jobs:
     if: ${{ !cancelled() }}
     steps:
       - name: Report the job results
-        run: echo '${{ toJSON(needs) }}'
+        # Through env rather than interpolated into the command. Safe today only because
+        # no job in this file declares `outputs:`, so the JSON can only hold result enums —
+        # and `toJSON` escapes double quotes but not single ones, so the first job output
+        # carrying an apostrophe would break the command, and the first one derived from
+        # `github.event` would make it an injection. That is correctness resting on a
+        # property of the rest of the file, which is what this gate exists to stop.
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: echo "$NEEDS"
       # One expression over `needs.*`, so adding a job to `needs` above covers it
       # by construction. Three explicit comparisons was the first shape, and it
       # made the gate's correctness depend on three lists staying in step — the
@@ -302,6 +310,13 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
+          # Note what is *not* pinned here. The action ref fixes its default bundle —
+          # v4.37.6's defaults.json says CLI 2.26.2 — but the action prefers a newer CLI
+          # already in the runner's toolcache, and the run for this commit reported
+          # "Found CodeQL tools version 2.26.3 in the toolcache. Using CodeQL CLI version
+          # 2.26.3". So the analysing version floats with the runner image, not with our
+          # SHA pin. Pass `tools:` if that ever needs to be reproducible.
+          #
           # `actions` as well as `javascript`. The workflows in this repository are
           # worth analysing on their own terms: one of them publishes to npm over
           # OIDC, and the reasoning about `permissions` blocks and `${{ }}`
