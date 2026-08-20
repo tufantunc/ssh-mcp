@@ -1,5 +1,60 @@
 # ssh-mcp
 
+## 2.3.3
+
+### Patch Changes
+
+- [#149](https://github.com/tufantunc/ssh-mcp/pull/149) [`76eaf66`](https://github.com/tufantunc/ssh-mcp/commit/76eaf66ce672ec75121078ab9708fec8206a8c16) Thanks [@tufantunc](https://github.com/tufantunc)! - Verify the stop instead of assuming it — and audit the one path that signals a host without a record.
+
+  Follow-up to the [#146](https://github.com/tufantunc/ssh-mcp/issues/146) fix, from two review rounds on it. Every item is the same shape as the bug it follows: a stop that reports success without having happened.
+
+  **A signal could be reported as delivered through a socket ssh2 will not write to.** ssh2 hands every packet to `onWrite`, which is `if (isWritable(sock)) sock.write(data)` — a socket that fails that check drops the packet with no error and no return value. The transport is now checked before either path claims dispatch, using all three of `isWritable`'s conjuncts rather than only `sock.writable`: measured, a half-open socket sits at `writable = true` while `isWritable()` is false, indefinitely, and a ProxyJump connection's transport is exactly that case because ssh2's channels default to `allowHalfOpen`. An unreadable transport now fails closed.
+
+  **A timeout that fired before the exec channel existed left the command running.** ssh2 invokes the exec callback on `CHANNEL_SUCCESS`, which OpenSSH sends _after_ forking the command, and the channel open is retried up to three times before that. The caller was told the command timed out; the command then started, ran to completion, held a channel and had its output discarded. A late channel is now stopped on arrival, and the outcome is recorded on its own span — the exec span has already ended by then, and an attribute set on an ended span is silently dropped.
+
+  **`close-session` signalled a remote process with no audit record.** Closing a background session now stops its command (INT, then TERM, then KILL) instead of only dropping the channel — which was measured to stop nothing. That turned a call that did nothing on the host into one that delivers `SIGKILL`, so it now writes an audit record naming the session's kind, and its tool description says what it does.
+
+  It is audited but deliberately **not** policy-gated. Routing it through the policy engine — the first shape of this fix — made the stop refusable: `session:close <name>` classifies as `safe`, so a `readOnly` profile, which _can_ open a background session because a `tail -f` classifies `read-only`, was denied permission to close it and had no other way to stop the command until the session's 1-hour cap expired. `ask-all` prompted on every close and an exhausted `commandQuotaPerDay` wedged the profile outright. A control whose refusal mode is "the thing you asked me to stop keeps running" is worse than the unaudited stop it replaced, so the record is kept and the veto is not. The record carries `ruleId: session-release` to distinguish it from an engine decision, and its exit code distinguishes a confirmed close from one that could not be dispatched.
+
+  Two more paths reach the same escalation without a tool call — the session reaper and connection teardown — and neither is policy-checked or audited. `SECURITY.md` now lists all six triggers with what each does and does not record.
+
+  **The escalation was abandoned mid-ladder.** The rungs after the first are timers, and `SSHConnection.close()` tears the transport down as soon as its sessions are closed — so a background command that ignored `SIGINT` received nothing further and survived, which is the case `SIGKILL` was added for. Closing a background session now waits for the escalation, bounded by the ladder's own length, and skips the wait entirely when nothing was dispatched (measured: 3.5s of dead time, since no later rung can reach a transport that refused the first).
+
+  Sessions and connections now close **concurrently**. Awaiting them one at a time was measured at 10.0s for five commands that ignore `INT` and `TERM` — past Docker's 10s default stop grace, so the container was killed mid-teardown and the later sessions got no escalation at all, which is worse than before the wait existed. Shutdown also flushes the audit log first and bounds the teardown at 5s, and the compose service sets an explicit `stop_grace_period`. The session reaper now awaits its closes before the idle-connection reaper runs; firing them without awaiting tore the transport down microseconds after the first signal, discarding `TERM` and `KILL`.
+
+  ## Corrections
+
+  **The process-group claim in the previous release note was wrong.** It said a signal reaches the command's session leader and orphans its children. OpenSSH answers a `signal` channel request with `killpg()` on the process group (`session.c`, `session_signal_req`), so an ordinary process tree does die — measured against 10.3p1, a shell and its child share one process group and both are gone after a single `SIGKILL` request. The "orphan" cited as evidence was debris leaked by an earlier experiment, and the test built on it was red on a clean container and green only on its second run. `SECURITY.md` states the corrected behaviour, along with the caveats that make it a server property rather than a guarantee: RFC 4254 does not specify delivery semantics, sshd refuses signal requests for forced-command and subsystem sessions, and other servers may differ.
+
+  **`SECURITY.md` also claimed `signal-process` classifies its signals as destructive.** It does not: `kill -KILL <pid>` classifies as `safe`, so `approvalPolicy = "ask-destructive"` never prompted for it. The document now says so and names the settings that do gate it. The classifier itself is unchanged in this release.
+
+  `ssh.unstopped` is set on every settle path (both cancellation paths computed it and dropped it before the span, so it could never be true for a cancelled command), the deferred case is marked `ssh.stopDeferred` rather than asserting a clean stop it cannot know about, and the signal name is a union type so a name ssh2 would reject is a compile error rather than a runtime warning that blames the wire.
+
+  `close-session`'s tool description changed, so its `--dump-tool-hashes` value changes with it — the first such change since that flag shipped. An operator pinning tool-description hashes will see `close-session` move, and that is expected here rather than a sign of tampering.
+
+- [#147](https://github.com/tufantunc/ssh-mcp/pull/147) [`17ab27d`](https://github.com/tufantunc/ssh-mcp/commit/17ab27dd64f0c7905393c369a318e92ec1c09a64) Thanks [@tufantunc](https://github.com/tufantunc)! - Stop a timed-out or cancelled command on the host, instead of only reporting that we did.
+
+  Reported as [#146](https://github.com/tufantunc/ssh-mcp/issues/146). `exec` closes stdin as soon as the command is dispatched, because a command that reads stdin would otherwise wait for input nobody will send. ssh2's `Channel.signal()` writes the request only while the channel is `writable` and its outgoing state is `open`, and closing stdin clears both — without throwing or reporting anything. So every signal sent to stop a command was discarded inside ssh2, and the command ran to completion on the host while the caller was told it had timed out.
+
+  Measured against OpenSSH 10.3p1, one channel per row, a 30-second `sleep` as the victim:
+
+  | what the client did                                          | at +4s | at +9s |
+  | ------------------------------------------------------------ | ------ | ------ |
+  | `end()`, then INT / TERM / `close()` — the shipped behaviour | alive  | alive  |
+  | INT / TERM without closing stdin first                       | gone   | gone   |
+  | `end()`, then `close()` and no signal                        | alive  | alive  |
+  | `end()`, then the signal sent past ssh2's check              | gone   | gone   |
+
+  Two things follow. A delivered signal is the only thing that stops a non-tty command — closing the channel does not, for the same reason killing a local `ssh host 'sleep 30'` leaves the sleep running. And this was never visible in the error: the message said "timed out" and was correct about the timeout.
+
+  **Cancellation was affected too**, which the report did not mention: the same closed stdin sits in front of the abort handler, so a command an operator explicitly cancelled also kept running. For a server whose job is to gate what an agent may run, "stopped" is a claim it makes on every timeout and every cancellation, and it was not true for either.
+
+  The signal now goes out past ssh2's check, so the fix needs no upstream release ([mscdex/ssh2#1510](https://github.com/mscdex/ssh2/pull/1510) is the proper repair, and ssh2 releases roughly annually). The escalation gained a rung: `INT`, `TERM`, `KILL`, then drop the channel — the old last rung was `close()`, which was measured to stop nothing, so a command ignoring the first two signals used to run forever.
+
+  `KILL` never being deliverable would now be said out loud rather than assumed: if no signal reaches the wire, the error adds _"The remote command could not be signalled and may still be running on the host."_ That should be unreachable today; it exists so that a future ssh2 which moves what this depends on brings back a visible failure rather than a silent one.
+
+  Interactive sessions were never affected — they write `^C` into a live pty and do not close stdin while a command runs.
+
 ## 2.3.2
 
 ### Patch Changes
@@ -8,7 +63,7 @@
 
   2.3.1 made the whole ACL check advisory, because 2.3.0 refused a config at the documented `%APPDATA%` location and left its owner no way past ([#138](https://github.com/tufantunc/ssh-mcp/issues/138)). That was too broad a retreat: the check never looked at the rights an ACE granted, so `Authenticated Users:(M)` — another account being able to rewrite the file — was reported in the same words, and with the same shrug, as `BUILTIN\Users:(RX)`.
 
-  Those are not the same finding. The config decides which hosts, which roles, which approval policy and which command classes this server honours, so another account being able to rewrite it is an authorization bypass rather than a disclosure. And Windows is not ambiguous about it: "an ACE grants a non-owner FILE_WRITE_DATA or WRITE_DAC" is exactly as clear as `0o022`. The ambiguity that justified retreating is specific to _read_ access on a shared volume.
+  Those are not the same finding. The config decides which hosts, which roles, which approval policy and which command classes this server honours, so another account being able to rewrite it is an authorization bypass rather than a disclosure. And Windows is not ambiguous about it: "an ACE grants a non-owner FILE*WRITE_DATA or WRITE_DAC" is exactly as clear as `0o022`. The ambiguity that justified retreating is specific to \_read* access on a shared volume.
 
   So the rights mask is now read, and the posture follows it:
 
