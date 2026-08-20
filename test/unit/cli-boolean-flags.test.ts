@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { flagEnabled, resolveHostKeyMode } from '../../src/index.js';
+import { flagEnabled, resolveHostKeyMode } from '../../src/cli.js';
 
 /**
  * Every documented boolean flag is written bare — `--disableApproval`, not

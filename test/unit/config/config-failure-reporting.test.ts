@@ -7,6 +7,13 @@ import { ConfigNotFoundError, OperatorError } from '../../../src/errors.js';
 import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from './helpers.js';
 
 /**
+ * These import `src/cli.ts`, not `src/index.ts`. That is the whole reason `cli.ts` exists:
+ * index.ts runs `main()` at import time unless `SSH_MCP_DISABLE_MAIN=1`, and the dynamic
+ * imports below re-evaluated that gate on every call — so this file used to carry a
+ * `vi.stubEnv` for it, without which a single-file run reported passing tests alongside
+ * "process.exit unexpectedly called with 1", and started connecting on a machine with a
+ * real config. Nothing in cli.ts has an import-time side effect.
+ *
  * #138: a Windows operator put a valid config at the documented path and was
  * told "No config file found". The file was there. `checkPermissions` rejected
  * it over POSIX mode bits that Windows does not have, and `buildAppConfig`'s
@@ -22,12 +29,6 @@ let tempDir: string;
 beforeEach(async () => {
   cfg = await makeConfigDir('ssh-mcp-fail-');
   tempDir = cfg.dir;
-  // src/index.ts runs main() at import time unless this is set, and the dynamic
-  // imports below re-evaluate that gate on every call. Without it a single-file
-  // run — `npx vitest --run <this file>`, which is how the IDE extension invokes
-  // it — reports passing tests alongside "process.exit unexpectedly called
-  // with 1", and on a machine with a real config it starts connecting.
-  vi.stubEnv('SSH_MCP_DISABLE_MAIN', '1');
 });
 
 afterEach(async () => {
@@ -125,7 +126,7 @@ describe('buildAppConfig only falls through when the file is absent', () => {
       loadConfigMock = vi.fn().mockRejectedValue(err);
       return { ...actual, loadConfig: loadConfigMock };
     });
-    const { buildAppConfig } = await import('../../../src/index.js');
+    const { buildAppConfig } = await import('../../../src/cli.js');
     return buildAppConfig(argv);
   }
 
@@ -197,8 +198,7 @@ describe('buildAppConfig threads --allowUncheckedConfigAcl to the loader', () =>
       });
       return { ...actual, loadConfig: loadConfigMock };
     });
-    vi.stubEnv('SSH_MCP_DISABLE_MAIN', '1');
-    const { buildAppConfig } = await import('../../../src/index.js');
+    const { buildAppConfig } = await import('../../../src/cli.js');
     await buildAppConfig(argv);
     return loadConfigMock;
   }
