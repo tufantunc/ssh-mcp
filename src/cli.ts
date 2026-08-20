@@ -1,13 +1,17 @@
 /**
- * The command line: argv into an AppConfig, and nothing else.
+ * The command line: argv into an AppConfig.
  *
  * Split out of index.ts, which runs `main()` at import time unless
- * `SSH_MCP_DISABLE_MAIN=1` is set. That made every test of a pure argv helper a test that
- * could start connecting to real hosts on a machine with a real config — one of them
- * carries a six-line comment and a `vi.stubEnv` about exactly that. Nothing in this file
- * has a side effect at import time, so importing it is safe.
+ * `SSH_MCP_DISABLE_MAIN=1` is set *and* `SSH_MCP_TEST` is not `1` — the gate is a
+ * disjunction, so the test variable overrides the disable one. That made every test of a
+ * pure argv helper a test that could start connecting to real hosts on a machine with a
+ * real config; one of them carried a six-line comment and a `vi.stubEnv` about exactly
+ * that, both removed by this split. Nothing in this file has a side effect at import
+ * time, so importing it is safe.
  *
- * index.ts keeps `main()` and the boot gate; everything argv-shaped lives here.
+ * Not *everything* argv-shaped lives here: index.ts still reads the transport, OTEL and
+ * OPA flags at the wiring site, where they are used. What moved is the part that had to
+ * escape the boot gate to be testable.
  */
 
 import { loadConfig, getConfigPath } from './config/loader.js';
@@ -17,8 +21,7 @@ import { HOST_GROUPS } from './policy/engine.js';
 import type { HostKeyMode } from './ssh/host-key.js';
 import type { AppConfig, Profile, Defaults } from './types.js';
 
-export function parseArgv(): Record<string, string | null> {
-  const args = process.argv.slice(2);
+export function parseArgv(args: string[] = process.argv.slice(2)): Record<string, string | null> {
   const config: Record<string, string | null> = {};
   for (const arg of args) {
     if (arg.startsWith('--')) {
@@ -121,15 +124,6 @@ export function resolveHostGroup(argv: Record<string, string | null>): string {
   );
 }
 
-/**
- * Every ACL finding, in the order it happened — both "readable beyond its owner" and
- * "could not be checked".
- *
- * Collected rather than only printed so `main()` can act on them once there is somewhere
- * durable to put them; see the note at the sink below.
- */
-const aclFindings: AclFinding[] = [];
-
 export async function buildAppConfig(argv: Record<string, string | null>): Promise<AppConfig> {
   // The way past an ACL that could not be read, rather than an operator with no
   // exit. See assertPrivateOnWindows.
@@ -138,11 +132,15 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
   // operator must be told, and the loader is not the layer that owns that. Routing it to
   // the audit store as well needs an AuditRecord variant for a startup event — that type
   // is hash-chained and tamper-evident, so it is its own change, and it is queued.
+  //
+  // An earlier version also pushed every finding into a module-level array "so main() can
+  // act on them". Nothing ever read it, and this split made the claim impossible — main()
+  // is in another module and the array was not exported. Re-adding a collection point is
+  // one line when there is a consumer to write it against.
   const aclOpts = {
     enforce: flagEnabled(argv, 'strictConfigAcl'),
     allowUnchecked: flagEnabled(argv, 'allowUncheckedConfigAcl'),
     onFinding: (f: AclFinding) => {
-      aclFindings.push(f);
       console.error(`Warning: ${f.message}`);
     },
   };

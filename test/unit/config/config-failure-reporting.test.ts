@@ -10,9 +10,12 @@ import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from './helpers.js';
  * These import `src/cli.ts`, not `src/index.ts`. That is the whole reason `cli.ts` exists:
  * index.ts runs `main()` at import time unless `SSH_MCP_DISABLE_MAIN=1`, and the dynamic
  * imports below re-evaluated that gate on every call — so this file used to carry a
- * `vi.stubEnv` for it, without which a single-file run reported passing tests alongside
- * "process.exit unexpectedly called with 1", and started connecting on a machine with a
- * real config. Nothing in cli.ts has an import-time side effect.
+ * `vi.stubEnv` for it, without which a single-file run failed with "process.exit
+ * unexpectedly called with 2" — and started connecting on a machine with a real config.
+ * (2 is EXIT_OPERATOR_ERROR: a missing config file is the operator's, not our defect,
+ * which is the distinction errors.ts exists to keep. The comment this replaces said 1,
+ * and had said it since before the split.) Nothing in cli.ts has an import-time side
+ * effect.
  *
  * #138: a Windows operator put a valid config at the documented path and was
  * told "No config file found". The file was there. `checkPermissions` rejected
@@ -115,7 +118,7 @@ describe('buildAppConfig only falls through when the file is absent', () => {
     vi.resetModules();
     // Built from the post-reset instance of errors.js on purpose. The check
     // under test is `instanceof`, and a class imported before resetModules is a
-    // different object from the one index.ts resolves afterwards — the test
+    // different object from the one cli.ts resolves afterwards — the test
     // would fail on the module registry rather than on the behaviour.
     const E = await import('../../../src/errors.js');
     const err = makeErr(E);

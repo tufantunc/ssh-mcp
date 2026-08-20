@@ -151,4 +151,3 @@ if (isCliEnabled || isTestMode) {
     process.exit(reportFatal(error));
   });
 }
-
