@@ -105,11 +105,12 @@ describe.skipIf(!allServersUp(await checkAllServers()))('closing a background se
   }
 
   afterEach(async () => {
-    // `kill -9`: a failed run used to leave `sleep 4820` in the fixture for its full 80
-    // minutes, and nothing reaped it — this file had no cleanup hook and exec-kill's
-    // pattern does not match this marker. Every later run then saw a survivor and failed
-    // for a reason that had nothing to do with the code.
-    await conn?.exec(`pkill -9 -f "^sleep ${MARKER}" || true`, { timeoutMs: 5000 }).catch(() => {});
+    // `kill -9`, unanchored, covering both markers: a failed run used to leave a `sleep` in
+    // the fixture for its full 80 minutes, and nothing reaped it. Unanchored so the trapping
+    // wrapper shell is matched too, and in the hook rather than an in-body `finally` —
+    // measured, a vitest test *timeout* runs the hook and skips the `finally`, which is
+    // exactly how one red run poisons every later one.
+    await conn?.exec('pkill -9 -f "sleep 48" || true', { timeoutMs: 5000 }).catch(() => {});
   });
 
   it('waits for the escalation instead of tearing the transport down mid-ladder', async () => {
@@ -119,7 +120,7 @@ describe.skipIf(!allServersUp(await checkAllServers()))('closing a background se
     // the rest of the ladder and the command survived. That is the case KILL exists for, so
     // it is the case worth testing.
     const trapping = 4821;
-    try {
+    {
       await conn.openSession({
         name: 'bg-trap',
         type: 'background',
@@ -133,8 +134,6 @@ describe.skipIf(!allServersUp(await checkAllServers()))('closing a background se
 
       const { stdout: after } = await conn.exec(`ps -ef | grep -c "[s]leep ${trapping}"`, { timeoutMs: 5000 });
       expect(Number(after.trim()), 'the trapping command outlived close-session').toBe(0);
-    } finally {
-      await conn.exec(`pkill -9 -f "sleep ${trapping}" || true`, { timeoutMs: 5000 }).catch(() => {});
     }
   }, 30000);
 
@@ -145,15 +144,19 @@ describe.skipIf(!allServersUp(await checkAllServers()))('closing a background se
     expect(await alive(), 'the background command never started').toBeGreaterThan(0);
 
     const started = Date.now();
-    await conn.closeSession('bg-kill');
+    const outcome = await conn.closeSession('bg-kill');
     const elapsed = Date.now() - started;
+    // The reported outcome, not just the process table: `'closed'` is the only value that
+    // means the channel actually closed, and hardcoding it was invisible before this.
+    expect(outcome).toBe('closed');
 
     // Asserted on elapsed time, not on a poll budget. The stream's stdin is never ended, so
     // ssh2's own `signal()` sends INT on the public path and the command dies in one round
-    // trip — measured at 5ms inside a full suite run. A 20s poll ceiling could not tell that
-    // apart from "nothing worked until the channel closed at +3s", which is exactly the
-    // regression this test exists to catch.
+    // trip — measured at 2-5ms. The ceiling is 500ms rather than 5000: every reachable
+    // outcome is under 3.5s (the ladder's own bound), so a 5000ms ceiling discriminated
+    // nothing, while 500ms still leaves a 100x margin and fails the moment this command
+    // starts surviving to the TERM rung at +1s.
     expect(await alive(), 'the background command outlived close-session').toBe(0);
-    expect(elapsed, 'closeSession waited far longer than one round trip').toBeLessThan(5000);
+    expect(elapsed, 'the command survived INT and had to be escalated').toBeLessThan(500);
   }, 30000);
 });

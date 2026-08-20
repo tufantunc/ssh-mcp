@@ -49,11 +49,20 @@ export function trimNewlines(text: string): string {
 /**
  * What closing a session achieved.
  *
- * `'unsignalled'` means the stop request could not be dispatched at all — the honest
- * counterpart to `exec`'s COULD_NOT_SIGNAL. A boolean was the first spelling and it read
- * as "did it stop", which is exactly the conflation this whole change removes.
+ * Three states because there are three genuinely different answers, and the first version
+ * of this had only two — it computed the third and threw it away, so `close-session`
+ * reported `'closed'` for a command that had survived INT, TERM *and* KILL. That is the
+ * same false claim the exec path stopped making.
+ *
+ * - `'closed'` — the channel closed. For a background session that means the command is
+ *   gone; for an interactive one, that its shell was ended.
+ * - `'stop-unconfirmed'` — the ladder was dispatched and the channel was still open when
+ *   the budget ran out. The strongest available evidence that the stop did not take: a
+ *   process in uninterruptible sleep, or a server that refuses signal requests at all
+ *   (sshd under a forced command or a subsystem, and Dropbear).
+ * - `'unsignalled'` — nothing could be dispatched, so nothing was asked of the host.
  */
-export type CloseOutcome = 'closed' | 'unsignalled';
+export type CloseOutcome = 'closed' | 'stop-unconfirmed' | 'unsignalled';
 
 export abstract class Session {
   readonly id: string;
@@ -403,17 +412,25 @@ export class BackgroundSession extends Session {
     // `close-session` reported `status: 'closed'` while `tail -f` kept running on the
     // host, which is the same false claim the exec path stopped making.
     const dispatched = terminateChannel(this.stream);
+    // Our side is closed either way — the session is being torn down and the caller is not
+    // getting it back. What varies is whether the *host* stopped, which the outcome carries.
+    this._status = 'closed';
+    if (!dispatched) return 'unsignalled';
+
     // Awaited, because the ladder's later rungs are timers and whatever happens next may
-    // tear the transport down: `SSHConnection.close()` calls `client.end()` on the line
-    // after `closeAll()`, and shutdown calls `process.exit`. Returning early meant a
+    // tear the transport down: `SSHConnection.close()` ends the client immediately after
+    // `closeAll()` returns, and shutdown calls `process.exit`. Returning early meant a
     // command that ignored INT received nothing further and survived — the KILL rung
-    // exists precisely for that command. The wait is bounded by the ladder's own length,
-    // so a command that dies to INT costs one round trip, not three seconds.
+    // exists precisely for that command. Bounded by the ladder's own length, so a command
+    // that dies to INT costs one round trip rather than three seconds.
+    //
+    // Skipped entirely when nothing was dispatched: no rung can be delivered through a
+    // transport that refused the first one, including the `channel.close()` rung, so
+    // `'close'` would never arrive and the wait was measured burning its full 3.5s for
+    // nothing.
     //
     // The old `stream.close()` released the channel synchronously; this releases it when
     // the ladder finishes, which is why the wait is here rather than left to the caller.
-    await waitForChannelClose(this.stream);
-    this._status = 'closed';
-    return dispatched ? 'closed' : 'unsignalled';
+    return (await waitForChannelClose(this.stream)) ? 'closed' : 'stop-unconfirmed';
   }
 }

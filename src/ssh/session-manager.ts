@@ -181,24 +181,42 @@ export class SessionManager {
   async close(name: string): Promise<CloseOutcome> {
     const session = this.sessions.get(name);
     if (!session) throw new Error(`Session "${name}" not found on ${this.deps.profile().name}`);
-    const outcome = await session.close();
-    this.sessions.delete(name);
-    return outcome;
+    try {
+      return await session.close();
+    } finally {
+      // Guarded and in a `finally`, both because closing now awaits a kill ladder rather
+      // than returning on the next microtask. Unguarded, a reaper closing this session
+      // while the caller re-opened the same name would evict the *new* session — the
+      // hazard `register` already documents. Without the `finally`, a rejection left the
+      // entry behind forever, holding a `sessionMaxPerConnection` slot and blocking the
+      // name.
+      if (this.sessions.get(name) === session) this.sessions.delete(name);
+    }
   }
 
   async closeAll(): Promise<void> {
-    for (const name of [...this.sessions.keys()]) {
-      await this.close(name).catch(() => {});
-    }
+    // Concurrently. The ladders are independent timers on independent channels, and
+    // sequentially this was measured at 10.0s for five commands that ignore INT and TERM —
+    // past Docker's 10s default stop grace, so the container was SIGKILLed mid-teardown and
+    // the later sessions got no escalation at all. Before the ladder was awaited each
+    // session at least received its INT immediately, so serialising made the tail worse
+    // than the bug it fixed.
+    await Promise.all([...this.sessions.keys()].map((name) => this.close(name).catch(() => {})));
   }
 
-  reapExpired(): void {
-    for (const [name, session] of this.sessions) {
-      if (session.isExpired()) {
-        session.close().catch(() => {});
-        this.sessions.delete(name);
-      }
-    }
+  /**
+   * Close every expired session, awaiting the escalation.
+   *
+   * Awaited, and async for that reason. Fire-and-forget left exactly one hole in the
+   * guarantee `waitForChannelClose` exists for: `close()` dispatched INT and returned, the
+   * entry was deleted so `sessionCount` hit zero in the same tick, and the reaper's very
+   * next call — `reapIdleConnections`, which gates on `sessionCount` — closed the
+   * connection and ended the client microseconds later. TERM and KILL were then discarded,
+   * so a background command that ignores INT survived its own reaping.
+   */
+  async reapExpired(): Promise<void> {
+    const expired = [...this.sessions.entries()].filter(([, s]) => s.isExpired());
+    await Promise.all(expired.map(([name]) => this.close(name).catch(() => {})));
   }
 
   markAllDisconnected(): void {

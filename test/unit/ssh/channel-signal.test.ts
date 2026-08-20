@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ClientChannel } from 'ssh2';
-import { signalChannel, terminateChannel } from '../../../src/ssh/channel-signal.js';
+import { EventEmitter } from 'events';
+import { signalChannel, terminateChannel, waitForChannelClose } from '../../../src/ssh/channel-signal.js';
 
 /**
  * #146: every signal ssh-mcp sent to stop a timed-out command was a silent no-op,
@@ -238,6 +239,47 @@ describe('terminateChannel', () => {
     expect(handles.length).toBeGreaterThan(0);
     expect(handles.every((h) => h.hasRef?.() === false)).toBe(true);
     handles.forEach((h) => clearTimeout(h as never));
+  });
+});
+
+describe('waitForChannelClose', () => {
+  /** A channel that only ever does what the test makes it do. */
+  function bare() {
+    const ch = new EventEmitter() as unknown as ClientChannel & { incoming: { state: string } };
+    (ch as unknown as { incoming: { state: string } }).incoming = { state: 'open' };
+    return ch;
+  }
+
+  it('resolves false when the budget expires with the channel still open', async () => {
+    // The bounded half of the bound. Every other call in the suite resolves through the
+    // `'close'` event, so this arm — the only producer of `false`, and the evidence that a
+    // command survived INT, TERM *and* KILL — had no test at all.
+    expect(await waitForChannelClose(bare(), 20)).toBe(false);
+  });
+
+  it('resolves true when the channel closes inside the budget', async () => {
+    const ch = bare();
+    setTimeout(() => ch.emit('close'), 5);
+    expect(await waitForChannelClose(ch, 500)).toBe(true);
+  });
+
+  it('settles once when the channel closes after the budget', async () => {
+    // A late `'close'` must not settle a promise the timeout already settled, and must not
+    // leave the listener attached to a channel that outlives the wait.
+    const ch = bare();
+    expect(await waitForChannelClose(ch, 20)).toBe(false);
+    expect(ch.listenerCount('close'), 'the timed-out wait left its listener attached').toBe(0);
+    ch.emit('close');
+  });
+
+  it('does not wait for a channel that has already closed', async () => {
+    // ssh2 emits `'close'` exactly once and skips it for an already-closed channel, so a
+    // listener attached afterwards never fires and the caller would burn the full budget.
+    const ch = bare();
+    (ch as unknown as { incoming: { state: string } }).incoming.state = 'closed';
+    const started = Date.now();
+    expect(await waitForChannelClose(ch, 5000)).toBe(true);
+    expect(Date.now() - started, 'waited on a channel that was already gone').toBeLessThan(200);
   });
 });
 

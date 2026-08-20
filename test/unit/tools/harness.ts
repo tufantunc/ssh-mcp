@@ -6,6 +6,7 @@ import { registerTools, registerResources } from '../../../src/tools/registry.js
 import { PolicyEngine, DEFAULT_RULES } from '../../../src/policy/engine.js';
 import { AuditStore } from '../../../src/audit/store.js';
 import type { CommandResult, Profile } from '../../../src/types.js';
+import type { CloseOutcome } from '../../../src/ssh/session.js';
 
 /**
  * In-process MCP client + server over InMemoryTransport, with the SSH layer
@@ -50,6 +51,14 @@ export interface Harness {
   setApproval(approve: boolean): void;
   /** How many times the client was actually prompted. */
   approvalPrompts(): number;
+  /**
+   * What `closeSession` reports; override per test.
+   *
+   * Configurable because the stub used to return `void`, so `outcome === 'unsignalled'` was
+   * never true and the branch that warns the caller a stop was not dispatched was dead in
+   * every unit test — including the ones written to cover it.
+   */
+  setCloseOutcome(outcome: CloseOutcome): void;
   close(): Promise<void>;
 }
 
@@ -61,6 +70,7 @@ export async function createHarness(
   const execCalls: ExecCall[] = [];
   const auditRecords: any[] = [];
   let approve = true;
+  let closeOutcome: CloseOutcome = 'closed';
   let approvalPrompts = 0;
   let execResult: Partial<CommandResult> = {};
 
@@ -95,7 +105,10 @@ export async function createHarness(
       sessions.set(name, session);
       return session;
     },
-    async closeSession(name: string) { sessions.delete(name); },
+    async closeSession(name: string): Promise<CloseOutcome> {
+      sessions.delete(name);
+      return closeOutcome;
+    },
     toInfo: () => ({
       profile: profile.name, host: profile.host, port: profile.port, user: profile.user,
       status: 'connected', sessionCount: sessions.size, activeChannels: 0,
@@ -139,6 +152,7 @@ export async function createHarness(
     auditRecords,
     setExecResult(result) { execResult = result; },
     setApproval(value) { approve = value; },
+    setCloseOutcome(outcome) { closeOutcome = outcome; },
     approvalPrompts: () => approvalPrompts,
     async close() { await client.close(); await server.close(); },
   };

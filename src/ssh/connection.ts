@@ -424,8 +424,8 @@ export class SSHConnection {
     return this.sessions.close(name);
   }
 
-  reapExpiredSessions(): void {
-    this.sessions.reapExpired();
+  async reapExpiredSessions(): Promise<void> {
+    return this.sessions.reapExpired();
   }
 
   async close(): Promise<void> {

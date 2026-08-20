@@ -251,18 +251,30 @@ export function waitForChannelClose(
   channel: ClientChannel,
   ms: number = ESCALATION_MS * 3 + 500,
 ): Promise<boolean> {
+  // ssh2 emits `'close'` exactly once, and `onCHANNEL_CLOSE` early-returns for a channel
+  // whose incoming state is already `'closed'` — so a listener attached after the fact
+  // never fires and the caller would burn the whole budget waiting for an event that has
+  // already happened. Not reachable through SessionManager today, because the session is
+  // removed from the map by that same emit; it is a trap for the next caller.
+  const incoming = (channel as ClientChannel & { incoming?: { state?: string } }).incoming;
+  if (incoming?.state === 'closed' || channel.destroyed) return Promise.resolve(true);
+
   return new Promise((resolve) => {
     let settled = false;
+    const onClose = () => done(true);
     const done = (closed: boolean) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // Detached on the timeout path too: a timed-out wait would otherwise leave its
+      // closure attached to a channel that may outlive it.
+      channel.removeListener('close', onClose);
       resolve(closed);
     };
     const timer = setTimeout(() => done(false), ms);
     // Unreferenced so a hung channel cannot hold the process open; the caller is awaiting
     // this, so the loop stays alive for as long as the caller itself does.
     timer.unref();
-    channel.once('close', () => done(true));
+    channel.once('close', onClose);
   });
 }

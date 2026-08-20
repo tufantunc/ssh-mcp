@@ -85,6 +85,10 @@ services:
 
   # ─── SSH MCP Server v2 ────────────────────────────────────────────────────
   ssh-mcp:
+    # Above the server's own 5s teardown budget (see SHUTDOWN_BUDGET_MS): closing a
+    # background session now waits for its kill ladder, and the 10s default left the
+    # container SIGKILLed mid-teardown.
+    stop_grace_period: 20s
     build: .
     profiles: ["app"]
     stdin_open: true

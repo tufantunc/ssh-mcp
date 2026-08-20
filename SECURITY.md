@@ -37,24 +37,36 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 
 ## Stopping a Command
 
-Three things stop a command: its timeout, an MCP client cancelling the request, and
-`close-session` on a background session. All three escalate the same way on the exec
-channel — `SIGINT` immediately, `SIGTERM` after 1s, `SIGKILL` after 2s, then the channel is
-closed. Some properties of that are worth knowing before you point this at something that
-matters.
+Six things stop a command, and they all escalate the same way on the exec channel —
+`SIGINT` immediately, `SIGTERM` after 1s, `SIGKILL` after 2s, then the channel is closed:
 
-**`SIGKILL` is part of it, and a timeout or cancellation reaches it without a policy
-check.** That is deliberate: the command was already authorised when it started, and
-stopping it is less authority than starting it. `close-session` *is* policy-evaluated and
-audited, because it is a caller-initiated action rather than the server cleaning up after
-itself. A command that must never be `SIGKILL`ed needs a timeout long enough that it
-finishes first.
+| trigger | policy check | audit record |
+|---|---|---|
+| the command's timeout | no | the failed command's own record |
+| an MCP client cancelling the request | no | the failed command's own record |
+| a channel that arrives after the request already timed out | no | trace only (`ssh.exec.lateStop`) |
+| `close-session` on a background session | **no** | yes (`session:close …`, `ruleId session-release`) |
+| the session reaper (idle TTL, or `sessionBackgroundMaxMs`, 1h by default) | no | **no** |
+| connection teardown — shutdown, or the idle-connection reaper | no | **no** |
 
-**Note that `kill` classifies as `safe`.** The `signal-process` tool is policy-evaluated and
-audited, but the command it builds (`kill -SIGNAL pid`) is not matched by any destructive
-pattern, so `approvalPolicy = "ask-destructive"` will *not* prompt for it. Use `ask-all`, a
-`readOnly` profile, or a role whose bindings exclude `safe` if an agent must not signal
-arbitrary processes.
+**Nothing on that list is policy-gated, and two of them leave no record.** The first four
+are the server stopping something policy already authorised when it started, which is
+strictly less authority than starting it. `close-session` is audited because it is
+caller-initiated, but it is deliberately *not* refusable: routing it through the policy
+engine meant a `readOnly` profile could open a background session and then be denied
+permission to close it, with no other way to stop the command for an hour. A control whose
+refusal mode is "the thing you asked me to stop keeps running" is worse than no control.
+
+The last two rows are the ones to weigh before pointing this at something that matters: a
+background `tail -f` that passes its TTL is `SIGKILL`ed by a timer, with no tool call, no
+policy check and no audit row. Set `sessionBackgroundMaxMs` and the idle TTL accordingly.
+
+**Note that `kill` classifies as `safe`.** The `signal-process` tool *is* policy-evaluated
+and audited, but the command it builds (`kill -SIGNAL pid`) is not matched by any
+destructive pattern, so `approvalPolicy = "ask-destructive"` will not prompt for it. Use
+`ask-all`, a `readOnly` profile, or a role whose bindings exclude `safe` if an agent must
+not signal arbitrary processes — those settings gate `signal-process`, and they do not gate
+any row in the table above.
 
 **The blast radius is the process group, not one process.** OpenSSH answers a `signal`
 channel request with `killpg()` on the command's group (`session.c`,
@@ -64,12 +76,15 @@ request. This is the server's behaviour rather than a protocol guarantee: RFC 42
 does not specify delivery semantics, sshd refuses signal requests for forced-command and
 subsystem sessions, and another server (this project also tests Dropbear) may differ.
 
-**Nothing acknowledges a signal request.** The absence of a warning in the error means the
-request was dispatched, not that the process died — a target may refuse it, and SSH gives
-no reply either way. When the request could not even be dispatched, the error says so
-explicitly ("could not be signalled, so it may still be running on the host"). The
-`ssh.unstopped` span attribute carries the same fact as a boolean, and is set on every
-stop, so its absence means an older build rather than a clean stop.
+**Nothing acknowledges a signal request.** For `exec`, the absence of a warning in the
+error means the request was dispatched, not that the process died; when it could not be
+dispatched at all the error says so ("could not be signalled, so it may still be running on
+the host"). The `ssh.unstopped` span attribute carries the same fact for every `exec` stop
+that had a channel to signal — a timeout that fires before the channel exists records
+`ssh.stopDeferred` instead, and the outcome then lands on a separate `ssh.exec.lateStop`
+span. `close-session` reports its own outcome in the tool result and in the audit record's
+exit code rather than on a span: it distinguishes a confirmed close from a signal that was
+dispatched but never took, and from one that could not be dispatched at all.
 
 ## Safe Deployment Guidelines
 

@@ -294,14 +294,30 @@ async function main() {
   }
 
   const reaperInterval = setInterval(() => {
-    for (const info of registry.listConnections()) {
-      const conn = registry.get(info.profile);
-      if (conn) {
-        conn.reapExpiredSessions();
-      }
-    }
-    registry.reapIdleConnections();
+    // Session reaping is awaited before connection reaping, and that order is load-bearing:
+    // closing a background session now signals its command, and `reapIdleConnections` gates
+    // on `sessionCount`, which drops to zero as soon as a session is closed. Fired without
+    // awaiting, the connection was torn down microseconds after the first signal and the
+    // TERM and KILL rungs were discarded — so a command that ignores INT survived its own
+    // reaping.
+    void (async () => {
+      const conns = registry.listConnections()
+        .map((info) => registry.get(info.profile))
+        .filter((c): c is NonNullable<typeof c> => Boolean(c));
+      await Promise.all(conns.map((conn) => conn.reapExpiredSessions().catch(() => {})));
+      registry.reapIdleConnections();
+    })();
   }, 60_000);
+
+  /**
+   * How long teardown gets before the process exits regardless.
+   *
+   * One kill ladder (3s) plus slack. Sessions and connections close concurrently, so this
+   * is the whole budget rather than a per-session one. Docker's default stop grace is 10s
+   * and Kubernetes' is 30s, so this stays comfortably inside both — the point is that we
+   * choose the moment we give up rather than being SIGKILLed in the middle of it.
+   */
+  const SHUTDOWN_BUDGET_MS = 5000;
 
   let isShuttingDown = false;
   const cleanup = async () => {
@@ -309,11 +325,22 @@ async function main() {
     isShuttingDown = true;
     console.error('Shutting down SSH MCP Server...');
     clearInterval(reaperInterval);
-    // Connections first, audit second. Closing a connection now closes its sessions, and
-    // closing a background session is an audited action — with the old order those records
-    // were written to an already-closed stream and silently dropped.
-    try { await registry.closeAll(); } catch (e) { console.error('closeAll failed:', e); }
+    // Audit first. An earlier version of this comment claimed session teardown wrote audit
+    // records that the old order dropped — it does not: nothing under src/ssh/ touches the
+    // audit store, only the `close-session` tool does, and that record is written and
+    // awaited during the tool call. So the reorder rescued nothing and put the final flush
+    // behind a teardown that now waits for kill ladders. Flushing first cannot lose a record
+    // that teardown does not write, and it survives a SIGKILL at the end of the grace period.
     try { await audit.close(); } catch (e) { console.error('audit.close failed:', e); }
+    // Bounded, so `process.exit(0)` is reached deliberately rather than by the container
+    // runtime's SIGKILL. Teardown is concurrent now, so the honest ceiling is one kill
+    // ladder plus slack rather than one per session.
+    try {
+      await Promise.race([
+        registry.closeAll(),
+        new Promise((resolve) => setTimeout(resolve, SHUTDOWN_BUDGET_MS).unref()),
+      ]);
+    } catch (e) { console.error('closeAll failed:', e); }
     process.exit(0);
   };
 

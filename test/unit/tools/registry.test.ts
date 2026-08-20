@@ -333,17 +333,65 @@ describe('sessions', () => {
     // INT, then TERM, then KILL — and this tool used to reach the connection directly,
     // around the pipeline, so a caller-invoked SIGKILL on a production host produced no
     // audit row at all. Every other path to a remote signal is audited.
-    expect(h.auditRecords.at(-1).command).toContain('session:close');
+    expect(h.auditRecords.at(-1).command).toBe('session:close interactive work');
   });
 
-  it('audits closing a background session as destructive', async () => {
+  it('audits closing a background session, recording its kind', async () => {
     h = await createHarness();
     await call('open-session', { name: 'logs', type: 'background', command: 'tail -f /var/log/syslog' });
     const closed = await call('close-session', { name: 'logs' });
     expect(closed.isError).toBeFalsy();
     const record = h.auditRecords.at(-1);
-    expect(record.command).toContain('session:close');
+    // The kind is in the recorded command so a remote SIGKILL is greppable and is not
+    // indistinguishable from ending a local shell.
+    expect(record.command).toBe('session:close background logs');
+    // Asserted rather than implied. An earlier version of this test was titled "as
+    // destructive" and asserted only `decision`, while the recorded class was `safe` — so
+    // it passed for the opposite of its stated reason. `session:close` is not matched by
+    // any destructive pattern; the release is audited, not gated, and `ruleId` says so.
+    expect(record.commandClass).toBe('safe');
+    expect(record.ruleId).toBe('session-release');
     expect(record.decision).toBe('allow');
+    expect(record.exitCode).toBe(0);
+  });
+
+  it('closes the session even on a profile whose policy refuses "safe" commands', async () => {
+    // The regression this shape exists to prevent: routing the close through the policy
+    // gate let a readOnly profile *open* a background session (a `tail -f` classifies
+    // read-only) and then be denied permission to close it, with no other way to stop the
+    // command. A release is audited, never refused.
+    h = await createHarness({ readOnly: true });
+    await call('open-session', { name: 'logs', type: 'background', command: 'tail -f /var/log/syslog' });
+    const closed = await call('close-session', { name: 'logs' });
+    expect(closed.isError).toBeFalsy();
+    expect(h.auditRecords.at(-1).command).toBe('session:close background logs');
+
+    const listed = await call('list-sessions', {});
+    expect(textOf(listed)).not.toContain('logs');
+  });
+
+  it.each([
+    ['unsignalled', /could not be signalled/],
+    ['stop-unconfirmed', /had not closed in time/],
+  ] as const)('tells the caller when a %s close may have left the command running', async (outcome, expected) => {
+    // The whole point of the outcome: `close-session` must not answer "closed." when the
+    // stop was never dispatched, or was dispatched and never took. Both arms were dead
+    // before the harness could express them.
+    h = await createHarness();
+    h.setCloseOutcome(outcome);
+    await call('open-session', { name: 'logs', type: 'background', command: 'tail -f /var/log/syslog' });
+    const closed = await call('close-session', { name: 'logs' });
+    expect(textOf(closed)).toMatch(expected);
+    // And recorded, not just told to the model: an unsignalled close used to produce a
+    // byte-identical audit row to a successful one.
+    expect(h.auditRecords.at(-1).exitCode).toBe(1);
+  });
+
+  it('says nothing extra when the stop is confirmed', async () => {
+    h = await createHarness();
+    await call('open-session', { name: 'logs', type: 'background', command: 'tail -f /var/log/syslog' });
+    const closed = await call('close-session', { name: 'logs' });
+    expect(textOf(closed)).toBe('Session "logs" closed.');
   });
 
   it('rejects a session name with shell metacharacters', async () => {
