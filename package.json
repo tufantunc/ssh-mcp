@@ -34,7 +34,7 @@
     "@opentelemetry/semantic-conventions": "^1.43.0",
     "smol-toml": "^1.7.0",
     "ssh2": "^1.17.0",
-    "zod": "^3.25.28"
+    "zod": "^4.4.3"
   },
   "overrides": {
     "zod-to-json-schema": "3.24.6"
