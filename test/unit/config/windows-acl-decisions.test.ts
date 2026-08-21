@@ -5,10 +5,10 @@ import {
   type AclOptions,
   type AclFinding,
   assertPrivateOnWindows,
-  type AclVerdict,
-  type Grant,
-  type UnknownReason,
 } from '../../../src/config/windows-acl.js';
+// The verdict vocabulary belongs to the parser, so these come from the other side of the
+// cut — which is the dependency the split exists to make visible.
+import type { AclVerdict, Grant, UnknownReason } from '../../../src/config/sddl.js';
 import { OperatorError } from '../../../src/errors.js';
 import { enforceAcl } from './helpers.js';
 

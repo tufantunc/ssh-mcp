@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import fc from 'fast-check';
-import { parseDacl } from '../../src/config/windows-acl.js';
+import { parseDacl, aclIdentity } from '../../src/config/sddl.js';
 
 /**
  * `parseDacl` is the security decision for the whole Windows config path, and
@@ -19,7 +19,13 @@ import { parseDacl } from '../../src/config/windows-acl.js';
 
 const OWNER = 'S-1-5-21-11-22-33-1001';
 const DOMAIN = 'S-1-5-21-11-22-33';
-const ALLOWED = { allowed: new Set(['S-1-5-18', 'S-1-5-32-544', OWNER, `${DOMAIN}-500`]), accountDomain: DOMAIN };
+// The production rule, not a replica of it — `aclIdentity(OWNER)` yields exactly the set
+// this used to spell out by hand. sddl.ts records why that matters: while both suites held
+// a replica, adding `BUILTIN\Users` to the allowlist or dropping the RID-500 entry left
+// every off-Windows test green, and two mutations survived the required check that way. The
+// sibling suite was fixed then; this one still had the copy, and measured, it was blind to
+// both mutations. Free to fix now that `aclIdentity` lives in the module this file imports.
+const ALLOWED = aclIdentity(OWNER);
 
 const allowedTrustee = fc.constantFrom('SY', 'BA', 'S-1-5-18', 'S-1-5-32-544', OWNER);
 const strangerTrustee = fc.constantFrom(

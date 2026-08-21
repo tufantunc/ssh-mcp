@@ -1,11 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { join } from 'path';
-import {
-  parseDacl,
-  aclIdentity,
-  classifyReadFailure,
-  type AclVerdict,
-} from '../../../src/config/windows-acl.js';
+import { parseDacl, aclIdentity, type AclVerdict } from '../../../src/config/sddl.js';
+// Stays behind the cut: classifying an icacls failure is the platform half's vocabulary.
+import { classifyReadFailure } from '../../../src/config/windows-acl.js';
 
 /**
  * The SDDL parser, which runs everywhere, so it is tested everywhere. The
@@ -380,6 +377,20 @@ describe('the rights field decides read from write', () => {
   it('reads a real modify mask as write', () => {
     // 0x1301bf is what the same inheritance gives Authenticated Users. Measured.
     expect(grantsOf('0x1301bf')?.writes).toBe(true);
+  });
+
+  // The decimal spelling of the same two masks. `icacls /save` emits hex, so these were
+  // uncovered — and deleting the decimal branch was measured to change the answer rather
+  // than merely lose coverage: without it 1179817 falls through to the two-character code
+  // loop, where an unrecognised chunk counts as write, so a read-only grant is reported as a
+  // writer and the default posture refuses a config that is fine. That is the #138
+  // false-positive direction, which the parser's own invariants call as costly as a bypass.
+  it('reads a decimal read-and-execute mask as read-only', () => {
+    expect(grantsOf('1179817')?.writes).toBe(false);   // 0x1200a9
+  });
+
+  it('reads a decimal modify mask as write', () => {
+    expect(grantsOf('1245631')?.writes).toBe(true);    // 0x1301bf
   });
 
   it.each(['FA', 'FW', 'WD', 'WO', 'SD', 'GA', 'GW'])('treats %s as write', (rights) => {
