@@ -1,20 +1,32 @@
 /**
  * The SDDL half of the Windows ACL check: descriptor text in, verdict out.
  *
- * Split from windows-acl.ts, and the split is the point rather than tidiness. This file
- * imports nothing — no `child_process`, no `fs`, no `os` — so the parser is
- * platform-independent by construction instead of by discipline, and that independence is
- * what lets the 2000-run property tests guard an authorization decision on every CI job
- * rather than only on the Windows one.
+ * Split from windows-acl.ts so the parser's platform independence is legible in the module
+ * graph — this file imports nothing at all, and `sddl-import-boundary.test.ts` holds it to
+ * that. What it owns is the grammar *and* the allowlist the grammar is judged against
+ * (`ALWAYS_ALLOWED_SIDS`, the RID-500 rule in `aclIdentity`): the second is authorization
+ * policy rather than syntax, but it is policy that needs no machine to evaluate, which is
+ * the line this cut actually draws.
  *
- * The failure it prevents is quiet: an edit reaching for `run(ICACLS, …)` inside
- * `parseDacl` would compile, read as a one-liner, and turn every parser test into a
- * Windows-only test while still reporting green. `sddl.import-boundary.test.ts` asserts
- * the import list so that edit fails instead.
+ * An earlier version of this header claimed the split prevents a *silent* failure — that an
+ * edit reaching for `icacls` inside `parseDacl` would leave CI green. That was wrong, and a
+ * review round disproved it by doing it: such an edit fails about 69 parser tests loudly on
+ * Linux, because none of those tests carries a platform guard. The real hazard is the step
+ * after. Faced with 69 red tests on a change that "obviously only affects Windows", the
+ * cheapest repair is `describe.runIf(win32)` — and *then* the 2000-run property suite stops
+ * exercising the decision off Windows and the green is real. Asserting the boundary here
+ * means the first step fails somewhere whose only sane repair is to undo the import.
  *
- * What stays on the other side is everything that talks to the machine — reading a
- * descriptor with `icacls`, resolving the current SID, deciding what to tell the operator
- * and what to refuse. This half only knows how to read the grammar.
+ * The type split follows the same line: the verdict vocabulary is what a descriptor says, so
+ * `Grant`, `UnknownReason`, `AclVerdict` and `AclIdentity` live here. `AclFinding` and
+ * `AclOptions` are what we tell the operator and what the operator asked for, so they stay
+ * with the platform half.
+ *
+ * `PRINCIPAL_NAMES`/`nameFor` are here against the plan that queued this split, which put
+ * them on the message side. They cannot go there while `parseDacl` populates `Grant.name`:
+ * honouring it would mean passing the parser a name resolver, a signature change the same
+ * plan ruled out by asking for no behaviour change. The table is keyed by SDDL alias and
+ * SID, which is this file's vocabulary anyway.
  */
 
 /**
@@ -279,6 +291,23 @@ function quoteBlindBalanced(group: string): boolean {
   return depth === 0;
 }
 
+/**
+ * ACE groups from a DACL body, respecting nesting *and quoting*.
+ *
+ * The quote handling is not decoration. A conditional ACE (`XA`/`ZA`) carries an
+ * expression whose string literals may contain parentheses, and SDDL gives them
+ * no escape. A quote-blind scan can therefore be fed two conditional ACEs whose
+ * literals hold `"("` and `")"`, which merges every ACE between them into a
+ * single group — and field 5 of the merged blob is the *first* ACE's trustee,
+ * which the attacker sets to the owner. Verified before the fix: a descriptor
+ * bracketing the real `BUILTIN\Users` and `Authenticated Users` grants that way
+ * came back `restricted`.
+ *
+ * That is the previous version's truncating regex returning as a merging scan,
+ * and it fails in the same unsafe direction, so the counting has to know about
+ * quotes. SDDL string literals have no `"` escape, which makes a plain toggle
+ * exact rather than approximate.
+ */
 function aceGroups(body: string): string[] | null {
   const groups: string[] = [];
   let depth = 0;

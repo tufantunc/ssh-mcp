@@ -255,24 +255,6 @@ async function readDescriptor(
 }
 
 /**
- * ACE groups from a DACL body, respecting nesting *and quoting*.
- *
- * The quote handling is not decoration. A conditional ACE (`XA`/`ZA`) carries an
- * expression whose string literals may contain parentheses, and SDDL gives them
- * no escape. A quote-blind scan can therefore be fed two conditional ACEs whose
- * literals hold `"("` and `")"`, which merges every ACE between them into a
- * single group — and field 5 of the merged blob is the *first* ACE's trustee,
- * which the attacker sets to the owner. Verified before the fix: a descriptor
- * bracketing the real `BUILTIN\Users` and `Authenticated Users` grants that way
- * came back `restricted`.
- *
- * That is the previous version's truncating regex returning as a merging scan,
- * and it fails in the same unsafe direction, so the counting has to know about
- * quotes. SDDL string literals have no `"` escape, which makes a plain toggle
- * exact rather than approximate.
- */
-
-/**
  * Whichever comes first: the verdict, or the deadline.
  *
  * The signal reaches the subprocesses, but `mkdtemp` and `rm` accept none, so

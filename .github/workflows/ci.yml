@@ -205,14 +205,18 @@ jobs:
 
   # One context that fails if any other job fails.
   #
-  # The repository ruleset requires `test` and nothing else, so a red `windows`
-  # job was visible but could not block a merge — and deleting the win32 branch in
-  # checkPermissions would leave every required check green, which is how the
-  # regression this change fixes could come straight back. Requiring `ci` instead
-  # covers every job listed in `needs`, which is why security-scan and codeql are
-  # there too: swapping `test` for a gate that quietly dropped them would trade
-  # one hole for another. Changing the ruleset is a repository setting and cannot
-  # be done from this file; until it is switched, this job is advisory.
+  # The ruleset used to require `test` and nothing else, so a red `windows` job was
+  # visible but could not block a merge — and deleting the win32 branch in
+  # checkPermissions would have left every required check green, which is how the
+  # regression that change fixed could have come straight back. Requiring `ci`
+  # instead covers every job listed in `needs`, which is why security-scan and
+  # codeql are there too: swapping `test` for a gate that quietly dropped them
+  # would trade one hole for another.
+  #
+  # Done, 2026-08-20: the ruleset now requires `ci` alone, verified through the
+  # rulesets API. This job is no longer advisory — a `windows` failure blocks a
+  # merge. Said explicitly because the previous wording outlived the fix, and a
+  # review round reasoned from it that a Windows-only regression could still ship.
   ci:
     runs-on: ubuntu-latest
     needs: [test, windows, security-scan, codeql]
