@@ -1,11 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { join } from 'path';
-import {
-  parseDacl,
-  aclIdentity,
-  classifyReadFailure,
-  type AclVerdict,
-} from '../../../src/config/windows-acl.js';
+import { parseDacl, aclIdentity, type AclVerdict } from '../../../src/config/sddl.js';
+// Stays behind the cut: classifying an icacls failure is the platform half's vocabulary.
+import { classifyReadFailure } from '../../../src/config/windows-acl.js';
 
 /**
  * The SDDL parser, which runs everywhere, so it is tested everywhere. The

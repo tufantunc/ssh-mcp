@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import fc from 'fast-check';
-import { parseDacl } from '../../src/config/windows-acl.js';
+import { parseDacl } from '../../src/config/sddl.js';
 
 /**
  * `parseDacl` is the security decision for the whole Windows config path, and
