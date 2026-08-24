@@ -735,3 +735,9 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md). Please follow the [security checklist]
 ## Support
 
 If you find SSH MCP Server helpful, consider starring the repository or [sponsoring](https://github.com/sponsors/tufantunc)!
+
+## Listed on
+
+[![SSH MCP Server on Glama](https://glama.ai/mcp/servers/tufantunc/ssh-mcp/badge)](https://glama.ai/mcp/servers/tufantunc/ssh-mcp)
+
+Also on the [official MCP registry](https://registry.modelcontextprotocol.io) as `io.github.tufantunc/ssh-mcp`.
