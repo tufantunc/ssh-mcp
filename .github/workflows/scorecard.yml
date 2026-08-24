@@ -1,0 +1,97 @@
+name: Scorecard
+
+# OpenSSF Scorecard: an automated, third-party read of this repo's supply-chain
+# posture — is there a security policy, are releases signed, are dependencies
+# pinned, is code scanning on, can a maintainer force-push to main. It grades what
+# we already claim in SECURITY.md, from outside, on a schedule, so a regression
+# shows up as a falling number rather than as nobody noticing.
+#
+# Deliberately NOT a job in ci.yml, for three reasons:
+#   1. It must not run on pull requests. Scorecard analyses the repository, not a
+#      diff, and `publish_results` from a fork PR would either fail or publish a
+#      fork's result under our name.
+#   2. `ci` is the required check in the branch ruleset. A job added there becomes
+#      required, and this one has nothing to say about a PR.
+#   3. It needs `id-token: write`, which ci.yml — the workflow that does run on
+#      pull requests — should not be handed.
+
+on:
+  # The published score is a property of the default branch, so it is recomputed
+  # when the default branch changes.
+  push:
+    branches: [main]
+  # Several checks (Branch-Protection above all) read repository settings rather
+  # than repository contents, so they can change with no commit at all. This event
+  # fires on exactly that, and is why a weekly cron alone would be too coarse.
+  branch_protection_rule:
+  schedule:
+    # Mondays, off the hour: GitHub queues scheduled jobs heavily at :00.
+    - cron: '27 5 * * 1'
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # Upload the SARIF so findings land in the repo's Security tab next to
+      # CodeQL's, rather than only in a log nobody opens.
+      security-events: write
+      # Mint the OIDC token that publishes the result to the OpenSSF API. This is
+      # what makes the README badge resolve; without it the run still scores but
+      # the badge stays unknown.
+      id-token: write
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Scorecard only reads. Leaving the token in .git/config would hand every
+          # subsequent step in this job a credential none of them need.
+          persist-credentials: false
+
+      # What this SHA pin does and does not buy, since the repo's own rule is that a
+      # pin should mean something. `action.yaml` at this commit is nine lines of
+      # `runs: using: docker, image: docker://ghcr.io/ossf/scorecard-action:v2.4.4`,
+      # so the pin freezes the wrapper and *not* the code that executes — the image
+      # tag is mutable and resolves at run time. Same shape as the semgrep action
+      # documented in ci.yml.
+      #
+      # Kept anyway, unlike semgrep, because the alternative is worse here: running
+      # the image directly would let us pin a digest but would also mean
+      # reimplementing the OIDC token exchange this action performs to publish
+      # results, which is the whole reason the badge resolves. The exposure is a tag
+      # controlled by the OpenSSF release process, on a job that has `contents: read`
+      # and touches no secret of ours.
+      - name: Run analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Publishes to the public OpenSSF dataset, which is what the badge reads.
+          # Only meaningful because this repository is public; the results say
+          # nothing that `git log` and the Settings page do not already show.
+          publish_results: true
+          # Note on Branch-Protection: this repo protects `main` with a *ruleset*
+          # rather than a classic branch-protection rule, and the check reads those
+          # settings through an API the default GITHUB_TOKEN cannot fully see. That
+          # check may therefore score lower than the protection actually in force.
+          # Fixing it means a fine-grained PAT with read access to administration,
+          # stored as a secret and passed here as `repo_token` — a standing
+          # credential in exchange for one sub-score, which is not obviously worth
+          # it. Left unset on purpose; revisit if the number misleads.
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        with:
+          sarif_file: results.sarif

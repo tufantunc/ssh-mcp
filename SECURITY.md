@@ -121,6 +121,20 @@ dispatched but never took, and from one that could not be dispatched at all.
 
 SSH MCP Server v2 implements controls that map to common security frameworks. This mapping documents which features support specific control requirements — it does **not** constitute formal certification. The **deployer** is responsible for the full deployment's compliance posture.
 
+### Independent assessment
+
+Everything in the tables below is **self-assessed**. The one continuous outside reading is
+[OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/tufantunc/ssh-mcp), which
+re-grades the repository weekly and on every change to `main` or to branch protection, and
+publishes the result. Findings also land in the repository's Security tab alongside CodeQL's.
+
+Read it for what it measures: the **supply chain and development process** — is there a
+security policy, are dependencies pinned and updated, is code scanning on, are releases
+signed, can history be rewritten. It says nothing about the runtime controls the tables
+below describe; no automated grader executes the policy engine. A high score means this
+project is built in a way that makes tampering hard to hide, not that a deployment of it
+is secure.
+
 ### SOC 2 (AICPA Trust Services Criteria)
 
 | Control | Description | SSH MCP v2 Feature |
