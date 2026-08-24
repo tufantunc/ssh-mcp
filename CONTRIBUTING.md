@@ -39,7 +39,11 @@ npm run changeset
 # Write: "Add ProxyJump support for bastion connections"
 ```
 
-This creates a file in `.changeset/` — commit it with your PR. When the PR merges, the changesets bot opens a "Version Packages" PR that bumps the version, updates CHANGELOG.md, and publishes to npm.
+This creates a file in `.changeset/` — commit it with your PR. When the PR merges, the changesets bot opens a "Version Packages" PR that bumps the version, updates CHANGELOG.md, and publishes to npm. Publishing to npm also lists the new version on the [official MCP registry](https://registry.modelcontextprotocol.io).
+
+### server.json
+
+`server.json` is the MCP registry entry. Its two version fields — the listing's own `version`, and the npm version it points at — are written by `npm run version` from `package.json`, so they arrive already bumped in the "Version Packages" PR and should not be edited by hand. Everything else in the file is hand-maintained; if you change the `title` or `description`, note that the registry schema caps both at 100 characters, which `test/unit/sync-server-json.test.ts` asserts.
 
 ## Review Criteria
 

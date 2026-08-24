@@ -9,6 +9,11 @@ on:
   # manual trigger the only ways to retry are re-running a failed job or pushing
   # an empty commit to main. Neither belongs in a release path.
   workflow_dispatch:
+    inputs:
+      list_only:
+        description: 'Skip the npm release and only list the current version on the MCP registry'
+        type: boolean
+        default: false
 
 # Read-only default, so a job added here later starts with no write access until
 # it asks. `release` below is the one job in this file and it opts up explicitly
@@ -23,10 +28,17 @@ concurrency: ${{ github.workflow }}-${{ github.ref }}
 jobs:
   release:
     runs-on: ubuntu-latest
+    # A `list_only` dispatch is for a version that reached npm but never reached
+    # the registry, so it must not go near the publish path again.
+    if: github.event.inputs.list_only != 'true'
     permissions:
       contents: write
       id-token: write
       pull-requests: write
+    # Consumed by the `registry` job's `if:` below, which is where the gate is
+    # explained.
+    outputs:
+      published: ${{ steps.changesets.outputs.published }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -103,10 +115,12 @@ jobs:
       # CHANGELOG entry on top of it.
       #
       # Before merging one, confirm exactly that: the PR touches only
-      # package.json's version, CHANGELOG.md and the consumed changeset files,
-      # and main is green at the commit it sits on. An admin merge of anything
-      # wider is skipping a real check.
+      # package.json's version, CHANGELOG.md, server.json's two version fields
+      # (written by `npm run version` — see scripts/sync-server-json.mjs) and
+      # the consumed changeset files, and main is green at the commit it sits
+      # on. An admin merge of anything wider is skipping a real check.
       - name: Create Release Pull Request or Publish
+        id: changesets
         uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1 (branch, not a tag)
         with:
           # No --provenance: trusted publishing generates provenance
@@ -144,3 +158,168 @@ jobs:
           # what the package's trusted publisher is configured against. Leaving
           # the token here would let a misconfigured trusted publisher fall back
           # silently, so nobody would notice it had stopped working.
+
+  # Listing on the official MCP registry (registry.modelcontextprotocol.io).
+  #
+  # A job rather than more steps on `release`, because npm versions are
+  # immutable: a combined job that failed at the registry could not be re-run —
+  # the retry would die earlier, republishing a version npm already has, and the
+  # part that actually broke would never be reached. This one retries alone.
+  #
+  # And a job rather than a second workflow. The obvious shape — trigger on the
+  # `v*` tag the changesets action pushes — cannot work here: that tag is pushed
+  # with GITHUB_TOKEN, and GitHub starts no workflows for those pushes. It is the
+  # same loop-breaker that keeps ci.yml off changeset-release/main, described at
+  # the release step above.
+  registry:
+    name: list on the MCP registry
+    needs: release
+    # Most runs of this workflow open or update the "Version Packages" pull
+    # request and publish nothing, so listing has to be gated on a release
+    # actually having happened — otherwise this job runs on every merge to main
+    # and fails against a version already listed.
+    #
+    # `!cancelled()` rather than the bare condition, because `needs:` alone means
+    # "only if release succeeded" and there are states where npm has published
+    # and the release job still fails: the action pushes the git tag and creates
+    # the GitHub release *after* `changeset publish` returns, and it exits
+    # non-zero on a publish whose exit code was non-zero even when packages
+    # shipped. Skipping here in those states is unrecoverable — a re-run of
+    # `release` finds the version already on npm, releases nothing, and reports
+    # `published: false` forever.
+    #
+    # `list_only` is the escape hatch for the one state this still cannot see: a
+    # failure before the action set its output at all. Dispatch it and this job
+    # runs against whatever `server.json` names on main.
+    #
+    # The ref guard is because `workflow_dispatch` accepts any ref, and a
+    # dispatch from another branch would otherwise list that branch's
+    # `server.json` under our namespace.
+    if: >-
+      ${{ !cancelled()
+      && github.ref == 'refs/heads/main'
+      && (needs.release.outputs.published == 'true'
+      || github.event.inputs.list_only == 'true') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # mcp-publisher exchanges this for a registry token, and the
+      # `io.github.tufantunc/*` namespace is authorised from the repository owner
+      # in its claims. No secret here either — same mechanism as the npm publish.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Needed by all three steps below that shell out to node: the `--check`
+      # run, the version read, and the identifier read. No `npm ci` — none of
+      # them touch node_modules. 24.x only to match the release job; unlike
+      # there, no npm version is load-bearing here, and `engines` allows far
+      # older.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.x'
+
+      # Pinned, not `latest/download`. This binary mints the credential that
+      # publishes under our namespace, which makes it exactly the kind of
+      # mutable reference the release job above went out of its way to remove
+      # from the publish path. The cost is that a registry API change eventually
+      # needs this bumped by hand — and that failure lands here, in the one job
+      # that can be re-run, with npm already safely published.
+      #
+      # The digest is the other half of that. A release tag in the URL pins a
+      # *release*, not its bytes: GitHub release assets can be replaced in place,
+      # so the tag alone gives none of the immutability a SHA-pinned action or an
+      # npm version does. That matters more here than it would elsewhere in this
+      # file, because npm's trusted publisher is bound to a workflow *filename*
+      # — this one — so anything executing in this job can mint a token npm will
+      # accept for ssh-mcp. The digest is published upstream in
+      # registry_1.8.1_checksums.txt; bumping the version means bumping both
+      # lines.
+      #
+      # Verified before extraction rather than after, so a replaced archive is
+      # never handed to tar.
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          curl -fsSL -o mcp-publisher.tar.gz \
+            https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
+          echo 'a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc  mcp-publisher.tar.gz' \
+            | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+          ./mcp-publisher --version
+
+      # server.json carries the version twice, and `npm run version` — wired to
+      # scripts/sync-server-json.mjs — is what keeps both in step with
+      # package.json inside the release pull request. `--check` asserts that it
+      # happened: if the script would have anything to write, the listing about
+      # to be published names a version other than the one that just shipped.
+      #
+      # Left to the registry, the same mistake arrives as a 404 from npm, or as
+      # a successful listing for the wrong version.
+      - name: server.json must already agree with package.json
+        run: node scripts/sync-server-json.mjs --check
+
+      # Everything server.json must satisfy that does not depend on npm: required
+      # fields, the name pattern, the 100-character title and description caps,
+      # the enums. It POSTs to a registry endpoint that needs no credentials, so
+      # it runs before `login`.
+      #
+      # This replaced a hand-rolled copy of two of those rules in
+      # scripts/sync-server-json.mjs, written on the belief that mcp-publisher
+      # only reports them at publish time. It does not — and two rules copied out
+      # of a pinned schema would have gone stale the first time that URL moved.
+      #
+      # Before the npm wait, not after: it takes a second, and there is no reason
+      # to spend five minutes on propagation only to fail on a malformed listing.
+      - name: Validate server.json against the registry schema
+        run: ./mcp-publisher validate
+
+      # The registry resolves packages[].version against npm and rejects what it
+      # cannot see. `npm publish` returning is not the same as the CDN serving
+      # the new version, so wait for it rather than racing it.
+      #
+      # This asks the registry's own question — a GET of the version manifest at
+      # `registry.npmjs.org/<identifier>/<version>`, which is literally the URL
+      # the npm validator builds — rather than a near-enough one. Two reasons it
+      # is not `npm view`:
+      #
+      #   `npm view pkg@version` fetches the whole packument and resolves the
+      #   version locally, and npm serves packuments with `max-age=300` while
+      #   defaulting `prefer-online` to false. Attempt 1 would cache a document
+      #   that lacks the new version and attempts 2..30 could all be answered
+      #   from it — a 290-second window entirely inside the 300-second one. The
+      #   loop would report "never became visible" while npm was serving it.
+      #
+      #   And the name has to come from server.json's identifier, not a literal:
+      #   the identifier is what the registry resolves, so polling anything else
+      #   can confirm a package the listing does not point at. The sync script
+      #   pins that identifier to package.json's name, which is what makes
+      #   reading it here safe.
+      - name: Wait for npm to serve the published version
+        run: |
+          set -euo pipefail
+          identifier="$(node -p 'require("./server.json").packages.find((p) => p.registryType === "npm").identifier')"
+          version="$(node -p 'require("./package.json").version')"
+          url="https://registry.npmjs.org/$identifier/$version"
+          attempts=30
+          for i in $(seq 1 "$attempts"); do
+            # Keep the reason. Discarding it made a 404, a 429, an npm outage and
+            # a runner DNS failure all read as "not yet visible", on the one job
+            # whose whole purpose is to be diagnosable.
+            if err="$(curl -fsS -o /dev/null "$url" 2>&1)"; then
+              echo "$identifier@$version is visible on npm"
+              exit 0
+            fi
+            echo "attempt $i/$attempts: not visible yet ($err)"
+            if [ "$i" -lt "$attempts" ]; then
+              sleep 10
+            fi
+          done
+          echo "::error::$identifier@$version never became visible on npm. Last error: $err" >&2
+          exit 1
+
+      - name: Publish to the registry
+        run: |
+          set -euo pipefail
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

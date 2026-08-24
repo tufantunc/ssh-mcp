@@ -3,6 +3,7 @@
   "license": "MIT",
   "version": "2.3.3",
   "description": "MCP server exposing policy-gated, audited SSH access for Linux and Windows hosts via the Model Context Protocol.",
+  "mcpName": "io.github.tufantunc/ssh-mcp",
   "type": "module",
   "bin": {
     "ssh-mcp": "build/index.js"
@@ -13,7 +14,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "inspect": "npx @modelcontextprotocol/inspector node build/index.js",
     "changeset": "changeset",
-    "version": "changeset version",
+    "version": "changeset version && node scripts/sync-server-json.mjs",
     "test": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run",
     "test:unit": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/unit/ test/property/",
     "test:integration": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/integration/",

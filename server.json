@@ -1,0 +1,48 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.tufantunc/ssh-mcp",
+  "title": "SSH — policy-gated remote access",
+  "description": "Policy-gated, audited SSH for Linux and Windows hosts: roles, approvals, and an audit log.",
+  "version": "2.3.3",
+  "websiteUrl": "https://github.com/tufantunc/ssh-mcp#readme",
+  "repository": {
+    "url": "https://github.com/tufantunc/ssh-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "ssh-mcp",
+      "version": "2.3.3",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "SSH_MCP_PASSWORD",
+          "description": "Password for the configured profile; a per-profile SSH_MCP_<PROFILE>_PASSWORD takes precedence. Credentials are never accepted as CLI arguments.",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "SSH_MCP_KEY",
+          "description": "Path to the private key file to authenticate with — the path, not the key material. A per-profile SSH_MCP_<PROFILE>_KEY takes precedence.",
+          "format": "filepath",
+          "isRequired": false
+        },
+        {
+          "name": "SSH_MCP_PASSPHRASE",
+          "description": "Passphrase for an encrypted private key.",
+          "isSecret": true,
+          "isRequired": false
+        },
+        {
+          "name": "SSH_MCP_SUDO_PASSWORD",
+          "description": "Password the sudo tool escalates with, when the policy in force allows the privileged class.",
+          "isSecret": true,
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}
