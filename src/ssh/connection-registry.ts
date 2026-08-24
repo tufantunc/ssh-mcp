@@ -1,4 +1,5 @@
-import { getProfile as getConfigProfile } from '../config/loader.js';
+import { getProfile as getConfigProfile, getConfigPath } from '../config/loader.js';
+import { UnconfiguredError } from '../errors.js';
 import type { AppConfig, Profile, ConnectionInfo } from '../types.js';
 import { resolveCredentials } from '../config/credential-resolver.js';
 import { SSHConnection } from './connection.js';
@@ -85,7 +86,25 @@ export class ConnectionRegistry {
     return this.connections.get(profile.name);
   }
 
+  /**
+   * Refuse everything while nothing is configured.
+   *
+   * The server now starts with `profiles: []` so a directory or a client's "add server"
+   * flow can read `tools/list` (see cli.ts). This is where that state stops being
+   * readable and starts being refused, and it sits here rather than in the loader's
+   * `getProfile` for one measured reason: the loader's empty check can only live in the
+   * no-profile-named branch, so a client calling `run-command` with `profile: "prod"`
+   * against an unconfigured server got `Profile "prod" not found` — a message telling the
+   * operator they mistyped a name when in fact they have no config at all, and omitting
+   * the config path this whole change exists to deliver. Checking before the lookup
+   * covers both.
+   */
+  assertConfigured(): void {
+    if (this.config.profiles.length === 0) throw new UnconfiguredError(getConfigPath());
+  }
+
   getProfile(profileName?: string): Profile {
+    this.assertConfigured();
     return getConfigProfile(this.config, profileName);
   }
 

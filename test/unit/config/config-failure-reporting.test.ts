@@ -230,6 +230,27 @@ describe('buildAppConfig only falls through when the file is absent', () => {
         buildWith((E) => new E.ConfigNotFoundError('/nowhere/config.toml'), { host: 'example.com' }),
       ).rejects.toThrow(/--host\/--user/);
     });
+
+    /**
+     * The soft path keys on the flags being absent, not on their values being truthy.
+     *
+     * `parseArgv` stores `null` for a flag written without `=` and drops bare words, so
+     * every spelling below produces a falsy `host`/`user` while the operator plainly asked
+     * for a quick start. A truthiness test sent all of them down the soft path: a server
+     * that starts and looks healthy, with the explanation only on a stderr stream an MCP
+     * client typically swallows. This is the same null-vs-truthy trap that made three
+     * boolean flags no-ops in #91.
+     */
+    it.each([
+      ['--host example.com --user root (space instead of =)', { host: null, user: null }],
+      ['bare --host', { host: null }],
+      ['--host= --user= from a wrapper with unset env vars', { host: '', user: '' }],
+      ['--host= alone', { host: '' }],
+    ])('still refuses a quick start given as %s', async (_label, argv) => {
+      await expect(
+        buildWith((E) => new E.ConfigNotFoundError('/nowhere/config.toml'), argv as Record<string, string | null>),
+      ).rejects.toThrow(/--host\/--user/);
+    });
   });
 });
 

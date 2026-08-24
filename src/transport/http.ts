@@ -141,7 +141,8 @@ export async function startHttpServer(
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
     // Liveness probes are conventionally unauthenticated, and the README lists
-    // /health without an auth caveat. It exposes nothing beyond "process is up".
+    // /health without an auth caveat. It exposes "process is up" and whether any profile
+    // is configured — see the handler below for why that second bit is not a secret.
     const isHealthProbe = req.method === 'GET' && url.pathname === '/health';
 
     if (!isHealthProbe) {
@@ -258,8 +259,18 @@ export async function startHttpServer(
     }
 
     if (req.method === 'GET' && url.pathname === '/health') {
+      // `configured` is liveness telling the truth about readiness. Since the server
+      // learned to start with nothing configured, an HTTP deployment whose config bind
+      // mount silently did not attach comes up, binds the port, and fails 100% of tool
+      // calls — while this probe said `healthy: true` and the explaining stderr warning
+      // scrolled past at boot. The status stays 200 so an existing probe does not start
+      // failing on upgrade; the field is what an operator can alert on.
+      //
+      // It widens what this unauthenticated route discloses by exactly one bit, and that
+      // bit is worth little to anyone: a server with no profile is one that cannot reach
+      // any host. `/status` carries the profile list itself and stays behind the token.
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ healthy: true }));
+      res.end(JSON.stringify({ healthy: true, configured: registry.listAllProfiles().length > 0 }));
       return;
     }
 

@@ -53,6 +53,14 @@ export function registerSessionTools(
     {},
     { readOnlyHint: true },
     async () => {
+      // The one tool that reads only `listAllProfiles()` and so never touches
+      // `getProfile`. Without this it answered an unconfigured server with a
+      // zero-length success — on the tool whose own description sends an agent here
+      // first ("discover available hosts before running commands"), and on the one
+      // channel where the startup stderr warning is not visible. The agent saw "no
+      // hosts" rather than "not configured". Refusing here is what makes the claim in
+      // the README, the changeset and the startup warning true of all eleven tools.
+      registry.assertConfigured();
       const connections = registry.listConnections();
       const profiles = registry.listAllProfiles();
       const lines = profiles.map((p) => {
@@ -143,20 +151,28 @@ export function registerSessionTools(
     { destructiveHint: true },
     async ({ name, profile }, extra) => {
       const cleanName = sanitizeSessionName(name);
-      const profileName = defaultProfileName(profile);
+      // Both the profile name and the connection are resolved inside the try below. They
+      // used to be resolved above it, so a refusal — an unconfigured server, an unknown
+      // profile name — escaped before `auditFailure` could record that a release was
+      // attempted. The placeholders are what the record is filed under if resolution is
+      // itself what failed.
+      let profileName = profile ?? '(default)';
       const ctx = makeCtx(extra, profileName, cleanName);
-      const conn = await resolveConn(profile);
-      // Recorded with the session's kind, so a remote SIGKILL is greppable in the log and
-      // distinguishable from ending a local shell — `open-session` encodes its type the
-      // same way.
-      // Through `toInfo()` rather than an `instanceof` check: the type is public API, and a
-      // tool handler reaching for a constructor identity is the layer leak this repo's own
-      // rules call out.
-      const kind = conn.getSession(cleanName)?.toInfo().type ?? 'unknown';
-      const command = `session:close ${kind} ${cleanName}`;
+      let command = `session:close unknown ${cleanName}`;
       const startedAt = Date.now();
 
       try {
+        profileName = defaultProfileName(profile);
+        ctx.profile = profileName;
+        const conn = await resolveConn(profile);
+        // Recorded with the session's kind, so a remote SIGKILL is greppable in the log and
+        // distinguishable from ending a local shell — `open-session` encodes its type the
+        // same way.
+        // Through `toInfo()` rather than an `instanceof` check: the type is public API, and a
+        // tool handler reaching for a constructor identity is the layer leak this repo's own
+        // rules call out.
+        const kind = conn.getSession(cleanName)?.toInfo().type ?? 'unknown';
+        command = `session:close ${kind} ${cleanName}`;
         const outcome = await conn.closeSession(cleanName);
         await auditResult(ctx, profileName, command, RELEASE, {
           stdout: '',

@@ -128,7 +128,12 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     await audit.record({
       mcpRequestId: ctx.requestId,
       profile: profileName,
-      user: registry.getProfile(profileName).user,
+      // Looked up without throwing. This used to be `registry.getProfile(profileName).user`,
+      // which throws for exactly the reason the tool call is being audited as a failure —
+      // an unconfigured server, or a profile name that does not exist — and `auditFailure`
+      // swallows that by design. The record the operator most needs was the one record that
+      // could not be written.
+      user: profileUser(profileName),
       command,
       commandClass: evaluation.commandClass,
       binary: evaluation.binary,
@@ -173,6 +178,11 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
 
   function defaultProfileName(profile?: string): string {
     return profile || registry.getProfile().name;
+  }
+
+  /** The profile's SSH user, or a placeholder — never throws, so an audit write cannot fail. */
+  function profileUser(profileName: string): string {
+    return registry.listAllProfiles().find((p) => p.name === profileName)?.user ?? '(unresolved)';
   }
 
   function makeProgressSender(extra: any): ((bytes: number, tail: string) => void) | undefined {
@@ -231,16 +241,23 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     run: (rt: RunContext) => Promise<{ audited: CommandResult; output: ToolResult }>,
   ): Promise<ToolResult> {
     const ctx = makeCtx(opts.extra, opts.profile, opts.session);
-    const profileName = defaultProfileName(opts.profile);
-    const profile = registry.getProfile(profileName);
     const onProgress = makeProgressSender(opts.extra);
     const abortSignal = opts.extra?.signal;
 
-    // Sanitization runs inside the try so a rejected (empty, control-char-only,
-    // over-length) command still leaves an audit trail — a client probing with
-    // malformed payloads used to leave none.
+    // Named before the try because `auditFailure` needs something to file the record
+    // under even when resolution itself is what failed. Reassigned to the resolved name as
+    // the first statement inside, so the quota key and the audit record are unchanged on
+    // every path that gets that far.
+    let profileName = opts.profile ?? '(default)';
+
+    // Profile resolution and sanitization both run inside the try, so a rejected call
+    // still leaves an audit trail — a client probing with malformed payloads, or probing
+    // a server that has no config at all, used to leave none. The unconfigured refusal
+    // reaches this the same way a bad command does.
     const state: AuditState = { command };
     try {
+      profileName = defaultProfileName(opts.profile);
+      const profile = registry.getProfile(profileName);
       let effective = opts.synthetic ? command : sanitizeCommand(command, profile.maxChars);
       state.command = effective;
 

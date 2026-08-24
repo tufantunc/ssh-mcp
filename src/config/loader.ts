@@ -3,7 +3,7 @@ import { homedir, platform } from 'os';
 import { join, dirname } from 'path';
 import { parse as parseTOML } from 'smol-toml';
 import { configSchema, type RawConfig } from './schema.js';
-import { OperatorError, ConfigNotFoundError } from '../errors.js';
+import { OperatorError, ConfigNotFoundError, UnconfiguredError } from '../errors.js';
 import { assertPrivateOnWindows, type AclOptions } from './windows-acl.js';
 import type { AppConfig, Profile, Defaults } from '../types.js';
 
@@ -194,24 +194,6 @@ function normalizeConfig(raw: RawConfig): AppConfig {
   return { defaults, profiles, policy: raw.policy };
 }
 
-/**
- * What to tell an operator who has configured nothing.
- *
- * One message, two places: the warning printed when the server starts unconfigured, and
- * the refusal every tool call gets until it is fixed. They have to say the same thing —
- * the whole point of starting without a config is that the explanation arrives later
- * rather than never, so it had better be the same explanation.
- */
-export function unconfiguredMessage(): string {
-  return (
-    'No config file found and missing required --host/--user.\n' +
-    // Was hardcoded to ~/.config/ssh-mcp/config.toml on every platform, so on
-    // Windows and macOS it named a path this code never reads.
-    `Either create a config file at ${getConfigPath()} or pass --config <path>.\n` +
-    'For quick start: --host=<host> --user=<user> (credentials via env vars).'
-  );
-}
-
 export function getProfile(config: AppConfig, name?: string): Profile {
   const targetName = name || config.defaults.defaultProfile;
   if (!targetName) {
@@ -227,12 +209,13 @@ export function getProfile(config: AppConfig, name?: string): Profile {
         `Pass a "profile" argument, or set defaults.defaultProfile in the config.`,
       );
     }
-    // Nothing configured at all. This is where the startup refusal went when the server
-    // learned to start unconfigured — so an MCP directory or a client's "add server" flow
-    // can read `tools/list` while a command still cannot run. It has to be a refusal and
-    // not a fall-through: `profiles[0]` on an empty list is `undefined`, which downstream
-    // became a TypeError rather than an explanation.
-    if (config.profiles.length === 0) throw new OperatorError(unconfiguredMessage());
+    // Defensive: a lookup helper must not hand back `undefined` typed as `Profile`, which
+    // is what `profiles[0]` on an empty list used to do — a TypeError somewhere downstream
+    // rather than an explanation here. This is the invariant, not the product rule. The
+    // decision that an unconfigured server refuses work lives in `ConnectionRegistry`,
+    // which guards this branch AND the named-profile one below; reaching this line means
+    // a caller went around the registry.
+    if (config.profiles.length === 0) throw new UnconfiguredError(getConfigPath());
     return config.profiles[0];
   }
   const profile = config.profiles.find((p) => p.name === targetName);

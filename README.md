@@ -102,6 +102,12 @@ nothing. Neither combination leaves you without an exit, which is the lesson of 
 A supervisor that treats any non-zero status as a failure needs no change. One
 that matched on `1` to detect a startup problem should match on `2` as well.
 
+Starting with nothing configured is **not** an exit-2 condition, as of the release that
+added introspection without a config: the server starts so it can be described, and
+refuses each tool call instead. A supervisor that used a non-zero exit to catch an
+unconfigured deployment should watch for `starting unconfigured` on stderr, or read
+`configured` from `GET /health` when running the HTTP transport.
+
 ### 3. Set credentials via environment variables
 
 ```bash
@@ -568,6 +574,12 @@ ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret --rateLimit=60
 | `--rateLimit` | 0 (off) | Max requests per minute (0 = unlimited) |
 
 Endpoints: `POST /` (MCP Streamable HTTP), `GET /status`, `GET /health`
+
+`GET /health` answers `{"healthy": true, "configured": <bool>}`. It stays `200` either way —
+`healthy` is liveness — while `configured` is false when no profile is set, which is the
+case of a config bind mount that silently did not attach: the server binds the port and
+refuses every tool call. `GET /status` carries the profile list itself and stays behind the
+bearer token.
 
 When rate limit is exceeded, the server returns HTTP 429 with `Retry-After` header and a JSON-RPC error body so MCP clients can handle it gracefully.
 

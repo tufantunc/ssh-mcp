@@ -4,6 +4,7 @@ import { platform } from 'os';
 import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from './helpers.js';
 import { loadConfig, getProfile, checkPermissions } from '../../../src/config/loader.js';
 import type { AppConfig } from '../../../src/types.js';
+import { defaultsFromArgv } from '../../../src/cli.js';
 import { OperatorError } from '../../../src/errors.js';
 
 let cfg: ConfigDir;
@@ -282,19 +283,30 @@ describe('checkPermissions', () => {
 
 describe('getProfile with nothing configured', () => {
   /**
-   * The refusal that used to happen at startup lands here instead, so it has to be a
-   * refusal rather than a crash. Before this, an empty profile list fell through to
-   * `profiles[0]` and returned `undefined` silently — measured — which downstream would
-   * have become a TypeError instead of telling the operator to write a config.
+   * The invariant, not the product rule.
+   *
+   * A lookup helper must not hand back `undefined` typed as `Profile`, which is what an
+   * empty list fell through to before — a TypeError somewhere downstream instead of an
+   * explanation. Note that an empty list is a state *this change introduced*:
+   * `configSchema` requires `profiles` to have at least one entry, so no config file could
+   * ever produce one, and before the server learned to start unconfigured nothing else
+   * could either.
+   *
+   * The decision that an unconfigured server refuses work lives one layer up, in
+   * `ConnectionRegistry` — see test/unit/ssh/unconfigured-registry.test.ts. It has to,
+   * because the check here can only sit in the no-profile-named branch, which is why the
+   * named branch below still answers as a pure lookup.
    */
+  const empty = (): AppConfig => ({ defaults: defaultsFromArgv({}), profiles: [] });
+
   it('refuses with the operator message rather than returning undefined', () => {
-    const empty = { defaults: {}, profiles: [], policy: undefined } as unknown as AppConfig;
-    expect(() => getProfile(empty)).toThrow(/No config file found/);
-    expect(() => getProfile(empty)).toThrow(OperatorError);
+    expect(() => getProfile(empty())).toThrow(/No config file found/);
+    expect(() => getProfile(empty())).toThrow(OperatorError);
   });
 
   it('still names a profile that was asked for and does not exist', () => {
-    const empty = { defaults: {}, profiles: [], policy: undefined } as unknown as AppConfig;
-    expect(() => getProfile(empty, 'prod')).toThrow(/Profile "prod" not found/);
+    // Pure lookup: the registry is what turns this into the unconfigured explanation
+    // before a caller can ever get here.
+    expect(() => getProfile(empty(), 'prod')).toThrow(/Profile "prod" not found/);
   });
 });

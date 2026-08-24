@@ -73,7 +73,6 @@ export function registerCommandTools(
     },
     { destructiveHint: true },
     async ({ command, profile }, extra) => {
-      const profileName = defaultProfileName(profile);
       return runAudited(
         command,
         {
@@ -84,7 +83,15 @@ export function registerCommandTools(
           // Evaluate the bare command too: the sudo wrapper would otherwise
           // hide a forbidden command inside a quoted `sh -c` argument.
           preCheck: (cleanCmd) => {
-            const rawEval = policy.evaluate(cleanCmd, registry.getProfile(profileName), 'privileged-command');
+            // Resolved here rather than before `runAudited`: `defaultProfileName` reaches
+            // `registry.getProfile()`, which refuses on an unconfigured server, and outside
+            // the pipeline's try that refusal escaped without an audit record. `preCheck`
+            // runs inside it.
+            const rawEval = policy.evaluate(
+              cleanCmd,
+              registry.getProfile(defaultProfileName(profile)),
+              'privileged-command',
+            );
             if (rawEval.decision === 'deny') {
               throw new PolicyRefusedError(
                 `POLICY_DENIED: ${rawEval.reason || 'Command not allowed'}`,
