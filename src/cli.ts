@@ -15,11 +15,27 @@
  */
 
 import { loadConfig, getConfigPath } from './config/loader.js';
-import { OperatorError, ConfigNotFoundError } from './errors.js';
+import { OperatorError, ConfigNotFoundError, UnconfiguredError } from './errors.js';
 import type { AclFinding } from './config/windows-acl.js';
 import { HOST_GROUPS } from './policy/engine.js';
 import type { HostKeyMode } from './ssh/host-key.js';
 import type { AppConfig, Profile, Defaults } from './types.js';
+
+/**
+ * Whether the operator asked for a quick start at all.
+ *
+ * Presence, not truthiness — the same #91 trap `flagEnabled` was written for. `parseArgv`
+ * stores `null` for a flag written without `=` and drops bare words, so all three of
+ * `--host example.com --user root` (space instead of `=`, the commonest slip), `--host`
+ * alone, and `--host= --user=` (a wrapper interpolating unset env vars) produce falsy
+ * values while the flags were plainly given. Testing truthiness sent every one of them
+ * down the soft path: a server that starts and looks healthy, with the explanation only
+ * on a stderr stream an MCP client typically swallows. Only "asked for nothing" softens;
+ * a half-given or empty-valued quick start is a typo and still refuses.
+ */
+function nothingRequested(argv: Record<string, string | null>): boolean {
+  return !('host' in argv) && !('user' in argv);
+}
 
 export function parseArgv(args: string[] = process.argv.slice(2)): Record<string, string | null> {
   const config: Record<string, string | null> = {};
@@ -124,6 +140,27 @@ export function resolveHostGroup(argv: Record<string, string | null>): string {
   );
 }
 
+/**
+ * The defaults a quick-start profile inherits, from flags alone.
+ *
+ * Named because an unconfigured start needs them too — `approvalGrantTtlMs` is read while
+ * wiring the tools, long before any profile exists, so the two paths have to agree.
+ */
+export function defaultsFromArgv(argv: Record<string, string | null>): Defaults {
+  return {
+    sessionMaxPerConnection: parseInt(argv.sessionMax as string) || 5,
+    sessionIdleTimeoutMs: parseInt(argv.sessionTtl as string) || 600_000,
+    sessionBackgroundMaxMs: 3_600_000,
+    commandTimeoutMs: parseInt(argv.timeout as string) || 60_000,
+    commandMaxChars: parseMaxChars(argv.maxChars),
+    commandMaxOutputBytes: 1_048_576,
+    connectionIdleReapMs: 900_000,
+    commandQuotaPerDay: parseInt(argv.commandQuota as string) || 0,
+    approvalGrantTtlMs: parseInt(argv.approvalGrantTtl as string) || 0,
+    approvalMode: 'ask-destructive',
+  };
+}
+
 export async function buildAppConfig(argv: Record<string, string | null>): Promise<AppConfig> {
   // The way past an ACL that could not be read, rather than an operator with no
   // exit. See assertPrivateOnWindows.
@@ -183,28 +220,30 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
     if (!(err instanceof ConfigNotFoundError)) throw err;
   }
 
-  if (!argv.host || !argv.user) {
-    throw new OperatorError(
-      'No config file found and missing required --host/--user.\n' +
-      // Was hardcoded to ~/.config/ssh-mcp/config.toml on every platform, so on
-      // Windows and macOS it named a path this code never reads.
-      `Either create a config file at ${getConfigPath()} or pass --config <path>.\n` +
-      'For quick start: --host=<host> --user=<user> (credentials via env vars).',
-    );
+  // Nothing configured, and nothing named on the command line either. Start anyway, with
+  // no profiles: an MCP client or directory can then complete the handshake and read
+  // `tools/list`, and every tool call is refused by `ConnectionRegistry` with the message
+  // below — including `list-connections`, which resolves no profile and so had to be told.
+  //
+  // Measured before this: `initialize` and `tools/list` against our own image drew no
+  // JSON-RPC response at all — the process exited on this check first — so every directory
+  // and every "add this server" flow saw a crash. Tool definitions are static metadata and
+  // the config decides what they may *reach*, so coupling the two bought no safety.
+  //
+  // A half-given quick start is not this case: `--host` without `--user` is a typo, and an
+  // explicit `--config` that points nowhere already threw above. Only "configured nothing"
+  // softens — see `nothingRequested`, which tests for the flags being absent rather than
+  // falsy so that a valueless or space-separated one stays a typo.
+  if (nothingRequested(argv)) {
+    console.error(`Warning: starting unconfigured — every tool call will be refused.\n${new UnconfiguredError(getConfigPath()).message}`);
+    return { defaults: defaultsFromArgv(argv), profiles: [] };
   }
 
-  const defaults: Defaults = {
-    sessionMaxPerConnection: parseInt(argv.sessionMax as string) || 5,
-    sessionIdleTimeoutMs: parseInt(argv.sessionTtl as string) || 600_000,
-    sessionBackgroundMaxMs: 3_600_000,
-    commandTimeoutMs: parseInt(argv.timeout as string) || 60_000,
-    commandMaxChars: parseMaxChars(argv.maxChars),
-    commandMaxOutputBytes: 1_048_576,
-    connectionIdleReapMs: 900_000,
-    commandQuotaPerDay: parseInt(argv.commandQuota as string) || 0,
-    approvalGrantTtlMs: parseInt(argv.approvalGrantTtl as string) || 0,
-    approvalMode: 'ask-destructive',
-  };
+  if (!argv.host || !argv.user) {
+    throw new UnconfiguredError(getConfigPath());
+  }
+
+  const defaults = defaultsFromArgv(argv);
 
   const profile: Profile = {
     name: 'default',

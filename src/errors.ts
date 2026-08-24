@@ -69,6 +69,30 @@ export class ConfigNotFoundError extends OperatorError {
   }
 }
 
+/**
+ * Nothing is configured: no config file, and no `--host`/`--user` on the command line.
+ *
+ * A type rather than a bare `OperatorError` for the reason `ConfigNotFoundError` is one —
+ * two layers have to agree on this state without agreeing on a string. `cli.ts` prints it
+ * as a startup warning and the server keeps running; `ConnectionRegistry` throws it at
+ * every tool call. Those are different audiences reached through different channels, and
+ * a wording edit in one must not quietly stop matching the other.
+ *
+ * The path is a constructor argument rather than a `getConfigPath()` call inside the
+ * message, so this file stays free of the config layer and the text is testable without
+ * stubbing `os.platform()`.
+ */
+export class UnconfiguredError extends OperatorError {
+  constructor(public readonly configPath: string) {
+    super(
+      'No config file found and missing required --host/--user.\n' +
+      `Either create a config file at ${configPath} or pass --config <path>.\n` +
+      'For quick start: --host=<host> --user=<user> (credentials via env vars).',
+    );
+    this.name = 'UnconfiguredError';
+  }
+}
+
 /** Exit status for an operator error, so a supervisor can tell it from a crash. */
 export const EXIT_OPERATOR_ERROR = 2;
 /** Exit status for anything else. */

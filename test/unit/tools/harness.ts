@@ -7,6 +7,8 @@ import { PolicyEngine, DEFAULT_RULES } from '../../../src/policy/engine.js';
 import { AuditStore } from '../../../src/audit/store.js';
 import type { CommandResult, Profile } from '../../../src/types.js';
 import type { CloseOutcome } from '../../../src/ssh/session.js';
+import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
+import { defaultsFromArgv } from '../../../src/cli.js';
 
 /**
  * In-process MCP client + server over InMemoryTransport, with the SSH layer
@@ -154,6 +156,39 @@ export async function createHarness(
     setApproval(value) { approve = value; },
     setCloseOutcome(outcome) { closeOutcome = outcome; },
     approvalPrompts: () => approvalPrompts,
+    async close() { await client.close(); await server.close(); },
+  };
+}
+
+/**
+ * The same handler layer, wired to a real `ConnectionRegistry` that has no profiles.
+ *
+ * A real registry rather than a stub, because the thing under test is the guard inside it
+ * and a stub would only re-state the expectation. What this adds over the e2e probe is the
+ * audit store: a refused tool call has to leave a record, and for eight of the eleven tools
+ * it did not — the profile was resolved above `runAudited`'s try, so the `OperatorError`
+ * escaped before `auditFailure` could see it, and an operator watching an unconfigured
+ * server get probed saw an empty log rather than the probing.
+ */
+export async function createUnconfiguredHarness(): Promise<Pick<Harness, 'client' | 'auditRecords' | 'close'>> {
+  const auditRecords: any[] = [];
+  const registry = new ConnectionRegistry({ defaults: defaultsFromArgv({}), profiles: [] });
+  const audit = { record: async (r: any) => { auditRecords.push(r); } } as unknown as AuditStore;
+
+  const server = new McpServer(
+    { name: 'test', version: '0.0.0' },
+    { capabilities: { tools: {}, resources: {} } },
+  );
+  registerTools(server, registry, new PolicyEngine(DEFAULT_RULES), audit, {});
+  registerResources(server, registry);
+
+  const client = new Client({ name: 'test-client', version: '0.0.0' }, { capabilities: {} });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  return {
+    client,
+    auditRecords,
     async close() { await client.close(); await server.close(); },
   };
 }

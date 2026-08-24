@@ -3,7 +3,7 @@ import { homedir, platform } from 'os';
 import { join, dirname } from 'path';
 import { parse as parseTOML } from 'smol-toml';
 import { configSchema, type RawConfig } from './schema.js';
-import { OperatorError, ConfigNotFoundError } from '../errors.js';
+import { OperatorError, ConfigNotFoundError, UnconfiguredError } from '../errors.js';
 import { assertPrivateOnWindows, type AclOptions } from './windows-acl.js';
 import type { AppConfig, Profile, Defaults } from '../types.js';
 
@@ -209,6 +209,13 @@ export function getProfile(config: AppConfig, name?: string): Profile {
         `Pass a "profile" argument, or set defaults.defaultProfile in the config.`,
       );
     }
+    // Defensive: a lookup helper must not hand back `undefined` typed as `Profile`, which
+    // is what `profiles[0]` on an empty list used to do — a TypeError somewhere downstream
+    // rather than an explanation here. This is the invariant, not the product rule. The
+    // decision that an unconfigured server refuses work lives in `ConnectionRegistry`,
+    // which guards this branch AND the named-profile one below; reaching this line means
+    // a caller went around the registry.
+    if (config.profiles.length === 0) throw new UnconfiguredError(getConfigPath());
     return config.profiles[0];
   }
   const profile = config.profiles.find((p) => p.name === targetName);
