@@ -1,4 +1,17 @@
-FROM node:22-slim AS builder
+# Pinned by digest, with the tag left readable beside it.
+#
+# `node:22-slim` is a moving tag: two builds of the same commit could resolve to
+# different base images, which is exactly the reproducibility hole OpenSSF
+# Scorecard's Pinned-Dependencies check flags — it scored this file 8/10. The
+# digest is the multi-platform OCI index, so linux/amd64 and linux/arm64 both
+# still resolve from it.
+#
+# Pinning is only safe because something refreshes it: .github/dependabot.yml
+# watches the `docker` ecosystem monthly and rewrites the digest while keeping
+# the tag, the same arrangement the four sshd images in docker-compose.yml
+# already use. Without that, a digest pin is how a base image quietly stays on
+# unpatched CVEs for a year — strictly worse than the moving tag it replaced.
+FROM node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS builder
 WORKDIR /app
 COPY package*.json ./
 # --ignore-scripts because `prepare` runs `npm run build`, and at this layer neither
@@ -12,7 +25,7 @@ COPY tsconfig.json ./
 COPY src/ ./src/
 RUN npm run build
 
-FROM node:22-slim
+FROM node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436
 WORKDIR /app
 
 RUN groupadd -r -g 65532 appgroup && useradd -r -u 65532 -g appgroup appuser
