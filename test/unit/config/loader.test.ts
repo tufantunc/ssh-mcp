@@ -4,6 +4,7 @@ import { platform } from 'os';
 import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from './helpers.js';
 import { loadConfig, getProfile, checkPermissions } from '../../../src/config/loader.js';
 import type { AppConfig } from '../../../src/types.js';
+import { OperatorError } from '../../../src/errors.js';
 
 let cfg: ConfigDir;
 let tempDir: string;
@@ -276,5 +277,24 @@ describe('checkPermissions', () => {
     } finally {
       await chmod(tempDir, 0o700);
     }
+  });
+});
+
+describe('getProfile with nothing configured', () => {
+  /**
+   * The refusal that used to happen at startup lands here instead, so it has to be a
+   * refusal rather than a crash. Before this, an empty profile list fell through to
+   * `profiles[0]` and returned `undefined` silently — measured — which downstream would
+   * have become a TypeError instead of telling the operator to write a config.
+   */
+  it('refuses with the operator message rather than returning undefined', () => {
+    const empty = { defaults: {}, profiles: [], policy: undefined } as unknown as AppConfig;
+    expect(() => getProfile(empty)).toThrow(/No config file found/);
+    expect(() => getProfile(empty)).toThrow(OperatorError);
+  });
+
+  it('still names a profile that was asked for and does not exist', () => {
+    const empty = { defaults: {}, profiles: [], policy: undefined } as unknown as AppConfig;
+    expect(() => getProfile(empty, 'prod')).toThrow(/Profile "prod" not found/);
   });
 });

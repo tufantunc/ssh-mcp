@@ -23,6 +23,10 @@ npm install -g ssh-mcp
 
 ### 2. Configure
 
+Without a config the server still starts, so a client or directory can complete the MCP
+handshake and read `tools/list` — but **every tool call is refused** until you configure it,
+with a message naming the path below. Nothing runs on a host until this step is done.
+
 Create the config file at the path for your platform:
 
 | Platform | Path |

@@ -170,9 +170,66 @@ describe('buildAppConfig only falls through when the file is absent', () => {
     // The message hardcoded ~/.config/ssh-mcp/config.toml on every platform,
     // while getConfigPath() sends Windows to %APPDATA% and macOS to Library.
     // It told Windows operators to create a file the code never reads.
-    await expect(
-      buildWith((E) => new E.ConfigNotFoundError(getConfigPath()), {}),
-    ).rejects.toThrow(getConfigPath());
+    //
+    // The assertion moved with the message rather than being dropped: nothing given at all
+    // is no longer a rejection — the server starts unconfigured so it can be introspected —
+    // so the path is checked where it is now said, on stderr at startup. #138's lesson is
+    // about the path being right, not about which call reports it.
+    const warnings: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+      warnings.push(String(a[0]));
+    });
+    try {
+      await buildWith((E) => new E.ConfigNotFoundError(getConfigPath()), {});
+    } finally {
+      spy.mockRestore();
+    }
+    expect(warnings.join('\n')).toContain(getConfigPath());
+  });
+
+  describe('an unconfigured server still describes itself', () => {
+    /**
+     * Starting with no config used to be fatal, which meant an MCP directory or a client's
+     * "add this server" flow got a process that exits before the handshake — measured against
+     * our own image, `initialize` and `tools/list` drew no JSON-RPC response at all, only the
+     * config error on stderr.
+     *
+     * Tool definitions are static metadata; the config decides what those tools may *reach*.
+     * Coupling "no config" to "no server" bought no safety and cost every introspection.
+     */
+    it('builds an empty config instead of refusing', async () => {
+      const config = await buildWith((E) => new E.ConfigNotFoundError('/nowhere/config.toml'), {});
+      expect(config.profiles).toEqual([]);
+    });
+
+    it('says so on stderr rather than starting silently', async () => {
+      // An operator who mistypes a flag would otherwise get a server that looks fine and
+      // fails per call. The warning names the same remedy the old refusal did.
+      const warnings: string[] = [];
+      const spy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+        warnings.push(String(a[0]));
+      });
+      try {
+        await buildWith((E) => new E.ConfigNotFoundError('/nowhere/config.toml'), {});
+      } finally {
+        spy.mockRestore();
+      }
+      expect(warnings.join('\n')).toMatch(/No config file found/);
+    });
+
+    it('still refuses when --config names a file that is not there', async () => {
+      // A named path that does not exist is a typo, not a discovery scenario. Only the
+      // no-config-at-all case softens.
+      await expect(
+        buildWith((E) => new E.ConfigNotFoundError('/x/typo.toml'), { config: '/x/typo.toml' }),
+      ).rejects.toThrow(/typo\.toml/);
+    });
+
+    it('still refuses a half-given quick start', async () => {
+      await expect(
+        buildWith((E) => new E.ConfigNotFoundError('/nowhere/config.toml'), { host: 'example.com' }),
+      ).rejects.toThrow(/--host\/--user/);
+    });
   });
 });
 
