@@ -129,6 +129,135 @@ const ACTION_MULTIPLEXERS = new Set(['systemctl', 'init', 'telinit']);
  * control inside a security release. `gosu` and `run0` were never caught by
  * either form.
  */
+/**
+ * Class ordering, so a command that contains another can take the higher of the two.
+ *
+ * Only used by the nesting scan below. Everything else in this file decides a single
+ * class outright.
+ */
+const CLASS_RANK: Record<CommandClass, number> = {
+  'read-only': 0,
+  safe: 1,
+  destructive: 2,
+  privileged: 3,
+};
+
+/** Shells that run their next argument as a command when given `-c`. */
+const SHELL_BINARIES = new Set([
+  'sh', 'bash', 'dash', 'zsh', 'ksh', 'ash', 'busybox',
+]);
+
+/**
+ * How deep a substitution may nest before we stop reading and refuse to guess.
+ *
+ * Reached only by input no operator writes — the tests use two hundred levels. The
+ * fallback is `privileged` rather than a lower class because the entire point of
+ * this scan is that a command we cannot read must not be treated as one we can.
+ */
+const MAX_NESTING_DEPTH = 8;
+
+/**
+ * Split on whitespace the way a shell would, keeping quoted runs together.
+ *
+ * `parseSegments` splits on `/\s+/`, which turns `sh -c "sudo id"` into
+ * `["sh", "-c", "\"sudo", "id\""]` — the argument is no longer a unit, so nothing
+ * downstream can classify it as the command it is.
+ */
+function splitRespectingQuotes(command: string): string[] {
+  const words: string[] = [];
+  let current = '';
+  let quote: string | null = null;
+
+  for (const ch of command) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current) words.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current) words.push(current);
+  return words;
+}
+
+/**
+ * The commands hiding inside a command.
+ *
+ * The elevation scan reads tokens produced by splitting on `;&|` and whitespace, so
+ * it only ever saw the outer command: `echo $(sudo id)` tokenised to
+ * `["echo", "$(sudo", "id)"]`, `echo` was taken to be the real command, and no
+ * elevation was found (GHSA-v8jh-gv7v-3gvq). The destructive scan never had this
+ * problem because it reads the raw text — which is why `echo $(rm -rf /)` was
+ * classified correctly the whole time. This closes that asymmetry by pulling the
+ * inner commands out so they can be classified in their own right.
+ *
+ * Four carriers, all of which a remote shell expands and runs:
+ *   `$(...)`, backticks, process substitution `<(...)` / `>(...)`, and a shell
+ *   given `-c`.
+ */
+export function nestedCommands(command: string): string[] {
+  const found: string[] = [];
+
+  // `$(...)`, `<(...)`, `>(...)` — scanned rather than matched, because a regex
+  // cannot balance parentheses and `echo $(echo $(sudo id))` is the case that
+  // matters most.
+  for (let i = 0; i < command.length; i++) {
+    const opensSubstitution = command[i] === '$' && command[i + 1] === '(';
+    const opensProcess = (command[i] === '<' || command[i] === '>') && command[i + 1] === '(';
+    if (!opensSubstitution && !opensProcess) continue;
+
+    // `$((1 + 1))` is arithmetic, not a command. Skipping it keeps the approval
+    // prompt off `echo $((1 + 1))`.
+    if (opensSubstitution && command[i + 2] === '(') continue;
+
+    let depth = 0;
+    for (let j = i + 1; j < command.length; j++) {
+      if (command[j] === '(') depth++;
+      else if (command[j] === ')') {
+        depth--;
+        if (depth === 0) {
+          found.push(command.slice(i + 2, j));
+          i = j;
+          break;
+        }
+      }
+    }
+  }
+
+  // Backticks. No nesting to balance — the shell requires escaping to nest them.
+  const backticks = command.match(/`([^`]*)`/g);
+  if (backticks) {
+    for (const raw of backticks) found.push(raw.slice(1, -1));
+  }
+
+  // `sh -c <command>`. Carries no substitution at all, so the scan above does not
+  // see it; found while mapping the reported bypass rather than in the report.
+  const words = splitRespectingQuotes(command);
+  for (let i = 0; i < words.length; i++) {
+    if (!SHELL_BINARIES.has(stripPath(unquote(words[i])))) continue;
+    for (let j = i + 1; j < words.length; j++) {
+      if (words[j] === '-c') {
+        if (words[j + 1] !== undefined) found.push(words[j + 1]);
+        break;
+      }
+      // Only flags may sit between the shell and its `-c`; anything else means
+      // this was not a `-c` invocation.
+      if (!words[j].startsWith('-')) break;
+    }
+  }
+
+  return found.filter((c) => c.trim().length > 0);
+}
+
 const PRIVILEGE_PREFIXES = new Set([
   'sudo', 'su', 'doas', 'pkexec',
   // BusyBox/Alpine, Docker entrypoints, the Rust sudo now default on some
@@ -464,10 +593,41 @@ export function extractBinary(command: string): string {
   return parts[0] || '';
 }
 
-export function classifyCommand(command: string): ParsedCommand {
+export function classifyCommand(command: string, depth = 0): ParsedCommand {
   const trimmed = command.trim();
   const binary = extractBinary(trimmed);
   const fullCommand = trimmed;
+
+  // A command that carries another command decides nothing on its own: the remote
+  // shell expands `$(...)`, backticks, `<(...)` and `sh -c` and runs what is inside,
+  // so the class has to be the higher of the two. Before this, the outer command
+  // decided alone and `echo $(sudo id)` was `safe` — a class the default rules grant
+  // on `prod` to `operator` and `admin`, while granting `privileged` there to nobody
+  // at all (GHSA-v8jh-gv7v-3gvq). It also skipped the approval prompt, since only
+  // `destructive` and `privileged` raise one, and the audit record said `safe`.
+  //
+  // Runs before the checks below rather than after, so the class it produces is not
+  // something a later branch can lower.
+  if (depth < MAX_NESTING_DEPTH) {
+    let highest: ParsedCommand | null = null;
+    for (const inner of nestedCommands(trimmed)) {
+      const parsed = classifyCommand(inner, depth + 1);
+      if (highest === null || CLASS_RANK[parsed.class] > CLASS_RANK[highest.class]) {
+        highest = parsed;
+      }
+    }
+    // `binary` comes from the inner command deliberately: it is what the audit
+    // record and the refusal message name, and naming the outer `echo` would
+    // describe the wrong process as the one that ran as root.
+    if (highest !== null && CLASS_RANK[highest.class] > CLASS_RANK['safe']) {
+      return { binary: highest.binary, fullCommand, class: highest.class };
+    }
+  } else {
+    // Nesting this deep is not something an operator writes, and we have stopped
+    // reading. Refusing to guess is the only answer consistent with the rest of
+    // this function.
+    return { binary, fullCommand, class: 'privileged' as CommandClass };
+  }
 
   // `binary` names the subject of the class. For everything below it is the
   // leading command; here it is the one that runs as root, which are the same
