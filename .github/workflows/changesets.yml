@@ -11,13 +11,12 @@ on:
   workflow_dispatch:
     inputs:
       list_only:
-        description: 'Skip the npm release and only list the current version on the MCP registry'
+        description: 'Skip the npm release and re-run only the post-publish jobs (MCP registry listing, SBOM attestation) for the version already on npm'
         type: boolean
         default: false
 
 # Read-only default, so a job added here later starts with no write access until
-# it asks. `release` below is the one job in this file and it opts up explicitly
-# — this block does not scope it. Without a default, a future job that declares
+# it asks. Every job below opts up explicitly — this block does not scope them. Without a default, a future job that declares
 # nothing would inherit the repository setting instead, which lives outside this
 # file and can be widened without anyone editing it.
 permissions:
@@ -158,6 +157,183 @@ jobs:
           # what the package's trusted publisher is configured against. Leaving
           # the token here would let a misconfigured trusted publisher fall back
           # silently, so nobody would notice it had stopped working.
+
+  # An SBOM for what actually shipped, bound to the tarball consumers download.
+  #
+  # A job rather than steps on `release`, and for the same reason `registry` is one:
+  # npm versions are immutable, so anything that can fail after `changeset publish`
+  # returns must be re-runnable without going near the publish path again. Nothing
+  # here can affect whether a release happens.
+  #
+  # The subject is the tarball fetched from npm, not one produced locally by
+  # `npm pack`. A re-pack is *probably* byte-identical, and an attestation bound to a
+  # digest nobody serves would be worse than none — it would verify against a file no
+  # consumer has. What makes fetching safe is the integrity check below: without it
+  # this job would sign whatever the network returned.
+  sbom:
+    name: attest an SBOM for the published package
+    needs: release
+    # Deliberately NOT the same gate as `registry`, despite the shared shape.
+    #
+    # `list_only` is included for the reason that input exists at all: `published` is
+    # set only after the changesets action has pushed the tag and created the GitHub
+    # release, so a failure in either leaves a version on npm that this workflow will
+    # never revisit — and re-running `release` cannot fix it, because `changeset
+    # publish` finds the version already there, releases nothing, and reports
+    # `published: false` forever. Without a dispatch route that release would have no
+    # SBOM and no way to obtain one, while the README says every release after v2.4.0
+    # carries one. Re-running the job is idempotent: the same digest re-attests, and
+    # the asset upload clobbers.
+    if: >-
+      ${{ !cancelled()
+      && github.ref == 'refs/heads/main'
+      && (needs.release.outputs.published == 'true'
+      || github.event.inputs.list_only == 'true') }}
+    runs-on: ubuntu-latest
+    permissions:
+      # Sign the attestations, and record them against the repository.
+      #
+      # Worth naming, because the `registry` job below explains the same hazard: npm's
+      # trusted publisher is bound to a workflow *filename*, so any job in this file
+      # holding `id-token: write` can mint a token npm would accept for ssh-mcp. This
+      # is the third such job. What keeps it narrow is that every step is either a
+      # SHA-pinned first-party action or a fixed command, and that `npm sbom
+      # --package-lock-only` reads the lockfile without installing anything — measured
+      # against a tree with no `node_modules` at all — so no dependency lifecycle
+      # script executes here. `contents:` stays read; attaching the files to the
+      # release needs write, and that is why it is a separate job below.
+      id-token: write
+      attestations: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # 24.x to match the release job — but unlike `registry`, where no npm version is
+      # load-bearing, this is the job where it decides the artifact. `npm sbom` is an
+      # npm subcommand: its availability, its `--package-lock-only` handling and its
+      # CycloneDX/SPDX output shape all come from the bundled npm, and the SBOM is
+      # what gets signed. A Node image whose npm changes that output publishes a
+      # differently-shaped SBOM under a valid signature, silently.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.x'
+
+      # `--package-lock-only`, so this reads package-lock.json rather than an installed
+      # tree. That is not only faster: an installed tree is filtered by the platform
+      # that installed it, so `node_modules` on this runner omits optional dependencies
+      # a Windows or macOS consumer would get. The lockfile describes what the package
+      # declares, which is what an SBOM is for — 164 components against 153 from a
+      # glibc Linux install, the difference being the `@napi-rs/keyring-*` optionals.
+      #
+      # `--omit=dev` because `files` is `build` only: nothing under devDependencies
+      # reaches the published tarball, and listing them would describe a supply chain
+      # the consumer does not have. It is doing real work — 164 against 397 without it.
+      #
+      # Both formats, and both are attested below. They are not redundant: CycloneDX is
+      # what application-security tooling consumes, SPDX what licence and compliance
+      # tooling does. A format shipped without an attestation would be decoration.
+      - name: Generate SBOMs from the lockfile
+        run: |
+          set -euo pipefail
+          npm sbom --sbom-format cyclonedx --package-lock-only --omit=dev > sbom.cdx.json
+          npm sbom --sbom-format spdx --package-lock-only --omit=dev > sbom.spdx.json
+          node -e "const c=require('./sbom.cdx.json');console.log('CycloneDX',c.specVersion,c.components.length,'components')"
+          node -e "const s=require('./sbom.spdx.json');console.log('SPDX',s.spdxVersion,s.packages.length,'packages')"
+
+      # `--retry-all-errors` rather than a hand-rolled loop. The registry serves a
+      # published version to the CDN asynchronously, so this URL can 404 for a while
+      # after `npm publish` returns; `-f` turns that into exit 22 and
+      # `--retry-all-errors` is what makes curl retry it. `registry` keeps its own loop
+      # for a reason documented there (packument caching) that does not apply to a
+      # tarball GET, so this does not reuse it — and note the two jobs both hang off
+      # `release` and run concurrently, so neither warms the other's CDN object.
+      #
+      # `-L` matters more than it looks: without it a 3xx is *success* to `-f`, which
+      # checks only >= 400, and curl writes zero bytes. That empty file would sail into
+      # the attestation as its subject.
+      #
+      # Then the check that makes any of this trustworthy. Without comparing against
+      # the integrity npm itself publishes, this job signs whatever the network
+      # returned — an attestation that cannot fail closed, which is the one kind worth
+      # less than none.
+      - name: Download and verify the published tarball
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          name="$(node -p 'require("./package.json").name')"
+
+          curl -fsSL --retry 30 --retry-delay 10 --retry-all-errors \
+            -o package.tgz "https://registry.npmjs.org/$name/-/$name-$version.tgz"
+
+          expected="$(curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+            "https://registry.npmjs.org/$name/$version" \
+            | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).dist.integrity')"
+          actual="sha512-$(openssl dgst -sha512 -binary package.tgz | base64 | tr -d '\n')"
+
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::tarball digest does not match the registry's dist.integrity for $name@$version." >&2
+            echo "::error::expected $expected, got $actual" >&2
+            exit 1
+          fi
+          echo "$name@$version verified: $actual ($(wc -c < package.tgz) bytes)"
+          echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
+
+      # `actions/attest`, not `actions/attest-sbom`. The latter is deprecated — its own
+      # first step emits a deprecation warning and its only other step forwards these
+      # exact inputs to this action.
+      - name: Attest the CycloneDX SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: package.tgz
+          sbom-path: sbom.cdx.json
+
+      - name: Attest the SPDX SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: package.tgz
+          sbom-path: sbom.spdx.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: |
+            sbom.cdx.json
+            sbom.spdx.json
+          retention-days: 7
+
+      - name: Record the release tag for the asset job
+        run: echo "$RELEASE_TAG" > release-tag.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-tag
+          path: release-tag.txt
+          retention-days: 7
+
+  # The readable half, split off so that `contents: write` never sits in the same job
+  # as `id-token: write`. The attestation above is the verifiable artifact and is
+  # already published by the time this runs; these files are for anyone answering
+  # "does this pull in <package>?" without a toolchain. If this job fails, nothing of
+  # value is lost — which is exactly why it does not belong upstream of the signing.
+  sbom-assets:
+    name: attach the SBOMs to the release
+    needs: sbom
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: '{sbom,release-tag}'
+          merge-multiple: true
+
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$(cat release-tag.txt)"
+          gh release upload "$tag" sbom.cdx.json sbom.spdx.json --clobber
 
   # Listing on the official MCP registry (registry.modelcontextprotocol.io).
   #

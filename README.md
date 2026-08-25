@@ -524,6 +524,45 @@ deny if {
 
 See [SECURITY.md](./SECURITY.md) for the full threat model, vulnerability reporting policy, and deployment checklist.
 
+### Supply chain
+
+Releases carry signed attestations, published through [Sigstore](https://www.sigstore.dev/)
+and recorded in its public transparency log. They live in **two different stores**, which is
+what decides how each is verified:
+
+| Attestation | Predicate | Stored by | Since |
+|---|---|---|---|
+| Build provenance — [SLSA](https://slsa.dev/) Build **Level 2** | `slsa.dev/provenance/v1` | npm | every release |
+| SBOM — CycloneDX and SPDX | `cyclonedx.org/bom`, `spdx.dev/Document` | GitHub | releases after v2.4.0 |
+
+Provenance comes from npm [trusted publishing](https://docs.npmjs.com/trusted-publishers):
+the release workflow authenticates with a short-lived OIDC token and no stored credential,
+so there is no long-lived npm token to leak.
+
+```bash
+npm audit signatures        # provenance, against an installed tree
+
+npm pack ssh-mcp            # the SBOM attestation is bound to the tarball, so fetch it
+gh attestation verify ssh-mcp-*.tgz --repo tufantunc/ssh-mcp --predicate-type https://cyclonedx.org/bom
+```
+
+Both flags on the last command are load-bearing. `gh attestation verify` defaults to the
+SLSA predicate, so without `--predicate-type` it filters the SBOM out and reports nothing
+found — and the provenance it would look for instead is in npm's store, not the GitHub
+store `--repo` queries. Use `https://spdx.dev/Document` for the SPDX one.
+
+Both SBOMs are also attached to each
+[GitHub release](https://github.com/tufantunc/ssh-mcp/releases), for reading rather than
+verifying.
+
+**Level 2, not 3.** Provenance is signed by the generic GitHub-hosted runner —
+`builder.id` is `https://github.com/actions/runner/github-hosted` — which the build itself
+can influence; Build L3 requires an isolated builder it cannot. Reaching L3 is not
+currently compatible with trusted publishing: npm turns on its own provenance whenever that
+setting is left at its default, and then ignores any externally generated one. So L3 today
+would mean returning to a long-lived npm token — trading the property described above for a
+level number.
+
 ### Safe Defaults
 
 - **Non-root** user in all examples
