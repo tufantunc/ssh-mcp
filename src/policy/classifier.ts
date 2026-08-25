@@ -543,9 +543,22 @@ const FORBIDDEN_RULES: ForbiddenRule[] = [
  * lives in FORBIDDEN_RULES and a caller checking only the regexes would quietly
  * permit `sudo reboot`.
  */
-export function findForbiddenMatch(command: string): string | null {
+export function findForbiddenMatch(command: string, depth = 0): string | null {
   for (const rule of FORBIDDEN_RULES) {
     if (rule.test(command)) return rule.label;
+  }
+
+  // The same carriers the class scan reads, for the same reason. This list is the
+  // one unconditional rule in the policy — forbidden regardless of role, tier or
+  // approval — and it was decided from the outer command alone, so
+  // `sh -c "shutdown -h now"` and `echo $(shutdown -h now)` were not forbidden.
+  // They still classified `destructive`, which on the `prod` tier degrades an
+  // absolute `deny` into `require-approval`: a rule that answers "never" became
+  // one a human can click through.
+  if (depth >= MAX_NESTING_DEPTH) return null;
+  for (const inner of nestedCommands(command)) {
+    const match = findForbiddenMatch(inner, depth + 1);
+    if (match !== null) return match;
   }
   return null;
 }

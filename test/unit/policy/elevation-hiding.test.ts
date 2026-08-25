@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyCommand, nestedCommands } from '../../../src/policy/classifier.js';
+import { classifyCommand, nestedCommands, isForbidden } from '../../../src/policy/classifier.js';
 
 /**
  * Elevation the tokenizer could not see (GHSA-v8jh-gv7v-3gvq).
@@ -108,5 +108,26 @@ describe('what the fix must not break', () => {
     // Whatever it decides, it must not decide "safe" — that is the failure mode
     // the whole advisory is about.
     expect(result.class).not.toBe('safe');
+  });
+});
+
+describe('the forbidden list is unconditional, including inside a carrier', () => {
+  // `FORBIDDEN_INVOCATIONS` is the one rule no role, tier or approval can satisfy.
+  // It was decided from the outer command alone, so wrapping it degraded an
+  // absolute `deny` into a `require-approval` a human can click through.
+  it.each([
+    ['sh -c', 'sh -c "shutdown -h now"'],
+    ['substitution', 'echo $(shutdown -h now)'],
+    ['backticks', 'echo `reboot`'],
+    ['nested wrapper', `sh -c 'sh -c "poweroff"'`],
+    ['eval inside a wrapper', 'sh -c "eval sudo id"'],
+  ])('%s does not launder a forbidden invocation', (_label, command) => {
+    expect(isForbidden(command)).toBe(true);
+  });
+
+  it('still lets ordinary commands through', () => {
+    expect(isForbidden('echo $(date)')).toBe(false);
+    expect(isForbidden('ls -la')).toBe(false);
+    expect(isForbidden('sh -c "ls -la"')).toBe(false);
   });
 });
