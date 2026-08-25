@@ -333,7 +333,13 @@ jobs:
         run: |
           set -euo pipefail
           tag="$(cat release-tag.txt)"
-          gh release upload "$tag" sbom.cdx.json sbom.spdx.json --clobber
+          # `--repo` because this job downloads artifacts and never checks out, so
+          # there is no git remote for `gh` to infer the repository from. Without it
+          # the upload died with "fatal: not a git repository" on the 2.4.1 release —
+          # after the attestation had been signed and published, which is the split
+          # working as intended: the verifiable artifact shipped, only the readable
+          # copies were missing.
+          gh release upload "$tag" sbom.cdx.json sbom.spdx.json --clobber --repo "$GITHUB_REPOSITORY"
 
   # Listing on the official MCP registry (registry.modelcontextprotocol.io).
   #
