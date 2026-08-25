@@ -606,6 +606,63 @@ export function extractBinary(command: string): string {
   return parts[0] || '';
 }
 
+/**
+ * The word a segment will actually execute, read past anything that is not it.
+ *
+ * Distinct from `elevatedBinary`, which answers "does this ask for elevation".
+ * This answers "what is the name of the thing that runs", so it can be asked
+ * whether that name is knowable at all.
+ */
+function effectiveCommandWord(words: string[]): string | null {
+  let i = 0;
+  while (i < words.length) {
+    const raw = words[i];
+    const word = stripPath(unquote(raw));
+
+    if (PRIVILEGE_PREFIXES.has(word) || EXEC_WRAPPERS.has(word)) {
+      i++;
+      while (i < words.length && words[i].startsWith('-')) {
+        const consumesValue = PREFIX_VALUE_FLAGS.has(words[i]);
+        i++;
+        if (consumesValue) i++;
+      }
+      continue;
+    }
+    if (ASSIGNMENT.test(raw) || raw.startsWith('-') || BARE_NUMERIC.test(raw)) {
+      i++;
+      continue;
+    }
+    return raw;
+  }
+  return null;
+}
+
+/**
+ * Whether any segment runs a command this process cannot name.
+ *
+ * The class — and with it the approval gate — is decided from the literal text of
+ * the command word. A word carrying `$` or a backtick is a name the shell resolves
+ * at run time, so `$S id` was classified as though `$S` were a binary, and came
+ * out `safe` (GHSA-fj9r-f47j-c73x).
+ *
+ * Resolving the variable is not the answer and cannot be: a session run keeps the
+ * caller's shell state, so `S=sudo` and `$S id` can arrive as two separate calls,
+ * and a variable exported in the target's own profile is never visible here at
+ * all. What is answerable is whether we know the name — and when we do not, saying
+ * so is the only honest class.
+ *
+ * Only the command word, never the arguments. `echo $HOME` names a command we know;
+ * promoting that would put a prompt on most ordinary shell usage.
+ */
+function hasUnnameableCommand(command: string): boolean {
+  for (const raw of command.split(/[;&|\n]/)) {
+    const words = raw.trim().split(/\s+/).filter(Boolean);
+    const head = effectiveCommandWord(words);
+    if (head !== null && /[$`]/.test(head)) return true;
+  }
+  return false;
+}
+
 export function classifyCommand(command: string, depth = 0): ParsedCommand {
   const trimmed = command.trim();
   const binary = extractBinary(trimmed);
@@ -651,6 +708,18 @@ export function classifyCommand(command: string, depth = 0): ParsedCommand {
   }
 
   if (isDestructive(trimmed) || hasDisqualifyingArgs(trimmed)) {
+    return { binary, fullCommand, class: 'destructive' as CommandClass };
+  }
+
+  // Below this point every branch assumes the command word names something we
+  // recognised. When it is a variable expansion it names nothing we can check, so
+  // the allowlist must not be consulted — `$S` is not on it, and falling through to
+  // the default made an unknown command `safe`.
+  //
+  // `destructive` rather than `privileged`: this is "we cannot tell", not "this is
+  // root". It gates on approval instead of refusing outright, which keeps
+  // `$PREFIX/bin/tool` usable for a role that holds `destructive` on the tier.
+  if (hasUnnameableCommand(trimmed)) {
     return { binary, fullCommand, class: 'destructive' as CommandClass };
   }
 
