@@ -5,14 +5,26 @@
 If you discover a security vulnerability in SSH MCP Server, please report it responsibly:
 
 1. **DO NOT** open a public GitHub issue.
-2. Email: **security [at] tufantunc [dot] com** (or use [GitHub Security Advisories](https://github.com/tufantunc/ssh-mcp/security/advisories/new)).
+2. Report it privately, either way:
+   - [Open a private security advisory](https://github.com/tufantunc/ssh-mcp/security/advisories/new) — preferred, since it keeps the report, the fix and the CVE in one thread; or
+   - email <security@tufantunc.com>.
 3. Include:
    - Description of the vulnerability
    - Steps to reproduce
    - Affected versions
    - Potential impact
 
-You will receive a response within 72 hours. Please do not disclose the vulnerability publicly until a fix is released.
+### Disclosure timeline
+
+| When | What |
+|---|---|
+| Within 72 hours | Acknowledgement that the report arrived, and whether it is reproducible |
+| Within 7 days | An assessment: affected versions, severity, and whether a fix is planned |
+| Within 90 days | Coordinated public disclosure, or sooner once a fixed release is published |
+
+Please keep the vulnerability private until a fixed release is out, or until the 90 days
+elapse — whichever comes first. Reporters are credited in the advisory unless they ask not
+to be.
 
 ## Threat Model
 
