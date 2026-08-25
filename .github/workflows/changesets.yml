@@ -159,6 +159,108 @@ jobs:
           # the token here would let a misconfigured trusted publisher fall back
           # silently, so nobody would notice it had stopped working.
 
+  # An SBOM for what actually shipped, bound to the tarball consumers download.
+  #
+  # A job rather than steps on `release`, and for the same reason `registry` is
+  # one: npm versions are immutable, so anything that can fail after
+  # `changeset publish` returns must be re-runnable without going near the
+  # publish path again. Nothing here can affect whether a release happens.
+  #
+  # The subject is the tarball fetched from npm, not one produced locally by
+  # `npm pack`. A re-pack is *probably* byte-identical, and an attestation bound
+  # to a digest nobody serves would be worse than none — it would verify against
+  # a file no consumer has. Fetching the published bytes makes
+  # `gh attestation verify` work on exactly what `npm install` puts on disk.
+  sbom:
+    name: attest an SBOM for the published package
+    needs: release
+    # Same gate as `registry`: most runs of this workflow open or update the
+    # "Version Packages" pull request and publish nothing.
+    if: >-
+      ${{ !cancelled()
+      && github.ref == 'refs/heads/main'
+      && needs.release.outputs.published == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # Upload the SBOMs onto the GitHub release the changesets action created.
+      contents: write
+      # Sign the attestation, and record it against the repository.
+      #
+      # Worth naming, because the `registry` job below explains the same hazard:
+      # npm's trusted publisher is bound to a workflow *filename*, so any job in
+      # this file holding `id-token: write` can mint a token npm would accept for
+      # ssh-mcp. This is the third such job. What keeps it narrow is that every
+      # step below is either a SHA-pinned first-party action or a fixed command,
+      # and that `npm sbom --package-lock-only` reads the lockfile without
+      # installing anything — so no dependency lifecycle script executes in a job
+      # holding that permission.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.x'
+
+      # `--package-lock-only`, so this reads package-lock.json rather than an
+      # installed tree. That is not only faster: an installed tree is filtered by
+      # the platform that installed it, so `node_modules` on this runner omits
+      # optional dependencies a Windows or macOS consumer would get. The lockfile
+      # describes what the package declares, which is what an SBOM is for — 164
+      # components against 153 from a Linux install, measured.
+      #
+      # `--omit=dev` because `files` is `build` only: nothing under
+      # devDependencies reaches the published tarball, and listing them would
+      # describe a supply chain the consumer does not have.
+      - name: Generate SBOMs from the lockfile
+        run: |
+          set -euo pipefail
+          npm sbom --sbom-format cyclonedx --package-lock-only --omit=dev > sbom.cdx.json
+          npm sbom --sbom-format spdx --package-lock-only --omit=dev > sbom.spdx.json
+          node -e "const c=require('./sbom.cdx.json');console.log('CycloneDX',c.specVersion,c.components.length,'components')"
+
+      # The registry serves a published version to the CDN asynchronously —
+      # `npm publish` returning is not the same as this URL resolving, which is
+      # why the `registry` job has its own wait. This one is short because that
+      # job usually has already forced the propagation by the time we get here;
+      # it exists so an unlucky ordering retries instead of failing.
+      - name: Download the published tarball
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          name="$(node -p 'require("./package.json").name')"
+          url="https://registry.npmjs.org/$name/-/$name-$version.tgz"
+          for i in $(seq 1 20); do
+            if err="$(curl -fsS -o package.tgz "$url" 2>&1)"; then
+              echo "fetched $name@$version ($(wc -c < package.tgz) bytes)"
+              echo "TARBALL_SHA256=$(sha256sum package.tgz | cut -d' ' -f1)" >> "$GITHUB_ENV"
+              echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "attempt $i/20: not served yet ($err)"
+            sleep 10
+          done
+          echo "::error::$name@$version never became downloadable. Last error: $err" >&2
+          exit 1
+
+      - name: Attest the SBOM against the published tarball
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: package.tgz
+          sbom-path: sbom.cdx.json
+
+      # Also as plain release assets. The attestation is the verifiable artifact;
+      # these are the readable one, for anyone answering "does this pull in
+      # <package>?" without a toolchain.
+      - name: Attach the SBOMs to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "tarball sha256: $TARBALL_SHA256"
+          gh release upload "$RELEASE_TAG" sbom.cdx.json sbom.spdx.json --clobber
+
   # Listing on the official MCP registry (registry.modelcontextprotocol.io).
   #
   # A job rather than more steps on `release`, because npm versions are
