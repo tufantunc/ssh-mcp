@@ -3,7 +3,7 @@
   "name": "io.github.tufantunc/ssh-mcp",
   "title": "SSH — policy-gated remote access",
   "description": "Policy-gated, audited SSH for Linux and Windows hosts: roles, approvals, and an audit log.",
-  "version": "2.4.1",
+  "version": "2.4.2",
   "websiteUrl": "https://github.com/tufantunc/ssh-mcp#readme",
   "repository": {
     "url": "https://github.com/tufantunc/ssh-mcp",
@@ -13,7 +13,7 @@
     {
       "registryType": "npm",
       "identifier": "ssh-mcp",
-      "version": "2.4.1",
+      "version": "2.4.2",
       "transport": {
         "type": "stdio"
       },
