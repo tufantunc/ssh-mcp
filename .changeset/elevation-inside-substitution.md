@@ -15,3 +15,7 @@ Commands that carry other commands are now classified as the higher of the two, 
 The last of those was not in the report and does not involve substitution at all: `sh -c "sudo id"` classified `safe` for the same reason, and a fix that only parsed `$(...)` would have left it open.
 
 Substitutions that carry nothing elevated or destructive are unchanged — `echo $(date)` stays `safe`, and arithmetic expansion is not treated as a command, so `echo $((1 + 1))` does not start raising prompts.
+
+The same carriers were also laundering the forbidden-invocation list — `shutdown`, `reboot`, `halt`, `poweroff`, `eval` — which is the one rule in the policy that holds regardless of role, tier or approval. It was decided from the outer command alone, so `sh -c "shutdown -h now"` and `echo $(shutdown -h now)` were not forbidden: they classified `destructive`, which on the `prod` tier turns an absolute `deny` into a prompt a human can accept. The forbidden scan now reads the carriers too.
+
+Not found by the report, but by working outward from it.
