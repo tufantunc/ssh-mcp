@@ -13,10 +13,51 @@ const commandClassSchema = z.enum(['read-only', 'safe', 'destructive', 'privileg
  * excluded alongside it rather than reasoned about case by case.
  */
 const RESERVED_BINDING_KEYS = ['__proto__', 'constructor', 'prototype'];
+const RESERVED_KEY_MESSAGE =
+  `Reserved name (${RESERVED_BINDING_KEYS.join(', ')}). Rename the role or tier.`;
+
 const bindingKeySchema = z.string().min(1).refine(
   (key) => !RESERVED_BINDING_KEYS.includes(key),
-  { message: `Reserved name (${RESERVED_BINDING_KEYS.join(', ')}). Rename the role or tier.` },
+  { message: RESERVED_KEY_MESSAGE },
 );
+
+/**
+ * The reserved-key check, run against the raw object before `z.record` sees it.
+ *
+ * `bindingKeySchema` alone stopped being enough at zod 4. Its record
+ * implementation never hands `__proto__` to the key schema — it drops the key and
+ * returns an object without it, so a config naming that role parsed *cleanly* and
+ * came out empty. Measured: `Object.keys` on the parsed TOML shows `__proto__`,
+ * `z.record` accepts, and the result has zero keys.
+ *
+ * That is not prototype pollution — zod 4 declines to write the key at all, which
+ * is the safe half. What it loses is the loud refusal: the operator gets a clean
+ * startup and a role that silently does not exist, which is the exact failure the
+ * comment above was written for. `constructor` and `prototype` still reach the key
+ * schema and are still rejected by it; only `__proto__` slips past, and this covers
+ * all three rather than special-casing the one.
+ *
+ * `getOwnPropertyNames` and a property descriptor rather than `Object.keys` and a
+ * property read. Measured, neither choice changes the outcome for the input this
+ * actually receives — `smol-toml` leaves `__proto__` enumerable, and the reserved
+ * branch returns before anything reads the value. Both are kept because neither
+ * conclusion is ours to depend on: an enumerable key is the TOML parser's decision,
+ * and `value['__proto__']` would follow the prototype rather than read the key.
+ */
+function checkReservedKeys(value: unknown, ctx: z.core.$RefinementCtx): void {
+  if (typeof value !== 'object' || value === null) return;
+
+  for (const key of Object.getOwnPropertyNames(value)) {
+    if (RESERVED_BINDING_KEYS.includes(key)) {
+      ctx.addIssue({ code: 'custom', message: RESERVED_KEY_MESSAGE, path: [key] });
+      continue;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor && typeof descriptor.value === 'object' && descriptor.value !== null) {
+      checkReservedKeys(descriptor.value, ctx);
+    }
+  }
+}
 
 export const defaultsSchema = z.object({
   defaultProfile: z.string().optional(),
@@ -86,10 +127,13 @@ export const profileSchema = z.object({
  * code reads it, so accepting it here would document a key that does nothing.
  */
 export const policySchema = z.object({
-  roleBindings: z.record(
-    bindingKeySchema,
-    z.record(bindingKeySchema, z.array(commandClassSchema)),
-  ).optional(),
+  roleBindings: z.unknown()
+    .superRefine(checkReservedKeys)
+    .pipe(z.record(
+      bindingKeySchema,
+      z.record(bindingKeySchema, z.array(commandClassSchema)),
+    ))
+    .optional(),
   denylist: z.array(z.string()).optional(),
 }).strict();
 
@@ -97,7 +141,7 @@ export const policySchema = z.object({
 // key from a newer version) parses cleanly and is dropped with no warning, so
 // the operator gets a clean startup and none of the behaviour they configured.
 export const configSchema = z.object({
-  defaults: defaultsSchema.default({}),
+  defaults: defaultsSchema.prefault({}),
   profiles: z.array(profileSchema).min(1),
   policy: policySchema.optional(),
 }).strict();
