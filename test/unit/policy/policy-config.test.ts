@@ -280,6 +280,73 @@ ${ADMIN_PROD_PROFILE}
     await expect(loadConfig(tier)).rejects.toThrow(/Reserved name/);
   });
 
+  it('names the role a reserved tier sits under, not just the tier', async () => {
+    // The path is the actionable half of the refusal. Reporting only the leaf key
+    // pointed the operator at `policy.roleBindings.__proto__` — a top-level role that
+    // is not in their file — while the role they have to edit went unnamed. Asserting
+    // the message alone let that regress unnoticed.
+    const path = await writeConfig(`
+${ADMIN_PROD_PROFILE}
+
+[policy.roleBindings.admin]
+"__proto__" = ["privileged"]
+`);
+    await expect(loadConfig(path)).rejects.toThrow(/policy\.roleBindings\.admin\.__proto__/);
+  });
+
+  it('rejects a role named prototype', async () => {
+    // `prototype` was in the reserved list with nothing pinning it: removing it from
+    // the list failed no test. It is also the name a future narrowing would drop
+    // first, since unlike `__proto__` it reaches the key schema on its own.
+    const path = await writeConfig(`
+${ADMIN_PROD_PROFILE}
+
+[policy.roleBindings."prototype"]
+prod = ["privileged"]
+`);
+    await expect(loadConfig(path)).rejects.toThrow(/Reserved name/);
+  });
+
+  it('reports every reserved name rather than stopping at the first', async () => {
+    // The walk uses `continue`, not `return`, matching the engine's coherence check.
+    // With only a `/Reserved name/` assertion, swapping one for the other was
+    // invisible.
+    const path = await writeConfig(`
+${ADMIN_PROD_PROFILE}
+
+[policy.roleBindings."constructor"]
+prod = ["privileged"]
+
+[policy.roleBindings.admin]
+"prototype" = ["privileged"]
+`);
+    const error = await loadConfig(path).then(() => null, (e: Error) => e);
+    expect(error?.message).toMatch(/roleBindings\.constructor/);
+    expect(error?.message).toMatch(/roleBindings\.admin\.prototype/);
+  });
+
+  it('explains an empty role or tier name instead of saying only that the key is invalid', async () => {
+    // zod 4's record replaces the key schema's own message with `Invalid key in
+    // record`, so `min(1)`'s text stopped reaching the operator.
+    const path = await writeConfig(`
+${ADMIN_PROD_PROFILE}
+
+[policy.roleBindings.""]
+prod = ["privileged"]
+`);
+    await expect(loadConfig(path)).rejects.toThrow(/cannot be empty/);
+  });
+
+  it('refuses roleBindings that is not a table', async () => {
+    const path = await writeConfig(`
+${ADMIN_PROD_PROFILE}
+
+[policy]
+roleBindings = "nope"
+`);
+    await expect(loadConfig(path)).rejects.toThrow(/policy\.roleBindings/);
+  });
+
   it('names the root in a top-level validation error instead of an empty path', async () => {
     const path = await writeConfig(`
 ${ADMIN_PROD_PROFILE}
