@@ -3,6 +3,9 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { createRequire } from 'module';
+import { realpathSync } from 'fs';
+import { resolve } from 'path';
 
 /**
  * Our zod and the SDK's have to be the same zod.
@@ -15,10 +18,14 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
  *
  * What actually matters is unchanged and is what this now checks: a schema built
  * with the zod *we* depend on has to be accepted by the SDK, reach the wire as a
- * JSON Schema with our field names on it, and validate arguments. When the tree
- * carries two zod copies — which is what an unconstrained `zod-to-json-schema`
- * override caused — this fails at registration with a type that has no `_parse`,
- * which is the same symptom under a different cause.
+ * JSON Schema with our field names on it, and validate arguments.
+ *
+ * Note what this first test does *not* catch, because the earlier draft of this file
+ * claimed it did: two zod copies in the tree. Planting a nested zod 3 under the SDK
+ * and running this leaves it green — the SDK's compat layer makes mixed copies work
+ * at run time, and the failure an unconstrained `zod-to-json-schema` override
+ * actually produced was a `tsc` error, which no vitest test can raise. The second
+ * test below is what covers that, by comparing resolution rather than behaviour.
  *
  * Deliberately built on a throwaway schema rather than the real eleven tools, so
  * adding a tool or editing a description never touches it.
@@ -26,6 +33,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 describe('zod compatibility with the MCP SDK', () => {
   it('registers a schema from our zod and serves it as JSON Schema', async () => {
     const server = new McpServer({ name: 'zod-compat', version: '0.0.0' }, { capabilities: { tools: {} } });
+    let seen: unknown;
 
     server.tool(
       'probe',
@@ -34,7 +42,10 @@ describe('zod compatibility with the MCP SDK', () => {
         required: z.string().describe('a required string'),
         optional: z.number().optional().describe('an optional number'),
       },
-      async ({ required }) => ({ content: [{ type: 'text' as const, text: `got ${required}` }] }),
+      async (args) => {
+        seen = args;
+        return { content: [{ type: 'text' as const, text: `got ${args.required}` }] };
+      },
     );
 
     const client = new Client({ name: 'zod-compat-client', version: '0.0.0' }, { capabilities: {} });
@@ -56,6 +67,18 @@ describe('zod compatibility with the MCP SDK', () => {
       const ok: any = await client.callTool({ name: 'probe', arguments: { required: 'hi' } });
       expect(ok.content[0].text).toBe('got hi');
 
+      // The two client-visible facts the changeset states about this upgrade, pinned
+      // here because nothing else covered them. zod 3 emitted
+      // `additionalProperties: false`; zod 4 emits nothing, while the runtime keeps
+      // stripping the extra argument either way — so the advertised contract loosened
+      // and the actual behaviour did not. If a future bump starts advertising `true`,
+      // or lets an undeclared argument reach a handler, that is a change clients see.
+      expect(probe!.inputSchema.additionalProperties).toBeUndefined();
+
+      const extra: any = await client.callTool({ name: 'probe', arguments: { required: 'hi', bogus: 1 } });
+      expect(extra.isError).toBeFalsy();
+      expect(seen, 'an undeclared argument reached the handler').toEqual({ required: 'hi' });
+
       // Returned as an error result rather than a rejection — the SDK converts the
       // validation failure into `isError` with the message attached.
       const bad: any = await client.callTool({ name: 'probe', arguments: { optional: 1 } });
@@ -67,18 +90,22 @@ describe('zod compatibility with the MCP SDK', () => {
     }
   });
 
-  it('resolves exactly one zod in the production tree', async () => {
-    // Two copies is the failure this file exists for. The SDK accepts `^3.25 || ^4.0`,
-    // so npm can satisfy it with a nested copy rather than deduping — which is what
-    // an override pinning `zod-to-json-schema` to a zod-3-only version caused.
-    const ours = await import('zod');
-    const sdkSide = await import('@modelcontextprotocol/sdk/server/mcp.js');
-    expect(typeof ours.z.string).toBe('function');
-    expect(typeof sdkSide.McpServer).toBe('function');
+  it('resolves exactly one zod in the production tree', () => {
+    // Resolution, not liveness. The previous version of this test imported both
+    // packages and asserted `typeof z.string === 'function'` — which is true of any
+    // zod, and true with two of them: planting zod 3 at
+    // `node_modules/@modelcontextprotocol/sdk/node_modules/zod` left it passing while
+    // naming the one property it was supposed to protect.
+    //
+    // `realpathSync` because a workspace or a linked install can reach the same
+    // package through two paths without it being two copies.
+    const projectRequire = createRequire(resolve(import.meta.dirname, '../package.json'));
+    const sdkRequire = createRequire(projectRequire.resolve('@modelcontextprotocol/sdk/server/mcp.js'));
 
-    // A schema from our zod must be the same brand the SDK checks against; if the
-    // tree had two copies the registration in the previous test would already have
-    // failed, so this asserts the cheap half — that importing both is coherent.
-    expect(ours.z.string().safeParse('x').success).toBe(true);
+    const ours = realpathSync(projectRequire.resolve('zod/package.json'));
+    const theirs = realpathSync(sdkRequire.resolve('zod/package.json'));
+
+    expect(theirs, `the SDK resolves a different zod than we do:\n  ours:   ${ours}\n  theirs: ${theirs}`)
+      .toBe(ours);
   });
 });
