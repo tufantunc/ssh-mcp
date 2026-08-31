@@ -7,7 +7,7 @@ If you discover a security vulnerability in SSH MCP Server, please report it res
 1. **DO NOT** open a public GitHub issue.
 2. Report it privately, either way:
    - [Open a private security advisory](https://github.com/tufantunc/ssh-mcp/security/advisories/new) — preferred, since it keeps the report, the fix and the CVE in one thread; or
-   - email <security@tufantunc.com>.
+   - email <tufan.tunc.91@gmail.com>.
 3. Include:
    - Description of the vulnerability
    - Steps to reproduce
