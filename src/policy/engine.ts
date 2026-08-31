@@ -22,7 +22,11 @@ export interface PolicyRules {
 export const HOST_GROUPS = ['prod', 'staging', 'dev'] as const;
 
 export const DEFAULT_RULES: PolicyRules = {
-  roleBindings: {
+  // Null-prototype for the reason spelled out at `mergePolicyRules`: a role name is
+  // a free string, and this object is indexed by it. `mergePolicyRules` returns this
+  // one unchanged when there is no override, so fixing only the merged copy would
+  // leave the commonest path — no `[policy]` section at all — on a plain object.
+  roleBindings: Object.assign(Object.create(null), {
     viewer: {
       prod: ['read-only'],
       staging: ['read-only'],
@@ -38,7 +42,7 @@ export const DEFAULT_RULES: PolicyRules = {
       staging: ['read-only', 'safe', 'destructive', 'privileged'],
       dev: ['read-only', 'safe', 'destructive', 'privileged'],
     },
-  },
+  }),
 };
 
 /**
@@ -69,7 +73,26 @@ export function mergePolicyRules(
 
   // Copy every tier map: assigning base's objects straight through would let a
   // later merge mutate DEFAULT_RULES, which is a module-level singleton.
-  const roleBindings: Record<string, Record<string, CommandClass[]>> = {};
+  //
+  // `Object.create(null)`, not `{}`, because the loop below assigns a key the
+  // operator chose: `roleBindings[role] = ...` with `role === '__proto__'` invokes
+  // the prototype setter on a plain object rather than creating a key. Measured, the
+  // effect is not global — `Object.prototype` is untouched — but this object's own
+  // prototype is replaced by the operator's tier map, after which `roleBindings.prod`
+  // resolves through the chain as though `prod` were a role. Reported as
+  // https://github.com/tufantunc/ssh-mcp/issues/172.
+  //
+  // Reaching it needs the schema guard in config/schema.ts to be bypassed first, and
+  // that guard is exactly what zod 4 silently disabled once already (2.5.0 rebuilt
+  // it). Insurance in the authorization engine is worth one function call.
+  //
+  // It also removes a second case with no config involved: on a plain object,
+  // `roleBindings['toString']` returns a function, so a profile whose role is named
+  // after an `Object.prototype` member found a truthy "binding". That failed closed —
+  // `findPolicyProblems` still refused it and evaluation floored at read-only — but it
+  // took a different branch than an unknown role, for no reason a reader could see.
+  const roleBindings: Record<string, Record<string, CommandClass[]>> =
+    Object.create(null);
   for (const [role, groups] of Object.entries(base.roleBindings)) {
     roleBindings[role] = { ...groups };
   }
