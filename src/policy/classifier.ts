@@ -187,12 +187,18 @@ const INTERPRETERS: Record<string, { flags: string[]; readable: boolean }> = Obj
 const AWK_BINARIES = new Set(['awk', 'gawk', 'mawk']);
 
 /** Flags whose value is a separate word, which is not the program. `awk -F ':' '{…}'`. */
-const AWK_VALUE_FLAGS = new Set([
-  '-v', '--assign', '-F', '--field-separator',
-  // gawk's include and mawk's -W also take a separate value that is not the program, and
-  // mawk is Debian's `awk` while gawk is Fedora's, so both are reachable under that name.
-  '-i', '--include', '-W',
-]);
+/**
+ * The only two flags that consume a separate word on every awk.
+ *
+ * `-i`, `--include`, `-W`, `--assign` and `--field-separator` were here, on the reasoning
+ * that gawk and mawk consume a value for them. They do — but BWK awk, which is `awk` on
+ * macOS and the BSDs and Debian's `original-awk`, ignores an unknown option *without*
+ * consuming anything and runs the next operand as the program. Skipping a word that awk
+ * did not skip handed the gate the data file and let the real program through as `safe`.
+ * Everything outside this pair falls to the fail-closed branch below, which is the answer
+ * that does not depend on knowing which awk is on the far end.
+ */
+const AWK_VALUE_FLAGS = new Set(['-v', '-F']);
 
 /** The program, or a library, comes from a file this cannot see. */
 const AWK_FILE_FLAGS = new Set(['-f', '--file', '-l', '--load', '-E', '--exec']);
@@ -214,10 +220,13 @@ const AWK_SOURCE_FLAGS = new Set(['-e', '--source']);
  * `awk 'NR>1'` — skipping a header line, one of the most common awk idioms there is.
  * Redirection needs something to redirect, so a `>` is only read as one when a `print` or
  * `printf` precedes it in the same statement: `awk '$3 > 100 {print}'` compares,
- * `awk '{print $1 > $2}'` writes. `@` likewise only counts as gawk's `@load`/`@include`,
- * not as the at-sign in an email address.
+ * `awk '{print $1 > $2}'` writes. `@` counts as gawk's `@load`/`@include`, and
+ * as an indirect call: `f="system"; @f(…)` resolves to the builtin and runs a shell
+ * command, which no other alternative here sees. Anchoring on the call syntax leaves the
+ * at-sign in `awk '$1=="x@y.com"'` alone.
  */
-const AWK_ESCAPE = /\bsystem\s*\(|\bgetline\b|@(?:load|include)\b|(?<!\|)\|(?!\|)/;
+const AWK_ESCAPE =
+  /\bsystem\s*\(|\bgetline\b|@(?:load|include)\b|@[A-Za-z_]\w*\s*\(|(?<!\|)\|(?!\|)/;
 
 /**
  * Whether an awk program redirects output to a file.
@@ -470,11 +479,13 @@ export function nestedCommands(command: string): string[] {
     // No awk arm. An awk program is not shell, and reading it as one classified
     // `awk '$1 == "root"'` as an unresolvable command word and put `binary: "$1"` into the
     // audit record. `AWK_ESCAPE` is the whole awk rule.
-    for (let i = 0; i < words.length; i++) {
-      const spec = INTERPRETERS[stripPath(unquote(words[i]))];
-      if (spec === undefined || isFlagValue(words, i, spec.flags)) continue;
-      const program = programAfterFlag(words, i, spec.flags);
-      if (program !== null) found.push(program);
+    if (!operandsAreData(words)) {
+      for (let i = 0; i < words.length; i++) {
+        const spec = INTERPRETERS[stripPath(unquote(words[i]))];
+        if (spec === undefined || isFlagValue(words, i, spec.flags)) continue;
+        const program = programAfterFlag(words, i, spec.flags);
+        if (program !== null) found.push(program);
+      }
     }
 
     // `-exec` is a flag rather than a command word, so this one is still a scan.
@@ -922,6 +933,21 @@ function effectiveCommandIndex(words: string[]): number {
 }
 
 /**
+ * Whether this segment's command word is one whose operands are data.
+ *
+ * The carrier scan reads every word, because a wrapper this file does not list would
+ * otherwise hide `sh -c`. The cost is that an outer tool's own flag can be mistaken for an
+ * interpreter's: `grep python3 -c /var/log/x` counts lines, and `-c` is also python's
+ * program flag. An allowlisted command is one this file already vouches for as reading
+ * rather than running, so its arguments are subjects, not commands — the positive form of
+ * the mention-vs-invocation rule at #91. `find` keeps its `-exec` scan, which is separate.
+ */
+function operandsAreData(words: string[]): boolean {
+  const idx = effectiveCommandIndex(words);
+  return idx !== -1 && READ_ONLY_ALLOWLIST.has(stripPath(unquote(words[idx])));
+}
+
+/**
  * Whether an interpreter name is the value of the flag before it rather than a command.
  *
  * The scan looks at every word so that a carrier behind an unlisted wrapper is not lost,
@@ -1087,11 +1113,13 @@ function hasUnreadableProgram(command: string): boolean {
     const { words, sep } = segments[i];
     if (sep === '|' && readsProgramFromStdin(words)) return true;
 
-    for (let j = 0; j < words.length; j++) {
-      const spec = INTERPRETERS[stripPath(unquote(words[j]))];
-      if (spec === undefined || spec.readable) continue;
-      if (isFlagValue(words, j, spec.flags)) continue;
-      if (programAfterFlag(words, j, spec.flags) !== null) return true;
+    if (!operandsAreData(words)) {
+      for (let j = 0; j < words.length; j++) {
+        const spec = INTERPRETERS[stripPath(unquote(words[j]))];
+        if (spec === undefined || spec.readable) continue;
+        if (isFlagValue(words, j, spec.flags)) continue;
+        if (programAfterFlag(words, j, spec.flags) !== null) return true;
+      }
     }
 
     // awk is keyed on the command word rather than scanned for. An interpreter's program

@@ -525,3 +525,45 @@ describe('the narrow review round\'s findings', () => {
     expect(classifyCommand(command).class, command).toBe(expected);
   });
 });
+
+describe('the narrow security round\'s findings', () => {
+  it.each([
+    "awk -i 'BEGIN{system(\"sudo id\")}' /etc/hostname",
+    "awk --include 'BEGIN{system(\"sudo id\")}' f",
+    "awk -W 'BEGIN{system(\"sudo id\")}' f",
+    "awk --assign 'BEGIN{system(\"sudo id\")}' f",
+    "awk --field-separator 'BEGIN{system(\"sudo id\")}' f",
+  ])('%s is gated', (command) => {
+    // gawk and mawk consume a value for these; BWK awk — `awk` on macOS, the BSDs and
+    // Debian's original-awk — ignores an unknown option without consuming and runs the
+    // next operand. Skipping a word awk did not skip handed the gate the data file.
+    expect(classifyCommand(command).class, command).not.toBe('safe');
+  });
+
+  it.each(["awk -v n=1 '{print $1}' f", "awk -F: '{print $1}' /etc/passwd"])(
+    '%s is left alone',
+    (command) => {
+      // The two that really do consume a separate word on every awk.
+      expect(classifyCommand(command).class, command).toBe('safe');
+    },
+  );
+
+  it('an indirect call reaching the builtin system() is gated', () => {
+    // gawk resolves `@f(…)` to a builtin, so `f="system"` runs a shell command with no
+    // literal `system(` anywhere.
+    expect(classifyCommand('awk \'BEGIN{f="system"; @f("sudo id")}\'').class).toBe(
+      'destructive',
+    );
+    expect(classifyCommand('awk \'$1=="x@y.com"\' f').class).toBe('safe');
+  });
+
+  it('an allowlisted command\'s operands are subjects, not commands', () => {
+    // `-c` is grep's count flag and python's program flag; the carrier scan read the
+    // second meaning off the first tool.
+    expect(classifyCommand('grep python3 -c /var/log/x').class).toBe('read-only');
+    expect(classifyCommand('grep -e perl -e python /etc/shells').class).toBe('read-only');
+    // But a tool that really does run its operands keeps its scan.
+    expect(classifyCommand("xargs -I {} sh -c 'sudo id'").class).toBe('privileged');
+    expect(classifyCommand('find / -name x -exec sudo id +').class).toBe('privileged');
+  });
+});
