@@ -192,3 +192,98 @@ describe('synthesised commands are classified (F3)', () => {
     expect(classifyCommand('session:open interactive s1').binary).toBe('session:open');
   });
 });
+
+/**
+ * Part 4: an interpreter laundered the class of whatever it was handed.
+ */
+describe('an interpreter does not launder the class (F6)', () => {
+  it.each([
+    "python3 -c 'import os; os.system(\"id\")'",
+    "perl -e 'system(\"rm -rf /etc\")'",
+    "node -e 'require(\"child_process\").execSync(\"id\")'",
+    "node -p 'sudo id'",
+    "php -r 'system(\"id\");'",
+  ])('%s is not safe', (command) => {
+    expect(classifyCommand(command).class, command).not.toBe('safe');
+  });
+
+  it.each([
+    'runuser -u root -- id',
+    'setpriv --reuid=0 id',
+    "sh -c'sudo id'",
+    'find / -name x -exec sudo id +',
+  ])('%s reaches privileged', (command) => {
+    expect(classifyCommand(command).class, command).toBe('privileged');
+  });
+});
+
+describe('awk is read rather than blanket-gated', () => {
+  it.each([
+    "awk 'BEGIN{system(\"sudo id\")}'",
+    // A value-taking flag shifts the program position. Reading its value as the program
+    // let five characters (`-v x=1`) turn a refusal into an allow.
+    "awk -v n=1 'BEGIN{system(\"sudo id\")}'",
+    "awk -F ':' 'BEGIN{system(\"sudo id\")}' /etc/passwd",
+    "gawk --assign n=1 'BEGIN{system(\"sudo id\")}'",
+    // Redirection writes a file with no system() and no pipe at all.
+    'awk \'BEGIN{print "k" > "/root/.ssh/authorized_keys"}\'',
+    'awk -f /tmp/p.awk file',
+    'gawk -l /tmp/evil.so \'BEGIN{}\'',
+  ])('%s is gated', (command) => {
+    expect(classifyCommand(command).class, command).not.toBe('safe');
+  });
+
+  it.each([
+    "awk '{print $1}' file.txt",
+    "awk -F: '{print $1}' /etc/passwd",
+    "gawk '{print $2}' f",
+    "mawk '{print}' f",
+  ])('%s is left alone', (command) => {
+    expect(classifyCommand(command).class, command).toBe('safe');
+  });
+});
+
+describe('a program arriving on stdin cannot be read either', () => {
+  it.each([
+    'echo sudo id | bash',
+    'echo "sudo id" | sh -s',
+    'echo "sudo id" | bash -',
+    'echo "sudo id" | env bash',
+    'echo "sudo id" | /bin/bash',
+  ])('%s is gated', (command) => {
+    expect(classifyCommand(command).class, command).not.toBe('safe');
+  });
+
+  it('but a pipe carrying data is not a pipe carrying a program', () => {
+    expect(classifyCommand('cat data | python3 app.py').class).toBe('safe');
+    expect(classifyCommand("df -h | awk '{print $5}'").class).toBe('safe');
+  });
+});
+
+describe('naming an interpreter is not running one', () => {
+  it.each([
+    ['which python3', 'read-only'],
+    ['ls -l /usr/bin/node', 'read-only'],
+    ['cat /usr/local/bin/php', 'read-only'],
+    ['readlink -f /usr/bin/awk', 'read-only'],
+    ['grep node /etc/hosts', 'read-only'],
+    ['python3 /srv/app/manage.py migrate', 'safe'],
+    ['node /srv/app/server.js', 'safe'],
+    ['busybox sh -c "ls"', 'safe'],
+  ])('%s stays %s', (command, expected) => {
+    // Scanning every word for an interpreter name is the mention-vs-invocation defect
+    // this file records fixing as #91. A program-bearing flag must actually be present.
+    expect(classifyCommand(command).class, command).toBe(expected);
+  });
+});
+
+describe('reading a carrier does not become a way to stall the server', () => {
+  it('cost stays linear in the number of -exec tokens', () => {
+    // Each `-exec` used to emit an overlapping suffix still holding the rest of them, so
+    // the recursion re-expanded the same tail once per token: 81 bytes cost 17 seconds.
+    const command = `${'-ok '.repeat(200)}x`;
+    const started = process.hrtime.bigint();
+    classifyCommand(command);
+    expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(2000);
+  });
+});

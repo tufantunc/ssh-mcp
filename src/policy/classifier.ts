@@ -143,9 +143,69 @@ const CLASS_RANK: Record<CommandClass, number> = {
 };
 
 /** Shells that run their next argument as a command when given `-c`. */
-const SHELL_BINARIES = new Set([
-  'sh', 'bash', 'dash', 'zsh', 'ksh', 'ash', 'busybox',
-]);
+/**
+ * Interpreters, the flags that hand them a program, and whether this file can read it.
+ *
+ * One table rather than three overlapping name lists: adding an interpreter here is the
+ * whole change, and a shell list that drifts out of step with a readability list is how a
+ * new shell ends up treated as an unreadable interpreter.
+ *
+ * `readable` means the program is shell, so classifying it is this same job done again
+ * and the class it earns is real. Python, Perl, Ruby, Node and PHP are not: their program
+ * is a different language, and `os.system('sudo id')` carries an elevation the shell
+ * classifier cannot see. Pretending to parse them would be a worse answer than admitting
+ * we cannot, so an unreadable program makes the command `destructive` — "we cannot tell",
+ * not "this is root", the same answer `hasUnnameableCommand` gives.
+ *
+ * `busybox` is not here: it takes an applet name, not `-c`, so `busybox sh -c …` is an
+ * `sh` invocation behind a wrapper. It is in EXEC_WRAPPERS instead, which is what it is.
+ */
+const INTERPRETERS: Record<string, { flags: string[]; readable: boolean }> = {
+  sh: { flags: ['-c'], readable: true },
+  bash: { flags: ['-c'], readable: true },
+  dash: { flags: ['-c'], readable: true },
+  zsh: { flags: ['-c'], readable: true },
+  ksh: { flags: ['-c'], readable: true },
+  ash: { flags: ['-c'], readable: true },
+  python: { flags: ['-c'], readable: false },
+  python2: { flags: ['-c'], readable: false },
+  python3: { flags: ['-c'], readable: false },
+  perl: { flags: ['-e', '-E'], readable: false },
+  ruby: { flags: ['-e'], readable: false },
+  // `-p`/`--print` evaluate exactly as `-e` does and then print the result.
+  node: { flags: ['-e', '--eval', '-p', '--print'], readable: false },
+  php: { flags: ['-r'], readable: false },
+};
+
+/** awk takes its program as the first operand, so it does not fit the table above. */
+const AWK_BINARIES = new Set(['awk', 'gawk', 'mawk']);
+
+/** Flags whose value is a separate word, which is not the program. `awk -F ':' '{…}'`. */
+const AWK_VALUE_FLAGS = new Set(['-v', '--assign', '-F', '--field-separator']);
+
+/** The program, or a library, comes from a file this cannot see. */
+const AWK_FILE_FLAGS = new Set(['-f', '--file', '-l', '--load']);
+
+/** gawk's `-e` / `--source` carry program text, which is readable. */
+const AWK_SOURCE_FLAGS = new Set(['-e', '--source']);
+
+/**
+ * The ways an awk program reaches a shell or a file.
+ *
+ * awk is the one interpreter whose program is readable in argv, so gating every `awk`
+ * would put an approval prompt on `awk '{print $1}'` — most of what awk is used for.
+ * The question is narrowed to whether the program can start a process or write a file:
+ * `system()`, a command pipe (`print | "cmd"`, `"cmd" | getline`), output redirection
+ * (`print > "file"`, which reaches `~/.ssh/authorized_keys` without a shell), and gawk's
+ * `@load`/`@include`. `||` is logical or, not a pipe.
+ *
+ * `>` is also awk's greater-than, so `awk '$3 > 100'` asks for approval it does not need.
+ * That is the direction to be wrong in: the alternative missed an arbitrary file write.
+ */
+const AWK_ESCAPE = /\bsystem\s*\(|\bgetline\b|[@>]|(?<!\|)\|(?!\|)/;
+
+/** `find … -exec <cmd> +` runs cmd. */
+const FIND_EXEC_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
 
 /**
  * How deep a substitution may nest before we stop reading and refuse to guess.
@@ -328,20 +388,46 @@ export function nestedCommands(command: string): string[] {
     for (const raw of backticks) found.push(raw.slice(1, -1));
   }
 
-  // `sh -c <command>`. Carries no substitution at all, so the scan above does not
-  // see it; found while mapping the reported bypass rather than in the report.
-  const words = tokenizeSegments(command).flat();
-  for (let i = 0; i < words.length; i++) {
-    if (!SHELL_BINARIES.has(stripPath(unquote(words[i])))) continue;
-    for (let j = i + 1; j < words.length; j++) {
-      if (words[j] === '-c') {
-        if (words[j + 1] !== undefined) found.push(words[j + 1]);
-        break;
+  // A carrier hands a program to something that runs it. Carries no substitution, so the
+  // scan above does not see it. Read each segment's command word rather than scanning
+  // every word: matching a mention rather than an invocation is #91, and
+  // `cat /usr/bin/python3` names an interpreter without running one.
+  const segments = tokenizeSegmentsDetailed(command);
+  for (const { words } of segments) {
+    const idx = effectiveCommandIndex(words);
+    if (idx !== -1) {
+      const bin = stripPath(words[idx]);
+      const spec = INTERPRETERS[bin];
+      if (spec !== undefined) {
+        const program = programAfterFlag(words, idx, spec.flags);
+        if (program !== null) found.push(program);
+      } else if (AWK_BINARIES.has(bin)) {
+        const program = awkProgram(words.slice(idx + 1));
+        if (program !== null) found.push(program);
       }
-      // Only flags may sit between the shell and its `-c`; anything else means
-      // this was not a `-c` invocation.
-      if (!words[j].startsWith('-')) break;
     }
+
+    // `-exec` is a flag rather than a command word, so this one is still a scan.
+    for (let i = 0; i < words.length; i++) {
+      if (!FIND_EXEC_FLAGS.has(words[i]) || words[i + 1] === undefined) continue;
+      const rest = words.slice(i + 1);
+      const stop = rest.findIndex((w) => w === '+' || w === ';');
+      found.push((stop === -1 ? rest : rest.slice(0, stop)).join(' '));
+      // Step past what was consumed. Leaving `i` where it was emitted one child per
+      // `-exec` token, each an overlapping suffix of the last and each still holding the
+      // rest of them, so the recursion re-expanded the same tail once per token: twenty
+      // `-ok` tokens in 81 bytes cost 17 seconds of a single-threaded event loop.
+      i = stop === -1 ? words.length : i + 1 + stop;
+    }
+  }
+
+  // A pipe stage whose command word is an interpreter with no program of its own runs
+  // whatever the previous stage printed. Starts at 1: a leading `|` records its separator
+  // on the first segment, and reading `segments[-1]` threw.
+  for (let i = 1; i < segments.length; i++) {
+    if (segments[i].sep !== '|') continue;
+    if (!readsProgramFromStdin(segments[i].words)) continue;
+    found.push(segments[i - 1].words.join(' '));
   }
 
   return found.filter((c) => c.trim().length > 0);
@@ -352,6 +438,8 @@ const PRIVILEGE_PREFIXES = new Set([
   // BusyBox/Alpine, Docker entrypoints, the Rust sudo now default on some
   // distributions, systemd's replacement, and the Solaris/illumos spelling.
   'su-exec', 'gosu', 'sudo-rs', 'run0', 'pfexec',
+  // Both reach root with the command otherwise classified `safe`.
+  'runuser', 'setpriv',
 ]);
 
 /**
@@ -371,6 +459,8 @@ const PRIVILEGE_PREFIXES = new Set([
 const EXEC_WRAPPERS = new Set([
   'env', 'nohup', 'nice', 'ionice', 'command', 'exec', 'setsid', 'stdbuf',
   'timeout', 'chrt', 'taskset', 'xargs', 'watch',
+  // `busybox <applet>` runs the applet, so it wraps rather than interprets.
+  'busybox',
 ]);
 
 /**
@@ -725,6 +815,17 @@ export function extractBinary(command: string): string {
  * whether that name is knowable at all.
  */
 function effectiveCommandWord(words: string[]): string | null {
+  const i = effectiveCommandIndex(words);
+  return i === -1 ? null : words[i];
+}
+
+/**
+ * The position of that word, for callers that need to read its arguments.
+ *
+ * Deriving the word from the index rather than searching for it afterwards is what keeps
+ * `sh x sh -c 'sudo id'` from finding the wrong `sh`.
+ */
+function effectiveCommandIndex(words: string[]): number {
   let i = 0;
   while (i < words.length) {
     const raw = words[i];
@@ -743,9 +844,112 @@ function effectiveCommandWord(words: string[]): string | null {
       i++;
       continue;
     }
-    return raw;
+    return i;
+  }
+  return -1;
+}
+
+/**
+ * The program an interpreter was handed on its command line, or null.
+ *
+ * Only flags may sit between the interpreter and its flag; anything else means this was
+ * not that kind of invocation, which is what keeps `python3 script.py` — a program this
+ * cannot read either, but one every deployment runs — out of the gate.
+ */
+function programAfterFlag(words: string[], from: number, flags: string[]): string | null {
+  for (let j = from + 1; j < words.length; j++) {
+    const word = words[j];
+    if (flags.includes(word)) return words[j + 1] ?? null;
+    const attached = flags.find((f) => word.startsWith(f) && word.length > f.length);
+    if (attached !== undefined) {
+      const rest = word.slice(attached.length);
+      // `sh -c'sudo id'` tokenises to `-csudo id`, so the program is attached. `bash -cx`
+      // is a flag cluster and the program is the next word. A space, or the `=` of
+      // `--eval=…`, is what tells them apart: a cluster is letters only.
+      if (/\s/.test(rest) || rest.startsWith('=')) return rest.replace(/^=/, '');
+      return words[j + 1] ?? null;
+    }
+    if (!word.startsWith('-')) return null;
   }
   return null;
+}
+
+/** awk's program: the first operand, once value-taking flags and their values are past. */
+function awkProgram(args: string[]): string | null {
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i];
+    if (word === '--') return args[i + 1] ?? null;
+    if (AWK_FILE_FLAGS.has(word)) return null;
+    if (AWK_SOURCE_FLAGS.has(word)) return args[i + 1] ?? null;
+    // `-v x=1` and `-F :` take a separate word. Reading that word as the program is what
+    // let `awk -F ':' 'BEGIN{system("sudo id")}'` past the gate entirely.
+    if (AWK_VALUE_FLAGS.has(word)) { i += 1; continue; }
+    if (word.startsWith('-') && word.length > 1) {
+      const file = [...AWK_FILE_FLAGS].find((f) => word.startsWith(f));
+      if (file !== undefined) return null;
+      const source = [...AWK_SOURCE_FLAGS].find((f) => word.startsWith(f));
+      if (source !== undefined) return word.slice(source.length).replace(/^=/, '');
+      continue;
+    }
+    return word;
+  }
+  return null;
+}
+
+/** Whether an awk invocation can start a process or write a file this has not read. */
+function awkProgramIsUnreadable(args: string[]): boolean {
+  const program = awkProgram(args);
+  if (program === null) return true;
+  return AWK_ESCAPE.test(program);
+}
+
+/**
+ * Whether a segment's command word is an interpreter with no program of its own.
+ *
+ * `echo "sudo id" | bash` hands the program over on stdin, where there is nothing to
+ * read. This holds for the shells too — `readable` is about a `-c` argument, and there is
+ * no `-c` here. Requiring that no operand follow is what keeps `cat data | python3
+ * app.py` out of it: there the pipe carries data, not a program.
+ */
+function readsProgramFromStdin(words: string[]): boolean {
+  const idx = effectiveCommandIndex(words);
+  if (idx === -1) return false;
+  const bin = stripPath(words[idx]);
+  const spec = INTERPRETERS[bin];
+  if (spec === undefined && !AWK_BINARIES.has(bin)) return false;
+  const flags = spec?.flags ?? [...AWK_SOURCE_FLAGS, ...AWK_FILE_FLAGS];
+  for (let j = idx + 1; j < words.length; j++) {
+    const word = words[j];
+    if (flags.some((f) => word === f || word.startsWith(f))) return false;
+    if (!word.startsWith('-')) return false;
+  }
+  return true;
+}
+
+/**
+ * Whether any segment hands a program to something this file cannot read.
+ *
+ * Keyed on the segment's command word, never on any word that happens to name an
+ * interpreter: matching a mention rather than an invocation is the defect this file
+ * records fixing as #91, and `cat /usr/bin/python3` names an interpreter without running
+ * one. A program-bearing flag must actually be present, so naming one is not enough.
+ */
+function hasUnreadableProgram(command: string): boolean {
+  const segments = tokenizeSegmentsDetailed(command);
+  for (let i = 0; i < segments.length; i++) {
+    const { words, sep } = segments[i];
+    if (sep === '|' && readsProgramFromStdin(words)) return true;
+
+    const idx = effectiveCommandIndex(words);
+    if (idx === -1) continue;
+    const bin = stripPath(words[idx]);
+    const spec = INTERPRETERS[bin];
+    if (spec !== undefined && !spec.readable && programAfterFlag(words, idx, spec.flags) !== null) {
+      return true;
+    }
+    if (AWK_BINARIES.has(bin) && awkProgramIsUnreadable(words.slice(idx + 1))) return true;
+  }
+  return false;
 }
 
 /**
@@ -855,7 +1059,7 @@ function classifyOuter(trimmed: string): ParsedCommand {
     return { binary: elevated, fullCommand, class: 'privileged' as CommandClass };
   }
 
-  if (isDestructive(trimmed) || hasDisqualifyingArgs(trimmed)) {
+  if (hasUnreadableProgram(trimmed) || isDestructive(trimmed) || hasDisqualifyingArgs(trimmed)) {
     return { binary, fullCommand, class: 'destructive' as CommandClass };
   }
 

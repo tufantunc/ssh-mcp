@@ -215,7 +215,10 @@ describe('elevation and exec wrappers (GHSA-6f54-mjqq-2jp8)', () => {
 
   it('treats find as writing when it carries an action flag', () => {
     expect(classifyCommand('find /var/www -delete').class).toBe('destructive');
-    expect(classifyCommand('find / -name x -exec sudo id +').class).toBe('destructive');
+    // Reading the `-exec` carrier is what raises this past `destructive`: the command
+    // find runs is `sudo id`. The two assertions below still expect `destructive`, which
+    // is what shows this is the elevation being seen and not a blanket raise on -exec.
+    expect(classifyCommand('find / -name x -exec sudo id +').class).toBe('privileged');
     expect(classifyCommand('find /tmp -execdir rm {} +').class).toBe('destructive');
     expect(classifyCommand('find /tmp -ok rm {} +').class).toBe('destructive');
   });
