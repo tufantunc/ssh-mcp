@@ -425,8 +425,8 @@ denylist; an invalid pattern fails at startup rather than degrading silently.
 - `ask-destructive` — prompt for destructive/privileged (default). Narrower than it sounds:
   outside the never-allowed list, `destructive` is one `rm -rf /path` pattern, `find` with a
   write/exec flag, an unresolvable command word, a program handed to an interpreter this
-  server cannot read (`python3 -c`, `awk -f`, a program arriving on a pipe), and
-  `sftp-upload`/interactive `open-session` — elevation classifies `privileged`, which also
+  server cannot read (`python3 -c`, `awk -f`, a program arriving on a pipe), an awk program
+  that can start a process or write a file, and `sftp-upload`/interactive `open-session` — elevation classifies `privileged`, which also
   prompts. Ordinary writes, service control and signals do not. See
   [SECURITY.md](./SECURITY.md) before relying on this in production.
 - `ask-all` — prompt for every command

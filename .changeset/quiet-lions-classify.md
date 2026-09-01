@@ -5,8 +5,8 @@
 **Security:** classify the command a shell would actually run ([GHSA-qvx5-rxrj-9vfh](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-qvx5-rxrj-9vfh), CVSS 9.9). Affects 2.0.0 through 2.5.1.
 
 `minor` rather than `patch` for the reason 2.3.0 and 2.5.0 used it: the version reflects what
-upgrading can do to you, not how large the change is. Two shipped tools stop working for one
-role on one tier — see **Behaviour changes** below.
+upgrading can do to you, not how large the change is. Two shipped tools stop working for two
+role/tier pairs — see **Behaviour changes** below.
 
 Quoting is removed by the transport before the command runs, but the classifier's regexes
 were written against the text as sent. `rm -rf "/etc"` therefore matched nothing, came back
@@ -47,19 +47,33 @@ carrier is what raises `find / -name x -exec sudo id +` to `privileged`.
 
 ## Behaviour changes
 
-- **`sftp-upload` and interactive `open-session` are refused for `operator` on `prod`.** Under
-  the default rules that role holds `['read-only','safe']`, and both are now `destructive`, so
-  the decision is `deny` rather than an approval prompt. `viewer` loses them on every tier.
-  Grant `destructive` on the tier to restore them. On `staging` and `dev`, `operator` and
-  `admin` already hold `destructive`, so those degrade to a prompt instead.
-- **`awk '$3 > 100'` asks for approval it does not need**, because `>` is both output
-  redirection and greater-than and the redirection form writes arbitrary files. That is the
-  direction to be wrong in, but it is a prompt you did not get before.
-- `sftp:download` and `session:close` deliberately keep the class they have today. Both would
-  move *down* from `safe`, and a security release is the wrong place for a widening.
+**`sftp-upload` and interactive `open-session` become `destructive`.** Measured against the
+default rules, that changes the decision for these:
 
-Measured against 84 ordinary read and maintenance commands — including quoted arguments that
-are not commands, and commands that merely name an interpreter (`which python3`,
-`ls -l /usr/bin/node`, `ps aux | grep python3`) — exactly one changed class: the `awk`
-comparison above. Of 25 attack forms, 20 moved from ungated to gated, 5 were already gated,
-and none is left open.
+| role / tier | before | after |
+|---|---|---|
+| `operator` / `prod` | allow | **deny** |
+| `viewer` / `dev` | allow | **deny** |
+| `operator` / `staging`, `operator` / `dev` | allow | approval prompt |
+| `admin` / `prod`, `admin` / `staging`, `admin` / `dev` | allow | approval prompt |
+| `viewer` / `prod`, `viewer` / `staging` | already denied | already denied |
+
+The two `deny` rows are the reason for the `minor`: those roles hold `['read-only','safe']`
+on that tier, so there is no prompt to click through. Grant `destructive` on the tier to
+restore them. `viewer` never held `safe` on `prod` or `staging`, so nothing moves there.
+
+`sftp:download` and `session:close` deliberately keep the class they have today. Both would
+move *down* from `safe`, and a security release is the wrong place for a widening.
+
+**Newly gated interpreter forms.** Beyond the six named above, `ruby -e`, `python -c`,
+`python2 -c`, `perl -E`, `node --eval` and `node --print` are gated for the same reason, as
+is an awk program that can start a process or write a file (`system()`, a command pipe,
+`print > "file"`, `-f`, gawk's `--load`, or a flag this server does not recognise, since an
+unknown flag means it cannot tell which word is the program). An ordinary
+`awk '{print $1}'`, `awk -F: '{print $1}'`, `awk 'NR>1'` or `awk '$3 > 100'` is unaffected.
+
+Measured against 87 ordinary read and maintenance commands — quoted arguments that are not
+commands, commands that merely name an interpreter (`which python3`, `ls -l /usr/bin/node`,
+`ps aux | grep python3`, `man awk`), pattern-form and brace-form awk one-liners, and
+download-then-run-a-script pairs — **no command changed class in either direction**. Of 25
+attack forms, 20 moved from ungated to gated, 5 were already gated, and none is left open.
