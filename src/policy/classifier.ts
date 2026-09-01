@@ -160,7 +160,12 @@ const CLASS_RANK: Record<CommandClass, number> = {
  * `busybox` is not here: it takes an applet name, not `-c`, so `busybox sh -c …` is an
  * `sh` invocation behind a wrapper. It is in EXEC_WRAPPERS instead, which is what it is.
  */
-const INTERPRETERS: Record<string, { flags: string[]; readable: boolean }> = {
+// Null-prototype for the reason `mergePolicyRules` spells out (#172): this is indexed by
+// a command word, which is a free string, so on a plain object `INTERPRETERS['toString']`
+// resolves to a function and reading `.flags` off it throws inside the policy gate.
+const INTERPRETERS: Record<string, { flags: string[]; readable: boolean }> = Object.assign(
+  Object.create(null) as Record<string, { flags: string[]; readable: boolean }>,
+  {
   sh: { flags: ['-c'], readable: true },
   bash: { flags: ['-c'], readable: true },
   dash: { flags: ['-c'], readable: true },
@@ -175,16 +180,22 @@ const INTERPRETERS: Record<string, { flags: string[]; readable: boolean }> = {
   // `-p`/`--print` evaluate exactly as `-e` does and then print the result.
   node: { flags: ['-e', '--eval', '-p', '--print'], readable: false },
   php: { flags: ['-r'], readable: false },
-};
+  },
+);
 
 /** awk takes its program as the first operand, so it does not fit the table above. */
 const AWK_BINARIES = new Set(['awk', 'gawk', 'mawk']);
 
 /** Flags whose value is a separate word, which is not the program. `awk -F ':' '{…}'`. */
-const AWK_VALUE_FLAGS = new Set(['-v', '--assign', '-F', '--field-separator']);
+const AWK_VALUE_FLAGS = new Set([
+  '-v', '--assign', '-F', '--field-separator',
+  // gawk's include and mawk's -W also take a separate value that is not the program, and
+  // mawk is Debian's `awk` while gawk is Fedora's, so both are reachable under that name.
+  '-i', '--include', '-W',
+]);
 
 /** The program, or a library, comes from a file this cannot see. */
-const AWK_FILE_FLAGS = new Set(['-f', '--file', '-l', '--load']);
+const AWK_FILE_FLAGS = new Set(['-f', '--file', '-l', '--load', '-E', '--exec']);
 
 /** gawk's `-e` / `--source` carry program text, which is readable. */
 const AWK_SOURCE_FLAGS = new Set(['-e', '--source']);
@@ -199,10 +210,15 @@ const AWK_SOURCE_FLAGS = new Set(['-e', '--source']);
  * (`print > "file"`, which reaches `~/.ssh/authorized_keys` without a shell), and gawk's
  * `@load`/`@include`. `||` is logical or, not a pipe.
  *
- * `>` is also awk's greater-than, so `awk '$3 > 100'` asks for approval it does not need.
- * That is the direction to be wrong in: the alternative missed an arbitrary file write.
+ * `>` is also awk's greater-than, and gating it outright put an approval prompt on
+ * `awk 'NR>1'` — skipping a header line, one of the most common awk idioms there is.
+ * Redirection needs something to redirect, so a `>` is only read as one when a `print` or
+ * `printf` precedes it in the same statement: `awk '$3 > 100 {print}'` compares,
+ * `awk '{print $1 > $2}'` writes. `@` likewise only counts as gawk's `@load`/`@include`,
+ * not as the at-sign in an email address.
  */
-const AWK_ESCAPE = /\bsystem\s*\(|\bgetline\b|[@>]|(?<!\|)\|(?!\|)/;
+const AWK_ESCAPE =
+  /\bsystem\s*\(|\bgetline\b|@(?:load|include)\b|(?<!\|)\|(?!\|)|\b(?:print|printf)\b[^;{}]*>/;
 
 /** `find … -exec <cmd> +` runs cmd. */
 const FIND_EXEC_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
@@ -299,17 +315,30 @@ function tokenizeSegmentsDetailed(
  * Segments are rejoined with `; ` so a pattern cannot match across two commands that the
  * shell would run separately.
  */
+let lastNormalizedInput: string | null = null;
+let lastNormalizedOutput = '';
+
 function normalizeCommand(command: string): string {
+  // One evaluate asks for this about nineteen times, once per regex rule, and each ask
+  // re-ran the tokeniser over the whole command. The asks arrive in a row on the same
+  // input, so a one-entry cache removes almost all of it.
+  if (command === lastNormalizedInput) return lastNormalizedOutput;
+  lastNormalizedInput = command;
+  lastNormalizedOutput = normalizeUncached(command);
+  return lastNormalizedOutput;
+}
+
+function normalizeUncached(command: string): string {
   return tokenizeSegments(command)
-    .map((words) => words.filter((word) => !SEPARATOR_CHAR.test(word)).join(' '))
+    .map((words) => words.map((w) => (QUOTED_CONTENT.test(w) ? PLACEHOLDER : w)).join(' '))
     .join('; ');
 }
 
 /**
- * A separator inside a token, which is only possible if it was quoted.
+ * A character the tokeniser splits on or at, which a token can only hold if it was quoted.
  *
- * The tokeniser splits on unquoted separators, so a token still holding one came from
- * inside quotes — the shell will not split there, and its contents are data. Rejoining it
+ * The tokeniser splits on unquoted separators and at unquoted whitespace, so a token
+ * holding either came from inside quotes — the shell will not split there, and its contents are data. Rejoining it
  * into the pattern text is what makes an argument read as a command: `echo "hello; rm -rf
  * /"` prints a string, and normalising it produced `echo hello; rm -rf /`, which matched
  * the never-allowed list. Dropping those tokens keeps quote removal doing the job it was
@@ -317,7 +346,17 @@ function normalizeCommand(command: string): string {
  * argument impersonate a command. A carrier that really does hand over a quoted command
  * (`sh -c "ls; rm -rf /etc"`) is read by `nestedCommands`, not by this.
  */
-const SEPARATOR_CHAR = /[;&|\n]/;
+const QUOTED_CONTENT = /[\s;&|\n]/;
+
+/**
+ * What a quoted token becomes in the pattern text.
+ *
+ * Deleting it instead spliced its neighbours together and created an adjacency that appears
+ * nowhere in the command: `echo rm 'a|b' -rf /` normalised to `echo rm -rf /` and landed on
+ * the never-allowed list. A character no pattern contains and `\s` does not match stands in
+ * its place, so the two sides can no longer be read as one phrase.
+ */
+const PLACEHOLDER = '\u0000';
 
 /**
  * Try a regex against the command as written and against the tokenised form.
@@ -401,10 +440,10 @@ export function nestedCommands(command: string): string[] {
       if (spec !== undefined) {
         const program = programAfterFlag(words, idx, spec.flags);
         if (program !== null) found.push(program);
-      } else if (AWK_BINARIES.has(bin)) {
-        const program = awkProgram(words.slice(idx + 1));
-        if (program !== null) found.push(program);
       }
+      // No awk arm. An awk program is not shell, and reading it as one classified
+      // `awk '$1 == "root"'` as an unresolvable command word and put `binary: "$1"` into
+      // the audit record. `AWK_ESCAPE` is the whole awk rule.
     }
 
     // `-exec` is a flag rather than a command word, so this one is still a scan.
@@ -472,9 +511,11 @@ const EXEC_WRAPPERS = new Set([
  * \;` form only escaped because `;` happens to be a shell metacharacter, while
  * the `+` terminator carries none.
  */
-const DISQUALIFYING_ARGS: Record<string, RegExp> = {
-  find: /^-(exec|execdir|ok|okdir|delete|fprintf?|fls)$/,
-};
+// Null-prototype for the same reason as INTERPRETERS: indexed by the command word.
+const DISQUALIFYING_ARGS: Record<string, RegExp> = Object.assign(
+  Object.create(null) as Record<string, RegExp>,
+  { find: /^-(exec|execdir|ok|okdir|delete|fprintf?|fls)$/ },
+);
 
 /** A leading `NAME=value`, which a shell treats as an assignment, not a command. */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
@@ -869,7 +910,28 @@ function programAfterFlag(words: string[], from: number, flags: string[]): strin
       if (/\s/.test(rest) || rest.startsWith('=')) return rest.replace(/^=/, '');
       return words[j + 1] ?? null;
     }
+    // The program flag need not lead the cluster: `bash -xc 'sudo id'` runs exactly what
+    // `bash -cx 'sudo id'` runs, and a prefix test saw the second and missed the first.
+    const clustered = clusteredFlag(word, flags);
+    if (clustered !== null) return clustered === '' ? (words[j + 1] ?? null) : clustered;
     if (!word.startsWith('-')) return null;
+  }
+  return null;
+}
+
+/**
+ * What follows a short flag inside a single-dash cluster, or null if it holds none.
+ *
+ * Clusters only — a run of single letters after one dash. Long flags and attached values
+ * are handled before this is reached.
+ */
+function clusteredFlag(word: string, flags: string[]): string | null {
+  if (!/^-[A-Za-z]+$/.test(word)) return null;
+  const body = word.slice(1);
+  for (const flag of flags) {
+    if (flag.length !== 2) continue;
+    const at = body.indexOf(flag[1]);
+    if (at !== -1) return body.slice(at + 1);
   }
   return null;
 }
@@ -915,9 +977,11 @@ function readsProgramFromStdin(words: string[]): boolean {
   const idx = effectiveCommandIndex(words);
   if (idx === -1) return false;
   const bin = stripPath(words[idx]);
+  // Interpreters only. awk's one program-from-stdin form is `awk -f -`, already gated as a
+  // file flag; every other piped awk reads data, not a program.
   const spec = INTERPRETERS[bin];
-  if (spec === undefined && !AWK_BINARIES.has(bin)) return false;
-  const flags = spec?.flags ?? [...AWK_SOURCE_FLAGS, ...AWK_FILE_FLAGS];
+  if (spec === undefined) return false;
+  const flags = spec.flags;
   for (let j = idx + 1; j < words.length; j++) {
     const word = words[j];
     if (flags.some((f) => word === f || word.startsWith(f))) return false;
@@ -992,10 +1056,13 @@ function hasUnnameableCommand(command: string): boolean {
  * release rather than an acquisition. Lowering a class is a widening, and a security
  * release is the wrong place for one; they keep the class they have today.
  */
-const SYNTHETIC_CLASSES: Record<string, CommandClass> = {
-  'sftp:upload': 'destructive',
-  'session:open': 'destructive',
-};
+const SYNTHETIC_CLASSES: Record<string, CommandClass> = Object.assign(
+  Object.create(null) as Record<string, CommandClass>,
+  {
+    'sftp:upload': 'destructive',
+    'session:open': 'destructive',
+  },
+);
 
 /** The first word, tokenised — the synthetic verb when there is one. */
 function syntheticVerb(command: string): string {

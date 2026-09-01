@@ -287,3 +287,59 @@ describe('reading a carrier does not become a way to stall the server', () => {
     expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(2000);
   });
 });
+
+describe('a program flag is found wherever it sits in a cluster', () => {
+  it.each([
+    "bash -cx 'sudo id'",
+    "bash -xc 'sudo id'",
+    "bash -ic 'sudo id'",
+    "python3 -Ic \"import os; os.system('sudo id')\"",
+    "perl -wE 'system(\"sudo id\")'",
+    "php -nr 'system(\"id\");'",
+  ])('%s is gated', (command) => {
+    // Testing only the prefix saw `-cx` and missed `-xc`, which runs exactly the same
+    // thing. A one-character reorder walked around the whole control.
+    expect(classifyCommand(command).class, command).not.toBe('safe');
+  });
+});
+
+describe('an awk pattern is not a shell command', () => {
+  it.each([
+    "awk 'NR>1' access.log",
+    'awk \'$1 == "root"\' /etc/passwd',
+    "awk '{sum+=$1} END{print sum}' nums",
+    "awk 'length($0) > 80' file",
+    "df -h | awk '$5 > 80 {print $6}'",
+  ])('%s is left alone', (command) => {
+    // Two ways this went wrong: `>` read as redirection when it is greater-than, and the
+    // awk program read as shell, where `$1` looks like an unresolvable command word.
+    expect(classifyCommand(command).class, command).toBe('safe');
+  });
+
+  it('while a program that really writes a file is still gated', () => {
+    expect(classifyCommand('awk \'{print $1 > "/etc/cron.d/z"}\'').class).toBe('destructive');
+    expect(classifyCommand('awk \'NR>1 {print $2 > "out"}\'').class).toBe('destructive');
+  });
+});
+
+describe('a command word naming an Object.prototype member is just a command word', () => {
+  it.each(['toString arg', 'constructor -c foo', '__proto__ -c foo', 'env toString x'])(
+    '%s does not throw',
+    (command) => {
+      // The lookup tables are indexed by the command word, which is a free string.
+      expect(() => classifyCommand(command)).not.toThrow();
+    },
+  );
+});
+
+describe('normalising does not invent a command that was never written', () => {
+  it.each([
+    "echo rm 'a|b' -rf /",
+    "echo 'chmod -R 777' /srv/app",
+    "grep -r 'rm -rf' /var/log",
+  ])('%s is not on the never-allowed list', (command) => {
+    // Dropping a quoted token spliced its neighbours together, so `echo rm 'a|b' -rf /`
+    // normalised to `echo rm -rf /` — an adjacency that appears nowhere in the command.
+    expect(findForbiddenMatch(command), command).toBeNull();
+  });
+});
