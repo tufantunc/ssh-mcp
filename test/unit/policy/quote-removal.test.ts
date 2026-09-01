@@ -110,3 +110,49 @@ describe('what the rewrite must not break', () => {
     },
   );
 });
+
+/**
+ * Part 2: the carrier scan replaced the outer class instead of raising it.
+ */
+describe('the class is the maximum over the command and what it carries (F2)', () => {
+  it('a carrier cannot lower the class of the command carrying it', () => {
+    // The inner `rm -rf /etc` is destructive and the outer `sudo` is privileged. The
+    // scan used to return the inner class outright, which on `prod` is the difference
+    // between a prompt and a refusal.
+    expect(classifyCommand("sudo sh -c 'rm -rf /etc'").class).toBe('privileged');
+    expect(classifyCommand('sudo sh -c "ls"').class).toBe('privileged');
+  });
+
+  it('a carrier still raises the class of a harmless outer command', () => {
+    expect(classifyCommand('echo $(sudo id)').class).toBe('privileged');
+    expect(classifyCommand('echo `sudo id`').class).toBe('privileged');
+  });
+
+  it('and raises nothing when there is nothing to raise', () => {
+    expect(classifyCommand('echo $(ls)').class).toBe('safe');
+  });
+
+  it('names the process that earned the class, not the one that wrapped it', () => {
+    // `binary` reaches the audit record and the refusal message.
+    expect(classifyCommand('echo $(sudo id)').binary).toBe('id');
+  });
+});
+
+describe('nesting past the cap refuses rather than guessing', () => {
+  const nest = (n: number) => {
+    let command = 'id';
+    for (let i = 0; i < n; i += 1) command = `sh -c ${JSON.stringify(command)}`;
+    return command;
+  };
+
+  it('reads up to the cap', () => {
+    expect(classifyCommand(nest(7)).class).toBe('safe');
+  });
+
+  it('and stops reading at it', () => {
+    // A carrier with no `$` in it, so the cap is what decides rather than
+    // `hasUnnameableCommand`. Flipping this fallback to a permissive class is the
+    // failure mode this whole advisory is about, so it is pinned here.
+    expect(classifyCommand(nest(8)).class).toBe('privileged');
+  });
+});

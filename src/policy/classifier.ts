@@ -773,41 +773,44 @@ function hasUnnameableCommand(command: string): boolean {
   return false;
 }
 
+/**
+ * The class of a command, and of everything it carries.
+ *
+ * A command that carries another decides nothing on its own: the remote shell expands
+ * `$(...)`, backticks, `<(...)` and `sh -c` and runs what is inside, so the class is the
+ * higher of the two. The scan for carriers already existed, but it *replaced* the outer
+ * class instead of raising it, and only when the inner class was above `safe` — so
+ * `sudo sh -c 'rm -rf /etc'` reported the inner `destructive` and lost the outer
+ * `privileged`, which on `prod` is the difference between a prompt and a refusal.
+ * Taking the maximum is what makes the scan unable to lower anything.
+ */
 export function classifyCommand(command: string, depth = 0): ParsedCommand {
   const trimmed = command.trim();
+  const outer = classifyOuter(trimmed);
+
+  if (depth >= MAX_NESTING_DEPTH) {
+    // Nesting this deep is not something an operator writes, and we have stopped
+    // reading. Refusing to guess is the only answer consistent with the rest of this
+    // file.
+    return { binary: outer.binary, fullCommand: trimmed, class: 'privileged' as CommandClass };
+  }
+
+  let highest = outer;
+  for (const inner of nestedCommands(trimmed)) {
+    const parsed = classifyCommand(inner, depth + 1);
+    // `binary` follows the winning side deliberately: it is what the audit record and
+    // the refusal message name, and naming the outer `echo` would describe the wrong
+    // process as the one that ran as root.
+    if (CLASS_RANK[parsed.class] > CLASS_RANK[highest.class]) highest = parsed;
+  }
+
+  return { binary: highest.binary, fullCommand: trimmed, class: highest.class };
+}
+
+/** The class of the command itself, reading none of what it carries. */
+function classifyOuter(trimmed: string): ParsedCommand {
   const binary = extractBinary(trimmed);
   const fullCommand = trimmed;
-
-  // A command that carries another command decides nothing on its own: the remote
-  // shell expands `$(...)`, backticks, `<(...)` and `sh -c` and runs what is inside,
-  // so the class has to be the higher of the two. Before this, the outer command
-  // decided alone and `echo $(sudo id)` was `safe` — a class the default rules grant
-  // on `prod` to `operator` and `admin`, while granting `privileged` there to nobody
-  // at all (GHSA-v8jh-gv7v-3gvq). It also skipped the approval prompt, since only
-  // `destructive` and `privileged` raise one, and the audit record said `safe`.
-  //
-  // Runs before the checks below rather than after, so the class it produces is not
-  // something a later branch can lower.
-  if (depth < MAX_NESTING_DEPTH) {
-    let highest: ParsedCommand | null = null;
-    for (const inner of nestedCommands(trimmed)) {
-      const parsed = classifyCommand(inner, depth + 1);
-      if (highest === null || CLASS_RANK[parsed.class] > CLASS_RANK[highest.class]) {
-        highest = parsed;
-      }
-    }
-    // `binary` comes from the inner command deliberately: it is what the audit
-    // record and the refusal message name, and naming the outer `echo` would
-    // describe the wrong process as the one that ran as root.
-    if (highest !== null && CLASS_RANK[highest.class] > CLASS_RANK['safe']) {
-      return { binary: highest.binary, fullCommand, class: highest.class };
-    }
-  } else {
-    // Nesting this deep is not something an operator writes, and we have stopped
-    // reading. Refusing to guess is the only answer consistent with the rest of
-    // this function.
-    return { binary, fullCommand, class: 'privileged' as CommandClass };
-  }
 
   // `binary` names the subject of the class. For everything below it is the
   // leading command; here it is the one that runs as root, which are the same
