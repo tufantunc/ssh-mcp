@@ -774,6 +774,31 @@ function hasUnnameableCommand(command: string): boolean {
 }
 
 /**
+ * Commands this server synthesises rather than a user typing them.
+ *
+ * These reach the classifier as text like `sftp:upload /etc/passwd`, and no rule named
+ * them, so every one fell through to the default `safe` — a class the default rules grant
+ * to `operator` on `prod`. Writing an arbitrary file to the target is not `safe`: it is
+ * the same authority as `rm`, spelled through a different tool, and it reaches
+ * `~/.ssh/authorized_keys` without touching a shell. Opening a session is the same
+ * argument, since it hands over an interactive shell.
+ *
+ * `sftp:download` and `session:close` are deliberately absent. Both would move *down*
+ * from `safe` — download to `read-only`, matching its `readOnlyHint`, and close being a
+ * release rather than an acquisition. Lowering a class is a widening, and a security
+ * release is the wrong place for one; they keep the class they have today.
+ */
+const SYNTHETIC_CLASSES: Record<string, CommandClass> = {
+  'sftp:upload': 'destructive',
+  'session:open': 'destructive',
+};
+
+/** The first word, tokenised — the synthetic verb when there is one. */
+function syntheticVerb(command: string): string {
+  return tokenizeSegments(command)[0]?.[0] ?? '';
+}
+
+/**
  * The class of a command, and of everything it carries.
  *
  * A command that carries another decides nothing on its own: the remote shell expands
@@ -796,6 +821,16 @@ export function classifyCommand(command: string, depth = 0): ParsedCommand {
   }
 
   let highest = outer;
+
+  // A floor, not a verdict. Returning the synthetic class outright would put it above
+  // the elevation and never-allowed checks, so `sftp:upload /tmp/x; sudo id` would
+  // record `destructive` where the command is `privileged`.
+  const verb = syntheticVerb(trimmed);
+  const floor = SYNTHETIC_CLASSES[verb];
+  if (floor !== undefined && CLASS_RANK[floor] > CLASS_RANK[highest.class]) {
+    highest = { binary: verb, fullCommand: trimmed, class: floor };
+  }
+
   for (const inner of nestedCommands(trimmed)) {
     const parsed = classifyCommand(inner, depth + 1);
     // `binary` follows the winning side deliberately: it is what the audit record and

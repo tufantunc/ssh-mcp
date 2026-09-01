@@ -156,3 +156,39 @@ describe('nesting past the cap refuses rather than guessing', () => {
     expect(classifyCommand(nest(8)).class).toBe('privileged');
   });
 });
+
+/**
+ * Part 3: the four commands this server synthesises matched no rule and fell to `safe`.
+ */
+describe('synthesised commands are classified (F3)', () => {
+  it('writing a file to the target is not safe', () => {
+    expect(classifyCommand('sftp:upload /home/u/.ssh/authorized_keys').class).toBe(
+      'destructive',
+    );
+  });
+
+  it('handing over an interactive session is not safe', () => {
+    expect(classifyCommand('session:open interactive s1').class).toBe('destructive');
+  });
+
+  it.each([
+    ['sftp:download /etc/shadow', 'safe'],
+    ['session:close interactive s1', 'safe'],
+  ])('%s keeps the class it has today', (command, expected) => {
+    // Both would move DOWN from `safe`, and lowering a class is a widening. Pinned so
+    // that neither is quietly changed inside a security release.
+    expect(classifyCommand(command).class, command).toBe(expected);
+  });
+
+  it('the synthetic class is a floor, not a verdict', () => {
+    // Returning it outright would put it above the elevation and never-allowed checks.
+    expect(classifyCommand('sftp:upload /tmp/x; sudo id').class).toBe('privileged');
+    expect(classifyCommand('sftp:download /etc/shadow; rm -rf /').class).toBe('destructive');
+  });
+
+  it('the verbs match what the tools actually emit', () => {
+    // src/tools/file-tools.ts and src/tools/session-tools.ts build these strings.
+    expect(classifyCommand('sftp:upload /tmp/x').binary).toBe('sftp:upload');
+    expect(classifyCommand('session:open interactive s1').binary).toBe('session:open');
+  });
+});
