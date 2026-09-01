@@ -280,11 +280,28 @@ describe('naming an interpreter is not running one', () => {
 describe('reading a carrier does not become a way to stall the server', () => {
   it('cost stays linear in the number of -exec tokens', () => {
     // Each `-exec` used to emit an overlapping suffix still holding the rest of them, so
-    // the recursion re-expanded the same tail once per token: 81 bytes cost 17 seconds.
-    const command = `${'-ok '.repeat(200)}x`;
+    // the recursion re-expanded the same tail once per token, at roughly 4x per token.
+    // Sixteen tokens is the size where that is unmistakable but still terminates: ~1.6s
+    // broken against ~1ms here. Asserting at 200 tokens instead would not fail — it would
+    // never return, and `classifyCommand` is synchronous, so the suite would hang rather
+    // than report.
     const started = process.hrtime.bigint();
-    classifyCommand(command);
-    expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(2000);
+    classifyCommand(`${'-ok '.repeat(16)}x`);
+    expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(500);
+  });
+
+  it('and stays linear as the count grows', () => {
+    const cost = (n: number) => {
+      const command = `${'-ok '.repeat(n)}x`;
+      classifyCommand(command);
+      const started = process.hrtime.bigint();
+      classifyCommand(command);
+      return Number(process.hrtime.bigint() - started) / 1e6;
+    };
+    // Linear means doubling the tokens roughly doubles the cost. The broken form
+    // quadrupled it, so anything under 8x is a wide berth that does not depend on how
+    // fast the runner is.
+    expect(cost(200) / Math.max(cost(100), 0.01)).toBeLessThan(8);
   });
 });
 
@@ -405,5 +422,46 @@ describe('reading an awk program cannot be made quadratic', () => {
     const started = process.hrtime.bigint();
     classifyCommand(command);
     expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(1500);
+  });
+});
+
+describe('the second review round\'s uncovered forms', () => {
+  it.each([
+    // busybox as an exec wrapper. The `ls` case below reaches `safe` with the entry and
+    // without it, so only an elevated applet distinguishes the two.
+    // `busybox <applet>` runs the applet, so busybox is a wrapper. `sh -c` alone does not
+    // pin that — the carrier scan reads every word and finds `sh` either way. An elevated
+    // applet with no interpreter in sight is what the wrapper entry actually buys.
+    ['busybox sudo id', 'privileged'],
+    ["busybox sh -c 'sudo id'", 'privileged'],
+    ['find /tmp -okdir sudo id +', 'privileged'],
+    ["bash -c='sudo id'", 'privileged'],
+    ["node --eval 'sudo id'", 'privileged'],
+    // The tokeniser has always split on newline; the rewrite had to preserve that.
+    ['echo x\nsudo id', 'privileged'],
+    ['awk --file /tmp/p.awk f', 'destructive'],
+    ['awk --source \'BEGIN{system("sudo id")}\'', 'destructive'],
+    // The dangerous form above is gated even without the flag table, because an
+    // unrecognised awk flag fails closed. What the table entry buys is the benign form.
+    ["awk --source '{print $1}' f", 'safe'],
+    ['awk \'BEGIN{"id" | getline}\'', 'destructive'],
+    // `||` is logical or, not a command pipe.
+    ["gawk 'BEGIN{if(1||2)print}'", 'safe'],
+    ['busybox sh -c "ls"', 'safe'],
+  ])('%s is %s', (command, expected) => {
+    expect(classifyCommand(command).class, command).toBe(expected);
+  });
+
+  it.each([
+    ['| bash', 'destructive'],
+    ['; | python3', 'destructive'],
+    ['|| bash', 'destructive'],
+    ['', 'safe'],
+    ['   ', 'safe'],
+    ['\n', 'safe'],
+  ])('degenerate input %j is %s', (command, expected) => {
+    // These were asserted as "does not throw", which a regression classifying `| bash`
+    // as `safe` would have passed.
+    expect(classifyCommand(command).class, JSON.stringify(command)).toBe(expected);
   });
 });

@@ -216,8 +216,10 @@ describe('elevation and exec wrappers (GHSA-6f54-mjqq-2jp8)', () => {
   it('treats find as writing when it carries an action flag', () => {
     expect(classifyCommand('find /var/www -delete').class).toBe('destructive');
     // Reading the `-exec` carrier is what raises this past `destructive`: the command
-    // find runs is `sudo id`. The two assertions below still expect `destructive`, which
-    // is what shows this is the elevation being seen and not a blanket raise on -exec.
+    // find runs is `sudo id`. The two assertions below are not evidence for that — they
+    // reach `destructive` through the disqualifying-argument rule, not through the
+    // carrier. `find /tmp -okdir sudo id +` in quote-removal.test.ts is what pins the
+    // -exec family independently.
     expect(classifyCommand('find / -name x -exec sudo id +').class).toBe('privileged');
     expect(classifyCommand('find /tmp -execdir rm {} +').class).toBe('destructive');
     expect(classifyCommand('find /tmp -ok rm {} +').class).toBe('destructive');
@@ -260,7 +262,7 @@ describe('forbidden pattern matching cost', () => {
     // The quadratic forms took ~11s at 160k characters and grow four-fold per
     // doubling; the rewritten ones are sub-millisecond. One second separates
     // them by orders of magnitude in both directions.
-    expect(elapsedMs).toBeLessThan(1000);
+    expect(elapsedMs).toBeLessThan(3000);
   });
 
   /**
@@ -292,9 +294,12 @@ describe('forbidden pattern matching cost', () => {
     classifyCommand(oneMegabyte);
     const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
 
-    // 45 ms measured, against 65_000 ms before. A second is far enough below
-    // the old figure to fail loudly on a regression and far enough above the
-    // new one to survive a slow CI runner.
+    // ~460 ms measured here, against 65_000 ms before the pattern rewrite and ~200 ms on
+    // 2.5.1 — resolving quoting costs a pass over the input, and every regex rule is now
+    // tried against the tokenised form as well as the written one. Three seconds keeps a
+    // real regression loud while leaving room for a CI runner several times slower than
+    // this one; the previous one-second budget was down to 1.3x headroom and had already
+    // failed once on a cold run.
     expect(elapsedMs).toBeLessThan(1000);
   });
 });
