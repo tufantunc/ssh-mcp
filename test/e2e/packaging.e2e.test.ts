@@ -188,8 +188,19 @@ describe.skipIf(!serverBuilt || !pnpmAvailable)('E2E — strict dependency resol
           'zod',
         ];
         for (const m of mods) await import(m);
+        // Named exports, not bare imports. \`await import(m)\` above proves the package
+        // resolves; it says nothing about whether the symbol tracer.ts destructures is
+        // still there. Every one of the four it uses gets a guard, because a renamed
+        // export is invisible to tsc (the imports are dynamic) and \`initTracing\`
+        // swallows the resulting TypeError into a console.error — tracing goes off and
+        // the server carries on. Two of these were missing until the 0.221 bump, and
+        // they were the two that bump moved.
+        const { NodeSDK } = await import('@opentelemetry/sdk-node');
+        const { OTLPTraceExporter } = await import('@opentelemetry/exporter-trace-otlp-http');
         const { resourceFromAttributes } = await import('@opentelemetry/resources');
         const { ATTR_SERVICE_NAME } = await import('@opentelemetry/semantic-conventions');
+        if (typeof NodeSDK !== 'function') throw new Error('NodeSDK missing');
+        if (typeof OTLPTraceExporter !== 'function') throw new Error('OTLPTraceExporter missing');
         if (typeof resourceFromAttributes !== 'function') throw new Error('resourceFromAttributes missing');
         if (typeof ATTR_SERVICE_NAME !== 'string') throw new Error('ATTR_SERVICE_NAME missing');
         console.log('resolved');
