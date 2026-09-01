@@ -465,3 +465,63 @@ describe('the second review round\'s uncovered forms', () => {
     expect(classifyCommand(command).class, JSON.stringify(command)).toBe(expected);
   });
 });
+
+describe('the narrow review round\'s findings', () => {
+  it('an awk redirection is caught however long the printed text is', () => {
+    // The canonical attack prints an SSH public key, so the `>` sits some four hundred
+    // characters after the `print`. Bounding the scan to keep the regex linear traded the
+    // quadratic for a hole exactly there.
+    const key = 'A'.repeat(372);
+    const command = `awk 'BEGIN{print "ssh-rsa ${key} x" > "/root/.ssh/authorized_keys"}'`;
+    expect(classifyCommand(command).class).toBe('destructive');
+  });
+
+  it('and reading it is still linear', () => {
+    const started = process.hrtime.bigint();
+    classifyCommand(`awk '${'print '.repeat(30000)}'`);
+    expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(1500);
+  });
+
+  it.each([
+    // A `print` reaches only to the end of its statement, so a later comparison is not a
+    // redirection. And `sprintf` contains `printf` while printing nothing.
+    ["awk '{print $1} $3 > 100' f", 'safe'],
+    ["awk '{print $1}; $2 > 5' f", 'safe'],
+    ['awk \'{if (sprintf("%d",$1) > "5") print}\' f', 'safe'],
+    ['awk \'{print $1 > "/tmp/o"}\'', 'destructive'],
+  ])('%s is %s', (command, expected) => {
+    expect(classifyCommand(command).class, command).toBe(expected);
+  });
+
+  it.each([
+    'find . -name perl -type f',
+    'find . -name node -newer /tmp/x',
+    'find . -type f -perm 644',
+  ])('%s is a search, not a carrier', (command) => {
+    // `/^-[A-Za-z]+$/` matched every single-dash long option too, and `find`'s predicates
+    // are full of them — `-type` contains perl's `-e`.
+    expect(classifyCommand(command).class, command).toBe('read-only');
+  });
+
+  it.each(['grep -e perl -e python /etc/shells', 'grep -e node package.json'])(
+    '%s searches for a name rather than running it',
+    (command) => {
+      expect(classifyCommand(command).class, command).toBe('read-only');
+    },
+  );
+
+  it('while a carrier behind a wrapper is still read', () => {
+    // The rule that keeps `grep -e perl` out must not cost this: `-m` takes no value.
+    expect(classifyCommand("nsenter -t 1 -m sh -c 'sudo id'").class).toBe('privileged');
+    expect(classifyCommand("xargs -I {} sh -c 'sudo id'").class).toBe('privileged');
+  });
+
+  it.each([
+    ['echo x | bash -- script.sh', 'safe'],
+    ['echo "sudo id" | bash -s -- arg', 'destructive'],
+    ['echo "sudo id" | bash -s', 'destructive'],
+  ])('%s is %s', (command, expected) => {
+    // Without `-s` the word after `--` is the script itself; with it, stdin is the script.
+    expect(classifyCommand(command).class, command).toBe(expected);
+  });
+});

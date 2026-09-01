@@ -217,8 +217,35 @@ const AWK_SOURCE_FLAGS = new Set(['-e', '--source']);
  * `awk '{print $1 > $2}'` writes. `@` likewise only counts as gawk's `@load`/`@include`,
  * not as the at-sign in an email address.
  */
-const AWK_ESCAPE =
-  /\bsystem\s*\(|\bgetline\b|@(?:load|include)\b|(?<!\|)\|(?!\|)|\b(?:print|printf)\b[^;{}>]{0,200}>/;
+const AWK_ESCAPE = /\bsystem\s*\(|\bgetline\b|@(?:load|include)\b|(?<!\|)\|(?!\|)/;
+
+/**
+ * Whether an awk program redirects output to a file.
+ *
+ * A single left-to-right pass rather than a regex. `\bprint\b[^;{}]*>` is quadratic —
+ * with no `>` to find, every `print` scans to the end — and bounding the scan to fix that
+ * traded the bug for a hole: the canonical attack prints an SSH public key, so the `>` sits
+ * some four hundred characters after the `print` and any bound short enough to help misses
+ * it. One pass costs the same as the regex and needs no bound.
+ */
+function awkRedirects(program: string): boolean {
+  let sawPrint = false;
+  for (let i = 0; i < program.length; i++) {
+    const ch = program[i];
+    // A statement boundary ends the reach of a `print`.
+    if (ch === ';' || ch === '{' || ch === '}') { sawPrint = false; continue; }
+    if (ch === '>') { if (sawPrint) return true; continue; }
+    if (ch !== 'p') continue;
+    const before = i === 0 ? '' : program[i - 1];
+    // `sprintf` contains `printf` but prints nothing.
+    if (/[A-Za-z0-9_]/.test(before)) continue;
+    if (!program.startsWith('print', i)) continue;
+    const end = i + (program.startsWith('printf', i) ? 6 : 5);
+    const after = program[end];
+    if (after === undefined || !/[A-Za-z0-9_]/.test(after)) sawPrint = true;
+  }
+  return false;
+}
 
 /** `find … -exec <cmd> +` runs cmd. */
 const FIND_EXEC_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
@@ -445,7 +472,7 @@ export function nestedCommands(command: string): string[] {
     // audit record. `AWK_ESCAPE` is the whole awk rule.
     for (let i = 0; i < words.length; i++) {
       const spec = INTERPRETERS[stripPath(unquote(words[i]))];
-      if (spec === undefined) continue;
+      if (spec === undefined || isFlagValue(words, i, spec.flags)) continue;
       const program = programAfterFlag(words, i, spec.flags);
       if (program !== null) found.push(program);
     }
@@ -895,6 +922,26 @@ function effectiveCommandIndex(words: string[]): number {
 }
 
 /**
+ * Whether an interpreter name is the value of the flag before it rather than a command.
+ *
+ * The scan looks at every word so that a carrier behind an unlisted wrapper is not lost,
+ * and requires a program-bearing flag to follow before it believes one. That is not quite
+ * enough: `grep -e perl -e python` puts `perl` after a flag and a second `-e` after it,
+ * which reads as perl being handed a program. A search term is not a command.
+ *
+ * The test is deliberately narrow — the preceding flag must be one of *this interpreter's*
+ * program flags. Any flag at all was too much: `nsenter -t 1 -m sh -c 'sudo id'` puts the
+ * shell after `-m`, which takes no value, and dropping it lost a real elevation. Nothing
+ * here can know an arbitrary tool's grammar, so `sed -n perl -e p` — a shape no one
+ * writes — is still read as a carrier.
+ */
+function isFlagValue(words: string[], i: number, flags: string[]): boolean {
+  if (i === 0) return false;
+  const previous = words[i - 1];
+  return previous.length > 1 && previous.startsWith('-') && flags.includes(previous);
+}
+
+/**
  * The program an interpreter was handed on its command line, or null.
  *
  * Only flags may sit between the interpreter and its flag; anything else means this was
@@ -916,8 +963,7 @@ function programAfterFlag(words: string[], from: number, flags: string[]): strin
     }
     // The program flag need not lead the cluster: `bash -xc 'sudo id'` runs exactly what
     // `bash -cx 'sudo id'` runs, and a prefix test saw the second and missed the first.
-    const clustered = clusteredFlag(word, flags);
-    if (clustered !== null) return clustered === '' ? (words[j + 1] ?? null) : clustered;
+    if (clusterCarriesFlag(word, flags)) return words[j + 1] ?? null;
     if (!word.startsWith('-')) return null;
   }
   return null;
@@ -929,15 +975,15 @@ function programAfterFlag(words: string[], from: number, flags: string[]): strin
  * Clusters only — a run of single letters after one dash. Long flags and attached values
  * are handled before this is reached.
  */
-function clusteredFlag(word: string, flags: string[]): string | null {
-  if (!/^-[A-Za-z]+$/.test(word)) return null;
+function clusterCarriesFlag(word: string, flags: string[]): boolean {
+  // Three letters at most. `/^-[A-Za-z]+$/` alone also matches every single-dash long
+  // option, and `find`'s predicates are full of them: `-type` contains perl's `-e`, so
+  // `find . -name perl -type f` read as a carrier and asked for approval.
+  if (!/^-[A-Za-z]{2,3}$/.test(word)) return false;
   const body = word.slice(1);
-  for (const flag of flags) {
-    if (flag.length !== 2) continue;
-    const at = body.indexOf(flag[1]);
-    if (at !== -1) return body.slice(at + 1);
-  }
-  return null;
+  // A cluster is letters only, so whatever follows the program flag is more flags — the
+  // program itself is always the next word.
+  return flags.some((flag) => flag.length === 2 && body.includes(flag[1]));
 }
 
 /** awk flags that take no value, so the program still follows them. */
@@ -983,7 +1029,7 @@ function awkProgram(args: string[]): string | null {
 function awkProgramIsUnreadable(args: string[]): boolean {
   const program = awkProgram(args);
   if (program === null) return true;
-  return AWK_ESCAPE.test(program);
+  return AWK_ESCAPE.test(program) || awkRedirects(program);
 }
 
 /** Spellings of "the program is on standard input" that look like a file operand. */
@@ -1006,12 +1052,22 @@ function readsProgramFromStdin(words: string[]): boolean {
   const spec = INTERPRETERS[bin];
   if (spec === undefined) return false;
   const flags = spec.flags;
+  let sawStdinFlag = false;
   for (let j = idx + 1; j < words.length; j++) {
     const word = words[j];
     if (flags.some((f) => word === f || word.startsWith(f))) return false;
     // `--` ends the interpreter's own arguments; what follows is `$1..$n`, so a program
     // still has to come from somewhere and `bash -s -- arg` reads stdin.
-    if (word === '--' || STDIN_PATHS.has(word)) return true;
+    // `-s` says outright that the script comes from stdin, so everything after it is
+    // `$1..$n` whatever it looks like.
+    if (word === '-s') { sawStdinFlag = true; continue; }
+    // `--` ends the interpreter's own arguments. Without `-s` the next word is the script
+    // itself, so `bash -- process.sh` reads a file while `bash -s -- arg` reads stdin.
+    if (word === '--') {
+      const next = words[j + 1];
+      return sawStdinFlag || next === undefined || STDIN_PATHS.has(next);
+    }
+    if (STDIN_PATHS.has(word)) return true;
     if (!word.startsWith('-')) return false;
   }
   return true;
@@ -1033,9 +1089,9 @@ function hasUnreadableProgram(command: string): boolean {
 
     for (let j = 0; j < words.length; j++) {
       const spec = INTERPRETERS[stripPath(unquote(words[j]))];
-      if (spec !== undefined && !spec.readable && programAfterFlag(words, j, spec.flags) !== null) {
-        return true;
-      }
+      if (spec === undefined || spec.readable) continue;
+      if (isFlagValue(words, j, spec.flags)) continue;
+      if (programAfterFlag(words, j, spec.flags) !== null) return true;
     }
 
     // awk is keyed on the command word rather than scanned for. An interpreter's program
