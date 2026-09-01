@@ -11,7 +11,7 @@
 # the tag, the same arrangement the four sshd images in docker-compose.yml
 # already use. Without that, a digest pin is how a base image quietly stays on
 # unpatched CVEs for a year — strictly worse than the moving tag it replaced.
-FROM node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436 AS builder
+FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS builder
 WORKDIR /app
 COPY package*.json ./
 # --ignore-scripts because `prepare` runs `npm run build`, and at this layer neither
@@ -25,7 +25,7 @@ COPY tsconfig.json ./
 COPY src/ ./src/
 RUN npm run build
 
-FROM node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436
+FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 WORKDIR /app
 
 RUN groupadd -r -g 65532 appgroup && useradd -r -u 65532 -g appgroup appuser
