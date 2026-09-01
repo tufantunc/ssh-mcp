@@ -343,3 +343,67 @@ describe('normalising does not invent a command that was never written', () => {
     expect(findForbiddenMatch(command), command).toBeNull();
   });
 });
+
+describe('a carrier is found wherever it sits, not only at the command word', () => {
+  it.each([
+    "xargs -I {} sh -c 'sudo id'",
+    "flock /tmp/l sh -c 'sudo id'",
+    "chroot /mnt sh -c 'sudo id'",
+    "nsenter -t 1 -m sh -c 'sudo id'",
+    "systemd-run sh -c 'sudo id'",
+  ])('%s reaches privileged', (command) => {
+    // Keying on the segment's command word alone lost every carrier behind a wrapper this
+    // file does not list, and all five went from `privileged` to `safe`. The guard against
+    // matching a mention is the program-bearing flag, not the position.
+    expect(classifyCommand(command).class, command).toBe('privileged');
+  });
+
+  it('and a mention still carries nothing', () => {
+    expect(classifyCommand('cat /usr/bin/python3').class).toBe('read-only');
+    expect(classifyCommand('readlink -f /usr/bin/awk').class).toBe('read-only');
+    expect(classifyCommand('man awk').class).toBe('safe');
+  });
+});
+
+describe('awk flags this file does not recognise make the program unreadable', () => {
+  it.each([
+    "gawk -D x 'BEGIN{system(\"sudo id\")}'",
+    "awk -i /dev/null 'BEGIN{system(\"sudo id\")}'",
+    "mawk -W interactive 'BEGIN{system(\"sudo id\")}'",
+    'gawk -E /tmp/evil.awk',
+  ])('%s is gated', (command) => {
+    // Enumerating the value-taking flags and skipping the rest handed the gate the flag's
+    // value instead of the program. Fail closed on a flag the table does not know.
+    expect(classifyCommand(command).class, command).not.toBe('safe');
+  });
+
+  it.each([
+    "awk -F: '{print $1}' /etc/passwd",
+    "awk -v n=1 '{print $1}' f",
+    "awk --posix '{print $1}' f",
+    "awk '{print $1 \"@\" $2}' f",
+  ])('%s is left alone', (command) => {
+    expect(classifyCommand(command).class, command).toBe('safe');
+  });
+});
+
+describe('a program on stdin is unreadable however the interpreter is told to read it', () => {
+  it.each([
+    'echo "sudo id" | bash -s -- arg',
+    'echo "sudo id" | bash /dev/stdin',
+    'echo "sudo id" | sh -',
+  ])('%s is gated', (command) => {
+    expect(classifyCommand(command).class, command).not.toBe('safe');
+  });
+});
+
+describe('reading an awk program cannot be made quadratic', () => {
+  it('a program full of print tokens costs linear time', () => {
+    // `[^;{}]*>` scanned to end-of-input for every `print`, so the cost was quadratic in
+    // the program length — 192KB took 8.7 seconds inside the policy gate.
+    const command = `awk '${'print '.repeat(30000)}'`;
+    const started = process.hrtime.bigint();
+    classifyCommand(command);
+    expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(1500);
+  });
+});

@@ -218,7 +218,7 @@ const AWK_SOURCE_FLAGS = new Set(['-e', '--source']);
  * not as the at-sign in an email address.
  */
 const AWK_ESCAPE =
-  /\bsystem\s*\(|\bgetline\b|@(?:load|include)\b|(?<!\|)\|(?!\|)|\b(?:print|printf)\b[^;{}]*>/;
+  /\bsystem\s*\(|\bgetline\b|@(?:load|include)\b|(?<!\|)\|(?!\|)|\b(?:print|printf)\b[^;{}>]{0,200}>/;
 
 /** `find … -exec <cmd> +` runs cmd. */
 const FIND_EXEC_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
@@ -433,17 +433,21 @@ export function nestedCommands(command: string): string[] {
   // `cat /usr/bin/python3` names an interpreter without running one.
   const segments = tokenizeSegmentsDetailed(command);
   for (const { words } of segments) {
-    const idx = effectiveCommandIndex(words);
-    if (idx !== -1) {
-      const bin = stripPath(words[idx]);
-      const spec = INTERPRETERS[bin];
-      if (spec !== undefined) {
-        const program = programAfterFlag(words, idx, spec.flags);
-        if (program !== null) found.push(program);
-      }
-      // No awk arm. An awk program is not shell, and reading it as one classified
-      // `awk '$1 == "root"'` as an unresolvable command word and put `binary: "$1"` into
-      // the audit record. `AWK_ESCAPE` is the whole awk rule.
+    // Every word, not just the command word. Stopping at the head lost the carrier behind
+    // any wrapper this file does not list: `xargs -I {} sh -c 'sudo id'` stops on `{}`, and
+    // `flock`, `chroot`, `nsenter` and `systemd-run` are not wrappers it knows — all six
+    // went from `privileged` to `safe`. What keeps this from matching a *mention* is not
+    // where it looks but what it requires: `programAfterFlag` returns null unless a
+    // program-bearing flag actually follows, so `cat /usr/bin/python3` carries nothing.
+    //
+    // No awk arm. An awk program is not shell, and reading it as one classified
+    // `awk '$1 == "root"'` as an unresolvable command word and put `binary: "$1"` into the
+    // audit record. `AWK_ESCAPE` is the whole awk rule.
+    for (let i = 0; i < words.length; i++) {
+      const spec = INTERPRETERS[stripPath(unquote(words[i]))];
+      if (spec === undefined) continue;
+      const program = programAfterFlag(words, i, spec.flags);
+      if (program !== null) found.push(program);
     }
 
     // `-exec` is a flag rather than a command word, so this one is still a scan.
@@ -936,6 +940,14 @@ function clusteredFlag(word: string, flags: string[]): string | null {
   return null;
 }
 
+/** awk flags that take no value, so the program still follows them. */
+const AWK_BARE_FLAGS = new Set([
+  '-b', '-c', '--traditional', '--compat', '-C', '--copyright', '-g', '--gen-pot',
+  '-h', '--help', '-n', '--non-decimal-data', '-N', '--use-lc-numeric', '-P', '--posix',
+  '-r', '--re-interval', '-S', '--sandbox', '-t', '--lint-old', '-V', '--version',
+  '-d', '--dump-variables', '-O', '--optimize',
+]);
+
 /** awk's program: the first operand, once value-taking flags and their values are past. */
 function awkProgram(args: string[]): string | null {
   for (let i = 0; i < args.length; i++) {
@@ -946,12 +958,21 @@ function awkProgram(args: string[]): string | null {
     // `-v x=1` and `-F :` take a separate word. Reading that word as the program is what
     // let `awk -F ':' 'BEGIN{system("sudo id")}'` past the gate entirely.
     if (AWK_VALUE_FLAGS.has(word)) { i += 1; continue; }
+    // `-F:` and `-vx=1` carry the value in the same word, so no operand is consumed.
+    if ([...AWK_VALUE_FLAGS].some((f) => f.length === 2 && word.startsWith(f) && word.length > 2)) {
+      continue;
+    }
     if (word.startsWith('-') && word.length > 1) {
       const file = [...AWK_FILE_FLAGS].find((f) => word.startsWith(f));
       if (file !== undefined) return null;
       const source = [...AWK_SOURCE_FLAGS].find((f) => word.startsWith(f));
       if (source !== undefined) return word.slice(source.length).replace(/^=/, '');
-      continue;
+      if (AWK_BARE_FLAGS.has(word)) continue;
+      // An unrecognised flag may or may not take a value, so the operand position is
+      // unknown and the next word may not be the program. Enumerating the value-taking
+      // flags and skipping the rest is what let `-D x` and `-W interactive` hand the gate
+      // the wrong string; saying "unreadable" does not depend on the table being complete.
+      return null;
     }
     return word;
   }
@@ -964,6 +985,9 @@ function awkProgramIsUnreadable(args: string[]): boolean {
   if (program === null) return true;
   return AWK_ESCAPE.test(program);
 }
+
+/** Spellings of "the program is on standard input" that look like a file operand. */
+const STDIN_PATHS = new Set(['-', '/dev/stdin', '/dev/fd/0', '/proc/self/fd/0']);
 
 /**
  * Whether a segment's command word is an interpreter with no program of its own.
@@ -985,6 +1009,9 @@ function readsProgramFromStdin(words: string[]): boolean {
   for (let j = idx + 1; j < words.length; j++) {
     const word = words[j];
     if (flags.some((f) => word === f || word.startsWith(f))) return false;
+    // `--` ends the interpreter's own arguments; what follows is `$1..$n`, so a program
+    // still has to come from somewhere and `bash -s -- arg` reads stdin.
+    if (word === '--' || STDIN_PATHS.has(word)) return true;
     if (!word.startsWith('-')) return false;
   }
   return true;
@@ -1004,14 +1031,21 @@ function hasUnreadableProgram(command: string): boolean {
     const { words, sep } = segments[i];
     if (sep === '|' && readsProgramFromStdin(words)) return true;
 
+    for (let j = 0; j < words.length; j++) {
+      const spec = INTERPRETERS[stripPath(unquote(words[j]))];
+      if (spec !== undefined && !spec.readable && programAfterFlag(words, j, spec.flags) !== null) {
+        return true;
+      }
+    }
+
+    // awk is keyed on the command word rather than scanned for. An interpreter's program
+    // flag is evidence that it was invoked; awk's program is a positional operand, so
+    // nothing in the argument list distinguishes running awk from naming it, and scanning
+    // made `readlink -f /usr/bin/awk` and `man awk` destructive.
     const idx = effectiveCommandIndex(words);
     if (idx === -1) continue;
-    const bin = stripPath(words[idx]);
-    const spec = INTERPRETERS[bin];
-    if (spec !== undefined && !spec.readable && programAfterFlag(words, idx, spec.flags) !== null) {
-      return true;
-    }
-    if (AWK_BINARIES.has(bin) && awkProgramIsUnreadable(words.slice(idx + 1))) return true;
+    const head = stripPath(unquote(words[idx]));
+    if (AWK_BINARIES.has(head) && awkProgramIsUnreadable(words.slice(idx + 1))) return true;
   }
   return false;
 }
