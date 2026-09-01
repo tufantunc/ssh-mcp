@@ -157,36 +157,125 @@ const SHELL_BINARIES = new Set([
 const MAX_NESTING_DEPTH = 8;
 
 /**
- * Split on whitespace the way a shell would, keeping quoted runs together.
+ * Split a command into segments of words, resolving quoting as a shell would.
  *
- * `parseSegments` splits on `/\s+/`, which turns `sh -c "sudo id"` into
- * `["sh", "-c", "\"sudo", "id\""]` — the argument is no longer a unit, so nothing
- * downstream can classify it as the command it is.
+ * The classifier's regexes were written against the command as sent, but the transport
+ * removes quoting before the command runs, so `rm -rf "/etc"` matched no destructive
+ * pattern and `s"u"do id` named no privilege prefix. Every consumer that used to split on
+ * `/[;&|\n]/` and `/\s+/` reads this instead, so quote removal happens once, in one
+ * place, rather than being re-derived per rule.
+ *
+ * Not a shell parser. Variable expansion, arithmetic and here-documents are out of scope —
+ * `hasUnnameableCommand` is what refuses a command word this cannot resolve.
  */
-function splitRespectingQuotes(command: string): string[] {
-  const words: string[] = [];
+function tokenizeSegments(command: string): string[][] {
+  return tokenizeSegmentsDetailed(command).map((segment) => segment.words);
+}
+
+/**
+ * The same split, keeping the separator that introduced each segment.
+ *
+ * Only the pipe rules need it: `|` feeds one command's output into the next, while `;`
+ * and `&` merely sequence, and a rule about pipes must not fire on a rule about sequences.
+ * Deriving both views from one tokeniser is what stops the two from drifting apart.
+ */
+function tokenizeSegmentsDetailed(
+  command: string,
+  honorQuotes = true,
+): Array<{ words: string[]; sep: string }> {
+  const segments: Array<{ words: string[]; sep: string }> = [];
+  let pending = '';
+  let words: string[] = [];
   let current = '';
   let quote: string | null = null;
+  let escaped = false;
+
+  const endWord = () => {
+    if (current) words.push(current);
+    current = '';
+  };
+  const endSegment = (sep: string) => {
+    endWord();
+    if (words.length > 0) segments.push({ words, sep: pending });
+    words = [];
+    pending = sep;
+  };
 
   for (const ch of command) {
+    if (escaped) {
+      // A backslash quotes the next character, so `\reboot` runs reboot. Keeping the
+      // character and dropping the backslash is what the shell does.
+      current += ch;
+      escaped = false;
+      continue;
+    }
     if (quote) {
+      // Backslash is literal inside single quotes; inside double quotes it escapes.
+      if (ch === '\\' && quote === '"') { escaped = true; continue; }
       if (ch === quote) quote = null;
       else current += ch;
       continue;
     }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      continue;
-    }
-    if (/\s/.test(ch)) {
-      if (current) words.push(current);
-      current = '';
-      continue;
-    }
+    if (ch === '\\') { escaped = true; continue; }
+    if (honorQuotes && (ch === '"' || ch === "'")) { quote = ch; continue; }
+    if (ch === ';' || ch === '&' || ch === '|' || ch === '\n') { endSegment(ch); continue; }
+    if (/\s/.test(ch)) { endWord(); continue; }
     current += ch;
   }
-  if (current) words.push(current);
-  return words;
+  endSegment('');
+
+  // A quote left open at the end is not a command a shell would run — it is a syntax
+  // error. Reading it as one long quoted argument is the dangerous reading: `echo "hi;
+  // sudo id` then never splits on the `;` and the elevation disappears, which measured as
+  // `privileged` before this tokeniser and `safe` after. So fall back to the scan that
+  // treats the quote character as ordinary text, which splits and still sees `sudo id`.
+  if (quote !== null) return tokenizeSegmentsDetailed(command, false);
+  return segments;
+}
+
+/**
+ * The command rebuilt from its tokens, for the regex rules to match against.
+ *
+ * Segments are rejoined with `; ` so a pattern cannot match across two commands that the
+ * shell would run separately.
+ */
+function normalizeCommand(command: string): string {
+  return tokenizeSegments(command)
+    .map((words) => words.filter((word) => !SEPARATOR_CHAR.test(word)).join(' '))
+    .join('; ');
+}
+
+/**
+ * A separator inside a token, which is only possible if it was quoted.
+ *
+ * The tokeniser splits on unquoted separators, so a token still holding one came from
+ * inside quotes — the shell will not split there, and its contents are data. Rejoining it
+ * into the pattern text is what makes an argument read as a command: `echo "hello; rm -rf
+ * /"` prints a string, and normalising it produced `echo hello; rm -rf /`, which matched
+ * the never-allowed list. Dropping those tokens keeps quote removal doing the job it was
+ * added for — `rm -rf "/etc"`, whose tokens hold no separator — without letting a quoted
+ * argument impersonate a command. A carrier that really does hand over a quoted command
+ * (`sh -c "ls; rm -rf /etc"`) is read by `nestedCommands`, not by this.
+ */
+const SEPARATOR_CHAR = /[;&|\n]/;
+
+/**
+ * Try a regex against the command as written and against the tokenised form.
+ *
+ * Normalising alone is not enough. It rebuilds the command from tokens, so the shell
+ * metacharacters between them are gone, and a pattern that matches across a separator no
+ * longer fires — the fork bomb, whose `:|:&` needs the literal `|` and `&`, is the case
+ * that shows this. Normalising is still what defeats `rm -rf "/etc"`. Neither form is a
+ * superset of the other, so both are tried: for a pattern whose whole job is to notice
+ * something, the union is the only direction that cannot lose a match.
+ *
+ * Deliberately scoped to regexes. The word-based rules in `FORBIDDEN_RULES` already
+ * tokenise, and handing them the normalised string turns a separator that was safely
+ * inside a quoted argument into a real one — `grep -E "warn|reboot" syslog` became an
+ * unconditional refusal, which is the mention-vs-invocation bug of #91 all over again.
+ */
+function matchesEitherForm(command: string, test: (form: string) => boolean): boolean {
+  return test(command) || test(normalizeCommand(command));
 }
 
 /**
@@ -241,7 +330,7 @@ export function nestedCommands(command: string): string[] {
 
   // `sh -c <command>`. Carries no substitution at all, so the scan above does not
   // see it; found while mapping the reported bypass rather than in the report.
-  const words = splitRespectingQuotes(command);
+  const words = tokenizeSegments(command).flat();
   for (let i = 0; i < words.length; i++) {
     if (!SHELL_BINARIES.has(stripPath(unquote(words[i])))) continue;
     for (let j = i + 1; j < words.length; j++) {
@@ -348,10 +437,16 @@ interface Segment {
 
 function parseSegments(command: string): Segment[] {
   const segments: Segment[] = [];
+  for (const words of tokenizeSegments(command)) {
+    const segment = parseWords(words);
+    if (segment !== null) segments.push(segment);
+  }
+  return segments;
+}
 
-  for (const raw of command.split(/[;&|\n]/)) {
-    const words = raw.trim().split(/\s+/).filter(Boolean);
-
+/** The same, for callers that already hold the tokenised words. */
+function parseWords(words: string[]): Segment | null {
+  {
     let i = 0;
     while (i < words.length && PRIVILEGE_PREFIXES.has(stripPath(words[i]))) {
       i++;
@@ -363,11 +458,10 @@ function parseSegments(command: string): Segment[] {
     }
 
     if (i < words.length) {
-      segments.push({ head: stripPath(words[i]), args: words.slice(i + 1) });
+      return { head: stripPath(words[i]), args: words.slice(i + 1) };
     }
   }
-
-  return segments;
+  return null;
 }
 
 /**
@@ -435,8 +529,8 @@ function elevatedBinary(words: string[]): string | null {
  * privileged decision — in the audit log, the OTel span and OPA's input (#134).
  */
 function elevatedBinaryOf(command: string): string | null {
-  for (const segment of command.split(/[;&|\n]/)) {
-    const found = elevatedBinary(segment.trim().split(/\s+/).filter(Boolean));
+  for (const words of tokenizeSegments(command)) {
+    const found = elevatedBinary(words);
     if (found !== null) return found;
   }
   return null;
@@ -490,7 +584,13 @@ const DOWNLOADERS = new Set(['curl', 'wget']);
  * running one when it succeeds.
  */
 function pipesDownloadIntoShell(command: string): boolean {
-  const heads = command.split('|').map((part) => parseSegments(part)[0]?.head);
+  // One head per pipe stage. Splitting on every separator would make `curl -O x;
+  // bash build.sh` — download, then run a local script — match a rule whose label says
+  // "piping a download into a shell", on a list that cannot be switched off.
+  const segments = tokenizeSegmentsDetailed(command);
+  const heads = segments
+    .filter((segment, i) => i === 0 || segment.sep === '|')
+    .map((segment) => parseWords(segment.words)?.head);
   const firstDownload = heads.findIndex((h) => h !== undefined && DOWNLOADERS.has(h));
   if (firstDownload === -1) return false;
   return heads.slice(firstDownload + 1).some((h) => h !== undefined && SHELLS.has(h));
@@ -524,7 +624,10 @@ interface ForbiddenRule {
 }
 
 const FORBIDDEN_RULES: ForbiddenRule[] = [
-  ...FORBIDDEN_PATTERNS.map((re) => ({ label: String(re), test: (c: string) => re.test(c) })),
+  ...FORBIDDEN_PATTERNS.map((re) => ({
+    label: String(re),
+    test: (c: string) => matchesEitherForm(c, (form) => re.test(form)),
+  })),
   {
     label: 'invoking a power-state command (shutdown, reboot, halt, poweroff) or eval',
     test: (command) => invokedWords(command).some((w) => FORBIDDEN_INVOCATIONS.has(w)),
@@ -584,7 +687,10 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
  * either.
  */
 function isDestructive(command: string): boolean {
-  return isForbidden(command) || DESTRUCTIVE_PATTERNS.some((re) => re.test(command));
+  return (
+    isForbidden(command) ||
+    matchesEitherForm(command, (form) => DESTRUCTIVE_PATTERNS.some((re) => re.test(form)))
+  );
 }
 
 const LEADING_PRIVILEGE_PREFIXES = [
@@ -595,7 +701,12 @@ const LEADING_PRIVILEGE_PREFIXES = [
 ];
 
 export function extractBinary(command: string): string {
-  let cmd = command.trim();
+  // The first segment's words, so quoting is resolved — `s"u"do id` used to report
+  // `s"u"do` in the audit record and the refusal message. Reading the normalised whole
+  // command instead would be wrong in the other direction: it rejoins segments with
+  // `; `, so `ls | grep x` would report `ls;`, and this name reaches the audit record,
+  // the OTel span and OPA's input (#134). A separator is not a binary.
+  let cmd = (tokenizeSegments(command)[0] ?? []).join(' ').trim();
   for (const prefix of LEADING_PRIVILEGE_PREFIXES) {
     cmd = cmd.replace(prefix, '').trim();
   }
@@ -655,8 +766,7 @@ function effectiveCommandWord(words: string[]): string | null {
  * promoting that would put a prompt on most ordinary shell usage.
  */
 function hasUnnameableCommand(command: string): boolean {
-  for (const raw of command.split(/[;&|\n]/)) {
-    const words = raw.trim().split(/\s+/).filter(Boolean);
+  for (const words of tokenizeSegments(command)) {
     const head = effectiveCommandWord(words);
     if (head !== null && /[$`]/.test(head)) return true;
   }
@@ -723,7 +833,7 @@ export function classifyCommand(command: string, depth = 0): ParsedCommand {
     return { binary, fullCommand, class: 'destructive' as CommandClass };
   }
 
-  const twoWordPrefix = fullCommand.split(/\s+/).slice(0, 2).join(' ');
+  const twoWordPrefix = (tokenizeSegments(fullCommand)[0] ?? []).slice(0, 2).join(' ');
   if (READ_ONLY_ALLOWLIST.has(binary) || READ_ONLY_ALLOWLIST.has(twoWordPrefix)) {
     if (SHELL_CONTROL_CHARS.test(trimmed)) {
       return { binary, fullCommand, class: 'safe' as CommandClass };
