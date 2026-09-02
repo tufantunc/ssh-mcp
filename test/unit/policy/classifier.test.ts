@@ -313,6 +313,50 @@ describe('forbidden pattern matching cost', () => {
   }, 30_000);
 });
 
+describe('the fork-bomb rule tolerates the spacing bash tolerates', () => {
+  it.each([
+    ':(){ :|:& };:',
+    ': () { : | : & } ; :',
+    ': (){ :|:& };:',
+    ':()  {  : | : &  }  ;  :',
+    ':()\t{\t:|:&\t}\t;\t:',
+  ])('%j is refused', (command) => {
+    // The pattern permitted spaces around the braces but not before the parentheses or
+    // around the pipe, so three of these ran and classified `safe`.
+    expect(isForbidden(command)).toBe(true);
+  });
+
+  it.each([
+    'docker run -v /a:/b img',
+    'PATH=/x:/y ls',
+    'echo a:b:c',
+    'git log --format=%h:%s',
+    'ssh user@host:/path',
+    "awk -F: '{print $1}' /etc/passwd",
+    'curl http://x:8080/',
+    'true; :',
+  ])('%j is not', (command) => {
+    expect(isForbidden(command)).toBe(false);
+  });
+
+  it.each([':(){ :&:& };:', ':(){ : ;: & };:'])(
+    '%j escapes too, and the comment says so',
+    (command) => {
+      // A body that separates the two calls with `&` or `;` rather than `|`. Widening the
+      // pattern to cover these would widen a list no role, tier or approval mode can
+      // override, so the trade is left where it is — but written down, not implied away.
+      expect(isForbidden(command)).toBe(false);
+    },
+  );
+
+  it('does not claim to catch a fork bomb under another name', () => {
+    // `f(){ f|f& };f` is the same bomb. Matching it needs a backreference over an
+    // unbounded body, and this file has already shipped one ReDoS; the impact is a
+    // denial of service against the target host, not against this server.
+    expect(isForbidden('f(){ f|f& };f')).toBe(false);
+  });
+});
+
 describe('forbidden patterns still match after the rewrite', () => {
   const forbids = (command: string) => isForbidden(command);
 

@@ -487,7 +487,17 @@ When `--opaUrl` is set, commands the built-in engine allows are additionally
 evaluated by OPA. **OPA can only narrow.** A command the built-in engine has
 already denied returns that denial without OPA being consulted at all, so a
 sidecar answering `allow` cannot grant a class the role bindings withhold. To
-widen, edit `[policy]`. The request shape follows the AuthZEN Access Evaluation contract:
+widen, edit `[policy]`.
+
+An outage falls back to the local decision and logs one warning per minute. That is the
+default because OPA is an *additional* deny layer and stopping all work would be the worse
+failure — but an operator who deployed OPA *as* the authorization gate loses that gate
+during the outage, and the only signal is a stderr line MCP clients usually discard.
+`--opaFailClosed` makes the gate being down mean no; the refusal carries `ruleId:
+"opa-unavailable"` so the audit record says the gate was down rather than implying a policy
+refused the command.
+
+The request shape follows the AuthZEN Access Evaluation contract:
 
 ```json
 {
@@ -500,7 +510,7 @@ widen, edit `[policy]`. The request shape follows the AuthZEN Access Evaluation 
 }
 ```
 
-OPA responds with `{ "result": true/false }`. If OPA denies (`result: false`), the command is blocked even if the built-in engine allows it. If OPA is unreachable, the built-in engine's decision stands (fail-open to avoid locking out access).
+OPA responds with `{ "result": true/false }`. If OPA denies (`result: false`), the command is blocked even if the built-in engine allows it. If OPA is unreachable, the built-in engine's decision stands by default (fail-open, to avoid locking out access); `--opaFailClosed` refuses instead. A 200 that carries no boolean `result` counts as unreachable — that is what OPA answers for an undefined document, so a misnamed package or an unactivated bundle is an outage rather than consent.
 
 Example Rego policy (`ssh-mcp.rego`):
 ```rego
@@ -710,6 +720,8 @@ Secrets are **never** passed as CLI arguments.
 | `--strictConfigAcl` | false | Windows: refuse on every ACL finding, including a read-only over-grant |
 | `--disableApproval` | false | Skip the approval gate (quick start profile only) |
 | `--opaUrl` | — | OPA sidecar URL for external policy |
+| `--opaFailClosed` | false | Refuse every command while OPA is unreachable, instead of falling back to local policy |
+| `--opaTimeoutMs` | 10000 | How long to wait for the OPA sidecar. Lower makes the fail-open cheaper to reach; higher makes an outage slower to notice |
 | `--commandQuota` | 0 (off) | Max commands per rolling 24h per profile |
 | `--approvalGrantTtl` | 0 (off) | Auto-approve an identical command for this many ms after approval |
 | `--auditEntropyScan` | false | Enable entropy-based secret scanning in audit |

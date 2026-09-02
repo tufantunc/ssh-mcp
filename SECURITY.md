@@ -143,6 +143,42 @@ span. `close-session` reports its own outcome in the tool result and in the audi
 exit code rather than on a span: it distinguishes a confirmed close from a signal that was
 dispatched but never took, and from one that could not be dispatched at all.
 
+### An interactive session is outside name-based classification
+
+`run-command` classifies each input on its own, but an interactive session is a persistent
+PTY shell that keeps whatever the previous input left behind. So a command word can be
+redefined by one call and used by the next, and both calls classify low:
+
+```
+alias ls='sudo id'              safe        allowed
+ls                              read-only   allowed — runs sudo id
+
+export PATH=/tmp/mine:$PATH     safe        allowed
+cat /etc/hosts                  read-only   allowed — runs /tmp/mine/cat
+
+ls() { sudo id; }               safe        allowed
+```
+
+The classifier already answers this for variables, but less strongly than "refused": `S=sudo`
+then `$S id` classifies `destructive`, because a command word containing `$` cannot be
+resolved statically. So it reaches the approval gate — prompted under
+`ask-destructive` or `ask-all`, refused outright under `deny` or where `destructive` is not
+bound for the role and tier, and allowed under `auto`. The alias,
+shell function and `PATH` cases do not even reach that: they classify `safe` or `read-only`,
+below the class that prompts, because the command word is an ordinary name and nothing about
+it looks wrong. That difference is the gap, and it is one class wide.
+
+**This is not fixable by classifying harder.** The state lives in the remote shell, not in
+this server, and a name-based classifier cannot know what a name means on the other end.
+Treat the ability to open an interactive session as the privilege it is:
+
+- Opening one classifies `destructive` as of 2.6.0, so under the default rules `operator`
+  cannot open one on `prod` at all, and `admin` is prompted. Before 2.6.0 it was `safe`.
+- On a profile that grants `destructive`, `approvalPolicy = "ask-all"` is the control that
+  covers the second call as well as the first.
+- A `readOnly` profile is unaffected: it holds `read-only` only, so it cannot set the alias
+  in the first place.
+
 ## Safe Deployment Guidelines
 
 1. **Never run as root.** Create a dedicated low-privilege service account.

@@ -90,3 +90,35 @@ describe('parseFailureLimit', () => {
     },
   );
 });
+
+/**
+ * `--opaUrl` was checked only for emptiness, so anything `fetch` cannot use reached the
+ * engine and failed on every request — with `OPA sidecar enabled` on stdout and one stderr
+ * line a minute as the only signal that the gate was never consulted.
+ */
+describe('parseOpaUrl', () => {
+  it.each([
+    ['http://localhost:8181', 'http://localhost:8181'],
+    ['https://opa:8181/base', 'https://opa:8181/base'],
+    // A trailing slash would make the request path `//v1/data/...`.
+    ['http://opa:8181/', 'http://opa:8181'],
+  ])('accepts %s', async (raw, expected) => {
+    const { parseOpaUrl } = await import('../../src/cli.js');
+    expect(parseOpaUrl(raw)).toBe(expected);
+  });
+
+  it.each(['opa.internal:8181', 'localhost:8181', 'not a url', '/v1/data', 'ftp://x', '', null])(
+    'refuses %j at startup rather than at every request',
+    async (raw) => {
+      // `--opaUrl=localhost:8181` is a realistic slip: OPA's own `--addr` is `:8181`.
+      const { parseOpaUrl } = await import('../../src/cli.js');
+      expect(() => parseOpaUrl(raw as any)).toThrow(/opaUrl/);
+    },
+  );
+
+  it('refuses credentials in the URL, which fetch cannot use at all', async () => {
+    const { parseOpaUrl } = await import('../../src/cli.js');
+    expect(() => parseOpaUrl('http://opa-admin:s3cr3t@opa.internal:8181'))
+      .toThrow(/must not embed credentials/);
+  });
+});

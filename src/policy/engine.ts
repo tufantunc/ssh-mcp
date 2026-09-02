@@ -18,6 +18,19 @@ export interface PolicyRules {
   denylist?: string[];
 }
 
+/**
+ * How long to wait for the OPA sidecar before treating it as unavailable.
+ *
+ * Bounded because an unbounded wait held every tool call for undici's five-minute header
+ * timeout. Ten seconds and not two: in the default mode a timeout falls back to the local
+ * decision, so the budget is also the price of turning an explicit OPA *deny* into an
+ * allow — at two seconds a sidecar under load crosses it by accident, and anyone who can
+ * add latency crosses it on purpose. Ten is above a loaded sidecar's p99 and still thirty
+ * times cheaper than the hang it replaced. `--opaTimeoutMs` moves it: lower makes the
+ * fail-open cheaper to reach, higher makes an outage slower to notice.
+ */
+const DEFAULT_OPA_TIMEOUT_MS = 10_000;
+
 /** Tiers, most restrictive first. Unknown/unset tiers resolve to the first. */
 export const HOST_GROUPS = ['prod', 'staging', 'dev'] as const;
 
@@ -229,6 +242,8 @@ export function resolvePolicyRules(
 
 export class PolicyEngine {
   private opaUrl: string | null = null;
+  private opaFailClosed = false;
+  private opaTimeoutMs = DEFAULT_OPA_TIMEOUT_MS;
   /** Rate-limits the fail-open warning so one outage can't flood stderr. */
   private lastOpaWarning = 0;
   /** The operator's patterns, compiled once. The built-ins live in classifier.ts. */
@@ -249,8 +264,14 @@ export class PolicyEngine {
     });
   }
 
-  setOpaUrl(url: string | null): void {
+  setOpaUrl(url: string | null, failClosed = false, timeoutMs = DEFAULT_OPA_TIMEOUT_MS): void {
+    this.opaTimeoutMs = timeoutMs;
+    // Reset the warning throttle when the mode changes, or the one warning per minute can
+    // be the *previous* mode's sentence — "commands OPA would deny may now be allowed"
+    // printed while the engine refuses everything.
+    if (failClosed !== this.opaFailClosed || url !== this.opaUrl) this.lastOpaWarning = 0;
     this.opaUrl = url;
+    this.opaFailClosed = failClosed;
   }
 
   evaluate(
@@ -345,15 +366,33 @@ export class PolicyEngine {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ input }),
+        // A sidecar that accepts the connection and never answers is the canonical way
+        // OPA is "unreachable", and without this the call ran to undici's five-minute
+        // header timeout while every tool call waited on it. The abort lands in the catch
+        // below, so both modes reach their own answer inside the budget.
+        signal: AbortSignal.timeout(this.opaTimeoutMs),
       });
 
       if (!resp.ok) {
-        this.warnOpaUnavailable(`HTTP ${resp.status} from ${this.opaUrl}`);
-        return local;
+        return this.onOpaUnavailable(`HTTP ${resp.status}`, local);
       }
 
-      const data = await resp.json() as { result?: boolean };
-      if (data.result === false) {
+      const payload: unknown = await resp.json();
+      // Guarded, not cast. `as { result?: unknown }` is a lie for a `null` body — reading
+      // `.result` off it threw, so the cause on stderr read as a defect in this server
+      // rather than as the "no decision" condition it names below.
+      const result = typeof payload === 'object' && payload !== null
+        ? (payload as { result?: unknown }).result
+        : undefined;
+      if (typeof result !== 'boolean') {
+        // A 200 carrying no decision is how OPA answers for an undefined document, which
+        // is what a wrong package path, an unactivated bundle, or an `allow` rule written
+        // without `default allow := false` all produce. Reading that as consent meant
+        // `--opaFailClosed` did not cover the way an OPA gate actually goes down: six of
+        // seven response shapes allowed, with no warning at all.
+        return this.onOpaUnavailable('no boolean `result` in the response', local);
+      }
+      if (result === false) {
         return {
           decision: 'deny',
           commandClass: parsed.class,
@@ -363,10 +402,36 @@ export class PolicyEngine {
         };
       }
     } catch (err) {
-      this.warnOpaUnavailable(err instanceof Error ? err.message : String(err));
+      return this.onOpaUnavailable(err instanceof Error ? err.message : String(err), local);
     }
 
     return local;
+  }
+
+  /**
+   * What an OPA outage means, which is the operator's choice rather than ours.
+   *
+   * Falling back to the local decision is the default and stays the default: OPA is an
+   * additional deny layer, and an outage that stopped all work would be a worse failure
+   * than one that narrows the policy. But an operator who deployed OPA *as* the
+   * authorization gate has a control that disappears during an outage, and the only signal
+   * is a stderr line that MCP clients usually discard. `--opaFailClosed` lets them say
+   * that the gate being down means no.
+   */
+  private onOpaUnavailable(cause: string, local: PolicyEvaluation): PolicyEvaluation {
+    this.warnOpaUnavailable(cause);
+    if (!this.opaFailClosed) return local;
+    return {
+      decision: 'deny',
+      commandClass: local.commandClass,
+      binary: local.binary,
+      ruleId: 'opa-unavailable',
+      // Fixed string. `cause` goes to stderr, where the operator is; this `reason` is
+      // rethrown as the tool's error text and written to the audit record, and it carried
+      // `this.opaUrl` — an internal hostname, and any credential embedded in it — out to
+      // the MCP client on every refusal.
+      reason: 'OPA evaluation unavailable and --opaFailClosed is set',
+    };
   }
 
   /**
@@ -382,7 +447,9 @@ export class PolicyEngine {
     this.lastOpaWarning = now;
     console.error(
       `POLICY WARNING: OPA evaluation unavailable (${cause}). ` +
-      'Falling back to local policy — commands OPA would deny may now be allowed.',
+      (this.opaFailClosed
+        ? 'Refusing every command while it is down, because --opaFailClosed is set.'
+        : 'Falling back to local policy — commands OPA would deny may now be allowed.'),
     );
   }
 
