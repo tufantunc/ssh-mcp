@@ -291,21 +291,26 @@ describe('forbidden pattern matching cost', () => {
     const seed = 'dd curl wget chown -R x ';
     const cost = (bytes: number) => {
       const command = seed.repeat(Math.ceil(bytes / seed.length)).slice(0, bytes);
-      classifyCommand(command);
       const started = process.hrtime.bigint();
       classifyCommand(command);
       return Number(process.hrtime.bigint() - started) / 1e6;
     };
 
-    // A ratio rather than a wall-clock bound. "Stays linear" is a claim about growth,
-    // and an absolute budget measures the runner instead: this asserted 1000 ms against
-    // ~460 ms locally, and CI failed it at 3677 ms because CI runs the suite under
-    // coverage instrumentation. Quadrupling the input should roughly quadruple the cost;
-    // the quadratic forms this replaced grew sixteen-fold, so eight is a wide berth that
-    // no machine's speed can move.
-    const ratio = cost(1_000_000) / Math.max(cost(250_000), 0.01);
+    // A ratio rather than a wall-clock bound. "Stays linear" is a claim about growth, and
+    // an absolute budget measures the runner: this asserted 1000 ms against ~460 ms
+    // locally and CI failed at 3677 ms, because CI runs the suite under coverage
+    // instrumentation. Quadrupling the input should roughly quadruple the cost, and the
+    // quadratic forms this guards against grew sixteen-fold, so four-vs-eight is a wide
+    // berth that no machine's speed can move.
+    //
+    // 50KB and 200KB rather than 1MB: growth is what is being asserted, and a 1MB
+    // measurement under coverage costs seconds, which is how the first attempt at this
+    // traded a failed assertion for a test timeout. CI measured ~8x this machine, so the
+    // explicit timeout is what stops a slow runner turning a passing assertion into a
+    // timeout again. Absolute cost at size is covered by the 200k-character cases above.
+    const ratio = cost(200_000) / Math.max(cost(50_000), 0.01);
     expect(ratio).toBeLessThan(8);
-  });
+  }, 30_000);
 });
 
 describe('forbidden patterns still match after the rewrite', () => {
