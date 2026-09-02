@@ -1,5 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createHarness, textOf, type Harness } from './harness.js';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 let h: Harness;
 
@@ -16,7 +19,8 @@ describe('MCP tool surface', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'close-session', 'list-connections', 'list-sessions', 'open-session',
       'privileged-command', 'read-command', 'read-session-output',
-      'run-command', 'sftp-download', 'sftp-upload', 'signal-process',
+      'run-command', 'sftp-download', 'sftp-download-file', 'sftp-list',
+      'sftp-upload', 'sftp-upload-file', 'signal-process',
     ]);
   });
 
@@ -25,7 +29,108 @@ describe('MCP tool surface', () => {
     const { tools } = await h.client.listTools();
     const readOnly = tools.filter((t) => t.annotations?.readOnlyHint).map((t) => t.name).sort();
     // A mutating tool advertised as read-only invites auto-approval by clients.
-    expect(readOnly).toEqual(['list-connections', 'list-sessions', 'read-command', 'read-session-output', 'sftp-download']);
+    expect(readOnly).toEqual([
+      'list-connections', 'list-sessions', 'read-command', 'read-session-output',
+      'sftp-download', 'sftp-list',
+    ]);
+  });
+});
+
+describe('SFTP file tools', () => {
+  it('allows directory listing on a read-only profile', async () => {
+    h = await createHarness({ readOnly: true, role: 'viewer' });
+    const listed = await call('sftp-list', { remotePath: '/incoming' });
+    expect(listed.isError).toBeFalsy();
+    expect(JSON.parse(textOf(listed))).toEqual({ entries: [], totalEntries: 0, truncated: false });
+  });
+
+  it('gates remote uploads as destructive operations', async () => {
+    h = await createHarness();
+    h.setApproval(false);
+    const refused = await call('sftp-upload', {
+      remotePath: '/incoming/refused.txt',
+      content: 'must not arrive',
+    });
+    expect(refused.isError).toBe(true);
+    expect(h.approvalPrompts()).toBe(1);
+  });
+
+  it('streams binary files through local paths and lists the remote directory', async () => {
+    h = await createHarness();
+    const dir = await mkdtemp(join(process.cwd(), '.ssh-mcp-sftp-'));
+    const source = join(dir, 'source.bin');
+    const destination = join(dir, 'destination.bin');
+    const content = Buffer.from([0, 1, 2, 255, 254, 253]);
+
+    try {
+      await writeFile(source, content);
+      const uploaded = await call('sftp-upload-file', {
+        localPath: source,
+        remotePath: '/incoming/source.bin',
+      });
+      expect(uploaded.isError).toBeFalsy();
+
+      const listed = await call('sftp-list', { remotePath: '/incoming' });
+      expect(textOf(listed)).toContain('source.bin');
+      expect(textOf(listed)).toContain(`"size": ${content.length}`);
+
+      const downloaded = await call('sftp-download-file', {
+        remotePath: '/incoming/source.bin',
+        localPath: destination,
+      });
+      expect(downloaded.isError).toBeFalsy();
+      expect(await readFile(destination)).toEqual(content);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not overwrite a local file unless explicitly requested', async () => {
+    h = await createHarness();
+    const dir = await mkdtemp(join(process.cwd(), '.ssh-mcp-sftp-'));
+    const source = join(dir, 'source.txt');
+    const destination = join(dir, 'destination.txt');
+
+    try {
+      await writeFile(source, 'remote content');
+      await call('sftp-upload-file', { localPath: source, remotePath: '/remote.txt' });
+      await writeFile(destination, 'keep me');
+
+      const refused = await call('sftp-download-file', {
+        remotePath: '/remote.txt',
+        localPath: destination,
+      });
+      expect(refused.isError).toBe(true);
+      expect(await readFile(destination, 'utf8')).toBe('keep me');
+
+      const replaced = await call('sftp-download-file', {
+        remotePath: '/remote.txt',
+        localPath: destination,
+        overwrite: true,
+      });
+      expect(replaced.isError).toBeFalsy();
+      expect(await readFile(destination, 'utf8')).toBe('remote content');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects local paths outside the MCP working directory', async () => {
+    h = await createHarness();
+    const dir = await mkdtemp(join(tmpdir(), 'ssh-mcp-outside-'));
+    const source = join(dir, 'outside.txt');
+
+    try {
+      await writeFile(source, 'not readable by this tool');
+      const refused = await call('sftp-upload-file', {
+        localPath: source,
+        remotePath: '/outside.txt',
+      });
+      expect(refused.isError).toBe(true);
+      expect(textOf(refused)).toContain('working directory');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

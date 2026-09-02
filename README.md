@@ -156,7 +156,17 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 | `privileged-command` | Execute with sudo (needs approval, unless `approvalPolicy = "auto"`) | — | ✅ |
 | `sftp-upload` | Upload a file via SFTP | — | ✅ |
 | `sftp-download` | Download a file via SFTP | ✅ | — |
+| `sftp-list` | List a remote directory via SFTP | ✅ | — |
+| `sftp-upload-file` | Stream a local file to a remote path | — | ✅ |
+| `sftp-download-file` | Stream a remote file to a local path | — | ✅ |
 | `signal-process` | Send INT/TERM/KILL to a remote PID | — | ✅ |
+
+The path-based SFTP tools are confined to the MCP server's working directory.
+Relative paths resolve from that directory; absolute paths and symlinks are accepted only
+when their resolved target remains inside it. Downloads do not overwrite an existing file
+unless `overwrite: true` is passed, and never overwrite a symlink.
+`sftp-list` returns at most 1,000 entries by default; `maxEntries` can raise that to
+10,000, subject to the profile's `commandMaxOutputBytes` limit.
 
 ### Interactive Sessions
 
@@ -188,7 +198,7 @@ OpenSSH on Windows 11.
 | | Linux / BSD / macOS | Windows OpenSSH |
 |---|:---:|:---:|
 | `read-command`, `run-command`, `privileged-command`, `signal-process` | ✅ | ✅ |
-| `sftp-upload`, `sftp-download` | ✅ | ✅ |
+| All `sftp-*` tools | ✅ | ✅ |
 | Background sessions | ✅ | ✅ |
 | **Interactive sessions** | ✅ | ❌ |
 

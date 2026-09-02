@@ -29,7 +29,7 @@ import { SERVER_ENTRY, serverBuilt } from './harness.js';
  */
 
 /** The complete registered set. A reduced list would mean the config had leaked into the metadata. */
-const TOOL_COUNT = 11;
+const TOOL_COUNT = 14;
 
 interface Probe { stdout: string; stderr: string; replies: any[] }
 

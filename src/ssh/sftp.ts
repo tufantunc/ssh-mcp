@@ -46,6 +46,36 @@ export class SftpClient {
     });
   }
 
+  /** Upload a local file without buffering it in the MCP process. */
+  async uploadFile(localPath: string, remotePath: string): Promise<void> {
+    return this.withSftp(async (sftp) => {
+      return new Promise<void>((resolve, reject) => {
+        sftp.fastPut(localPath, remotePath, (err) => {
+          if (err) {
+            reject(new Error(`SFTP file upload error: ${err.message}`));
+            return;
+          }
+          resolve();
+        });
+      });
+    });
+  }
+
+  /** Download directly to a local file without buffering it in memory. */
+  async downloadFile(remotePath: string, localPath: string): Promise<void> {
+    return this.withSftp(async (sftp) => {
+      return new Promise<void>((resolve, reject) => {
+        sftp.fastGet(remotePath, localPath, (err) => {
+          if (err) {
+            reject(new Error(`SFTP file download error: ${err.message}`));
+            return;
+          }
+          resolve();
+        });
+      });
+    });
+  }
+
   /**
    * Download a remote file, refusing anything over the cap.
    *

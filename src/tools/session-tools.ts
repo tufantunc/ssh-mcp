@@ -59,7 +59,7 @@ export function registerSessionTools(
       // first ("discover available hosts before running commands"), and on the one
       // channel where the startup stderr warning is not visible. The agent saw "no
       // hosts" rather than "not configured". Refusing here is what makes the claim in
-      // the README, the changeset and the startup warning true of all eleven tools.
+      // the README, the changeset and the startup warning true of every tool.
       registry.assertConfigured();
       const connections = registry.listConnections();
       const profiles = registry.listAllProfiles();

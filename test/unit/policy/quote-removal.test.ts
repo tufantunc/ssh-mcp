@@ -167,6 +167,13 @@ describe('synthesised commands are classified (F3)', () => {
     );
   });
 
+  it.each([
+    ['sftp:upload-file /tmp/x', 'destructive'],
+    ['sftp:download-file /tmp/x', 'destructive'],
+  ])('classifies the new operation %s as %s', (command, expected) => {
+    expect(classifyCommand(command).class).toBe(expected);
+  });
+
   it('handing over an interactive session is not safe', () => {
     expect(classifyCommand('session:open interactive s1').class).toBe('destructive');
   });
