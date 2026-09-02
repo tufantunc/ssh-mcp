@@ -232,11 +232,32 @@ describe('OPA evaluation', () => {
     it('keeps the sidecar URL out of what the client is told', async () => {
       await startOpa(() => ({ status: 500, body: { error: 'boom' } }));
       const engine = new PolicyEngine(DEFAULT_RULES);
-      engine.setOpaUrl('http://opa-admin:s3cr3t@opa.internal:8181', true);
-    
+      // Pointed at the server that was actually started. An earlier version handed the
+      // engine a different, hardcoded URL with credentials in it — which `fetch` refuses
+      // before opening a socket, so the request never reached the 500 and the non-2xx
+      // route this test exists to cover was never taken.
+      engine.setOpaUrl(url, true);
+
       const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      expect(requests).toHaveLength(1);
       // `reason` is rethrown as the tool's error text and written to the audit record.
-      expect(result.reason).not.toMatch(/s3cr3t|internal|8181/);
+      expect(result.reason).toBe('OPA evaluation unavailable and --opaFailClosed is set');
+      // The operator still gets the diagnostic, on stderr, where it is useful.
+      expect(warnings()).toMatch(/HTTP 500/);
+      expect(warnings()).not.toContain(url);
+    });
+
+    it('reports a body with no decision as that, not as an internal error', async () => {
+      // `null` is valid JSON, and reading `.result` off it threw — so the cause on stderr
+      // read as a defect in this server rather than the condition it names.
+      await startOpa(() => ({ body: null }));
+      const engine = new PolicyEngine(DEFAULT_RULES);
+      engine.setOpaUrl(url, true);
+
+      const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      expect(result.decision).toBe('deny');
+      expect(warnings()).toMatch(/no boolean/);
+      expect(warnings()).not.toMatch(/Cannot read properties/);
     });
 
     it('gives up on a sidecar that never answers, rather than waiting on it', async () => {

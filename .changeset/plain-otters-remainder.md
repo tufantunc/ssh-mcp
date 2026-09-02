@@ -35,7 +35,9 @@ warns there too now, where a permanently broken bundle used to log nothing at al
 request is bounded at two seconds: a sidecar that accepts the connection and never answers
 used to hold every tool call for undici's five-minute timeout. `--opaUrl` written with a
 space, and `--opaFailClosed` given without a URL, are refused at startup rather than
-silently dropping the flag. And the refusal text is a fixed string — it carried the sidecar
+silently dropping the flag — and so is a `--opaUrl` value `fetch` cannot use, which is the
+same hole one flag-value away: `--opaUrl=localhost:8181` without a scheme printed
+`OPA sidecar enabled` and was never consulted. And the refusal text is a fixed string — it carried the sidecar
 URL, and any credential embedded in it, out to the MCP client.
 
 **Interactive sessions are outside name-based classification, and that is now written

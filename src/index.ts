@@ -15,6 +15,7 @@ import {
   checkRemovedFlags,
   flagEnabled,
   parseFailureLimit,
+  parseOpaUrl,
   resolveHostKeyMode,
 } from './cli.js';
 
@@ -47,10 +48,7 @@ async function main() {
     // Presence, not truthiness — the trap `flagEnabled` was written for. A
     // space-separated `--opaUrl http://…` stores null, so the old guard dropped it
     // silently, and dropped any `--opaFailClosed` the operator asked for with it.
-    if (!argv.opaUrl) {
-      throw new OperatorError('--opaUrl needs a URL, as --opaUrl=<url>.');
-    }
-    policy.setOpaUrl(argv.opaUrl, flagEnabled(argv, 'opaFailClosed'));
+    policy.setOpaUrl(parseOpaUrl(argv.opaUrl), flagEnabled(argv, 'opaFailClosed'));
     console.error(`OPA sidecar enabled: ${argv.opaUrl}`);
   } else if (flagEnabled(argv, 'opaFailClosed')) {
     throw new OperatorError('--opaFailClosed does nothing without --opaUrl.');

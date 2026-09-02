@@ -140,6 +140,41 @@ export function parseMaxChars(raw: string | null | undefined): number {
 }
 
 /**
+ * `--opaUrl`, refused at startup rather than at every request.
+ *
+ * Only emptiness was checked, so anything `fetch` cannot use reached the engine and failed
+ * on every call — with `OPA sidecar enabled` printed at startup and one stderr line per
+ * minute as the only signal. `--opaUrl=localhost:8181` is a realistic slip, since OPA's own
+ * `--addr` is written `:8181`, and in the default mode it leaves a gate that looks
+ * configured and is never consulted. Credentials in the URL are refused too: `fetch`
+ * rejects such a URL outright, so it would be a gate that cannot work at all.
+ */
+export function parseOpaUrl(raw: string | null | undefined): string {
+  if (!raw) {
+    throw new OperatorError('--opaUrl needs a URL, as --opaUrl=http://localhost:8181.');
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new OperatorError(
+      `--opaUrl=${raw} is not a URL. Include the scheme, as --opaUrl=http://localhost:8181.`,
+    );
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new OperatorError(`--opaUrl must be http or https, got ${parsed.protocol}`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new OperatorError(
+      '--opaUrl must not embed credentials — fetch() refuses such a URL, so the gate would ' +
+      'never be consulted. Put the sidecar behind a network boundary instead.',
+    );
+  }
+  // A trailing slash would make the request path `//v1/data/...`.
+  return (parsed.origin + parsed.pathname).replace(/\/$/, '');
+}
+
+/**
  * `strict` was previously unreachable: nothing but test code could select it,
  * yet host-key.ts pointed users at a `--acceptNewHostKey` flag that never
  * existed. `--insecureHostKey` is kept as an alias for the documented flag.

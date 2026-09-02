@@ -161,8 +161,9 @@ ls() { sudo id; }               safe        allowed
 
 The classifier already answers this for variables, but less strongly than "refused": `S=sudo`
 then `$S id` classifies `destructive`, because a command word containing `$` cannot be
-resolved statically. So it reaches the approval gate — prompted under `ask-destructive`,
-refused only where `destructive` is not bound, and allowed outright under `auto`. The alias,
+resolved statically. So it reaches the approval gate — prompted under
+`ask-destructive` or `ask-all`, refused outright under `deny` or where `destructive` is not
+bound for the role and tier, and allowed under `auto`. The alias,
 shell function and `PATH` cases do not even reach that: they classify `safe` or `read-only`,
 below the class that prompts, because the command word is an ordinary name and nothing about
 it looks wrong. That difference is the gap, and it is one class wide.

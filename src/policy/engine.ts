@@ -257,7 +257,7 @@ export class PolicyEngine {
     // Reset the warning throttle when the mode changes, or the one warning per minute can
     // be the *previous* mode's sentence — "commands OPA would deny may now be allowed"
     // printed while the engine refuses everything.
-    if (failClosed !== this.opaFailClosed) this.lastOpaWarning = 0;
+    if (failClosed !== this.opaFailClosed || url !== this.opaUrl) this.lastOpaWarning = 0;
     this.opaUrl = url;
     this.opaFailClosed = failClosed;
   }
@@ -365,8 +365,14 @@ export class PolicyEngine {
         return this.onOpaUnavailable(`HTTP ${resp.status}`, local);
       }
 
-      const data = await resp.json() as { result?: unknown };
-      if (typeof data.result !== 'boolean') {
+      const payload: unknown = await resp.json();
+      // Guarded, not cast. `as { result?: unknown }` is a lie for a `null` body — reading
+      // `.result` off it threw, so the cause on stderr read as a defect in this server
+      // rather than as the "no decision" condition it names below.
+      const result = typeof payload === 'object' && payload !== null
+        ? (payload as { result?: unknown }).result
+        : undefined;
+      if (typeof result !== 'boolean') {
         // A 200 carrying no decision is how OPA answers for an undefined document, which
         // is what a wrong package path, an unactivated bundle, or an `allow` rule written
         // without `default allow := false` all produce. Reading that as consent meant
@@ -374,7 +380,7 @@ export class PolicyEngine {
         // seven response shapes allowed, with no warning at all.
         return this.onOpaUnavailable('no boolean `result` in the response', local);
       }
-      if (data.result === false) {
+      if (result === false) {
         return {
           decision: 'deny',
           commandClass: parsed.class,
