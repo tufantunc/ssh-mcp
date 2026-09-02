@@ -38,8 +38,8 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@changesets/changelog-github": "^0.7.0",
-    "@changesets/cli": "^2.31.0",
+    "@changesets/changelog-github": "^1.0.0",
+    "@changesets/cli": "^3.0.1",
     "@types/node": "^26.2.0",
     "@types/ssh2": "^1.15.5",
     "@vitest/coverage-v8": "^4.1.10",
