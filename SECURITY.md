@@ -100,14 +100,14 @@ at startup, so that cannot happen. Treat strict as unusable until the code chang
 `trustedHostKey`.
 
 **`ask-destructive` gates less than the name suggests, and `kill` is one example rather
-than the exception.** Outside the never-allowed list, six things produce the `destructive`
+than the exception.** Outside the never-allowed list, five things produce the `destructive`
 class: the pattern `/rm\s+-rf?\s+\//`, a disqualifying argument on an otherwise allowlisted
 binary (`find … -delete`, `find … -exec`), a command word this process cannot resolve
 statically (`$VAR` as the command), a program handed to an interpreter this process cannot
-read (`python3 -c`, `perl -e`, `awk -f`, and a program arriving on a pipe), an awk program
-that can start a process or write a file (`system()`, a command pipe, `print > "file"`,
-gawk's `--load`), and the two commands this server synthesises that act on the target
-(`sftp:upload`, `session:open`).
+read (`python3 -c`, `perl -e`, `node -e`, `php -r`, and a program arriving on a pipe), and
+the two commands this server synthesises that act on the target (`sftp:upload`,
+`session:open`). **`awk` is not among them**: its program is read by none of this, so
+`awk 'BEGIN{system("...")}'` classifies `safe` exactly as it does on 2.5.1.
 Elevation classifies `privileged` rather than `destructive`; this mode gates both. Ordinary write verbs are in none of these. Measured against the shipped classifier, all of these are `safe`,
 and `safe` raises no prompt in this mode:
 

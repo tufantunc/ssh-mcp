@@ -37,10 +37,17 @@ Three narrower holes travelled with it:
   `node -e`, `node -p`, `php -r` and `echo … | bash` all reached root classified `safe`, and
   `runuser` and `setpriv` were missing from the elevation prefixes. Where the program is
   shell it is classified as shell; where it is not, this server cannot read what will run and
-  says so with `destructive`. `awk` is read rather than gated wholesale, so an ordinary
-  `awk '{print $1}' file` is unaffected, and its ways out to a shell or a file — `system()`,
-  a command pipe, `print > "file"`, `-f`, gawk's `--load` — are gated including the forms
-  where a `-v` or `-F` value sits before the program.
+  says so with `destructive`. The carrier is found wherever it sits, so
+  `xargs -I {} sh -c 'sudo id'` and `flock /tmp/l sh -c 'sudo id'` are read too, and a
+  program-bearing flag must be present, which keeps `python3 manage.py migrate` and
+  `cat /usr/bin/python3` where they were.
+
+  **`awk` is deliberately not covered.** Its program is a positional operand rather than a
+  flag's value, so nothing distinguishes running awk from naming it, and its four
+  implementations disagree about which flags consume a value — BWK awk, which is `awk` on
+  macOS and the BSDs, ignores an unknown option without consuming it. Two review rounds
+  found five separate holes in modelling that. `awk` keeps the class it has on 2.5.1 and is
+  tracked separately, so `awk 'BEGIN{system("...")}'` is still `safe` after this release.
 
 `find -exec` was already `destructive` before this release and stays gated; reading the
 carrier is what raises `find / -name x -exec sudo id +` to `privileged`.
@@ -66,14 +73,26 @@ restore them. `viewer` never held `safe` on `prod` or `staging`, so nothing move
 move *down* from `safe`, and a security release is the wrong place for a widening.
 
 **Newly gated interpreter forms.** Beyond the six named above, `ruby -e`, `python -c`,
-`python2 -c`, `perl -E`, `node --eval` and `node --print` are gated for the same reason, as
-is an awk program that can start a process or write a file (`system()`, a command pipe,
-`print > "file"`, `-f`, gawk's `--load`, or a flag this server does not recognise, since an
-unknown flag means it cannot tell which word is the program). An ordinary
-`awk '{print $1}'`, `awk -F: '{print $1}'`, `awk 'NR>1'` or `awk '$3 > 100'` is unaffected.
+`python2 -c`, `perl -E`, `node --eval` and `node --print` are gated for the same reason, and
+so are the flag-cluster spellings of all of them — `bash -xc`, `python3 -Ic`, `perl -wE` run
+exactly what `bash -cx` runs. A program arriving on standard input is gated however the
+interpreter is told to read it (`| bash`, `| bash -s`, `| bash -s -- arg`,
+`| bash /dev/stdin`), while a pipe carrying data to a named script (`cat data | bash
+process.sh`) is not.
 
-Measured against 87 ordinary read and maintenance commands — quoted arguments that are not
+Measured against 90 ordinary read and maintenance commands — quoted arguments that are not
 commands, commands that merely name an interpreter (`which python3`, `ls -l /usr/bin/node`,
-`ps aux | grep python3`, `man awk`), pattern-form and brace-form awk one-liners, and
-download-then-run-a-script pairs — **no command changed class in either direction**. Of 25
-attack forms, 20 moved from ungated to gated, 5 were already gated, and none is left open.
+`ps aux | grep python3`, `man awk`), awk one-liners, download-then-run-a-script pairs, and
+scripts run by name — **two changed class**:
+
+- `sed -n perl -e p file` moves `safe` → `destructive`. `-e` is both sed's expression flag
+  and perl's program flag, and nothing here can know an arbitrary tool's grammar. An
+  allowlisted command's operands are exempt, which covers `grep -e perl -e python`; `sed` is
+  not allowlisted, and this spelling is not one anyone writes.
+- `toString arg` moves from a `TypeError` inside the policy gate to `safe`. The lookup tables
+  were plain objects indexed by the command word, so a command named after an
+  `Object.prototype` member resolved to a function. That is a fix, not a regression.
+
+Of 25 attack forms, 16 moved from ungated to gated and 5 were already gated. The remaining
+four are all awk, which this release deliberately does not cover — see the interpreter
+bullet above.

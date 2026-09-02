@@ -217,32 +217,6 @@ describe('an interpreter does not launder the class (F6)', () => {
   });
 });
 
-describe('awk is read rather than blanket-gated', () => {
-  it.each([
-    "awk 'BEGIN{system(\"sudo id\")}'",
-    // A value-taking flag shifts the program position. Reading its value as the program
-    // let five characters (`-v x=1`) turn a refusal into an allow.
-    "awk -v n=1 'BEGIN{system(\"sudo id\")}'",
-    "awk -F ':' 'BEGIN{system(\"sudo id\")}' /etc/passwd",
-    "gawk --assign n=1 'BEGIN{system(\"sudo id\")}'",
-    // Redirection writes a file with no system() and no pipe at all.
-    'awk \'BEGIN{print "k" > "/root/.ssh/authorized_keys"}\'',
-    'awk -f /tmp/p.awk file',
-    'gawk -l /tmp/evil.so \'BEGIN{}\'',
-  ])('%s is gated', (command) => {
-    expect(classifyCommand(command).class, command).not.toBe('safe');
-  });
-
-  it.each([
-    "awk '{print $1}' file.txt",
-    "awk -F: '{print $1}' /etc/passwd",
-    "gawk '{print $2}' f",
-    "mawk '{print}' f",
-  ])('%s is left alone', (command) => {
-    expect(classifyCommand(command).class, command).toBe('safe');
-  });
-});
-
 describe('a program arriving on stdin cannot be read either', () => {
   it.each([
     'echo sudo id | bash',
@@ -256,7 +230,6 @@ describe('a program arriving on stdin cannot be read either', () => {
 
   it('but a pipe carrying data is not a pipe carrying a program', () => {
     expect(classifyCommand('cat data | python3 app.py').class).toBe('safe');
-    expect(classifyCommand("df -h | awk '{print $5}'").class).toBe('safe');
   });
 });
 
@@ -265,7 +238,6 @@ describe('naming an interpreter is not running one', () => {
     ['which python3', 'read-only'],
     ['ls -l /usr/bin/node', 'read-only'],
     ['cat /usr/local/bin/php', 'read-only'],
-    ['readlink -f /usr/bin/awk', 'read-only'],
     ['grep node /etc/hosts', 'read-only'],
     ['python3 /srv/app/manage.py migrate', 'safe'],
     ['node /srv/app/server.js', 'safe'],
@@ -320,25 +292,6 @@ describe('a program flag is found wherever it sits in a cluster', () => {
   });
 });
 
-describe('an awk pattern is not a shell command', () => {
-  it.each([
-    "awk 'NR>1' access.log",
-    'awk \'$1 == "root"\' /etc/passwd',
-    "awk '{sum+=$1} END{print sum}' nums",
-    "awk 'length($0) > 80' file",
-    "df -h | awk '$5 > 80 {print $6}'",
-  ])('%s is left alone', (command) => {
-    // Two ways this went wrong: `>` read as redirection when it is greater-than, and the
-    // awk program read as shell, where `$1` looks like an unresolvable command word.
-    expect(classifyCommand(command).class, command).toBe('safe');
-  });
-
-  it('while a program that really writes a file is still gated', () => {
-    expect(classifyCommand('awk \'{print $1 > "/etc/cron.d/z"}\'').class).toBe('destructive');
-    expect(classifyCommand('awk \'NR>1 {print $2 > "out"}\'').class).toBe('destructive');
-  });
-});
-
 describe('a command word naming an Object.prototype member is just a command word', () => {
   it.each(['toString arg', 'constructor -c foo', '__proto__ -c foo', 'env toString x'])(
     '%s does not throw',
@@ -377,30 +330,7 @@ describe('a carrier is found wherever it sits, not only at the command word', ()
 
   it('and a mention still carries nothing', () => {
     expect(classifyCommand('cat /usr/bin/python3').class).toBe('read-only');
-    expect(classifyCommand('readlink -f /usr/bin/awk').class).toBe('read-only');
     expect(classifyCommand('man awk').class).toBe('safe');
-  });
-});
-
-describe('awk flags this file does not recognise make the program unreadable', () => {
-  it.each([
-    "gawk -D x 'BEGIN{system(\"sudo id\")}'",
-    "awk -i /dev/null 'BEGIN{system(\"sudo id\")}'",
-    "mawk -W interactive 'BEGIN{system(\"sudo id\")}'",
-    'gawk -E /tmp/evil.awk',
-  ])('%s is gated', (command) => {
-    // Enumerating the value-taking flags and skipping the rest handed the gate the flag's
-    // value instead of the program. Fail closed on a flag the table does not know.
-    expect(classifyCommand(command).class, command).not.toBe('safe');
-  });
-
-  it.each([
-    "awk -F: '{print $1}' /etc/passwd",
-    "awk -v n=1 '{print $1}' f",
-    "awk --posix '{print $1}' f",
-    "awk '{print $1 \"@\" $2}' f",
-  ])('%s is left alone', (command) => {
-    expect(classifyCommand(command).class, command).toBe('safe');
   });
 });
 
@@ -411,17 +341,6 @@ describe('a program on stdin is unreadable however the interpreter is told to re
     'echo "sudo id" | sh -',
   ])('%s is gated', (command) => {
     expect(classifyCommand(command).class, command).not.toBe('safe');
-  });
-});
-
-describe('reading an awk program cannot be made quadratic', () => {
-  it('a program full of print tokens costs linear time', () => {
-    // `[^;{}]*>` scanned to end-of-input for every `print`, so the cost was quadratic in
-    // the program length — 192KB took 8.7 seconds inside the policy gate.
-    const command = `awk '${'print '.repeat(30000)}'`;
-    const started = process.hrtime.bigint();
-    classifyCommand(command);
-    expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(1500);
   });
 });
 
@@ -439,14 +358,6 @@ describe('the second review round\'s uncovered forms', () => {
     ["node --eval 'sudo id'", 'privileged'],
     // The tokeniser has always split on newline; the rewrite had to preserve that.
     ['echo x\nsudo id', 'privileged'],
-    ['awk --file /tmp/p.awk f', 'destructive'],
-    ['awk --source \'BEGIN{system("sudo id")}\'', 'destructive'],
-    // The dangerous form above is gated even without the flag table, because an
-    // unrecognised awk flag fails closed. What the table entry buys is the benign form.
-    ["awk --source '{print $1}' f", 'safe'],
-    ['awk \'BEGIN{"id" | getline}\'', 'destructive'],
-    // `||` is logical or, not a command pipe.
-    ["gawk 'BEGIN{if(1||2)print}'", 'safe'],
     ['busybox sh -c "ls"', 'safe'],
   ])('%s is %s', (command, expected) => {
     expect(classifyCommand(command).class, command).toBe(expected);
@@ -467,32 +378,6 @@ describe('the second review round\'s uncovered forms', () => {
 });
 
 describe('the narrow review round\'s findings', () => {
-  it('an awk redirection is caught however long the printed text is', () => {
-    // The canonical attack prints an SSH public key, so the `>` sits some four hundred
-    // characters after the `print`. Bounding the scan to keep the regex linear traded the
-    // quadratic for a hole exactly there.
-    const key = 'A'.repeat(372);
-    const command = `awk 'BEGIN{print "ssh-rsa ${key} x" > "/root/.ssh/authorized_keys"}'`;
-    expect(classifyCommand(command).class).toBe('destructive');
-  });
-
-  it('and reading it is still linear', () => {
-    const started = process.hrtime.bigint();
-    classifyCommand(`awk '${'print '.repeat(30000)}'`);
-    expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(1500);
-  });
-
-  it.each([
-    // A `print` reaches only to the end of its statement, so a later comparison is not a
-    // redirection. And `sprintf` contains `printf` while printing nothing.
-    ["awk '{print $1} $3 > 100' f", 'safe'],
-    ["awk '{print $1}; $2 > 5' f", 'safe'],
-    ['awk \'{if (sprintf("%d",$1) > "5") print}\' f', 'safe'],
-    ['awk \'{print $1 > "/tmp/o"}\'', 'destructive'],
-  ])('%s is %s', (command, expected) => {
-    expect(classifyCommand(command).class, command).toBe(expected);
-  });
-
   it.each([
     'find . -name perl -type f',
     'find . -name node -newer /tmp/x',
@@ -523,38 +408,6 @@ describe('the narrow review round\'s findings', () => {
   ])('%s is %s', (command, expected) => {
     // Without `-s` the word after `--` is the script itself; with it, stdin is the script.
     expect(classifyCommand(command).class, command).toBe(expected);
-  });
-});
-
-describe('the narrow security round\'s findings', () => {
-  it.each([
-    "awk -i 'BEGIN{system(\"sudo id\")}' /etc/hostname",
-    "awk --include 'BEGIN{system(\"sudo id\")}' f",
-    "awk -W 'BEGIN{system(\"sudo id\")}' f",
-    "awk --assign 'BEGIN{system(\"sudo id\")}' f",
-    "awk --field-separator 'BEGIN{system(\"sudo id\")}' f",
-  ])('%s is gated', (command) => {
-    // gawk and mawk consume a value for these; BWK awk — `awk` on macOS, the BSDs and
-    // Debian's original-awk — ignores an unknown option without consuming and runs the
-    // next operand. Skipping a word awk did not skip handed the gate the data file.
-    expect(classifyCommand(command).class, command).not.toBe('safe');
-  });
-
-  it.each(["awk -v n=1 '{print $1}' f", "awk -F: '{print $1}' /etc/passwd"])(
-    '%s is left alone',
-    (command) => {
-      // The two that really do consume a separate word on every awk.
-      expect(classifyCommand(command).class, command).toBe('safe');
-    },
-  );
-
-  it('an indirect call reaching the builtin system() is gated', () => {
-    // gawk resolves `@f(…)` to a builtin, so `f="system"` runs a shell command with no
-    // literal `system(` anywhere.
-    expect(classifyCommand('awk \'BEGIN{f="system"; @f("sudo id")}\'').class).toBe(
-      'destructive',
-    );
-    expect(classifyCommand('awk \'$1=="x@y.com"\' f').class).toBe('safe');
   });
 
   it('an allowlisted command\'s operands are subjects, not commands', () => {

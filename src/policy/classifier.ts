@@ -183,79 +183,7 @@ const INTERPRETERS: Record<string, { flags: string[]; readable: boolean }> = Obj
   },
 );
 
-/** awk takes its program as the first operand, so it does not fit the table above. */
-const AWK_BINARIES = new Set(['awk', 'gawk', 'mawk']);
-
 /** Flags whose value is a separate word, which is not the program. `awk -F ':' '{…}'`. */
-/**
- * The only two flags that consume a separate word on every awk.
- *
- * `-i`, `--include`, `-W`, `--assign` and `--field-separator` were here, on the reasoning
- * that gawk and mawk consume a value for them. They do — but BWK awk, which is `awk` on
- * macOS and the BSDs and Debian's `original-awk`, ignores an unknown option *without*
- * consuming anything and runs the next operand as the program. Skipping a word that awk
- * did not skip handed the gate the data file and let the real program through as `safe`.
- * Everything outside this pair falls to the fail-closed branch below, which is the answer
- * that does not depend on knowing which awk is on the far end.
- */
-const AWK_VALUE_FLAGS = new Set(['-v', '-F']);
-
-/** The program, or a library, comes from a file this cannot see. */
-const AWK_FILE_FLAGS = new Set(['-f', '--file', '-l', '--load', '-E', '--exec']);
-
-/** gawk's `-e` / `--source` carry program text, which is readable. */
-const AWK_SOURCE_FLAGS = new Set(['-e', '--source']);
-
-/**
- * The ways an awk program reaches a shell or a file.
- *
- * awk is the one interpreter whose program is readable in argv, so gating every `awk`
- * would put an approval prompt on `awk '{print $1}'` — most of what awk is used for.
- * The question is narrowed to whether the program can start a process or write a file:
- * `system()`, a command pipe (`print | "cmd"`, `"cmd" | getline`), output redirection
- * (`print > "file"`, which reaches `~/.ssh/authorized_keys` without a shell), and gawk's
- * `@load`/`@include`. `||` is logical or, not a pipe.
- *
- * `>` is also awk's greater-than, and gating it outright put an approval prompt on
- * `awk 'NR>1'` — skipping a header line, one of the most common awk idioms there is.
- * Redirection needs something to redirect, so a `>` is only read as one when a `print` or
- * `printf` precedes it in the same statement: `awk '$3 > 100 {print}'` compares,
- * `awk '{print $1 > $2}'` writes. `@` counts as gawk's `@load`/`@include`, and
- * as an indirect call: `f="system"; @f(…)` resolves to the builtin and runs a shell
- * command, which no other alternative here sees. Anchoring on the call syntax leaves the
- * at-sign in `awk '$1=="x@y.com"'` alone.
- */
-const AWK_ESCAPE =
-  /\bsystem\s*\(|\bgetline\b|@(?:load|include)\b|@[A-Za-z_]\w*\s*\(|(?<!\|)\|(?!\|)/;
-
-/**
- * Whether an awk program redirects output to a file.
- *
- * A single left-to-right pass rather than a regex. `\bprint\b[^;{}]*>` is quadratic —
- * with no `>` to find, every `print` scans to the end — and bounding the scan to fix that
- * traded the bug for a hole: the canonical attack prints an SSH public key, so the `>` sits
- * some four hundred characters after the `print` and any bound short enough to help misses
- * it. One pass costs the same as the regex and needs no bound.
- */
-function awkRedirects(program: string): boolean {
-  let sawPrint = false;
-  for (let i = 0; i < program.length; i++) {
-    const ch = program[i];
-    // A statement boundary ends the reach of a `print`.
-    if (ch === ';' || ch === '{' || ch === '}') { sawPrint = false; continue; }
-    if (ch === '>') { if (sawPrint) return true; continue; }
-    if (ch !== 'p') continue;
-    const before = i === 0 ? '' : program[i - 1];
-    // `sprintf` contains `printf` but prints nothing.
-    if (/[A-Za-z0-9_]/.test(before)) continue;
-    if (!program.startsWith('print', i)) continue;
-    const end = i + (program.startsWith('printf', i) ? 6 : 5);
-    const after = program[end];
-    if (after === undefined || !/[A-Za-z0-9_]/.test(after)) sawPrint = true;
-  }
-  return false;
-}
-
 /** `find … -exec <cmd> +` runs cmd. */
 const FIND_EXEC_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
 
@@ -476,9 +404,11 @@ export function nestedCommands(command: string): string[] {
     // where it looks but what it requires: `programAfterFlag` returns null unless a
     // program-bearing flag actually follows, so `cat /usr/bin/python3` carries nothing.
     //
-    // No awk arm. An awk program is not shell, and reading it as one classified
-    // `awk '$1 == "root"'` as an unresolvable command word and put `binary: "$1"` into the
-    // audit record. `AWK_ESCAPE` is the whole awk rule.
+    // awk is deliberately absent. Its program is a positional operand rather than the
+    // value of a flag, so nothing distinguishes running awk from naming it, and its four
+    // implementations disagree about which flags consume a value — modelling that wrongly
+    // opened five separate holes across two review rounds. `awk` keeps the class it has on
+    // 2.5.1 and is tracked separately.
     if (!operandsAreData(words)) {
       for (let i = 0; i < words.length; i++) {
         const spec = INTERPRETERS[stripPath(unquote(words[i]))];
@@ -1012,52 +942,6 @@ function clusterCarriesFlag(word: string, flags: string[]): boolean {
   return flags.some((flag) => flag.length === 2 && body.includes(flag[1]));
 }
 
-/** awk flags that take no value, so the program still follows them. */
-const AWK_BARE_FLAGS = new Set([
-  '-b', '-c', '--traditional', '--compat', '-C', '--copyright', '-g', '--gen-pot',
-  '-h', '--help', '-n', '--non-decimal-data', '-N', '--use-lc-numeric', '-P', '--posix',
-  '-r', '--re-interval', '-S', '--sandbox', '-t', '--lint-old', '-V', '--version',
-  '-d', '--dump-variables', '-O', '--optimize',
-]);
-
-/** awk's program: the first operand, once value-taking flags and their values are past. */
-function awkProgram(args: string[]): string | null {
-  for (let i = 0; i < args.length; i++) {
-    const word = args[i];
-    if (word === '--') return args[i + 1] ?? null;
-    if (AWK_FILE_FLAGS.has(word)) return null;
-    if (AWK_SOURCE_FLAGS.has(word)) return args[i + 1] ?? null;
-    // `-v x=1` and `-F :` take a separate word. Reading that word as the program is what
-    // let `awk -F ':' 'BEGIN{system("sudo id")}'` past the gate entirely.
-    if (AWK_VALUE_FLAGS.has(word)) { i += 1; continue; }
-    // `-F:` and `-vx=1` carry the value in the same word, so no operand is consumed.
-    if ([...AWK_VALUE_FLAGS].some((f) => f.length === 2 && word.startsWith(f) && word.length > 2)) {
-      continue;
-    }
-    if (word.startsWith('-') && word.length > 1) {
-      const file = [...AWK_FILE_FLAGS].find((f) => word.startsWith(f));
-      if (file !== undefined) return null;
-      const source = [...AWK_SOURCE_FLAGS].find((f) => word.startsWith(f));
-      if (source !== undefined) return word.slice(source.length).replace(/^=/, '');
-      if (AWK_BARE_FLAGS.has(word)) continue;
-      // An unrecognised flag may or may not take a value, so the operand position is
-      // unknown and the next word may not be the program. Enumerating the value-taking
-      // flags and skipping the rest is what let `-D x` and `-W interactive` hand the gate
-      // the wrong string; saying "unreadable" does not depend on the table being complete.
-      return null;
-    }
-    return word;
-  }
-  return null;
-}
-
-/** Whether an awk invocation can start a process or write a file this has not read. */
-function awkProgramIsUnreadable(args: string[]): boolean {
-  const program = awkProgram(args);
-  if (program === null) return true;
-  return AWK_ESCAPE.test(program) || awkRedirects(program);
-}
-
 /** Spellings of "the program is on standard input" that look like a file operand. */
 const STDIN_PATHS = new Set(['-', '/dev/stdin', '/dev/fd/0', '/proc/self/fd/0']);
 
@@ -1122,14 +1006,6 @@ function hasUnreadableProgram(command: string): boolean {
       }
     }
 
-    // awk is keyed on the command word rather than scanned for. An interpreter's program
-    // flag is evidence that it was invoked; awk's program is a positional operand, so
-    // nothing in the argument list distinguishes running awk from naming it, and scanning
-    // made `readlink -f /usr/bin/awk` and `man awk` destructive.
-    const idx = effectiveCommandIndex(words);
-    if (idx === -1) continue;
-    const head = stripPath(unquote(words[idx]));
-    if (AWK_BINARIES.has(head) && awkProgramIsUnreadable(words.slice(idx + 1))) return true;
   }
   return false;
 }
