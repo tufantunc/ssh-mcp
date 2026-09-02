@@ -259,9 +259,10 @@ describe('forbidden pattern matching cost', () => {
     classifyCommand(command);
     const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
 
-    // The quadratic forms took ~11s at 160k characters and grow four-fold per
-    // doubling; the rewritten ones are sub-millisecond. One second separates
-    // them by orders of magnitude in both directions.
+      // The quadratic forms took ~11s at 160k characters and grow four-fold per
+      // doubling; the rewritten ones are sub-millisecond. Three seconds separates them
+      // by orders of magnitude in both directions, with room for CI, which runs these
+      // under coverage instrumentation on a slower machine than any of us measure on.
     expect(elapsedMs).toBeLessThan(3000);
   });
 
@@ -288,19 +289,22 @@ describe('forbidden pattern matching cost', () => {
    */
   it('stays linear on a command built from the pattern heads themselves', () => {
     const seed = 'dd curl wget chown -R x ';
-    const oneMegabyte = seed.repeat(Math.ceil(1_000_000 / seed.length)).slice(0, 1_000_000);
+    const cost = (bytes: number) => {
+      const command = seed.repeat(Math.ceil(bytes / seed.length)).slice(0, bytes);
+      classifyCommand(command);
+      const started = process.hrtime.bigint();
+      classifyCommand(command);
+      return Number(process.hrtime.bigint() - started) / 1e6;
+    };
 
-    const started = process.hrtime.bigint();
-    classifyCommand(oneMegabyte);
-    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
-
-    // ~460 ms measured here, against 65_000 ms before the pattern rewrite and ~200 ms on
-    // 2.5.1 — resolving quoting costs a pass over the input, and every regex rule is now
-    // tried against the tokenised form as well as the written one. Three seconds keeps a
-    // real regression loud while leaving room for a CI runner several times slower than
-    // this one; the previous one-second budget was down to 1.3x headroom and had already
-    // failed once on a cold run.
-    expect(elapsedMs).toBeLessThan(1000);
+    // A ratio rather than a wall-clock bound. "Stays linear" is a claim about growth,
+    // and an absolute budget measures the runner instead: this asserted 1000 ms against
+    // ~460 ms locally, and CI failed it at 3677 ms because CI runs the suite under
+    // coverage instrumentation. Quadrupling the input should roughly quadruple the cost;
+    // the quadratic forms this replaced grew sixteen-fold, so eight is a wide berth that
+    // no machine's speed can move.
+    const ratio = cost(1_000_000) / Math.max(cost(250_000), 0.01);
+    expect(ratio).toBeLessThan(8);
   });
 });
 
