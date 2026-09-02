@@ -618,6 +618,8 @@ ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret --rateLimit=60
 | `--httpPort` | 3000 | HTTP listen port |
 | `--httpHost` | 127.0.0.1 | Bind address |
 | `--rateLimit` | 0 (off) | Max requests per minute (0 = unlimited) |
+| `--authFailureLimit` | 10 | Failed bearer-auth attempts allowed per client per minute (0 = off) |
+| `--trustProxy` | false | Read the client address from `X-Forwarded-For`. Only behind a proxy you control |
 
 Endpoints: `POST /` (MCP Streamable HTTP), `GET /status`, `GET /health`
 
@@ -628,6 +630,17 @@ refuses every tool call. `GET /status` carries the profile list itself and stays
 bearer token.
 
 When rate limit is exceeded, the server returns HTTP 429 with `Retry-After` header and a JSON-RPC error body so MCP clients can handle it gracefully.
+
+Failed authentication is throttled separately, and on by default. `--rateLimit` never saw a
+wrong bearer token, because the auth check answers before the limiter is reached — so
+guessing ran at network speed. `--authFailureLimit` gives each client its own small budget,
+spent only on a 401; a correct token never consumes from it, so a working client never
+throttles itself. Once an address has spent its budget every request from it waits,
+including one with the right token — that is deliberate, since answering the guess would
+otherwise tell the caller which token was right. Clients are told apart by socket address;
+`--trustProxy` reads `X-Forwarded-For` instead, and should be set only when a proxy you
+control is in front, because a client that can set that header can otherwise choose its own
+budget.
 
 **Always terminate TLS at a reverse proxy** (Caddy/nginx). The server listens on `127.0.0.1` only.
 
@@ -678,6 +691,8 @@ Secrets are **never** passed as CLI arguments.
 | `--httpHost` | 127.0.0.1 | HTTP bind address |
 | `--bearerToken` | — | Bearer token for HTTP transport auth (required for `--transport=http`) |
 | `--rateLimit` | 0 | HTTP requests per minute on the MCP route (0 = unlimited) |
+| `--authFailureLimit` | 10 | Failed bearer-auth attempts allowed per client per minute (0 = off) |
+| `--trustProxy` | false | Read the client address from `X-Forwarded-For`. Only behind a proxy you control |
 | `--allowedHosts` | bind address + localhost | Comma-separated Host headers accepted by the DNS-rebinding guard |
 | `--hostKeyMode` | `tofu` | `tofu \| strict \| insecure`. See [SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart) — `strict` currently refuses every host |
 | `--insecureHostKey` | false | Disable host key verification (test only!) |

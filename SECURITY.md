@@ -46,6 +46,7 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 | Weak SSH algorithms | Frozen algorithm allow-list per RFC 9142 (no SHA-1, no CBC, no ssh-rsa) |
 | PTY session leaks (MaxSessions) | Interactive sessions are bounded, not absent: `sessionMaxPerConnection` (default 5), `sessionIdleTimeoutMs` (10 min), `sessionBackgroundMaxMs` (1 h), and a reaper that sweeps expired sessions every 60s. One-shot commands use `exec()` and hold no channel. No persistent `su` shells |
 | Unbounded agent actions | Per-profile RBAC, rate limits, denylist, approval modes |
+| Bearer token guessing | `--authFailureLimit` — a per-client budget spent only on failed auth, on by default |
 
 ## Stopping a Command
 

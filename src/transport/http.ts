@@ -11,36 +11,124 @@ const MAX_BODY_SIZE = 1_048_576; // 1MB
 /** Cap on concurrent MCP sessions, so unauthenticated-adjacent churn can't grow the map without bound. */
 const MAX_SESSIONS = 64;
 
-class RateLimiter {
-  private tokens: number;
-  private lastRefill: number;
-  private maxTokens: number;
-  private refillIntervalMs: number;
+/** How many failed auth attempts one client may make per minute. 0 disables the check. */
+const DEFAULT_AUTH_FAILURE_LIMIT = 10;
 
-  constructor(maxRequestsPerMinute: number) {
-    this.maxTokens = maxRequestsPerMinute;
-    this.tokens = maxRequestsPerMinute;
-    this.lastRefill = Date.now();
-    this.refillIntervalMs = 60_000;
+/** Cap on tracked clients, for the reason `MAX_SESSIONS` exists: churn must not grow a map. */
+const MAX_TRACKED_CLIENTS = 1024;
+
+const REFILL_INTERVAL_MS = 60_000;
+
+interface Bucket {
+  tokens: number;
+  lastRefill: number;
+}
+
+/**
+ * One token-bucket step, shared by the two limiters so the refill arithmetic exists once.
+ *
+ * Mutates the bucket. Refills proportionally to elapsed time rather than on a timer, so an
+ * idle server costs nothing and there is no interval to clean up.
+ */
+function consume(bucket: Bucket, maxTokens: number): { allowed: boolean; retryAfterMs: number } {
+  const elapsed = Date.now() - bucket.lastRefill;
+  const refilled = Math.floor((elapsed / REFILL_INTERVAL_MS) * maxTokens);
+  if (refilled > 0) {
+    bucket.tokens = Math.min(maxTokens, bucket.tokens + refilled);
+    bucket.lastRefill += Math.round((refilled / maxTokens) * REFILL_INTERVAL_MS);
+  }
+
+  if (bucket.tokens > 0) {
+    bucket.tokens--;
+    return { allowed: true, retryAfterMs: 0 };
+  }
+
+  return { allowed: false, retryAfterMs: Math.ceil(REFILL_INTERVAL_MS / maxTokens) };
+}
+
+class RateLimiter {
+  private bucket: Bucket;
+
+  constructor(private maxTokens: number) {
+    this.bucket = { tokens: maxTokens, lastRefill: Date.now() };
   }
 
   tryConsume(): { allowed: boolean; retryAfterMs: number } {
-    const now = Date.now();
-    const elapsed = now - this.lastRefill;
-    const refilled = Math.floor((elapsed / this.refillIntervalMs) * this.maxTokens);
-    if (refilled > 0) {
-      this.tokens = Math.min(this.maxTokens, this.tokens + refilled);
-      this.lastRefill += Math.round((refilled / this.maxTokens) * this.refillIntervalMs);
-    }
-
-    if (this.tokens > 0) {
-      this.tokens--;
-      return { allowed: true, retryAfterMs: 0 };
-    }
-
-    const retryAfterMs = Math.ceil(this.refillIntervalMs / this.maxTokens);
-    return { allowed: false, retryAfterMs };
+    return consume(this.bucket, this.maxTokens);
   }
+}
+
+/**
+ * A bucket per client, for throttling failed authentication.
+ *
+ * Separate from the request limiter on purpose. The auth check returned before the request
+ * limiter was reached, so a wrong bearer token consumed nothing and guessing ran at network
+ * speed with no backoff — measured as twelve 401s and zero 429s against `--rateLimit=3`.
+ * Moving the request limiter above the auth check would have closed that and opened
+ * something worse: the request bucket is global, so unauthenticated traffic could then
+ * starve every legitimate client.
+ *
+ * Only failures consume a token, so a working client never builds a budget up and is never
+ * throttled by its own traffic — which is what makes this safe to have on by default. It
+ * is not a promise that a correct token always passes: once an address has spent its
+ * budget, everything from that address waits, correct tokens included. That is the whole
+ * point. Charging only after the comparison would leave the guess itself evaluated and the
+ * status code would still tell the attacker which token was right.
+ */
+class AuthFailureLimiter {
+  private buckets = new Map<string, Bucket>();
+
+  constructor(private maxTokens: number) {}
+
+  /** Whether this client may make another attempt. Does not consume. */
+  peek(key: string): { allowed: boolean; retryAfterMs: number } {
+    const bucket = this.buckets.get(key);
+    if (bucket === undefined) return { allowed: true, retryAfterMs: 0 };
+    const elapsed = Date.now() - bucket.lastRefill;
+    const refilled = Math.floor((elapsed / REFILL_INTERVAL_MS) * this.maxTokens);
+    const available = Math.min(this.maxTokens, bucket.tokens + Math.max(refilled, 0));
+    if (available > 0) return { allowed: true, retryAfterMs: 0 };
+    return { allowed: false, retryAfterMs: Math.ceil(REFILL_INTERVAL_MS / this.maxTokens) };
+  }
+
+  /** Charge this client for a failed attempt. */
+  recordFailure(key: string): void {
+    let bucket = this.buckets.get(key);
+    if (bucket === undefined) {
+      // Evict the least recently refilled entry rather than growing without bound. A
+      // client that has stopped failing is the one worth forgetting.
+      if (this.buckets.size >= MAX_TRACKED_CLIENTS) {
+        let oldestKey: string | null = null;
+        let oldest = Infinity;
+        for (const [k, b] of this.buckets) {
+          if (b.lastRefill < oldest) { oldest = b.lastRefill; oldestKey = k; }
+        }
+        if (oldestKey !== null) this.buckets.delete(oldestKey);
+      }
+      bucket = { tokens: this.maxTokens, lastRefill: Date.now() };
+      this.buckets.set(key, bucket);
+    }
+    consume(bucket, this.maxTokens);
+  }
+}
+
+/**
+ * Which client an attempt is charged to.
+ *
+ * The socket's remote address, which is the real client on a direct connection — how this
+ * server is normally run. `X-Forwarded-For` is read only when a proxy is explicitly
+ * trusted: honouring it unconditionally would let any client forge its own key and so opt
+ * out of the limit entirely.
+ */
+export function clientKey(req: IncomingMessage, trustProxy: boolean): string {
+  if (trustProxy) {
+    const forwarded = req.headers['x-forwarded-for'];
+    const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim();
+    if (first) return first;
+  }
+  const address = req.socket.remoteAddress ?? 'unknown';
+  // `::ffff:127.0.0.1` and `127.0.0.1` are the same client; key them the same way.
+  return address.startsWith('::ffff:') ? address.slice(7) : address;
 }
 
 export interface HttpTransportOpts {
@@ -49,6 +137,18 @@ export interface HttpTransportOpts {
   bearerToken?: string;
   registry: ConnectionRegistry;
   rateLimit?: number;
+  /**
+   * Failed bearer-auth attempts allowed per client per minute. Defaults to
+   * `DEFAULT_AUTH_FAILURE_LIMIT`; 0 disables the check. A correct token never consumes from
+   * this budget, so a working client never throttles itself; a client sharing an address
+   * with a failing one does wait, which is what the limit is for.
+   */
+  authFailureLimit?: number;
+  /**
+   * Whether to read the client address from `X-Forwarded-For`. Off by default, because a
+   * client that can set that header can otherwise choose its own rate-limit key.
+   */
+  trustProxy?: boolean;
   /**
    * Host headers accepted by the DNS-rebinding guard. Defaults to the bind
    * address and localhost; set this when running behind a reverse proxy that
@@ -79,6 +179,11 @@ export async function startHttpServer(
       'Without authentication, any network client can execute SSH commands on your hosts.',
     );
   }
+
+  const authFailureLimit = opts.authFailureLimit ?? DEFAULT_AUTH_FAILURE_LIMIT;
+  const authFailureLimiter = authFailureLimit > 0
+    ? new AuthFailureLimiter(authFailureLimit)
+    : null;
 
   const rateLimiter = opts.rateLimit && opts.rateLimit > 0
     ? new RateLimiter(opts.rateLimit)
@@ -146,6 +251,31 @@ export async function startHttpServer(
     const isHealthProbe = req.method === 'GET' && url.pathname === '/health';
 
     if (!isHealthProbe) {
+      // Checked before the token is compared, not after — so an exhausted budget answers
+      // 429 without evaluating the guess. Gating only the 401 path instead would throttle
+      // nothing: the comparison would still happen and a correct token would still be
+      // served, so the status code would still tell an attacker which guess was right.
+      const key = authFailureLimiter ? clientKey(req, opts.trustProxy === true) : '';
+      if (authFailureLimiter) {
+        const { allowed, retryAfterMs } = authFailureLimiter.peek(key);
+        if (!allowed) {
+          const retryAfterSec = Math.ceil(retryAfterMs / 1000);
+          res.writeHead(429, {
+            'Content-Type': 'application/json',
+            'Retry-After': String(retryAfterSec),
+          });
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            error: {
+              code: -32604,
+              message: `Too many failed authentication attempts. Retry after ${retryAfterSec}s.`,
+            },
+            id: null,
+          }));
+          return;
+        }
+      }
+
       const auth = req.headers.authorization || '';
       const expected = `Bearer ${bearerToken}`;
       const authBuf = Buffer.from(auth);
@@ -153,6 +283,7 @@ export async function startHttpServer(
       const match = authBuf.length === expectedBuf.length &&
         timingSafeEqual(authBuf, expectedBuf);
       if (!match) {
+        authFailureLimiter?.recordFailure(key);
         // RFC 7235: a 401 must say how to authenticate. MCP clients also parse
         // JSON-RPC envelopes on this route, so 401 speaks the same dialect as
         // the 429 and 413 responses rather than a bare {error}.
@@ -299,6 +430,9 @@ export async function startHttpServer(
       console.error('Endpoints: POST / (MCP), GET /status, GET /health');
       if (rateLimiter) {
         console.error(`Rate limit: ${opts.rateLimit} req/min`);
+      }
+      if (authFailureLimiter) {
+        console.error(`Auth failure limit: ${authFailureLimit}/min per client`);
       }
       resolve();
     });
