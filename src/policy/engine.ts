@@ -18,6 +18,9 @@ export interface PolicyRules {
   denylist?: string[];
 }
 
+/** How long to wait for the OPA sidecar before treating it as unavailable. */
+const OPA_TIMEOUT_MS = 2_000;
+
 /** Tiers, most restrictive first. Unknown/unset tiers resolve to the first. */
 export const HOST_GROUPS = ['prod', 'staging', 'dev'] as const;
 
@@ -251,6 +254,10 @@ export class PolicyEngine {
   }
 
   setOpaUrl(url: string | null, failClosed = false): void {
+    // Reset the warning throttle when the mode changes, or the one warning per minute can
+    // be the *previous* mode's sentence — "commands OPA would deny may now be allowed"
+    // printed while the engine refuses everything.
+    if (failClosed !== this.opaFailClosed) this.lastOpaWarning = 0;
     this.opaUrl = url;
     this.opaFailClosed = failClosed;
   }
@@ -347,13 +354,26 @@ export class PolicyEngine {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ input }),
+        // A sidecar that accepts the connection and never answers is the canonical way
+        // OPA is "unreachable", and without this the call ran to undici's five-minute
+        // header timeout while every tool call waited on it. The abort lands in the catch
+        // below, so both modes reach their own answer inside the budget.
+        signal: AbortSignal.timeout(OPA_TIMEOUT_MS),
       });
 
       if (!resp.ok) {
-        return this.onOpaUnavailable(`HTTP ${resp.status} from ${this.opaUrl}`, local);
+        return this.onOpaUnavailable(`HTTP ${resp.status}`, local);
       }
 
-      const data = await resp.json() as { result?: boolean };
+      const data = await resp.json() as { result?: unknown };
+      if (typeof data.result !== 'boolean') {
+        // A 200 carrying no decision is how OPA answers for an undefined document, which
+        // is what a wrong package path, an unactivated bundle, or an `allow` rule written
+        // without `default allow := false` all produce. Reading that as consent meant
+        // `--opaFailClosed` did not cover the way an OPA gate actually goes down: six of
+        // seven response shapes allowed, with no warning at all.
+        return this.onOpaUnavailable('no boolean `result` in the response', local);
+      }
       if (data.result === false) {
         return {
           decision: 'deny',
@@ -388,7 +408,11 @@ export class PolicyEngine {
       commandClass: local.commandClass,
       binary: local.binary,
       ruleId: 'opa-unavailable',
-      reason: `OPA evaluation unavailable and --opaFailClosed is set (${cause})`,
+      // Fixed string. `cause` goes to stderr, where the operator is; this `reason` is
+      // rethrown as the tool's error text and written to the audit record, and it carried
+      // `this.opaUrl` — an internal hostname, and any credential embedded in it — out to
+      // the MCP client on every refusal.
+      reason: 'OPA evaluation unavailable and --opaFailClosed is set',
     };
   }
 

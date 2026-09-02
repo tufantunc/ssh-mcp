@@ -159,10 +159,13 @@ cat /etc/hosts                  read-only   allowed — runs /tmp/mine/cat
 ls() { sudo id; }               safe        allowed
 ```
 
-The classifier already answers this for variables — `S=sudo` then `$S id` is refused,
-because a command word containing `$` cannot be resolved statically. That answer does not
-extend to an alias, a shell function or a `PATH` entry, because there the command word is
-an ordinary name and nothing about it looks wrong.
+The classifier already answers this for variables, but less strongly than "refused": `S=sudo`
+then `$S id` classifies `destructive`, because a command word containing `$` cannot be
+resolved statically. So it reaches the approval gate — prompted under `ask-destructive`,
+refused only where `destructive` is not bound, and allowed outright under `auto`. The alias,
+shell function and `PATH` cases do not even reach that: they classify `safe` or `read-only`,
+below the class that prompts, because the command word is an ordinary name and nothing about
+it looks wrong. That difference is the gap, and it is one class wide.
 
 **This is not fixable by classifying harder.** The state lives in the remote shell, not in
 this server, and a name-based classifier cannot know what a name means on the other end.

@@ -339,6 +339,16 @@ describe('the fork-bomb rule tolerates the spacing bash tolerates', () => {
     expect(isForbidden(command)).toBe(false);
   });
 
+  it.each([':(){ :&:& };:', ':(){ : ;: & };:'])(
+    '%j escapes too, and the comment says so',
+    (command) => {
+      // A body that separates the two calls with `&` or `;` rather than `|`. Widening the
+      // pattern to cover these would widen a list no role, tier or approval mode can
+      // override, so the trade is left where it is — but written down, not implied away.
+      expect(isForbidden(command)).toBe(false);
+    },
+  );
+
   it('does not claim to catch a fork bomb under another name', () => {
     // `f(){ f|f& };f` is the same bomb. Matching it needs a backreference over an
     // unbounded body, and this file has already shipped one ReDoS; the impact is a

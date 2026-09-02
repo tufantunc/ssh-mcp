@@ -213,6 +213,68 @@ describe('OPA evaluation', () => {
       expect(result.decision).not.toBe('deny');
       expect(errSpy).not.toHaveBeenCalled();
     });
+
+    it('treats a 200 that carries no decision as unavailable', async () => {
+      // `{}` is what OPA answers for an undefined document — a misnamed package, an
+      // unactivated bundle, or an `allow` rule written without `default allow := false`.
+      // Reading that as consent meant the flag did not cover the way an OPA gate
+      // actually goes down: six of seven response shapes allowed, with no warning.
+      for (const body of [{}, { result: null }, { result: 'false' }, { result: { allow: false } }]) {
+        await startOpa(() => ({ body }));
+        const engine = new PolicyEngine(DEFAULT_RULES);
+        engine.setOpaUrl(url, true);
+        const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+        expect(result.decision, JSON.stringify(body)).toBe('deny');
+        expect(result.ruleId).toBe('opa-unavailable');
+      }
+    });
+
+    it('keeps the sidecar URL out of what the client is told', async () => {
+      await startOpa(() => ({ status: 500, body: { error: 'boom' } }));
+      const engine = new PolicyEngine(DEFAULT_RULES);
+      engine.setOpaUrl('http://opa-admin:s3cr3t@opa.internal:8181', true);
+    
+      const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      // `reason` is rethrown as the tool's error text and written to the audit record.
+      expect(result.reason).not.toMatch(/s3cr3t|internal|8181/);
+    });
+
+    it('gives up on a sidecar that never answers, rather than waiting on it', async () => {
+      // A process that accepts the connection and never replies is the canonical
+      // "unreachable". Without a bound on the request this ran to undici's five-minute
+      // header timeout while every tool call waited behind it.
+      const hung = createServer(() => { /* deliberately no response */ });
+      await new Promise<void>((r) => hung.listen(0, '127.0.0.1', () => r()));
+      const port = (hung.address() as AddressInfo).port;
+      const engine = new PolicyEngine(DEFAULT_RULES);
+      engine.setOpaUrl(`http://127.0.0.1:${port}`, true);
+
+      const started = Date.now();
+      const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      const elapsed = Date.now() - started;
+      hung.close();
+
+      expect(result.decision).toBe('deny');
+      expect(result.ruleId).toBe('opa-unavailable');
+      expect(elapsed).toBeLessThan(10_000);
+    }, 20_000);
+
+    it('does not print the other mode\'s sentence after the mode changes', async () => {
+      const engine = new PolicyEngine(DEFAULT_RULES);
+      engine.setOpaUrl('http://127.0.0.1:1');
+      await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      expect(warnings()).toMatch(/may now be allowed/);
+
+      // The throttle is one warning per minute, so without a reset the next warning is
+      // suppressed and the fail-open sentence stands on the record while the engine
+      // refuses everything.
+      engine.setOpaUrl('http://127.0.0.1:1', true);
+      const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      expect(result.decision).toBe('deny');
+      expect(warnings()).toMatch(/Refusing every command/);
+    });
+
+
   });
 
 

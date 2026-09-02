@@ -2,7 +2,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { reportFatal } from './errors.js';
+import { reportFatal, OperatorError } from './errors.js';
 import { ConnectionRegistry } from './ssh/connection-registry.js';
 import { PolicyEngine, resolvePolicyRules } from './policy/engine.js';
 import { AuditStore } from './audit/store.js';
@@ -43,9 +43,17 @@ async function main() {
   const policy = new PolicyEngine(resolvePolicyRules(config.profiles, config.policy));
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);
 
-  if (argv.opaUrl) {
+  if ('opaUrl' in argv) {
+    // Presence, not truthiness — the trap `flagEnabled` was written for. A
+    // space-separated `--opaUrl http://…` stores null, so the old guard dropped it
+    // silently, and dropped any `--opaFailClosed` the operator asked for with it.
+    if (!argv.opaUrl) {
+      throw new OperatorError('--opaUrl needs a URL, as --opaUrl=<url>.');
+    }
     policy.setOpaUrl(argv.opaUrl, flagEnabled(argv, 'opaFailClosed'));
     console.error(`OPA sidecar enabled: ${argv.opaUrl}`);
+  } else if (flagEnabled(argv, 'opaFailClosed')) {
+    throw new OperatorError('--opaFailClosed does nothing without --opaUrl.');
   }
 
   // An McpServer binds to a single transport, so HTTP needs one per session.
