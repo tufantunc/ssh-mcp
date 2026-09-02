@@ -1,5 +1,118 @@
 # ssh-mcp
 
+## 2.6.0
+
+### Minor Changes
+
+- [#183](https://github.com/tufantunc/ssh-mcp/pull/183) [`6f899a3`](https://github.com/tufantunc/ssh-mcp/commit/6f899a3e4d2f12fe309d473a936e202bf68010ee) Thanks [@tufantunc](https://github.com/tufantunc)! - **Security:** classify the command a shell would actually run ([GHSA-qvx5-rxrj-9vfh](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-qvx5-rxrj-9vfh), CVSS 9.9). Affects 2.0.0 through 2.5.1.
+
+  `minor` rather than `patch` for the reason 2.3.0 and 2.5.0 used it: the version reflects what
+  upgrading can do to you, not how large the change is. Two shipped tools stop working for two
+  role/tier pairs — see **Behaviour changes** below.
+
+  Quoting is removed by the transport before the command runs, but the classifier's regexes
+  were written against the text as sent. `rm -rf "/etc"` therefore matched nothing, came back
+  `safe`, and ran without approval on a `prod` profile where `safe` is granted to `operator`.
+  `"rm" -rf /etc` and `s"u"do id` are the same bug spelled two more ways. This is the fourth
+  advisory in this area, and the previous three each taught the classifier one more carrier;
+  the shape of the mistake was reading the string instead of the tokens.
+
+  One tokeniser now resolves quoting and splits on `;`, `&`, `|` and newline outside quotes,
+  and the seven consumers that used to split on whitespace read it. Regex rules are tried
+  against both the written and the tokenised form, because neither is a superset of the other —
+  the tokenised form loses the separators the fork bomb's `:|:&` needs, the written form loses
+  the quote removal. The word-based rules deliberately keep the written form only: handing them
+  the tokenised one turns a separator that was safely inside a quoted argument into a real one,
+  which put `grep -E "warn|reboot" syslog` on the never-allowed list.
+
+  Three narrower holes travelled with it:
+
+  - A command's class was decided from its outer command alone, and the scan for carried
+    commands _replaced_ it rather than raising it. `sudo sh -c 'rm -rf /etc'` reported the
+    inner `destructive` and lost the outer `privileged`. The class is now the maximum over the
+    command and everything it carries.
+  - `sftp:upload` and `session:open` are built by this server rather than typed by a user, and
+    no rule named them, so both fell through to `safe`. Writing an arbitrary file to the target
+    is the same authority as `rm` spelled through a different tool, and it reaches
+    `~/.ssh/authorized_keys` without touching a shell. Both are `destructive` now.
+  - An interpreter laundered the class of what it was handed. `python3 -c`, `perl -e`,
+    `node -e`, `node -p`, `php -r` and `echo … | bash` all reached root classified `safe`, and
+    `runuser` and `setpriv` were missing from the elevation prefixes. Where the program is
+    shell it is classified as shell; where it is not, this server cannot read what will run and
+    says so with `destructive`. The carrier is found wherever it sits, so
+    `xargs -I {} sh -c 'sudo id'` and `flock /tmp/l sh -c 'sudo id'` are read too, and a
+    program-bearing flag must be present, which keeps `python3 manage.py migrate` and
+    `cat /usr/bin/python3` where they were.
+
+    **`awk` is deliberately not covered.** Its program is a positional operand rather than a
+    flag's value, so nothing distinguishes running awk from naming it, and its four
+    implementations disagree about which flags consume a value — BWK awk, which is `awk` on
+    macOS and the BSDs, ignores an unknown option without consuming it. Two review rounds
+    found five separate holes in modelling that. `awk` keeps the class it has on 2.5.1 and is
+    tracked separately, so `awk 'BEGIN{system("...")}'` is still `safe` after this release.
+
+  `find -exec` was already `destructive` before this release and stays gated; reading the
+  carrier is what raises `find / -name x -exec sudo id +` to `privileged`.
+
+  ## Behaviour changes
+
+  **`sftp-upload` and interactive `open-session` become `destructive`.** Measured against the
+  default rules, that changes the decision for these:
+
+  | role / tier                                            | before         | after           |
+  | ------------------------------------------------------ | -------------- | --------------- |
+  | `operator` / `prod`                                    | allow          | **deny**        |
+  | `viewer` / `dev`                                       | allow          | **deny**        |
+  | `operator` / `staging`, `operator` / `dev`             | allow          | approval prompt |
+  | `admin` / `prod`, `admin` / `staging`, `admin` / `dev` | allow          | approval prompt |
+  | `viewer` / `prod`, `viewer` / `staging`                | already denied | already denied  |
+
+  The two `deny` rows are the reason for the `minor`: those roles hold `['read-only','safe']`
+  on that tier, so there is no prompt to click through. Grant `destructive` on the tier to
+  restore them. `viewer` never held `safe` on `prod` or `staging`, so nothing moves there.
+
+  `sftp:download` and `session:close` deliberately keep the class they have today. Both would
+  move _down_ from `safe`, and a security release is the wrong place for a widening.
+
+  **Newly gated interpreter forms.** Beyond the six named above, `ruby -e`, `python -c`,
+  `python2 -c`, `perl -E`, `node --eval` and `node --print` are gated for the same reason, and
+  so are the flag-cluster spellings of all of them — `bash -xc`, `python3 -Ic`, `perl -wE` run
+  exactly what `bash -cx` runs. A program arriving on standard input is gated however the
+  interpreter is told to read it (`| bash`, `| bash -s`, `| bash -s -- arg`,
+  `| bash /dev/stdin`), while a pipe carrying data to a named script (`cat data | bash
+process.sh`) is not.
+
+  Measured against 90 ordinary read and maintenance commands — quoted arguments that are not
+  commands, commands that merely name an interpreter (`which python3`, `ls -l /usr/bin/node`,
+  `ps aux | grep python3`, `man awk`), awk one-liners, download-then-run-a-script pairs, and
+  scripts run by name — **two changed class**:
+
+  - `sed -n perl -e p file` moves `safe` → `destructive`. `-e` is both sed's expression flag
+    and perl's program flag, and nothing here can know an arbitrary tool's grammar. An
+    allowlisted command's operands are exempt, which covers `grep -e perl -e python`; `sed` is
+    not allowlisted, and this spelling is not one anyone writes.
+  - `toString arg` moves from a `TypeError` inside the policy gate to `safe`. The lookup tables
+    were plain objects indexed by the command word, so a command named after an
+    `Object.prototype` member resolved to a function. That is a fix, not a regression.
+
+  Of 25 attack forms, 16 moved from ungated to gated and 5 were already gated. The remaining
+  four are all awk, which this release deliberately does not cover — see the interpreter
+  bullet above.
+
+### Patch Changes
+
+- [#181](https://github.com/tufantunc/ssh-mcp/pull/181) [`b1ce0f7`](https://github.com/tufantunc/ssh-mcp/commit/b1ce0f7619ad86a3b4b90c93d117e4eab8438f2f) Thanks [@tufantunc](https://github.com/tufantunc)! - Correct three places where the documentation promised more than the code delivers, and two tool descriptions with it.
+
+  From an unsolicited source review by [Can Yildirim](https://github.com/canyildirim) against v2.5.0. Each was reproduced against the shipped build before being written up here; nothing in this release changes behaviour.
+
+  **Host key trust does not survive a restart.** `SECURITY.md` listed "TOFU host key verification by default" as the mitigation for MITM. The store behind it is a `Map` created per `ConnectionRegistry` — nothing reads or writes it to disk and nothing consults `~/.ssh/known_hosts` — so "verify after" means verify within one process. For a stdio server that starts and exits with its client, a fresh accept happens every session, and an attacker positioned to intercept has to win once per start rather than once ever. A new section says so, and names the one setting that does outlive a restart: `trustedHostKey` on the profile. It also records that `--hostKeyMode=strict` is currently unusable — the only write to the store sits below the strict throw, so the store never fills and every host is refused, with or without a pin.
+
+  **`ask-destructive` gates less than the name suggests.** Outside the never-allowed list, the `destructive` class comes from one `rm -rf /path` pattern, a `find` carrying a write/exec flag, and an unresolvable command word; elevation classifies `privileged`, which the mode also gates. `SECURITY.md` disclosed this for `kill`, which read as a single carve-out rather than the general rule. It is now stated as the rule, with the measured list: `rm -f /etc/passwd`, `rm -r -f /`, `rm --recursive --force /`, `mv`, `truncate`, `shred`, `systemctl stop`, `sftp-upload` and a reverse shell all classify `safe` and raise no prompt in this mode. `ask-all` is named as the mode that gates writes.
+
+  **Two tool descriptions overstated the approval gate.** `privileged-command` said approval is "ALWAYS" required; `approvalPolicy = "auto"` removes it. `run-command` had the same defect in the same sentence. Both now say the command goes through the approval gate and that `approvalPolicy` decides whether that is a prompt, an allow, or a refusal — which is true of all four modes, where naming `auto` alone was not: `ask-all` prompts for every class, and `deny` refuses instead of prompting.
+
+  That last change moves two `--dumpToolHashes` values: `run-command` 69b38cb4f45d7bc8 to 87a68e83fe483d53, and `privileged-command` e71bf56a334cf488 to dda5722295cb704b. The other nine are unchanged. An operator pinning tool-description hashes will see those two move, and that is expected here rather than a sign of tampering, as it was for `close-session` in 2.3.3.
+
 ## 2.5.1
 
 ### Patch Changes
