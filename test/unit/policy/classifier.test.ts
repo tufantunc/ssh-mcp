@@ -215,7 +215,12 @@ describe('elevation and exec wrappers (GHSA-6f54-mjqq-2jp8)', () => {
 
   it('treats find as writing when it carries an action flag', () => {
     expect(classifyCommand('find /var/www -delete').class).toBe('destructive');
-    expect(classifyCommand('find / -name x -exec sudo id +').class).toBe('destructive');
+    // Reading the `-exec` carrier is what raises this past `destructive`: the command
+    // find runs is `sudo id`. The two assertions below are not evidence for that — they
+    // reach `destructive` through the disqualifying-argument rule, not through the
+    // carrier. `find /tmp -okdir sudo id +` in quote-removal.test.ts is what pins the
+    // -exec family independently.
+    expect(classifyCommand('find / -name x -exec sudo id +').class).toBe('privileged');
     expect(classifyCommand('find /tmp -execdir rm {} +').class).toBe('destructive');
     expect(classifyCommand('find /tmp -ok rm {} +').class).toBe('destructive');
   });
@@ -254,10 +259,11 @@ describe('forbidden pattern matching cost', () => {
     classifyCommand(command);
     const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
 
-    // The quadratic forms took ~11s at 160k characters and grow four-fold per
-    // doubling; the rewritten ones are sub-millisecond. One second separates
-    // them by orders of magnitude in both directions.
-    expect(elapsedMs).toBeLessThan(1000);
+      // The quadratic forms took ~11s at 160k characters and grow four-fold per
+      // doubling; the rewritten ones are sub-millisecond. Three seconds separates them
+      // by orders of magnitude in both directions, with room for CI, which runs these
+      // under coverage instrumentation on a slower machine than any of us measure on.
+    expect(elapsedMs).toBeLessThan(3000);
   });
 
   /**
@@ -283,17 +289,28 @@ describe('forbidden pattern matching cost', () => {
    */
   it('stays linear on a command built from the pattern heads themselves', () => {
     const seed = 'dd curl wget chown -R x ';
-    const oneMegabyte = seed.repeat(Math.ceil(1_000_000 / seed.length)).slice(0, 1_000_000);
+    const cost = (bytes: number) => {
+      const command = seed.repeat(Math.ceil(bytes / seed.length)).slice(0, bytes);
+      const started = process.hrtime.bigint();
+      classifyCommand(command);
+      return Number(process.hrtime.bigint() - started) / 1e6;
+    };
 
-    const started = process.hrtime.bigint();
-    classifyCommand(oneMegabyte);
-    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
-
-    // 45 ms measured, against 65_000 ms before. A second is far enough below
-    // the old figure to fail loudly on a regression and far enough above the
-    // new one to survive a slow CI runner.
-    expect(elapsedMs).toBeLessThan(1000);
-  });
+    // A ratio rather than a wall-clock bound. "Stays linear" is a claim about growth, and
+    // an absolute budget measures the runner: this asserted 1000 ms against ~460 ms
+    // locally and CI failed at 3677 ms, because CI runs the suite under coverage
+    // instrumentation. Quadrupling the input should roughly quadruple the cost, and the
+    // quadratic forms this guards against grew sixteen-fold, so four-vs-eight is a wide
+    // berth that no machine's speed can move.
+    //
+    // 50KB and 200KB rather than 1MB: growth is what is being asserted, and a 1MB
+    // measurement under coverage costs seconds, which is how the first attempt at this
+    // traded a failed assertion for a test timeout. CI measured ~8x this machine, so the
+    // explicit timeout is what stops a slow runner turning a passing assertion into a
+    // timeout again. Absolute cost at size is covered by the 200k-character cases above.
+    const ratio = cost(200_000) / Math.max(cost(50_000), 0.01);
+    expect(ratio).toBeLessThan(8);
+  }, 30_000);
 });
 
 describe('forbidden patterns still match after the rewrite', () => {
