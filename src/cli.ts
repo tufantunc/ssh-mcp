@@ -65,6 +65,40 @@ export function parseArgv(args: string[] = process.argv.slice(2)): Record<string
  * `--flag=false` and `--flag=0` turn it off, because a flag that cannot be
  * turned off once written into a wrapper script is its own annoyance.
  */
+/**
+ * `--authFailureLimit`, refusing rather than guessing.
+ *
+ * `parseArgv` stores `null` for a flag written without a value, and `null !== undefined`,
+ * so a bare `--authFailureLimit` reached `parseInt` and produced NaN. NaN fails the `> 0`
+ * test the transport uses to decide whether to build the limiter at all, so a typo — or
+ * `--authFailureLimit=off`, which `0 = off` makes a plausible spelling — silently turned
+ * off a control that is on by default, with no line in the startup banner to say so. The
+ * same shape on `--rateLimit` is harmless because that one defaults to off; this one does
+ * not, which is what makes failing open new.
+ */
+export function parseFailureLimit(raw: string | null | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || !/^\d+$/.test(raw.trim())) {
+    throw new OperatorError(
+      `--authFailureLimit needs a non-negative whole number, got ${JSON.stringify(raw)}. ` +
+      'Use --authFailureLimit=0 to turn the check off deliberately.',
+    );
+  }
+  const value = Number(raw.trim());
+  // Bounded, because an unbounded one is the same fail-open this guard exists to stop:
+  // `--authFailureLimit=99999999999999999999` parsed to 1e20, a bucket that never empties
+  // and a `Retry-After` of 1 — configured on, functionally absent.
+  if (!Number.isSafeInteger(value) || value > MAX_AUTH_FAILURE_LIMIT) {
+    throw new OperatorError(
+      `--authFailureLimit must be between 0 and ${MAX_AUTH_FAILURE_LIMIT}, got ${JSON.stringify(raw)}.`,
+    );
+  }
+  return value;
+}
+
+/** Far above any real budget; the point is that there is one. */
+const MAX_AUTH_FAILURE_LIMIT = 10_000;
+
 export function flagEnabled(argv: Record<string, string | null>, name: string): boolean {
   if (!(name in argv)) return false;
   const value = argv[name];

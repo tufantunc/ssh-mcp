@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { randomUUID, timingSafeEqual } from 'crypto';
+import { isIP } from 'net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -11,36 +12,205 @@ const MAX_BODY_SIZE = 1_048_576; // 1MB
 /** Cap on concurrent MCP sessions, so unauthenticated-adjacent churn can't grow the map without bound. */
 const MAX_SESSIONS = 64;
 
-class RateLimiter {
-  private tokens: number;
-  private lastRefill: number;
-  private maxTokens: number;
-  private refillIntervalMs: number;
+/** How many failed auth attempts one client may make per minute. 0 disables the check. */
+export const DEFAULT_AUTH_FAILURE_LIMIT = 10;
 
-  constructor(maxRequestsPerMinute: number) {
-    this.maxTokens = maxRequestsPerMinute;
-    this.tokens = maxRequestsPerMinute;
-    this.lastRefill = Date.now();
-    this.refillIntervalMs = 60_000;
+/** Cap on tracked clients, for the reason `MAX_SESSIONS` exists: churn must not grow a map. */
+export const MAX_TRACKED_CLIENTS = 1024;
+
+const REFILL_INTERVAL_MS = 60_000;
+
+interface Bucket {
+  tokens: number;
+  lastRefill: number;
+}
+
+/**
+ * One token-bucket step, shared by the two limiters so the refill arithmetic exists once.
+ *
+ * Mutates the bucket. Refills proportionally to elapsed time rather than on a timer, so an
+ * idle server costs nothing and there is no interval to clean up.
+ */
+function consume(bucket: Bucket, maxTokens: number): { allowed: boolean; retryAfterMs: number } {
+  const elapsed = Date.now() - bucket.lastRefill;
+  const refilled = Math.floor((elapsed / REFILL_INTERVAL_MS) * maxTokens);
+  if (refilled > 0) {
+    bucket.tokens = Math.min(maxTokens, bucket.tokens + refilled);
+    bucket.lastRefill += Math.round((refilled / maxTokens) * REFILL_INTERVAL_MS);
+  }
+
+  if (bucket.tokens > 0) {
+    bucket.tokens--;
+    return { allowed: true, retryAfterMs: 0 };
+  }
+
+  return { allowed: false, retryAfterMs: Math.ceil(REFILL_INTERVAL_MS / maxTokens) };
+}
+
+class RateLimiter {
+  private bucket: Bucket;
+
+  constructor(private maxTokens: number) {
+    this.bucket = { tokens: maxTokens, lastRefill: Date.now() };
   }
 
   tryConsume(): { allowed: boolean; retryAfterMs: number } {
-    const now = Date.now();
-    const elapsed = now - this.lastRefill;
-    const refilled = Math.floor((elapsed / this.refillIntervalMs) * this.maxTokens);
-    if (refilled > 0) {
-      this.tokens = Math.min(this.maxTokens, this.tokens + refilled);
-      this.lastRefill += Math.round((refilled / this.maxTokens) * this.refillIntervalMs);
-    }
-
-    if (this.tokens > 0) {
-      this.tokens--;
-      return { allowed: true, retryAfterMs: 0 };
-    }
-
-    const retryAfterMs = Math.ceil(this.refillIntervalMs / this.maxTokens);
-    return { allowed: false, retryAfterMs };
+    return consume(this.bucket, this.maxTokens);
   }
+}
+
+/**
+ * A bucket per client, for throttling failed authentication.
+ *
+ * Separate from the request limiter on purpose. The auth check returned before the request
+ * limiter was reached, so a wrong bearer token consumed nothing and guessing ran at network
+ * speed with no backoff — measured as twelve 401s and zero 429s against `--rateLimit=3`.
+ * Moving the request limiter above the auth check would have closed that and opened
+ * something worse: the request bucket is global, so unauthenticated traffic could then
+ * starve every legitimate client.
+ *
+ * Only failures consume a token, so a working client never builds a budget up and is never
+ * throttled by its own traffic — which is what makes this safe to have on by default. It
+ * is not a promise that a correct token always passes: once an address has spent its
+ * budget, everything from that address waits, correct tokens included. That is the whole
+ * point. Charging only after the comparison would leave the guess itself evaluated and the
+ * status code would still tell the attacker which token was right.
+ */
+export class AuthFailureLimiter {
+  private buckets = new Map<string, Bucket>();
+
+  constructor(private maxTokens: number) {}
+
+  /** Whether this client may make another attempt. Does not consume. */
+  peek(key: string): { allowed: boolean; retryAfterMs: number } {
+    const bucket = this.buckets.get(key);
+    if (bucket === undefined) return { allowed: true, retryAfterMs: 0 };
+    const elapsed = Date.now() - bucket.lastRefill;
+    const refilled = Math.floor((elapsed / REFILL_INTERVAL_MS) * this.maxTokens);
+    const available = Math.min(this.maxTokens, bucket.tokens + Math.max(refilled, 0));
+    if (available > 0) return { allowed: true, retryAfterMs: 0 };
+    return { allowed: false, retryAfterMs: Math.ceil(REFILL_INTERVAL_MS / this.maxTokens) };
+  }
+
+  /** Charge this client for a failed attempt. */
+  recordFailure(key: string): void {
+    let bucket = this.buckets.get(key);
+    if (bucket === undefined) {
+      bucket = { tokens: this.maxTokens, lastRefill: Date.now() };
+      if (this.buckets.size >= MAX_TRACKED_CLIENTS) {
+        // Evict the *fullest* entry, not the oldest. An exhausted bucket has the oldest
+        // `lastRefill` by construction, so evicting by age evicted the locked-out client
+        // first and then handed its key a fresh budget: minting enough keys cleared a
+        // lockout, which was measured end to end. A full bucket is the one with nothing
+        // worth remembering.
+        let fullestKey: string | null = null;
+        let fullest = -1;
+        for (const [k, b] of this.buckets) {
+          if (b.tokens > fullest) { fullest = b.tokens; fullestKey = k; }
+        }
+        if (fullestKey !== null) this.buckets.delete(fullestKey);
+        // Every tracked client is spent, so the table itself is the signal and a new key
+        // does not get a full budget.
+        //
+        // The cost, stated because it is real and cannot be softened here: while the table
+        // is saturated an arriving client has one attempt rather than the full budget, so
+        // a first typo leaves its correct token waiting. Seeding one token instead of zero
+        // looks like it would help and does not — `consume` spends it immediately, and
+        // `peek` already allows a key it has never seen, so the first attempt is free
+        // either way and the second is refused either way. Measured both, identical.
+        // Giving an arriving key a real budget is the refund this rule exists to stop.
+        // Saturation needs 1024 addresses that have each spent a full budget.
+        if (fullest <= 0) bucket = { tokens: 0, lastRefill: Date.now() };
+      }
+      this.buckets.set(key, bucket);
+    }
+    consume(bucket, this.maxTokens);
+  }
+}
+
+/**
+ * Which client an attempt is charged to.
+ *
+ * The socket's remote address, which is the real client on a direct connection — how this
+ * server is normally run. `X-Forwarded-For` is read only when a proxy is explicitly
+ * trusted: honouring it unconditionally would let any client forge its own key and so opt
+ * out of the limit entirely.
+ *
+ * When it is read, the **rightmost** entry is the one taken, not the leftmost. A proxy
+ * appends the address it saw, so the rightmost entry is what the nearest trusted proxy
+ * observed while every entry to its left came from the client. Reading the leftmost was
+ * worse than having no limit: a client sending `X-Forwarded-For: 10.0.0.1` minted a fresh
+ * budget per request — measured as nine wrong tokens and zero 429s — and sending a
+ * victim's address burned *their* budget instead, locking out a correct token.
+ *
+ * This assumes exactly one trusted proxy in front, which is what `--trustProxy` means. A
+ * chain of two would need the second-from-right, and this does not try to guess the depth.
+ * Anything that is not an IP address is discarded rather than used as a map key.
+ */
+export function clientKey(
+  req: IncomingMessage,
+  trustProxy: boolean,
+  trustedProxies?: string[],
+): { key: string; forwardedIgnored: boolean } {
+  const peer = canonicalAddress(req.socket.remoteAddress ?? 'unknown');
+  const forwarded = req.headers['x-forwarded-for'];
+  if (!trustProxy || forwarded === undefined) return { key: peer, forwardedIgnored: false };
+
+  // The rightmost entry is proxy-authored only if a proxy actually appended one. Nothing
+  // about the header says whether it did, so the *peer* has to be the proxy — otherwise a
+  // client reaching the listener directly sends one forged entry, that entry is the
+  // rightmost, and it picks its own key. Both attacks this keying was fixed to stop came
+  // back alive in exactly that configuration.
+  if (!isTrustedPeer(peer, trustedProxies)) {
+    return { key: peer, forwardedIgnored: true };
+  }
+
+  const raw = Array.isArray(forwarded) ? forwarded.join(',') : forwarded;
+  const entries = raw.split(',').map((e) => e.trim()).filter(Boolean);
+  const nearest = entries[entries.length - 1];
+  const address = nearest === undefined ? undefined : forwardedAddress(nearest);
+  if (address === undefined) return { key: peer, forwardedIgnored: true };
+  return { key: address, forwardedIgnored: false };
+}
+
+/**
+ * Whether the peer may speak for other clients.
+ *
+ * Bare `--trustProxy` means a loopback peer, which is the deployment the README asks for:
+ * the server binds to 127.0.0.1 and a proxy on the same host terminates TLS. A proxy
+ * somewhere else has to be named, because "trust whoever connected" is the assumption that
+ * made the header forgeable again.
+ */
+function isTrustedPeer(peer: string, trustedProxies?: string[]): boolean {
+  if (trustedProxies !== undefined && trustedProxies.length > 0) {
+    return trustedProxies.includes(peer);
+  }
+  return peer === '127.0.0.1' || peer === '::1' || peer.startsWith('127.');
+}
+
+/**
+ * One `X-Forwarded-For` entry as an address, or undefined if it is not one.
+ *
+ * `net.isIP` rejects the bracketed and port-suffixed spellings, which is how IPv6 usually
+ * appears in this header — and rejecting silently collapsed every client onto the proxy's
+ * key, which is worse than not keying at all.
+ */
+function forwardedAddress(entry: string): string | undefined {
+  let candidate = entry;
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(candidate);
+  if (bracketed) candidate = bracketed[1];
+  // A trailing `:port` only when what is left is not itself an IPv6 literal: `::1` has
+  // colons of its own and must not be truncated.
+  else if (isIP(candidate) === 0 && /^[^:]+:\d+$/.test(candidate)) {
+    candidate = candidate.slice(0, candidate.lastIndexOf(':'));
+  }
+  candidate = canonicalAddress(candidate);
+  return isIP(candidate) === 0 ? undefined : candidate;
+}
+
+/** `::ffff:127.0.0.1` and `127.0.0.1` are the same client; key them the same way. */
+function canonicalAddress(address: string): string {
+  return address.startsWith('::ffff:') ? address.slice(7) : address;
 }
 
 export interface HttpTransportOpts {
@@ -49,6 +219,23 @@ export interface HttpTransportOpts {
   bearerToken?: string;
   registry: ConnectionRegistry;
   rateLimit?: number;
+  /**
+   * Failed bearer-auth attempts allowed per client per minute. Defaults to
+   * `DEFAULT_AUTH_FAILURE_LIMIT`; 0 disables the check. A correct token never consumes from
+   * this budget, so a working client never throttles itself; a client sharing an address
+   * with a failing one does wait, which is what the limit is for.
+   */
+  authFailureLimit?: number;
+  /**
+   * Whether to read the client address from `X-Forwarded-For`. Off by default, because a
+   * client that can set that header can otherwise choose its own rate-limit key.
+   */
+  trustProxy?: boolean;
+  /**
+   * Peer addresses allowed to speak for other clients via `X-Forwarded-For`. Empty means
+   * a loopback peer only, which is the deployment the README describes.
+   */
+  trustedProxies?: string[];
   /**
    * Host headers accepted by the DNS-rebinding guard. Defaults to the bind
    * address and localhost; set this when running behind a reverse proxy that
@@ -79,6 +266,29 @@ export async function startHttpServer(
       'Without authentication, any network client can execute SSH commands on your hosts.',
     );
   }
+
+  const authFailureLimit = opts.authFailureLimit ?? DEFAULT_AUTH_FAILURE_LIMIT;
+  const authFailureLimiter = authFailureLimit > 0
+    ? new AuthFailureLimiter(authFailureLimit)
+    : null;
+
+  // Said once, when it turns out to matter. Behind a proxy with `--trustProxy` off, every
+  // client is keyed on the proxy's socket address and so shares one budget — which means
+  // ten failures from anyone locks out everyone. The README tells operators to terminate
+  // TLS at a proxy, so this is the configuration it recommends, and the collapse is
+  // invisible until a legitimate client is refused.
+  let warnedSharedBudget = false;
+  const warnSharedBudget = () => {
+    if (warnedSharedBudget) return;
+    warnedSharedBudget = true;
+    console.error(
+      'POLICY WARNING: X-Forwarded-For is present but not being used to tell clients ' +
+      'apart, so every client shares one failed-auth budget and one failing client can ' +
+      'lock out the rest. Either --trustProxy is off, or the peer is not a trusted proxy ' +
+      '(bare --trustProxy trusts a loopback peer; name others with --trustedProxies), or ' +
+      'the rightmost entry is not an address this server can read.',
+    );
+  };
 
   const rateLimiter = opts.rateLimit && opts.rateLimit > 0
     ? new RateLimiter(opts.rateLimit)
@@ -146,6 +356,42 @@ export async function startHttpServer(
     const isHealthProbe = req.method === 'GET' && url.pathname === '/health';
 
     if (!isHealthProbe) {
+      // Checked before the token is compared, not after — so an exhausted budget answers
+      // 429 without evaluating the guess. Gating only the 401 path instead would throttle
+      // nothing: the comparison would still happen and a correct token would still be
+      // served, so the status code would still tell an attacker which guess was right.
+      let key = '';
+      if (authFailureLimiter) {
+        const resolved = clientKey(req, opts.trustProxy === true, opts.trustedProxies);
+        key = resolved.key;
+        // Warned in both directions. Without `--trustProxy` a proxied deployment shares
+        // one budget; *with* it, an entry that could not be read leaves the same collapse
+        // in place, and that case used to be the silent one — the operator had set the
+        // flag and had no way to know it was not taking effect.
+        if (resolved.forwardedIgnored || (opts.trustProxy !== true && req.headers['x-forwarded-for'])) {
+          warnSharedBudget();
+        }
+      }
+      if (authFailureLimiter) {
+        const { allowed, retryAfterMs } = authFailureLimiter.peek(key);
+        if (!allowed) {
+          const retryAfterSec = Math.ceil(retryAfterMs / 1000);
+          res.writeHead(429, {
+            'Content-Type': 'application/json',
+            'Retry-After': String(retryAfterSec),
+          });
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            error: {
+              code: -32604,
+              message: `Too many failed authentication attempts. Retry after ${retryAfterSec}s.`,
+            },
+            id: null,
+          }));
+          return;
+        }
+      }
+
       const auth = req.headers.authorization || '';
       const expected = `Bearer ${bearerToken}`;
       const authBuf = Buffer.from(auth);
@@ -153,6 +399,7 @@ export async function startHttpServer(
       const match = authBuf.length === expectedBuf.length &&
         timingSafeEqual(authBuf, expectedBuf);
       if (!match) {
+        authFailureLimiter?.recordFailure(key);
         // RFC 7235: a 401 must say how to authenticate. MCP clients also parse
         // JSON-RPC envelopes on this route, so 401 speaks the same dialect as
         // the 429 and 413 responses rather than a bare {error}.
@@ -299,6 +546,9 @@ export async function startHttpServer(
       console.error('Endpoints: POST / (MCP), GET /status, GET /health');
       if (rateLimiter) {
         console.error(`Rate limit: ${opts.rateLimit} req/min`);
+      }
+      if (authFailureLimiter) {
+        console.error(`Auth failure limit: ${authFailureLimit}/min per client`);
       }
       resolve();
     });

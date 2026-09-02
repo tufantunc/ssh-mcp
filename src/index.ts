@@ -14,6 +14,7 @@ import {
   buildAppConfig,
   checkRemovedFlags,
   flagEnabled,
+  parseFailureLimit,
   resolveHostKeyMode,
 } from './cli.js';
 
@@ -70,6 +71,9 @@ async function main() {
       host: (argv.httpHost as string) || '127.0.0.1',
       bearerToken: argv.bearerToken as string | undefined,
       rateLimit: parseInt(argv.rateLimit as string) || 0,
+      authFailureLimit: parseFailureLimit(argv.authFailureLimit),
+      trustProxy: flagEnabled(argv, 'trustProxy'),
+      trustedProxies: (argv.trustedProxies as string)?.split(',').map((h) => h.trim()).filter(Boolean),
       allowedHosts: (argv.allowedHosts as string)?.split(',').map((h) => h.trim()).filter(Boolean),
       registry,
     });
