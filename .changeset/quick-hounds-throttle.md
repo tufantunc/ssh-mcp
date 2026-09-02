@@ -22,11 +22,23 @@ Two things worth knowing before upgrading:
   the right token.** That is deliberate. Gating only the 401 path would still evaluate the
   guess and still serve a correct token, so the status code would tell an attacker which
   token was right and the limit would slow nothing down. A client with a correct token in
-  its config never reaches this; a client with a *wrong* token now waits between attempts
-  rather than retrying freely.
+  its config never spends any of the budget, so it never throttles *itself* — but it does
+  wait if it shares a source address with something that is failing. Behind a reverse
+  proxy that is every client at once, so **set `--trustProxy` when the proxy is yours**;
+  without it the server keys on the proxy's address and one failing client can lock out the
+  rest. The server says so on stderr the first time it sees `X-Forwarded-For` without
+  `--trustProxy`.
 - **Clients are told apart by socket address.** `--trustProxy` reads `X-Forwarded-For`
   instead, and is off by default because a client that can set that header could otherwise
-  pick its own budget. Set it only when a proxy you control is in front.
+  pick its own budget. When it is on, the **rightmost** entry is used — a proxy appends the
+  address it saw, so everything left of the last entry came from the client. Reading the
+  leftmost would be worse than having no limit: a client could mint a fresh budget per
+  request, or name a victim's address and spend theirs. This assumes one trusted proxy hop.
+- **The budget is tracked for at most 1024 addresses**, and a fresh address evicts the
+  emptiest tracked one rather than the oldest, so cycling addresses cannot refund a spent
+  budget.
+- **A malformed `--authFailureLimit` is now refused at startup** rather than silently
+  disabling the check. Only `0` turns it off.
 
 The request limiter itself is unchanged, and is still one global bucket rather than one per
 client — a separate question, tracked in #187.

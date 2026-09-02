@@ -637,10 +637,14 @@ guessing ran at network speed. `--authFailureLimit` gives each client its own sm
 spent only on a 401; a correct token never consumes from it, so a working client never
 throttles itself. Once an address has spent its budget every request from it waits,
 including one with the right token — that is deliberate, since answering the guess would
-otherwise tell the caller which token was right. Clients are told apart by socket address;
-`--trustProxy` reads `X-Forwarded-For` instead, and should be set only when a proxy you
-control is in front, because a client that can set that header can otherwise choose its own
-budget.
+otherwise tell the caller which token was right. Clients are told apart by socket address. **Behind a
+reverse proxy that means every client shares one budget**, so set `--trustProxy` when the
+proxy is yours — the server prints a warning the first time it sees `X-Forwarded-For`
+without it. `--trustProxy` takes the *rightmost* `X-Forwarded-For` entry, which is the hop
+the proxy itself appended; everything to its left came from the client, so reading the
+leftmost would let a client choose its own budget or spend a victim's. One trusted hop is
+assumed. A malformed `--authFailureLimit` is refused at startup rather than silently
+disabling the check; only `0` turns it off.
 
 **Always terminate TLS at a reverse proxy** (Caddy/nginx). The server listens on `127.0.0.1` only.
 

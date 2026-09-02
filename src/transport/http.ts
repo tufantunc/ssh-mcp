@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { randomUUID, timingSafeEqual } from 'crypto';
+import { isIP } from 'net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -12,10 +13,10 @@ const MAX_BODY_SIZE = 1_048_576; // 1MB
 const MAX_SESSIONS = 64;
 
 /** How many failed auth attempts one client may make per minute. 0 disables the check. */
-const DEFAULT_AUTH_FAILURE_LIMIT = 10;
+export const DEFAULT_AUTH_FAILURE_LIMIT = 10;
 
 /** Cap on tracked clients, for the reason `MAX_SESSIONS` exists: churn must not grow a map. */
-const MAX_TRACKED_CLIENTS = 1024;
+export const MAX_TRACKED_CLIENTS = 1024;
 
 const REFILL_INTERVAL_MS = 60_000;
 
@@ -75,7 +76,7 @@ class RateLimiter {
  * point. Charging only after the comparison would leave the guess itself evaluated and the
  * status code would still tell the attacker which token was right.
  */
-class AuthFailureLimiter {
+export class AuthFailureLimiter {
   private buckets = new Map<string, Bucket>();
 
   constructor(private maxTokens: number) {}
@@ -95,17 +96,23 @@ class AuthFailureLimiter {
   recordFailure(key: string): void {
     let bucket = this.buckets.get(key);
     if (bucket === undefined) {
-      // Evict the least recently refilled entry rather than growing without bound. A
-      // client that has stopped failing is the one worth forgetting.
-      if (this.buckets.size >= MAX_TRACKED_CLIENTS) {
-        let oldestKey: string | null = null;
-        let oldest = Infinity;
-        for (const [k, b] of this.buckets) {
-          if (b.lastRefill < oldest) { oldest = b.lastRefill; oldestKey = k; }
-        }
-        if (oldestKey !== null) this.buckets.delete(oldestKey);
-      }
       bucket = { tokens: this.maxTokens, lastRefill: Date.now() };
+      if (this.buckets.size >= MAX_TRACKED_CLIENTS) {
+        // Evict the *fullest* entry, not the oldest. An exhausted bucket has the oldest
+        // `lastRefill` by construction, so evicting by age evicted the locked-out client
+        // first and then handed its key a fresh budget: minting enough keys cleared a
+        // lockout, which was measured end to end. A full bucket is the one with nothing
+        // worth remembering.
+        let fullestKey: string | null = null;
+        let fullest = -1;
+        for (const [k, b] of this.buckets) {
+          if (b.tokens > fullest) { fullest = b.tokens; fullestKey = k; }
+        }
+        if (fullestKey !== null) this.buckets.delete(fullestKey);
+        // Every tracked client is spent, so the table itself is the signal. The new key
+        // inherits that rather than being rewarded for arriving late.
+        if (fullest <= 0) bucket = { tokens: 0, lastRefill: Date.now() };
+      }
       this.buckets.set(key, bucket);
     }
     consume(bucket, this.maxTokens);
@@ -119,15 +126,33 @@ class AuthFailureLimiter {
  * server is normally run. `X-Forwarded-For` is read only when a proxy is explicitly
  * trusted: honouring it unconditionally would let any client forge its own key and so opt
  * out of the limit entirely.
+ *
+ * When it is read, the **rightmost** entry is the one taken, not the leftmost. A proxy
+ * appends the address it saw, so the rightmost entry is what the nearest trusted proxy
+ * observed while every entry to its left came from the client. Reading the leftmost was
+ * worse than having no limit: a client sending `X-Forwarded-For: 10.0.0.1` minted a fresh
+ * budget per request — measured as nine wrong tokens and zero 429s — and sending a
+ * victim's address burned *their* budget instead, locking out a correct token.
+ *
+ * This assumes exactly one trusted proxy in front, which is what `--trustProxy` means. A
+ * chain of two would need the second-from-right, and this does not try to guess the depth.
+ * Anything that is not an IP address is discarded rather than used as a map key.
  */
 export function clientKey(req: IncomingMessage, trustProxy: boolean): string {
   if (trustProxy) {
     const forwarded = req.headers['x-forwarded-for'];
-    const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim();
-    if (first) return first;
+    const raw = Array.isArray(forwarded) ? forwarded.join(',') : forwarded;
+    const entries = (raw ?? '').split(',').map((e) => e.trim()).filter(Boolean);
+    const nearest = entries[entries.length - 1];
+    if (nearest !== undefined && isIP(canonicalAddress(nearest)) !== 0) {
+      return canonicalAddress(nearest);
+    }
   }
-  const address = req.socket.remoteAddress ?? 'unknown';
-  // `::ffff:127.0.0.1` and `127.0.0.1` are the same client; key them the same way.
+  return canonicalAddress(req.socket.remoteAddress ?? 'unknown');
+}
+
+/** `::ffff:127.0.0.1` and `127.0.0.1` are the same client; key them the same way. */
+function canonicalAddress(address: string): string {
   return address.startsWith('::ffff:') ? address.slice(7) : address;
 }
 
@@ -184,6 +209,22 @@ export async function startHttpServer(
   const authFailureLimiter = authFailureLimit > 0
     ? new AuthFailureLimiter(authFailureLimit)
     : null;
+
+  // Said once, when it turns out to matter. Behind a proxy with `--trustProxy` off, every
+  // client is keyed on the proxy's socket address and so shares one budget — which means
+  // ten failures from anyone locks out everyone. The README tells operators to terminate
+  // TLS at a proxy, so this is the configuration it recommends, and the collapse is
+  // invisible until a legitimate client is refused.
+  let warnedSharedBudget = false;
+  const warnSharedBudget = () => {
+    if (warnedSharedBudget) return;
+    warnedSharedBudget = true;
+    console.error(
+      'POLICY WARNING: requests carry X-Forwarded-For but --trustProxy is off, so every ' +
+      'client shares one failed-auth budget keyed on the proxy address — one failing ' +
+      'client can lock out the rest. Set --trustProxy if that proxy is yours.',
+    );
+  };
 
   const rateLimiter = opts.rateLimit && opts.rateLimit > 0
     ? new RateLimiter(opts.rateLimit)
@@ -256,6 +297,9 @@ export async function startHttpServer(
       // nothing: the comparison would still happen and a correct token would still be
       // served, so the status code would still tell an attacker which guess was right.
       const key = authFailureLimiter ? clientKey(req, opts.trustProxy === true) : '';
+      if (authFailureLimiter && opts.trustProxy !== true && req.headers['x-forwarded-for']) {
+        warnSharedBudget();
+      }
       if (authFailureLimiter) {
         const { allowed, retryAfterMs } = authFailureLimiter.peek(key);
         if (!allowed) {

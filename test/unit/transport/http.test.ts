@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import * as httpModule from 'http';
+import { clientKey } from '../../../src/transport/http.js';
 import type { Server } from 'net';
 
 const HTTP_PORT = 18399;
@@ -207,13 +208,20 @@ function bareRequest(
   port: number,
   path: string,
   headers: Record<string, string> = {},
-): Promise<{ status: number; headers: Record<string, string | string[] | undefined> }> {
+): Promise<{
+  status: number;
+  headers: Record<string, string | string[] | undefined>;
+  body: string;
+}> {
   return new Promise((resolve, reject) => {
     const req = httpModule.request(
       { hostname: HTTP_HOST, port, path, method: 'GET', headers, agent: false as const },
       (res) => {
-        res.resume();
-        res.on('end', () => resolve({ status: res.statusCode || 0, headers: res.headers }));
+        // Accumulated rather than discarded: both limiters answer 429 with the same
+        // JSON-RPC code, so a status-only assertion cannot tell them apart.
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode || 0, headers: res.headers, body }));
       },
     );
     req.on('error', reject);
@@ -445,39 +453,318 @@ describe('HTTP transport — the budget is keyed by client', () => {
  * platform, so that test would prove less than it costs.
  */
 describe('clientKey', () => {
+  const clientKeyOf = (req: any, trustProxy: boolean) => clientKey(req, trustProxy);
   const fake = (remoteAddress: string | undefined, forwarded?: string | string[]) => ({
     socket: { remoteAddress },
     headers: forwarded === undefined ? {} : { 'x-forwarded-for': forwarded },
   }) as any;
 
   it('uses the socket address, which is the real client on a direct connection', async () => {
-    const { clientKey } = await import('../../../src/transport/http.js');
-    expect(clientKey(fake('203.0.113.7'), false)).toBe('203.0.113.7');
+    expect(clientKeyOf(fake('203.0.113.7'), false)).toBe('203.0.113.7');
   });
 
   it('treats the IPv6-mapped form as the same client', async () => {
-    const { clientKey } = await import('../../../src/transport/http.js');
-    expect(clientKey(fake('::ffff:127.0.0.1'), false)).toBe('127.0.0.1');
-    expect(clientKey(fake('127.0.0.1'), false)).toBe('127.0.0.1');
+    expect(clientKeyOf(fake('::ffff:127.0.0.1'), false)).toBe('127.0.0.1');
+    expect(clientKeyOf(fake('127.0.0.1'), false)).toBe('127.0.0.1');
   });
 
   it('ignores X-Forwarded-For unless a proxy is trusted', async () => {
-    const { clientKey } = await import('../../../src/transport/http.js');
     // Otherwise a client picks its own key and opts out of the limit.
-    expect(clientKey(fake('203.0.113.7', '9.9.9.9'), false)).toBe('203.0.113.7');
-    expect(clientKey(fake('203.0.113.7', '9.9.9.9'), true)).toBe('9.9.9.9');
+    expect(clientKeyOf(fake('203.0.113.7', '9.9.9.9'), false)).toBe('203.0.113.7');
+    expect(clientKeyOf(fake('203.0.113.7', '9.9.9.9'), true)).toBe('9.9.9.9');
   });
 
-  it('reads the leftmost forwarded entry, which is the original client', async () => {
-    const { clientKey } = await import('../../../src/transport/http.js');
-    expect(clientKey(fake('10.0.0.1', '9.9.9.9, 10.0.0.5, 10.0.0.9'), true)).toBe('9.9.9.9');
-    expect(clientKey(fake('10.0.0.1', ['8.8.8.8', '7.7.7.7']), true)).toBe('8.8.8.8');
+  it('reads the rightmost forwarded entry, which is the hop the proxy itself added', async () => {
+    // Not the leftmost. A proxy appends the address it saw, so everything to the left of
+    // the last entry came from the client — reading the leftmost let a client mint a fresh
+    // budget per request, and let it burn a victim's budget by naming their address.
+    expect(clientKeyOf(fake('10.0.0.1', '9.9.9.9, 10.0.0.5, 10.0.0.9'), true)).toBe('10.0.0.9');
+    expect(clientKeyOf(fake('10.0.0.1', ['8.8.8.8', '7.7.7.7']), true)).toBe('7.7.7.7');
+  });
+
+  it('discards a forwarded value that is not an address', async () => {
+    // Otherwise arbitrary client text becomes a map key.
+    expect(clientKeyOf(fake('10.0.0.1', 'not-an-ip'), true)).toBe('10.0.0.1');
+    expect(clientKeyOf(fake('10.0.0.1', '9.9.9.9, garbage'), true)).toBe('10.0.0.1');
+  });
+
+  it('normalises the forwarded value the same way as the socket address', async () => {
+    expect(clientKeyOf(fake('10.0.0.1', '::ffff:203.0.113.9'), true)).toBe('203.0.113.9');
   });
 
   it('falls back rather than throwing when there is no address', async () => {
-    const { clientKey } = await import('../../../src/transport/http.js');
-    expect(clientKey(fake(undefined), false)).toBe('unknown');
+    expect(clientKeyOf(fake(undefined), false)).toBe('unknown');
     // A trusted proxy that sent nothing useful must not produce an empty key.
-    expect(clientKey(fake('10.0.0.1', '   '), true)).toBe('10.0.0.1');
+    expect(clientKeyOf(fake('10.0.0.1', '   '), true)).toBe('10.0.0.1');
+  });
+});
+
+/**
+ * The properties the default rests on, each pinned because a mutation of it survived the
+ * first version of these tests.
+ */
+describe('HTTP transport — the throttle only charges failures', () => {
+  const PORT = 18407;
+
+  beforeAll(async () => {
+    const { startHttpServer } = await import('../../../src/transport/http.js');
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const mockRegistry = {
+      listConnections: () => [], listAllProfiles: () => [], get: () => undefined,
+      getOrCreate: async () => { throw new Error('not in test'); },
+    } as any;
+    const mcpServer = new McpServer(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    );
+    await startHttpServer(() => mcpServer, {
+      port: PORT, host: HTTP_HOST, bearerToken: BEARER,
+      authFailureLimit: 3, registry: mockRegistry,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it('a working client never spends its own budget', async () => {
+    // The whole justification for shipping this on by default. Charging the success path
+    // too would lock every legitimate client out after N requests a minute, and the
+    // previous version of this file could not tell.
+    for (let i = 0; i < 8; i++) {
+      expect((await bareRequest(PORT, '/status', { authorization: `Bearer ${BEARER}` })).status)
+        .toBe(200);
+    }
+    // The budget is untouched, so a wrong token still gets its first 401 rather than a 429.
+    expect((await bareRequest(PORT, '/status', { authorization: 'Bearer wrong' })).status)
+      .toBe(401);
+  });
+});
+
+describe('HTTP transport — a spent budget comes back', () => {
+  const PORT = 18408;
+  const LIMIT = 3;
+
+  beforeAll(async () => {
+    const { startHttpServer } = await import('../../../src/transport/http.js');
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const mockRegistry = {
+      listConnections: () => [], listAllProfiles: () => [], get: () => undefined,
+      getOrCreate: async () => { throw new Error('not in test'); },
+    } as any;
+    const mcpServer = new McpServer(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    );
+    await startHttpServer(() => mcpServer, {
+      port: PORT, host: HTTP_HOST, bearerToken: BEARER,
+      authFailureLimit: LIMIT, registry: mockRegistry,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it('recovers after the interval Retry-After advertises', async () => {
+    for (let i = 0; i < LIMIT; i++) {
+      await bareRequest(PORT, '/status', { authorization: 'Bearer wrong' });
+    }
+    const throttled = await bareRequest(PORT, '/status', { authorization: 'Bearer wrong' });
+    expect(throttled.status).toBe(429);
+    const retryAfterSec = Number(throttled.headers['retry-after']);
+
+    // Only Date is faked, so the server's own socket I/O keeps running. Without this the
+    // refill could be broken outright — a bucket that never comes back — and the header
+    // would still advertise a wait that never ends.
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + retryAfterSec * 1000 + 50 });
+    try {
+      expect((await bareRequest(PORT, '/status', { authorization: `Bearer ${BEARER}` })).status)
+        .toBe(200);
+
+      // And the limit still bites afterwards. Recovery alone is not enough to prove the
+      // refill works on both sides: `peek` has its own refill, so a broken refill inside
+      // `consume` lets every request through while the bucket sits at zero — the throttle
+      // stops re-arming and nothing else notices.
+      const again: number[] = [];
+      for (let i = 0; i < LIMIT + 1; i++) {
+        again.push((await bareRequest(PORT, '/status', { authorization: 'Bearer wrong' })).status);
+      }
+      expect(again[again.length - 1]).toBe(429);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('HTTP transport — the default limit is the documented one', () => {
+  const PORT = 18409;
+
+  beforeAll(async () => {
+    const { startHttpServer } = await import('../../../src/transport/http.js');
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const mockRegistry = {
+      listConnections: () => [], listAllProfiles: () => [], get: () => undefined,
+      getOrCreate: async () => { throw new Error('not in test'); },
+    } as any;
+    const mcpServer = new McpServer(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    );
+    await startHttpServer(() => mcpServer, {
+      port: PORT, host: HTTP_HOST, bearerToken: BEARER, registry: mockRegistry,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it('allows exactly ten failures, the number the README documents', async () => {
+    // The literal, not the imported constant. Asserting against
+    // `DEFAULT_AUTH_FAILURE_LIMIT` is tautological — moving the constant moves the
+    // expectation with it, so 2 and 13 both passed. This is the value README.md states
+    // and the one operators size their clients against, so it is written out here and
+    // the two have to be changed together.
+    const expected = 10;
+    const statuses: number[] = [];
+    for (let i = 0; i < expected + 2; i++) {
+      statuses.push((await bareRequest(PORT, '/status', { authorization: 'Bearer wrong' })).status);
+    }
+    expect(statuses.slice(0, expected)).toEqual(Array(expected).fill(401));
+    expect(statuses[expected]).toBe(429);
+  });
+
+  it('and the constant agrees with it', async () => {
+    const { DEFAULT_AUTH_FAILURE_LIMIT } = await import('../../../src/transport/http.js');
+    expect(DEFAULT_AUTH_FAILURE_LIMIT).toBe(10);
+  });
+});
+
+describe('AuthFailureLimiter', () => {
+  it('keeps the tracked-client map bounded', async () => {
+    const { AuthFailureLimiter, MAX_TRACKED_CLIENTS } = await import('../../../src/transport/http.js');
+    const limiter = new AuthFailureLimiter(5) as any;
+    for (let i = 0; i < MAX_TRACKED_CLIENTS + 50; i++) limiter.recordFailure(`10.0.${i >> 8}.${i & 255}`);
+    // The only bound on this map, and the key is attacker-chosen under --trustProxy.
+    expect(limiter.buckets.size).toBeLessThanOrEqual(MAX_TRACKED_CLIENTS);
+  });
+
+  it('does not refund a spent budget when the map is recycled', async () => {
+    const { AuthFailureLimiter, MAX_TRACKED_CLIENTS } = await import('../../../src/transport/http.js');
+    const limiter = new AuthFailureLimiter(2);
+    for (let i = 0; i < 2; i++) limiter.recordFailure('victim');
+    expect(limiter.peek('victim').allowed).toBe(false);
+
+    // Evicting by age discarded the *blocked* bucket first — its lastRefill is frozen,
+    // because peek does not mutate — and then handed the key a fresh full budget, so
+    // cycling keys cleared a lockout.
+    for (let i = 0; i < MAX_TRACKED_CLIENTS + 10; i++) limiter.recordFailure(`filler-${i}`);
+    expect(limiter.peek('victim').allowed).toBe(false);
+  });
+});
+
+describe('HTTP transport — the two 429s are distinguishable', () => {
+  const PORT = 18410;
+
+  beforeAll(async () => {
+    const { startHttpServer } = await import('../../../src/transport/http.js');
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const mockRegistry = {
+      listConnections: () => [], listAllProfiles: () => [], get: () => undefined,
+      getOrCreate: async () => { throw new Error('not in test'); },
+    } as any;
+    const mcpServer = new McpServer(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    );
+    await startHttpServer(() => mcpServer, {
+      port: PORT, host: HTTP_HOST, bearerToken: BEARER,
+      authFailureLimit: 2, rateLimit: 3, registry: mockRegistry,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it('the auth throttle says which throttle it is', async () => {
+    for (let i = 0; i < 2; i++) await bareRequest(PORT, '/status', { authorization: 'Bearer x' });
+    const res = await bareRequest(PORT, '/status', { authorization: 'Bearer x' });
+    expect(res.status).toBe(429);
+    // MCP clients parse this route, so the envelope is part of the contract.
+    const parsed = JSON.parse(res.body);
+    expect(parsed.jsonrpc).toBe('2.0');
+    expect(parsed.error.code).toBe(-32604);
+    expect(parsed.error.message).toMatch(/failed authentication/i);
+  });
+
+  it('a failed attempt never touches the global request budget', async () => {
+    // The reason the request limiter was left above the auth check: that bucket is
+    // global, so letting unauthenticated traffic drain it would starve every legitimate
+    // client. Checked on its own server, with the failure budget deliberately left
+    // unspent — once it is spent the auth throttle answers first, which is what the
+    // sibling test above measures.
+    const { startHttpServer } = await import('../../../src/transport/http.js');
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const mockRegistry = {
+      listConnections: () => [], listAllProfiles: () => [], get: () => undefined,
+      getOrCreate: async () => { throw new Error('not in test'); },
+    } as any;
+    const mcpServer = new McpServer(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    );
+    const port = 18412;
+    await startHttpServer(() => mcpServer, {
+      port, host: HTTP_HOST, bearerToken: BEARER,
+      authFailureLimit: 5, rateLimit: 3, registry: mockRegistry,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Two failures — under the budget of 5, so nothing is throttled yet.
+    for (let i = 0; i < 2; i++) {
+      expect((await bareRequest(port, '/status', { authorization: 'Bearer x' })).status).toBe(401);
+    }
+    // The request budget of 3 is still whole.
+    const statuses: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      statuses.push((await bareRequest(port, '/status', { authorization: `Bearer ${BEARER}` })).status);
+    }
+    expect(statuses).toEqual([200, 200, 200]);
+  });
+});
+
+describe('HTTP transport — the request limiter admits exactly its limit', () => {
+  const PORT = 18411;
+
+  beforeAll(async () => {
+    const { startHttpServer } = await import('../../../src/transport/http.js');
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const mockRegistry = {
+      listConnections: () => [], listAllProfiles: () => [], get: () => undefined,
+      getOrCreate: async () => { throw new Error('not in test'); },
+    } as any;
+    const mcpServer = new McpServer(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    );
+    await startHttpServer(() => mcpServer, {
+      port: PORT, host: HTTP_HOST, bearerToken: BEARER,
+      rateLimit: 3, authFailureLimit: 0, registry: mockRegistry,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it('three through, then throttled — a fresh bucket, so the boundary is exact', async () => {
+    // The pre-existing test shares a bucket with the rest of the file and so can only
+    // assert a shape. That was fine until this arithmetic became shared by both limiters:
+    // an off-by-one in `consume` admits one extra request and nothing noticed.
+    const statuses: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      const res = await new Promise<number>((resolve, reject) => {
+        const req = httpModule.request(
+          {
+            hostname: HTTP_HOST, port: PORT, path: '/', method: 'POST',
+            headers: { authorization: `Bearer ${BEARER}`, 'content-type': 'application/json' },
+            agent: false as const,
+          },
+          (r) => { r.resume(); r.on('end', () => resolve(r.statusCode || 0)); },
+        );
+        req.on('error', reject);
+        req.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }));
+      });
+      statuses.push(res);
+    }
+    expect(statuses.filter((x) => x !== 429)).toHaveLength(3);
+    expect(statuses.slice(3)).toEqual([429, 429]);
   });
 });
