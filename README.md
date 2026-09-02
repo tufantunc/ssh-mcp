@@ -721,6 +721,7 @@ Secrets are **never** passed as CLI arguments.
 | `--disableApproval` | false | Skip the approval gate (quick start profile only) |
 | `--opaUrl` | — | OPA sidecar URL for external policy |
 | `--opaFailClosed` | false | Refuse every command while OPA is unreachable, instead of falling back to local policy |
+| `--opaTimeoutMs` | 10000 | How long to wait for the OPA sidecar. Lower makes the fail-open cheaper to reach; higher makes an outage slower to notice |
 | `--commandQuota` | 0 (off) | Max commands per rolling 24h per profile |
 | `--approvalGrantTtl` | 0 (off) | Auto-approve an identical command for this many ms after approval |
 | `--auditEntropyScan` | false | Enable entropy-based secret scanning in audit |

@@ -18,8 +18,18 @@ export interface PolicyRules {
   denylist?: string[];
 }
 
-/** How long to wait for the OPA sidecar before treating it as unavailable. */
-const OPA_TIMEOUT_MS = 2_000;
+/**
+ * How long to wait for the OPA sidecar before treating it as unavailable.
+ *
+ * Bounded because an unbounded wait held every tool call for undici's five-minute header
+ * timeout. Ten seconds and not two: in the default mode a timeout falls back to the local
+ * decision, so the budget is also the price of turning an explicit OPA *deny* into an
+ * allow — at two seconds a sidecar under load crosses it by accident, and anyone who can
+ * add latency crosses it on purpose. Ten is above a loaded sidecar's p99 and still thirty
+ * times cheaper than the hang it replaced. `--opaTimeoutMs` moves it: lower makes the
+ * fail-open cheaper to reach, higher makes an outage slower to notice.
+ */
+const DEFAULT_OPA_TIMEOUT_MS = 10_000;
 
 /** Tiers, most restrictive first. Unknown/unset tiers resolve to the first. */
 export const HOST_GROUPS = ['prod', 'staging', 'dev'] as const;
@@ -233,6 +243,7 @@ export function resolvePolicyRules(
 export class PolicyEngine {
   private opaUrl: string | null = null;
   private opaFailClosed = false;
+  private opaTimeoutMs = DEFAULT_OPA_TIMEOUT_MS;
   /** Rate-limits the fail-open warning so one outage can't flood stderr. */
   private lastOpaWarning = 0;
   /** The operator's patterns, compiled once. The built-ins live in classifier.ts. */
@@ -253,7 +264,8 @@ export class PolicyEngine {
     });
   }
 
-  setOpaUrl(url: string | null, failClosed = false): void {
+  setOpaUrl(url: string | null, failClosed = false, timeoutMs = DEFAULT_OPA_TIMEOUT_MS): void {
+    this.opaTimeoutMs = timeoutMs;
     // Reset the warning throttle when the mode changes, or the one warning per minute can
     // be the *previous* mode's sentence — "commands OPA would deny may now be allowed"
     // printed while the engine refuses everything.
@@ -358,7 +370,7 @@ export class PolicyEngine {
         // OPA is "unreachable", and without this the call ran to undici's five-minute
         // header timeout while every tool call waited on it. The abort lands in the catch
         // below, so both modes reach their own answer inside the budget.
-        signal: AbortSignal.timeout(OPA_TIMEOUT_MS),
+        signal: AbortSignal.timeout(this.opaTimeoutMs),
       });
 
       if (!resp.ok) {

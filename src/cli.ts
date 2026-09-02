@@ -140,6 +140,24 @@ export function parseMaxChars(raw: string | null | undefined): number {
 }
 
 /**
+ * `--opaTimeoutMs`, bounded on both sides.
+ *
+ * Too low turns an explicit OPA deny into an allow whenever the sidecar is slow, which is
+ * the fail-open this budget exists inside; too high brings back the hang it replaced. One
+ * second is the floor and two minutes the ceiling.
+ */
+export function parseOpaTimeout(raw: string | null | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = raw === null ? NaN : Number(raw.trim());
+  if (!Number.isSafeInteger(value) || value < 1_000 || value > 120_000) {
+    throw new OperatorError(
+      `--opaTimeoutMs must be a whole number of milliseconds between 1000 and 120000, got ${JSON.stringify(raw)}.`,
+    );
+  }
+  return value;
+}
+
+/**
  * `--opaUrl`, refused at startup rather than at every request.
  *
  * Only emptiness was checked, so anything `fetch` cannot use reached the engine and failed

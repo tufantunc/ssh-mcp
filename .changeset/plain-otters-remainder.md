@@ -32,8 +32,11 @@ OPA answers for an undefined document, so a misnamed package or an unactivated b
 the ordinary way an OPA gate is down while the process is still listening — and reading it
 as consent meant the flag missed exactly the case operators buy it for. The default mode
 warns there too now, where a permanently broken bundle used to log nothing at all. The
-request is bounded at two seconds: a sidecar that accepts the connection and never answers
-used to hold every tool call for undici's five-minute timeout. `--opaUrl` written with a
+request is bounded, where a sidecar that accepts the connection and never answers used to
+hold every tool call for undici's five-minute timeout. Ten seconds by default, and
+`--opaTimeoutMs` moves it — the budget is also the price of turning an explicit OPA *deny*
+into an allow, because a timeout falls back to the local decision, so too low is its own
+bypass and too high brings the hang back. `--opaUrl` written with a
 space, and `--opaFailClosed` given without a URL, are refused at startup rather than
 silently dropping the flag — and so is a `--opaUrl` value `fetch` cannot use, which is the
 same hole one flag-value away: `--opaUrl=localhost:8181` without a scheme printed

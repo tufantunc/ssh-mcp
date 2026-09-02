@@ -35,7 +35,9 @@ describe('OPA evaluation', () => {
   let requests: any[] = [];
   let errSpy: ReturnType<typeof vi.spyOn>;
 
-  async function startOpa(handler: (req: any) => { status?: number; body?: unknown }) {
+  async function startOpa(
+    handler: (req: any) => { status?: number; body?: unknown; delayMs?: number },
+  ) {
     requests = [];
     server = createServer((req, res) => {
       let raw = '';
@@ -43,9 +45,14 @@ describe('OPA evaluation', () => {
       req.on('end', () => {
         const parsed = raw ? JSON.parse(raw) : {};
         requests.push(parsed);
-        const { status = 200, body = {} } = handler(parsed);
-        res.writeHead(status, { 'content-type': 'application/json' });
-        res.end(JSON.stringify(body));
+        const { status = 200, body = {}, delayMs = 0 } = handler(parsed);
+        // `delayMs` stands in for a loaded sidecar: healthy, answering, just slow.
+        const respond = () => {
+          res.writeHead(status, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(body));
+        };
+        if (delayMs > 0) setTimeout(respond, delayMs).unref();
+        else respond();
       });
     });
     await new Promise<void>((r) => server!.listen(0, '127.0.0.1', r));
@@ -260,6 +267,31 @@ describe('OPA evaluation', () => {
       expect(warnings()).not.toMatch(/Cannot read properties/);
     });
 
+    it('keeps an explicit deny from a slow but healthy sidecar', async () => {
+      // The budget is also the price of turning an OPA *deny* into an allow, because a
+      // timeout falls back to the local decision. At two seconds a loaded sidecar crossed
+      // it by accident and anyone who could add latency crossed it on purpose.
+      await startOpa(() => ({ body: { result: false }, delayMs: 2_500 }));
+      const engine = new PolicyEngine(DEFAULT_RULES);
+      engine.setOpaUrl(url);
+
+      const result = await engine.evaluateWithOpa('rm -rf /data', makeProfile(), 'run-command');
+      expect(result.decision).toBe('deny');
+      expect(result.ruleId).toBe('opa');
+    }, 20_000);
+
+    it('honours a budget the operator set lower', async () => {
+      await startOpa(() => ({ body: { result: false }, delayMs: 2_000 }));
+      const engine = new PolicyEngine(DEFAULT_RULES);
+      engine.setOpaUrl(url, false, 1_000);
+
+      const result = await engine.evaluateWithOpa('rm -rf /data', makeProfile(), 'run-command');
+      // Their choice, and the warning says the gate was skipped.
+      expect(result.decision).not.toBe('deny');
+      expect(warnings()).toContain('POLICY WARNING');
+    }, 20_000);
+
+
     it('gives up on a sidecar that never answers, rather than waiting on it', async () => {
       // A process that accepts the connection and never replies is the canonical
       // "unreachable". Without a bound on the request this ran to undici's five-minute
@@ -268,7 +300,9 @@ describe('OPA evaluation', () => {
       await new Promise<void>((r) => hung.listen(0, '127.0.0.1', () => r()));
       const port = (hung.address() as AddressInfo).port;
       const engine = new PolicyEngine(DEFAULT_RULES);
-      engine.setOpaUrl(`http://127.0.0.1:${port}`, true);
+      // An explicit budget rather than the default, so this test pins "it gives up" and
+      // not whatever the default happens to be.
+      engine.setOpaUrl(`http://127.0.0.1:${port}`, true, 1_000);
 
       const started = Date.now();
       const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
@@ -277,7 +311,8 @@ describe('OPA evaluation', () => {
 
       expect(result.decision).toBe('deny');
       expect(result.ruleId).toBe('opa-unavailable');
-      expect(elapsed).toBeLessThan(10_000);
+      expect(elapsed).toBeGreaterThanOrEqual(900);
+      expect(elapsed).toBeLessThan(5_000);
     }, 20_000);
 
     it('does not print the other mode\'s sentence after the mode changes', async () => {
