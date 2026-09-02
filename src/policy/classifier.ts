@@ -86,7 +86,15 @@ const FORBIDDEN_PATTERNS: RegExp[] = [
   /rm\s+-rf?\s+\/(\s|$)/,          // rm -rf / — the filesystem root itself
   /mkfs\./,
   />\s*\/dev\/sd/,
-  /:\(\)\s*\{\s*:\|:\&\s*\}\s*;\s*:/,   // fork bomb
+  // Fork bomb. Whitespace is allowed at every position bash allows it, which the first
+  // version of this got wrong in three places at once: `: () { : | : & } ; :` and
+  // `:()  {  : | : &  }  ;  :` both ran and both classified `safe`, because the pattern
+  // permitted spaces around the braces but not before the parentheses or around the pipe.
+  // Only the classic `:` spelling is covered — `f(){ f|f& };f` is the same bomb and is
+  // not matched. Detecting that needs a backreference over an unbounded body, and this
+  // file has already shipped one ReDoS; the impact here is a denial of service against
+  // the target host rather than against this server, which is not worth that trade.
+  /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/,
   />\s*\/etc\/cron/,
   />\s*\/etc\/systemd/,
   />\s*~\/.ssh\/authorized_keys/,

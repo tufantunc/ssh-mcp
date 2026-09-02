@@ -229,6 +229,7 @@ export function resolvePolicyRules(
 
 export class PolicyEngine {
   private opaUrl: string | null = null;
+  private opaFailClosed = false;
   /** Rate-limits the fail-open warning so one outage can't flood stderr. */
   private lastOpaWarning = 0;
   /** The operator's patterns, compiled once. The built-ins live in classifier.ts. */
@@ -249,8 +250,9 @@ export class PolicyEngine {
     });
   }
 
-  setOpaUrl(url: string | null): void {
+  setOpaUrl(url: string | null, failClosed = false): void {
     this.opaUrl = url;
+    this.opaFailClosed = failClosed;
   }
 
   evaluate(
@@ -348,8 +350,7 @@ export class PolicyEngine {
       });
 
       if (!resp.ok) {
-        this.warnOpaUnavailable(`HTTP ${resp.status} from ${this.opaUrl}`);
-        return local;
+        return this.onOpaUnavailable(`HTTP ${resp.status} from ${this.opaUrl}`, local);
       }
 
       const data = await resp.json() as { result?: boolean };
@@ -363,10 +364,32 @@ export class PolicyEngine {
         };
       }
     } catch (err) {
-      this.warnOpaUnavailable(err instanceof Error ? err.message : String(err));
+      return this.onOpaUnavailable(err instanceof Error ? err.message : String(err), local);
     }
 
     return local;
+  }
+
+  /**
+   * What an OPA outage means, which is the operator's choice rather than ours.
+   *
+   * Falling back to the local decision is the default and stays the default: OPA is an
+   * additional deny layer, and an outage that stopped all work would be a worse failure
+   * than one that narrows the policy. But an operator who deployed OPA *as* the
+   * authorization gate has a control that disappears during an outage, and the only signal
+   * is a stderr line that MCP clients usually discard. `--opaFailClosed` lets them say
+   * that the gate being down means no.
+   */
+  private onOpaUnavailable(cause: string, local: PolicyEvaluation): PolicyEvaluation {
+    this.warnOpaUnavailable(cause);
+    if (!this.opaFailClosed) return local;
+    return {
+      decision: 'deny',
+      commandClass: local.commandClass,
+      binary: local.binary,
+      ruleId: 'opa-unavailable',
+      reason: `OPA evaluation unavailable and --opaFailClosed is set (${cause})`,
+    };
   }
 
   /**
@@ -382,7 +405,9 @@ export class PolicyEngine {
     this.lastOpaWarning = now;
     console.error(
       `POLICY WARNING: OPA evaluation unavailable (${cause}). ` +
-      'Falling back to local policy — commands OPA would deny may now be allowed.',
+      (this.opaFailClosed
+        ? 'Refusing every command while it is down, because --opaFailClosed is set.'
+        : 'Falling back to local policy — commands OPA would deny may now be allowed.'),
     );
   }
 

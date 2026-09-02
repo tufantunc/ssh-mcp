@@ -44,7 +44,7 @@ async function main() {
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);
 
   if (argv.opaUrl) {
-    policy.setOpaUrl(argv.opaUrl);
+    policy.setOpaUrl(argv.opaUrl, flagEnabled(argv, 'opaFailClosed'));
     console.error(`OPA sidecar enabled: ${argv.opaUrl}`);
   }
 

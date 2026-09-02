@@ -487,7 +487,17 @@ When `--opaUrl` is set, commands the built-in engine allows are additionally
 evaluated by OPA. **OPA can only narrow.** A command the built-in engine has
 already denied returns that denial without OPA being consulted at all, so a
 sidecar answering `allow` cannot grant a class the role bindings withhold. To
-widen, edit `[policy]`. The request shape follows the AuthZEN Access Evaluation contract:
+widen, edit `[policy]`.
+
+An outage falls back to the local decision and logs one warning per minute. That is the
+default because OPA is an *additional* deny layer and stopping all work would be the worse
+failure — but an operator who deployed OPA *as* the authorization gate loses that gate
+during the outage, and the only signal is a stderr line MCP clients usually discard.
+`--opaFailClosed` makes the gate being down mean no; the refusal carries `ruleId:
+"opa-unavailable"` so the audit record says the gate was down rather than implying a policy
+refused the command.
+
+The request shape follows the AuthZEN Access Evaluation contract:
 
 ```json
 {
@@ -710,6 +720,7 @@ Secrets are **never** passed as CLI arguments.
 | `--strictConfigAcl` | false | Windows: refuse on every ACL finding, including a read-only over-grant |
 | `--disableApproval` | false | Skip the approval gate (quick start profile only) |
 | `--opaUrl` | — | OPA sidecar URL for external policy |
+| `--opaFailClosed` | false | Refuse every command while OPA is unreachable, instead of falling back to local policy |
 | `--commandQuota` | 0 (off) | Max commands per rolling 24h per profile |
 | `--approvalGrantTtl` | 0 (off) | Auto-approve an identical command for this many ms after approval |
 | `--auditEntropyScan` | false | Enable entropy-based secret scanning in audit |

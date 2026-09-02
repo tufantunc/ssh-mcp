@@ -169,6 +169,53 @@ describe('OPA evaluation', () => {
     });
   });
 
+  describe('when the operator chooses fail-closed', () => {
+    it('refuses instead of falling back, on an HTTP error', async () => {
+      await startOpa(() => ({ status: 500, body: { error: 'boom' } }));
+      const engine = new PolicyEngine(DEFAULT_RULES);
+      engine.setOpaUrl(url, true);
+
+      const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      expect(result.decision).toBe('deny');
+      // A distinct ruleId, so the audit record says the gate was down rather than
+      // implying a policy actually refused this command.
+      expect(result.ruleId).toBe('opa-unavailable');
+      expect(result.reason).toMatch(/--opaFailClosed/);
+    });
+
+    it('refuses when nothing is listening', async () => {
+      const engine = new PolicyEngine(DEFAULT_RULES);
+      engine.setOpaUrl('http://127.0.0.1:1', true);
+
+      const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      expect(result.decision).toBe('deny');
+      expect(result.ruleId).toBe('opa-unavailable');
+    });
+
+    it('says what it is doing, not what the default does', async () => {
+      const engine = new PolicyEngine(DEFAULT_RULES);
+      engine.setOpaUrl('http://127.0.0.1:1', true);
+
+      await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      const warning = warnings();
+      expect(warning).toContain('POLICY WARNING');
+      expect(warning).toMatch(/Refusing every command/);
+      // The fail-open sentence would be a lie in this mode.
+      expect(warning).not.toMatch(/may now be allowed/);
+    });
+
+    it('leaves a healthy OPA alone', async () => {
+      await startOpa(() => ({ body: { result: true } }));
+      const engine = new PolicyEngine(DEFAULT_RULES);
+      engine.setOpaUrl(url, true);
+
+      const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+      expect(result.decision).not.toBe('deny');
+      expect(errSpy).not.toHaveBeenCalled();
+    });
+  });
+
+
   it('skips OPA entirely when no URL is configured', async () => {
     const engine = new PolicyEngine(DEFAULT_RULES);
     const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
