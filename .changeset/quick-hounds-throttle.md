@@ -36,7 +36,14 @@ Two things worth knowing before upgrading:
   request, or name a victim's address and spend theirs. This assumes one trusted proxy hop.
 - **The budget is tracked for at most 1024 addresses**, and a fresh address evicts the
   emptiest tracked one rather than the oldest, so cycling addresses cannot refund a spent
-  budget.
+  budget. While all 1024 are spent — which needs 1024 addresses that have each burned a
+  full budget — an arriving client has one attempt rather than the full ten. That is the
+  price of not refunding, and it is the one place this control is worse than no control.
+- **`X-Forwarded-For` is read only when the peer is the proxy.** Bare `--trustProxy` means
+  a loopback peer, which is the deployment the README describes; `--trustedProxies` names
+  one elsewhere. Trusting whoever connected would have left the header forgeable by anyone
+  reaching the listener directly, which is the hole the rightmost-entry rule was meant to
+  close.
 - **A malformed `--authFailureLimit` is now refused at startup** rather than silently
   disabling the check. Only `0` turns it off.
 

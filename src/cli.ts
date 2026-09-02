@@ -84,8 +84,20 @@ export function parseFailureLimit(raw: string | null | undefined): number | unde
       'Use --authFailureLimit=0 to turn the check off deliberately.',
     );
   }
-  return Number(raw.trim());
+  const value = Number(raw.trim());
+  // Bounded, because an unbounded one is the same fail-open this guard exists to stop:
+  // `--authFailureLimit=99999999999999999999` parsed to 1e20, a bucket that never empties
+  // and a `Retry-After` of 1 — configured on, functionally absent.
+  if (!Number.isSafeInteger(value) || value > MAX_AUTH_FAILURE_LIMIT) {
+    throw new OperatorError(
+      `--authFailureLimit must be between 0 and ${MAX_AUTH_FAILURE_LIMIT}, got ${JSON.stringify(raw)}.`,
+    );
+  }
+  return value;
 }
+
+/** Far above any real budget; the point is that there is one. */
+const MAX_AUTH_FAILURE_LIMIT = 10_000;
 
 export function flagEnabled(argv: Record<string, string | null>, name: string): boolean {
   if (!(name in argv)) return false;

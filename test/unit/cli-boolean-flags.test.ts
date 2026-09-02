@@ -53,3 +53,40 @@ describe('boolean flags reach their call sites', () => {
     expect(resolveHostKeyMode({ insecureHostKey: 'false' })).toBe('tofu');
   });
 });
+
+/**
+ * `--authFailureLimit` guards a control that is on by default, so a value it cannot read
+ * has to be refused rather than quietly turning the control off — the trap `flagEnabled`
+ * exists for, on a numeric flag.
+ */
+describe('parseFailureLimit', () => {
+  it('accepts a non-negative whole number, and 0 as "off"', async () => {
+    const { parseFailureLimit } = await import('../../src/cli.js');
+    expect(parseFailureLimit('10')).toBe(10);
+    expect(parseFailureLimit('0')).toBe(0);
+    expect(parseFailureLimit(' 5 ')).toBe(5);
+    expect(parseFailureLimit('007')).toBe(7);
+    // Absent means "use the default", and nothing else may.
+    expect(parseFailureLimit(undefined)).toBeUndefined();
+  });
+
+  it.each([null, '', 'abc', '-1', '+5', '1e3', '10.5', 'off', 'NaN'])(
+    'refuses %j rather than disabling the check',
+    async (raw) => {
+      const { parseFailureLimit } = await import('../../src/cli.js');
+      // `parseArgv` stores null for a flag written without `=`, and NaN survives `??`,
+      // so the old code turned the throttle off for every one of these.
+      expect(() => parseFailureLimit(raw as any)).toThrow(/authFailureLimit/);
+    },
+  );
+
+  it.each(['10001', '99999999999999999999', '9007199254740993'])(
+    'refuses %s, because an unbounded limit is the same fail-open',
+    async (raw) => {
+      // 1e20 is a bucket that never empties and a Retry-After of 1: configured on,
+      // functionally absent.
+      const { parseFailureLimit } = await import('../../src/cli.js');
+      expect(() => parseFailureLimit(raw)).toThrow(/between 0 and/);
+    },
+  );
+});

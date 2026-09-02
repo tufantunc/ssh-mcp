@@ -619,7 +619,8 @@ ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret --rateLimit=60
 | `--httpHost` | 127.0.0.1 | Bind address |
 | `--rateLimit` | 0 (off) | Max requests per minute (0 = unlimited) |
 | `--authFailureLimit` | 10 | Failed bearer-auth attempts allowed per client per minute (0 = off) |
-| `--trustProxy` | false | Read the client address from `X-Forwarded-For`. Only behind a proxy you control |
+| `--trustProxy` | false | Read the client address from `X-Forwarded-For`, but only when the peer is the proxy — bare means a loopback peer |
+| `--trustedProxies` | — | Comma-separated peer addresses allowed to send `X-Forwarded-For`. Empty means loopback only |
 
 Endpoints: `POST /` (MCP Streamable HTTP), `GET /status`, `GET /health`
 
@@ -642,8 +643,12 @@ reverse proxy that means every client shares one budget**, so set `--trustProxy`
 proxy is yours — the server prints a warning the first time it sees `X-Forwarded-For`
 without it. `--trustProxy` takes the *rightmost* `X-Forwarded-For` entry, which is the hop
 the proxy itself appended; everything to its left came from the client, so reading the
-leftmost would let a client choose its own budget or spend a victim's. One trusted hop is
-assumed. A malformed `--authFailureLimit` is refused at startup rather than silently
+leftmost would let a client choose its own budget or spend a victim's. That only holds if a
+proxy actually appended the entry, so the header is read **only when the peer is the
+proxy** — bare `--trustProxy` means a loopback peer, which is the deployment above; name a
+proxy elsewhere with `--trustedProxies`. When the header cannot be read as an address, or
+the peer is not trusted, the server falls back to the socket address and says so once, so
+a flag that is not taking effect is not silent. One trusted hop is assumed. A malformed `--authFailureLimit` is refused at startup rather than silently
 disabling the check; only `0` turns it off.
 
 **Always terminate TLS at a reverse proxy** (Caddy/nginx). The server listens on `127.0.0.1` only.
@@ -696,7 +701,8 @@ Secrets are **never** passed as CLI arguments.
 | `--bearerToken` | — | Bearer token for HTTP transport auth (required for `--transport=http`) |
 | `--rateLimit` | 0 | HTTP requests per minute on the MCP route (0 = unlimited) |
 | `--authFailureLimit` | 10 | Failed bearer-auth attempts allowed per client per minute (0 = off) |
-| `--trustProxy` | false | Read the client address from `X-Forwarded-For`. Only behind a proxy you control |
+| `--trustProxy` | false | Read the client address from `X-Forwarded-For`, but only when the peer is the proxy — bare means a loopback peer |
+| `--trustedProxies` | — | Comma-separated peer addresses allowed to send `X-Forwarded-For`. Empty means loopback only |
 | `--allowedHosts` | bind address + localhost | Comma-separated Host headers accepted by the DNS-rebinding guard |
 | `--hostKeyMode` | `tofu` | `tofu \| strict \| insecure`. See [SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart) — `strict` currently refuses every host |
 | `--insecureHostKey` | false | Disable host key verification (test only!) |

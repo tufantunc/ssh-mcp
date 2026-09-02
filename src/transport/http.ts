@@ -109,8 +109,17 @@ export class AuthFailureLimiter {
           if (b.tokens > fullest) { fullest = b.tokens; fullestKey = k; }
         }
         if (fullestKey !== null) this.buckets.delete(fullestKey);
-        // Every tracked client is spent, so the table itself is the signal. The new key
-        // inherits that rather than being rewarded for arriving late.
+        // Every tracked client is spent, so the table itself is the signal and a new key
+        // does not get a full budget.
+        //
+        // The cost, stated because it is real and cannot be softened here: while the table
+        // is saturated an arriving client has one attempt rather than the full budget, so
+        // a first typo leaves its correct token waiting. Seeding one token instead of zero
+        // looks like it would help and does not — `consume` spends it immediately, and
+        // `peek` already allows a key it has never seen, so the first attempt is free
+        // either way and the second is refused either way. Measured both, identical.
+        // Giving an arriving key a real budget is the refund this rule exists to stop.
+        // Saturation needs 1024 addresses that have each spent a full budget.
         if (fullest <= 0) bucket = { tokens: 0, lastRefill: Date.now() };
       }
       this.buckets.set(key, bucket);
@@ -138,17 +147,65 @@ export class AuthFailureLimiter {
  * chain of two would need the second-from-right, and this does not try to guess the depth.
  * Anything that is not an IP address is discarded rather than used as a map key.
  */
-export function clientKey(req: IncomingMessage, trustProxy: boolean): string {
-  if (trustProxy) {
-    const forwarded = req.headers['x-forwarded-for'];
-    const raw = Array.isArray(forwarded) ? forwarded.join(',') : forwarded;
-    const entries = (raw ?? '').split(',').map((e) => e.trim()).filter(Boolean);
-    const nearest = entries[entries.length - 1];
-    if (nearest !== undefined && isIP(canonicalAddress(nearest)) !== 0) {
-      return canonicalAddress(nearest);
-    }
+export function clientKey(
+  req: IncomingMessage,
+  trustProxy: boolean,
+  trustedProxies?: string[],
+): { key: string; forwardedIgnored: boolean } {
+  const peer = canonicalAddress(req.socket.remoteAddress ?? 'unknown');
+  const forwarded = req.headers['x-forwarded-for'];
+  if (!trustProxy || forwarded === undefined) return { key: peer, forwardedIgnored: false };
+
+  // The rightmost entry is proxy-authored only if a proxy actually appended one. Nothing
+  // about the header says whether it did, so the *peer* has to be the proxy — otherwise a
+  // client reaching the listener directly sends one forged entry, that entry is the
+  // rightmost, and it picks its own key. Both attacks this keying was fixed to stop came
+  // back alive in exactly that configuration.
+  if (!isTrustedPeer(peer, trustedProxies)) {
+    return { key: peer, forwardedIgnored: true };
   }
-  return canonicalAddress(req.socket.remoteAddress ?? 'unknown');
+
+  const raw = Array.isArray(forwarded) ? forwarded.join(',') : forwarded;
+  const entries = raw.split(',').map((e) => e.trim()).filter(Boolean);
+  const nearest = entries[entries.length - 1];
+  const address = nearest === undefined ? undefined : forwardedAddress(nearest);
+  if (address === undefined) return { key: peer, forwardedIgnored: true };
+  return { key: address, forwardedIgnored: false };
+}
+
+/**
+ * Whether the peer may speak for other clients.
+ *
+ * Bare `--trustProxy` means a loopback peer, which is the deployment the README asks for:
+ * the server binds to 127.0.0.1 and a proxy on the same host terminates TLS. A proxy
+ * somewhere else has to be named, because "trust whoever connected" is the assumption that
+ * made the header forgeable again.
+ */
+function isTrustedPeer(peer: string, trustedProxies?: string[]): boolean {
+  if (trustedProxies !== undefined && trustedProxies.length > 0) {
+    return trustedProxies.includes(peer);
+  }
+  return peer === '127.0.0.1' || peer === '::1' || peer.startsWith('127.');
+}
+
+/**
+ * One `X-Forwarded-For` entry as an address, or undefined if it is not one.
+ *
+ * `net.isIP` rejects the bracketed and port-suffixed spellings, which is how IPv6 usually
+ * appears in this header — and rejecting silently collapsed every client onto the proxy's
+ * key, which is worse than not keying at all.
+ */
+function forwardedAddress(entry: string): string | undefined {
+  let candidate = entry;
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(candidate);
+  if (bracketed) candidate = bracketed[1];
+  // A trailing `:port` only when what is left is not itself an IPv6 literal: `::1` has
+  // colons of its own and must not be truncated.
+  else if (isIP(candidate) === 0 && /^[^:]+:\d+$/.test(candidate)) {
+    candidate = candidate.slice(0, candidate.lastIndexOf(':'));
+  }
+  candidate = canonicalAddress(candidate);
+  return isIP(candidate) === 0 ? undefined : candidate;
 }
 
 /** `::ffff:127.0.0.1` and `127.0.0.1` are the same client; key them the same way. */
@@ -174,6 +231,11 @@ export interface HttpTransportOpts {
    * client that can set that header can otherwise choose its own rate-limit key.
    */
   trustProxy?: boolean;
+  /**
+   * Peer addresses allowed to speak for other clients via `X-Forwarded-For`. Empty means
+   * a loopback peer only, which is the deployment the README describes.
+   */
+  trustedProxies?: string[];
   /**
    * Host headers accepted by the DNS-rebinding guard. Defaults to the bind
    * address and localhost; set this when running behind a reverse proxy that
@@ -220,9 +282,11 @@ export async function startHttpServer(
     if (warnedSharedBudget) return;
     warnedSharedBudget = true;
     console.error(
-      'POLICY WARNING: requests carry X-Forwarded-For but --trustProxy is off, so every ' +
-      'client shares one failed-auth budget keyed on the proxy address — one failing ' +
-      'client can lock out the rest. Set --trustProxy if that proxy is yours.',
+      'POLICY WARNING: X-Forwarded-For is present but not being used to tell clients ' +
+      'apart, so every client shares one failed-auth budget and one failing client can ' +
+      'lock out the rest. Either --trustProxy is off, or the peer is not a trusted proxy ' +
+      '(bare --trustProxy trusts a loopback peer; name others with --trustedProxies), or ' +
+      'the rightmost entry is not an address this server can read.',
     );
   };
 
@@ -296,9 +360,17 @@ export async function startHttpServer(
       // 429 without evaluating the guess. Gating only the 401 path instead would throttle
       // nothing: the comparison would still happen and a correct token would still be
       // served, so the status code would still tell an attacker which guess was right.
-      const key = authFailureLimiter ? clientKey(req, opts.trustProxy === true) : '';
-      if (authFailureLimiter && opts.trustProxy !== true && req.headers['x-forwarded-for']) {
-        warnSharedBudget();
+      let key = '';
+      if (authFailureLimiter) {
+        const resolved = clientKey(req, opts.trustProxy === true, opts.trustedProxies);
+        key = resolved.key;
+        // Warned in both directions. Without `--trustProxy` a proxied deployment shares
+        // one budget; *with* it, an entry that could not be read leaves the same collapse
+        // in place, and that case used to be the silent one — the operator had set the
+        // flag and had no way to know it was not taking effect.
+        if (resolved.forwardedIgnored || (opts.trustProxy !== true && req.headers['x-forwarded-for'])) {
+          warnSharedBudget();
+        }
       }
       if (authFailureLimiter) {
         const { allowed, retryAfterMs } = authFailureLimiter.peek(key);

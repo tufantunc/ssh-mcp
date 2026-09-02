@@ -453,7 +453,11 @@ describe('HTTP transport — the budget is keyed by client', () => {
  * platform, so that test would prove less than it costs.
  */
 describe('clientKey', () => {
-  const clientKeyOf = (req: any, trustProxy: boolean) => clientKey(req, trustProxy);
+  // `clientKey` also reports whether a forwarded entry was ignored, which the handler
+  // uses to warn. These cases are about the key.
+  const clientKeyOf = (req: any, trustProxy: boolean, trusted?: string[]) =>
+    clientKey(req, trustProxy, trusted).key;
+  const ignoredFor = (req: any, trustProxy: boolean) => clientKey(req, trustProxy).forwardedIgnored;
   const fake = (remoteAddress: string | undefined, forwarded?: string | string[]) => ({
     socket: { remoteAddress },
     headers: forwarded === undefined ? {} : { 'x-forwarded-for': forwarded },
@@ -471,31 +475,61 @@ describe('clientKey', () => {
   it('ignores X-Forwarded-For unless a proxy is trusted', async () => {
     // Otherwise a client picks its own key and opts out of the limit.
     expect(clientKeyOf(fake('203.0.113.7', '9.9.9.9'), false)).toBe('203.0.113.7');
-    expect(clientKeyOf(fake('203.0.113.7', '9.9.9.9'), true)).toBe('9.9.9.9');
+    // A loopback peer is the proxy in the deployment the README describes.
+    expect(clientKeyOf(fake('127.0.0.1', '9.9.9.9'), true)).toBe('9.9.9.9');
   });
 
   it('reads the rightmost forwarded entry, which is the hop the proxy itself added', async () => {
     // Not the leftmost. A proxy appends the address it saw, so everything to the left of
     // the last entry came from the client — reading the leftmost let a client mint a fresh
     // budget per request, and let it burn a victim's budget by naming their address.
-    expect(clientKeyOf(fake('10.0.0.1', '9.9.9.9, 10.0.0.5, 10.0.0.9'), true)).toBe('10.0.0.9');
-    expect(clientKeyOf(fake('10.0.0.1', ['8.8.8.8', '7.7.7.7']), true)).toBe('7.7.7.7');
+    expect(clientKeyOf(fake('127.0.0.1', '9.9.9.9, 10.0.0.5, 10.0.0.9'), true)).toBe('10.0.0.9');
+    expect(clientKeyOf(fake('127.0.0.1', ['8.8.8.8', '7.7.7.7']), true)).toBe('7.7.7.7');
   });
 
   it('discards a forwarded value that is not an address', async () => {
     // Otherwise arbitrary client text becomes a map key.
-    expect(clientKeyOf(fake('10.0.0.1', 'not-an-ip'), true)).toBe('10.0.0.1');
-    expect(clientKeyOf(fake('10.0.0.1', '9.9.9.9, garbage'), true)).toBe('10.0.0.1');
+    expect(clientKeyOf(fake('127.0.0.1', 'not-an-ip'), true)).toBe('127.0.0.1');
+    expect(clientKeyOf(fake('127.0.0.1', '9.9.9.9, garbage'), true)).toBe('127.0.0.1');
   });
 
   it('normalises the forwarded value the same way as the socket address', async () => {
-    expect(clientKeyOf(fake('10.0.0.1', '::ffff:203.0.113.9'), true)).toBe('203.0.113.9');
+    expect(clientKeyOf(fake('127.0.0.1', '::ffff:203.0.113.9'), true)).toBe('203.0.113.9');
+  });
+
+  it('will not let a client that is not the proxy speak for others', () => {
+    // The rightmost entry is proxy-authored only if a proxy appended one. On a direct
+    // connection the client's single forged entry *is* the rightmost, so both attacks
+    // this keying was written to stop came back alive until the peer was checked.
+    expect(clientKeyOf(fake('203.0.113.50', '10.0.0.1'), true)).toBe('203.0.113.50');
+    expect(ignoredFor(fake('203.0.113.50', '10.0.0.1'), true)).toBe(true);
+    // Naming the proxy makes it trusted again.
+    expect(clientKeyOf(fake('10.9.9.9', '198.51.100.42'), true, ['10.9.9.9']))
+      .toBe('198.51.100.42');
+  });
+
+  it.each([
+    ['[2001:db8::1]:443', '2001:db8::1'],
+    ['[2001:db8::1]', '2001:db8::1'],
+    ['198.51.100.5:51234', '198.51.100.5'],
+    ['::1', '::1'],
+  ])('reads %s as %s', (forwarded, expected) => {
+    // `net.isIP` rejects the bracketed and port-suffixed spellings, which is how IPv6
+    // usually appears here — and rejecting silently collapsed every client onto the
+    // proxy's key, which is worse than not keying at all.
+    expect(clientKeyOf(fake('127.0.0.1', forwarded), true)).toBe(expected);
+  });
+
+  it('says when a forwarded entry was ignored, so the handler can warn', () => {
+    expect(ignoredFor(fake('127.0.0.1', 'garbage'), true)).toBe(true);
+    expect(ignoredFor(fake('127.0.0.1', '9.9.9.9'), true)).toBe(false);
+    expect(ignoredFor(fake('127.0.0.1'), true)).toBe(false);
   });
 
   it('falls back rather than throwing when there is no address', async () => {
     expect(clientKeyOf(fake(undefined), false)).toBe('unknown');
     // A trusted proxy that sent nothing useful must not produce an empty key.
-    expect(clientKeyOf(fake('10.0.0.1', '   '), true)).toBe('10.0.0.1');
+    expect(clientKeyOf(fake('127.0.0.1', '   '), true)).toBe('127.0.0.1');
   });
 });
 
@@ -639,6 +673,26 @@ describe('AuthFailureLimiter', () => {
     for (let i = 0; i < MAX_TRACKED_CLIENTS + 50; i++) limiter.recordFailure(`10.0.${i >> 8}.${i & 255}`);
     // The only bound on this map, and the key is attacker-chosen under --trustProxy.
     expect(limiter.buckets.size).toBeLessThanOrEqual(MAX_TRACKED_CLIENTS);
+  });
+
+  it('gives an arriving client one attempt while every bucket is spent', async () => {
+    const { AuthFailureLimiter, MAX_TRACKED_CLIENTS } = await import('../../../src/transport/http.js');
+    const limiter = new AuthFailureLimiter(10);
+    // Saturate the table with exhausted buckets, which is remotely reachable.
+    for (let i = 0; i < MAX_TRACKED_CLIENTS; i++) {
+      for (let n = 0; n < 10; n++) limiter.recordFailure(`atk-${i}`);
+    }
+    // `peek` allows a key it has never seen, so the first attempt is free; the bucket is
+    // created by the failure and starts spent, so the second is refused. On an unsaturated
+    // table the same client would have the full budget — that collapse is the cost of not
+    // refunding, and it is asserted here so it cannot change unnoticed.
+    expect(limiter.peek('arriving').allowed).toBe(true);
+    limiter.recordFailure('arriving');
+    expect(limiter.peek('arriving').allowed).toBe(false);
+
+    const unsaturated = new AuthFailureLimiter(10);
+    unsaturated.recordFailure('arriving');
+    expect(unsaturated.peek('arriving').allowed).toBe(true);
   });
 
   it('does not refund a spent budget when the map is recycled', async () => {
