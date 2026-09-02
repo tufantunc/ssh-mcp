@@ -1,5 +1,111 @@
 # ssh-mcp
 
+## 2.7.0
+
+### Minor Changes
+
+- [#189](https://github.com/tufantunc/ssh-mcp/pull/189) [`d525eed`](https://github.com/tufantunc/ssh-mcp/commit/d525eedc2c29ca53a30f06767ede18e6bca3da69) Thanks [@tufantunc](https://github.com/tufantunc)! - The remaining findings from the source review behind GHSA-qvx5-rxrj-9vfh, none of them
+  exploitable on their own.
+  
+  **The fork-bomb rule tolerates the spacing bash tolerates.** The pattern allowed whitespace
+  around the braces but not at the five positions bash also allows it — before the parentheses,
+  inside them, either side of the pipe, and before the ampersand — so `: () { : | : & } ; :`
+  ran and classified `safe` while `:(){ :|:& };:` was refused.
+  
+  Three spellings still escape, named here rather than implied away: the same bomb under
+  another name (`f(){ f|f& };f`), a body separating the two calls with `&` or `;` instead of
+  `|` (`:(){ :&:& };:`), and a comment between the tokens. The first needs a backreference
+  over an unbounded body and this file has already shipped one ReDoS; the others would widen
+  a list no role, tier or approval mode can override. The impact is a denial of service
+  against the target host rather than against this server, which is why neither trade is
+  worth making — but this is a narrower hole, not a closed door.
+  
+  **`--opaFailClosed`.** When `--opaUrl` is set and the sidecar is unreachable, evaluation
+  falls back to the local decision and logs one warning per minute. That stays the default —
+  OPA is an additional deny layer, and an outage that stopped all work would be a worse
+  failure than one that narrows the policy. But an operator who deployed OPA *as* the
+  authorization gate loses it during an outage, with the only signal on a stderr stream MCP
+  clients usually discard. The new flag makes the gate being down mean no. The refusal
+  carries `ruleId: "opa-unavailable"` rather than `"opa"`, so an audit record says the gate
+  was down instead of implying a policy refused the command.
+  
+  A 200 that carries no boolean `result` counts as unavailable, in both modes. That is what
+  OPA answers for an undefined document, so a misnamed package or an unactivated bundle is
+  the ordinary way an OPA gate is down while the process is still listening — and reading it
+  as consent meant the flag missed exactly the case operators buy it for. The default mode
+  warns there too now, where a permanently broken bundle used to log nothing at all. The
+  request is bounded, where a sidecar that accepts the connection and never answers used to
+  hold every tool call for undici's five-minute timeout. Ten seconds by default, and
+  `--opaTimeoutMs` moves it — the budget is also the price of turning an explicit OPA *deny*
+  into an allow, because a timeout falls back to the local decision, so too low is its own
+  bypass and too high brings the hang back. `--opaUrl` written with a
+  space, and `--opaFailClosed` given without a URL, are refused at startup rather than
+  silently dropping the flag — and so is a `--opaUrl` value `fetch` cannot use, which is the
+  same hole one flag-value away: `--opaUrl=localhost:8181` without a scheme printed
+  `OPA sidecar enabled` and was never consulted. And the refusal text is a fixed string — it carried the sidecar
+  URL, and any credential embedded in it, out to the MCP client.
+  
+  **Interactive sessions are outside name-based classification, and that is now written
+  down.** `run-command` classifies each input on its own, but an interactive session keeps
+  the remote shell's state, so `alias ls='sudo id'` classifies `safe` and the following `ls`
+  classifies `read-only` and runs it. The same holds for a shell function and for a prepended
+  `PATH` entry. The classifier already refuses a command word containing `$` — `S=sudo` then
+  `$S id` — but an alias is an ordinary name and nothing about it looks wrong.
+  
+  No fix is offered for that last one, because classifying harder cannot reach it: the state
+  is in the remote shell, not in this server. What changed instead is its reachability —
+  opening an interactive session became `destructive` in 2.6.0, so under the default rules
+  `operator` cannot open one on `prod` at all where before it was `safe`. SECURITY.md now says
+  so, and says that `ask-all` is the control that covers the second call as well as the first.
+
+- [#188](https://github.com/tufantunc/ssh-mcp/pull/188) [`a7625c8`](https://github.com/tufantunc/ssh-mcp/commit/a7625c8236894fdab00893fa957824fcc7da5cc0) Thanks [@tufantunc](https://github.com/tufantunc)! - **Security:** throttle failed bearer authentication on the HTTP transport ([#187](https://github.com/tufantunc/ssh-mcp/issues/187)).
+  
+  `--rateLimit` never saw a wrong token. The auth check answers before the limiter is
+  reached, so a failed attempt consumed nothing — measured as twelve 401s and zero 429s
+  against `--rateLimit=3`, with the bucket still full afterwards. A bearer token is the only
+  thing in front of a tool that runs commands over SSH, and guessing it ran at network speed
+  with no backoff.
+  
+  `--authFailureLimit` (default 10 per client per minute, 0 disables) is a separate budget,
+  spent only on a 401. A correct token never consumes from it, so a working client never
+  throttles itself, which is why the default is on. Moving the request limiter above the auth
+  check instead would have closed this and opened something worse: that bucket is global, so
+  unauthenticated traffic could then starve every legitimate client.
+  
+  Two things worth knowing before upgrading:
+  
+  - **Once an address has spent its budget, every request from it waits — including one with
+    the right token.** That is deliberate. Gating only the 401 path would still evaluate the
+    guess and still serve a correct token, so the status code would tell an attacker which
+    token was right and the limit would slow nothing down. A client with a correct token in
+    its config never spends any of the budget, so it never throttles *itself* — but it does
+    wait if it shares a source address with something that is failing. Behind a reverse
+    proxy that is every client at once, so **set `--trustProxy` when the proxy is yours**;
+    without it the server keys on the proxy's address and one failing client can lock out the
+    rest. The server says so on stderr the first time it sees `X-Forwarded-For` without
+    `--trustProxy`.
+  - **Clients are told apart by socket address.** `--trustProxy` reads `X-Forwarded-For`
+    instead, and is off by default because a client that can set that header could otherwise
+    pick its own budget. When it is on, the **rightmost** entry is used — a proxy appends the
+    address it saw, so everything left of the last entry came from the client. Reading the
+    leftmost would be worse than having no limit: a client could mint a fresh budget per
+    request, or name a victim's address and spend theirs. This assumes one trusted proxy hop.
+  - **The budget is tracked for at most 1024 addresses**, and a fresh address evicts the
+    emptiest tracked one rather than the oldest, so cycling addresses cannot refund a spent
+    budget. While all 1024 are spent — which needs 1024 addresses that have each burned a
+    full budget — an arriving client has one attempt rather than the full ten. That is the
+    price of not refunding, and it is the one place this control is worse than no control.
+  - **`X-Forwarded-For` is read only when the peer is the proxy.** Bare `--trustProxy` means
+    a loopback peer, which is the deployment the README describes; `--trustedProxies` names
+    one elsewhere. Trusting whoever connected would have left the header forgeable by anyone
+    reaching the listener directly, which is the hole the rightmost-entry rule was meant to
+    close.
+  - **A malformed `--authFailureLimit` is now refused at startup** rather than silently
+    disabling the check. Only `0` turns it off.
+  
+  The request limiter itself is unchanged, and is still one global bucket rather than one per
+  client — a separate question, tracked in [#187](https://github.com/tufantunc/ssh-mcp/issues/187).
+
 ## 2.6.0
 
 ### Minor Changes
