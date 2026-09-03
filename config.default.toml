@@ -10,6 +10,8 @@
 
 [defaults]
 defaultProfile = "dev"            # Profile used when none is specified
+# transferRoot = "/var/lib/ssh-mcp/transfers" # Required to enable sftp-upload-file/sftp-download-file
+transferMaxBytes = 1073741824      # 1GB cap per streaming upload/download
 sessionMaxPerConnection = 5       # Max interactive+background sessions per host
 sessionIdleTimeoutMs = 600000     # 10min idle -> auto-close session
 sessionBackgroundMaxMs = 3600000  # 1hr max for background sessions

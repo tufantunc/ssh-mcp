@@ -133,7 +133,7 @@ export async function loadConfig(customPath?: string, opts: AclOptions = {}): Pr
     throw new OperatorError(`Config validation error:\n${issues}`);
   }
 
-  return normalizeConfig(result.data);
+  return normalizeConfig(result.data, configPath);
 }
 
 /**
@@ -160,7 +160,7 @@ function uncapZero(maxChars: number): number {
  * configuration (an `approvalMode` that never takes effect is a security
  * downgrade, not just a papercut).
  */
-function normalizeConfig(raw: RawConfig): AppConfig {
+function normalizeConfig(raw: RawConfig, configPath?: string): AppConfig {
   // commandMaxChars is mapped here as well as on the profile below, so no `0`
   // survives anywhere in AppConfig. Leaving the raw value on `defaults` left one
   // object carrying two encodings of "unlimited" — `profile.maxChars` as
@@ -181,6 +181,7 @@ function normalizeConfig(raw: RawConfig): AppConfig {
     timeout: p.timeout ?? defaults.commandTimeoutMs,
     maxChars: uncapZero(p.maxChars ?? defaults.commandMaxChars),
     maxOutputBytes: p.maxOutputBytes ?? defaults.commandMaxOutputBytes,
+    maxTransferBytes: p.maxTransferBytes ?? defaults.transferMaxBytes,
     approvalPolicy: p.approvalPolicy ?? defaults.approvalMode,
     sessionMaxPerConnection: p.sessionMaxPerConnection ?? defaults.sessionMaxPerConnection,
     sessionIdleTimeoutMs: p.sessionIdleTimeoutMs ?? defaults.sessionIdleTimeoutMs,
@@ -191,7 +192,7 @@ function normalizeConfig(raw: RawConfig): AppConfig {
   // Passed through untouched. mergePolicyRules() owns the layering over
   // DEFAULT_RULES, so the loader has no policy semantics of its own to get
   // wrong.
-  return { defaults, profiles, policy: raw.policy };
+  return { defaults, profiles, policy: raw.policy, configPath };
 }
 
 export function getProfile(config: AppConfig, name?: string): Profile {

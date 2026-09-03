@@ -9,7 +9,10 @@ import type { CommandResult, Profile } from '../../../src/types.js';
 import type { CloseOutcome } from '../../../src/ssh/session.js';
 import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
 import { defaultsFromArgv } from '../../../src/cli.js';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Readable, Writable } from 'node:stream';
 
 /**
  * In-process MCP client + server over InMemoryTransport, with the SSH layer
@@ -29,6 +32,7 @@ export const testProfile: Profile = {
   timeout: 5000,
   maxChars: 5000,
   maxOutputBytes: 1_048_576,
+  maxTransferBytes: 1_073_741_824,
   role: 'admin',
   readOnly: false,
   approvalPolicy: 'ask-destructive',
@@ -46,6 +50,7 @@ export interface ExecCall {
 
 export interface Harness {
   client: Client;
+  transferRoot: string;
   execCalls: ExecCall[];
   auditRecords: any[];
   /** What the stubbed exec returns; override per test. */
@@ -67,7 +72,7 @@ export interface Harness {
 
 export async function createHarness(
   overrides: Partial<Profile> = {},
-  toolOpts: { approvalGrantTtlMs?: number } = {},
+  toolOpts: { approvalGrantTtlMs?: number; transferRoot?: string; configPath?: string } = {},
 ): Promise<Harness> {
   const profile: Profile = { ...testProfile, ...overrides };
   const execCalls: ExecCall[] = [];
@@ -88,24 +93,56 @@ export async function createHarness(
 
   const sessions = new Map<string, any>();
   const remoteFiles = new Map<string, Buffer>();
+  const transferRoot = toolOpts.transferRoot ?? await mkdtemp(join(tmpdir(), 'ssh-mcp-harness-'));
+  const ownedTransferRoot = toolOpts.transferRoot === undefined;
+  const directoryHandles = new Map<string, { entries: any[]; consumed: boolean }>();
 
   const sftp = {
     end() {},
-    fastPut(localPath: string, remotePath: string, callback: (err?: Error) => void) {
-      readFile(localPath).then((data) => {
-        remoteFiles.set(remotePath, data);
-        callback();
-      }, callback);
+    createWriteStream(remotePath: string) {
+      const chunks: Buffer[] = [];
+      return new Writable({
+        write(chunk, _encoding, callback) { chunks.push(Buffer.from(chunk)); callback(); },
+        final(callback) { remoteFiles.set(remotePath, Buffer.concat(chunks)); callback(); },
+      });
     },
-    fastGet(remotePath: string, localPath: string, callback: (err?: Error) => void) {
+    createReadStream(remotePath: string) {
       const data = remoteFiles.get(remotePath);
-      if (!data) {
-        callback(new Error(`No such remote file: ${remotePath}`));
-        return;
-      }
-      writeFile(localPath, data).then(() => callback(), callback);
+      return data
+        ? Readable.from(data)
+        : new Readable({ read() { this.destroy(new Error(`No such remote file: ${remotePath}`)); } });
     },
-    readdir(remotePath: string, callback: (err: Error | undefined, entries?: any[]) => void) {
+    stat(remotePath: string, callback: (err?: Error, stats?: any) => void) {
+      const data = remoteFiles.get(remotePath);
+      if (!data) callback(Object.assign(new Error(`No such remote file: ${remotePath}`), { code: 2 }));
+      else callback(undefined, { size: data.length, mode: 0o100644, mtime: 1, atime: 1 });
+    },
+    rename(source: string, destination: string, callback: (err?: Error) => void) {
+      const data = remoteFiles.get(source);
+      if (!data) callback(new Error(`No such remote file: ${source}`));
+      else {
+        remoteFiles.set(destination, data);
+        remoteFiles.delete(source);
+        callback();
+      }
+    },
+    ext_openssh_rename(source: string, destination: string, callback: (err?: Error) => void) {
+      this.rename(source, destination, callback);
+    },
+    ext_openssh_hardlink(source: string, destination: string, callback: (err?: Error) => void) {
+      const data = remoteFiles.get(source);
+      if (!data) callback(new Error(`No such remote file: ${source}`));
+      else if (remoteFiles.has(destination)) callback(new Error(`Remote file exists: ${destination}`));
+      else {
+        remoteFiles.set(destination, data);
+        callback();
+      }
+    },
+    unlink(remotePath: string, callback: (err?: Error) => void) {
+      remoteFiles.delete(remotePath);
+      callback();
+    },
+    opendir(remotePath: string, callback: (err: Error | undefined, handle?: Buffer) => void) {
       const prefix = remotePath.endsWith('/') ? remotePath : `${remotePath}/`;
       const entries = [...remoteFiles.entries()]
         .filter(([path]) => path.startsWith(prefix))
@@ -113,7 +150,20 @@ export async function createHarness(
           filename: path.slice(prefix.length),
           attrs: { size: data.length, mode: 0o100644, mtime: 1, atime: 1 },
         }));
-      callback(undefined, entries);
+      const id = `handle-${directoryHandles.size}`;
+      directoryHandles.set(id, { entries, consumed: false });
+      callback(undefined, Buffer.from(id));
+    },
+    readdir(handle: Buffer, callback: (err: any, entries?: any[]) => void) {
+      const state = directoryHandles.get(handle.toString());
+      if (!state) { callback(new Error('Invalid directory handle')); return; }
+      if (state.consumed) { callback(Object.assign(new Error('EOF'), { code: 1 })); return; }
+      state.consumed = true;
+      callback(undefined, state.entries);
+    },
+    close(handle: Buffer, callback: (err?: Error) => void) {
+      directoryHandles.delete(handle.toString());
+      callback();
     },
   };
 
@@ -164,7 +214,7 @@ export async function createHarness(
     { name: 'test', version: '0.0.0' },
     { capabilities: { tools: {}, resources: {} } },
   );
-  registerTools(server, registry, new PolicyEngine(DEFAULT_RULES), audit, toolOpts);
+  registerTools(server, registry, new PolicyEngine(DEFAULT_RULES), audit, { ...toolOpts, transferRoot });
   registerResources(server, registry);
 
   const client = new Client(
@@ -182,13 +232,18 @@ export async function createHarness(
 
   return {
     client,
+    transferRoot,
     execCalls,
     auditRecords,
     setExecResult(result) { execResult = result; },
     setApproval(value) { approve = value; },
     setCloseOutcome(outcome) { closeOutcome = outcome; },
     approvalPrompts: () => approvalPrompts,
-    async close() { await client.close(); await server.close(); },
+    async close() {
+      await client.close();
+      await server.close();
+      if (ownedTransferRoot) await rm(transferRoot, { recursive: true, force: true });
+    },
   };
 }
 

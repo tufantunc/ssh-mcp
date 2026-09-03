@@ -44,6 +44,10 @@ export class PolicyRefusedError extends Error {
 
 export interface ToolDeps {
   server: McpServer;
+  /** Dedicated local directory exposed to streaming SFTP file tools. */
+  transferRoot?: string;
+  /** Config path, used to keep the transfer root away from configuration. */
+  configPath?: string;
   /** Lifetime of a just-in-time approval grant; 0 = always prompt. */
   approvalGrantTtlMs?: number;
   registry: ConnectionRegistry;
@@ -224,6 +228,8 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     preCheck?: (cleanCmd: string) => void;
     /** Rewrite what policy evaluates and what runs (the sudo wrapper). */
     wrap?: (cleanCmd: string) => string;
+    /** Build a synthetic command after profile resolution but before policy evaluation. */
+    prepareCommand?: (setCommand: (prepared: string) => void) => Promise<string>;
   }
 
   /**
@@ -258,6 +264,13 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     try {
       profileName = defaultProfileName(opts.profile);
       const profile = registry.getProfile(profileName);
+      if (opts.prepareCommand) {
+        const setCommand = (prepared: string) => {
+          command = prepared;
+          state.command = prepared;
+        };
+        setCommand(await opts.prepareCommand(setCommand));
+      }
       let effective = opts.synthetic ? command : sanitizeCommand(command, profile.maxChars);
       state.command = effective;
 

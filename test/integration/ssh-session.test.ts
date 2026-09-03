@@ -17,6 +17,7 @@ const testProfile: Profile = {
   timeout: 10000,
   maxChars: 5000,
   maxOutputBytes: 1048576,
+  maxTransferBytes: 1_073_741_824,
   role: 'admin',
   readOnly: false,
   approvalPolicy: 'auto',

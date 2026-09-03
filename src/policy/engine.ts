@@ -4,7 +4,6 @@ import type {
   PolicyEvaluation,
   Profile,
   ApprovalMode,
-  ParsedCommand,
 } from '../types.js';
 import { classifyCommand, findForbiddenMatch } from './classifier.js';
 import { OperatorError } from '../errors.js';
@@ -254,23 +253,13 @@ export class PolicyEngine {
     this.opaUrl = url;
   }
 
-  /**
-   * A directory listing is a new, intrinsically read-only SFTP operation. Its
-   * audit string is metadata, not a shell command, so classify it by tool id.
-   */
-  private classifyOperation(command: string, toolName: string): ParsedCommand {
-    if (toolName === 'sftp-list') {
-      return { binary: 'sftp:list', fullCommand: command, class: 'read-only' };
-    }
-    return classifyCommand(command);
-  }
-
   evaluate(
     command: string,
     profile: Profile,
-    _toolName: string,
+    toolName: string,
   ): PolicyEvaluation {
-    const parsed = this.classifyOperation(command, _toolName);
+    void toolName;
+    const parsed = classifyCommand(command);
     const allowedClasses = this.getAllowedClasses(profile);
     const classAllowed = allowedClasses.includes(parsed.class);
 
@@ -345,7 +334,7 @@ export class PolicyEngine {
     }
 
     try {
-      const parsed = this.classifyOperation(command, toolName);
+      const parsed = classifyCommand(command);
       const input = {
         subject: { role: profile.role, profile: profile.name },
         action: { tool: toolName, commandClass: parsed.class },

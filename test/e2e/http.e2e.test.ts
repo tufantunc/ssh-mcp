@@ -151,8 +151,8 @@ describe.skipIf(!available)('E2E — HTTP transport', () => {
     const first = await connectClient();
     const second = await connectClient();
 
-    expect((await first.listTools()).tools.length).toBe(11);
-    expect((await second.listTools()).tools.length).toBe(11);
+    expect((await first.listTools()).tools.length).toBe(14);
+    expect((await second.listTools()).tools.length).toBe(14);
 
     // First client goes away; the endpoint must stay usable.
     await first.close();

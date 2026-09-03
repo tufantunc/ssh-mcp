@@ -37,10 +37,12 @@ auth = "password"
     const config = await loadConfig(path);
     expect(config.defaults.defaultProfile).toBe('dev');
     expect(config.defaults.sessionMaxPerConnection).toBe(5);
+    expect(config.defaults.transferMaxBytes).toBe(1_073_741_824);
     expect(config.profiles).toHaveLength(1);
     expect(config.profiles[0].name).toBe('dev');
     expect(config.profiles[0].port).toBe(2222);
     expect(config.profiles[0].sessionMaxPerConnection).toBe(5);
+    expect(config.profiles[0].maxTransferBytes).toBe(1_073_741_824);
   });
 
   // Regression: [defaults] used to be validated but only two session keys were
@@ -53,6 +55,7 @@ approvalMode = "ask-all"
 commandTimeoutMs = 30000
 commandMaxChars = 1234
 commandMaxOutputBytes = 2048
+transferMaxBytes = 4096
 sessionBackgroundMaxMs = 111000
 sessionMaxPerConnection = 9
 sessionIdleTimeoutMs = 222000
@@ -68,6 +71,7 @@ user = "test"
     expect(p.timeout).toBe(30000);
     expect(p.maxChars).toBe(1234);
     expect(p.maxOutputBytes).toBe(2048);
+    expect(p.maxTransferBytes).toBe(4096);
     expect(p.sessionBackgroundMaxMs).toBe(111000);
     expect(p.sessionMaxPerConnection).toBe(9);
     expect(p.sessionIdleTimeoutMs).toBe(222000);
@@ -103,6 +107,7 @@ user = "test"
     expect(p.approvalPolicy).toBe('ask-destructive');
     expect(p.timeout).toBe(60_000);
     expect(p.maxOutputBytes).toBe(1_048_576);
+    expect(p.maxTransferBytes).toBe(1_073_741_824);
   });
 
   it('rejects unknown profile keys instead of silently dropping them', async () => {

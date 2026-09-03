@@ -148,6 +148,7 @@ export function resolveHostGroup(argv: Record<string, string | null>): string {
  */
 export function defaultsFromArgv(argv: Record<string, string | null>): Defaults {
   return {
+    transferMaxBytes: 1_073_741_824,
     sessionMaxPerConnection: parseInt(argv.sessionMax as string) || 5,
     sessionIdleTimeoutMs: parseInt(argv.sessionTtl as string) || 600_000,
     sessionBackgroundMaxMs: 3_600_000,
@@ -257,6 +258,7 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
     timeout: defaults.commandTimeoutMs,
     maxChars: defaults.commandMaxChars,
     maxOutputBytes: defaults.commandMaxOutputBytes,
+    maxTransferBytes: defaults.transferMaxBytes,
     role: 'admin',
     group: resolveHostGroup(argv),
     readOnly: false,

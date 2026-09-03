@@ -5,6 +5,10 @@ import { resolveCredentials } from '../../src/config/credential-resolver.js';
 import type { Profile } from '../../src/types.js';
 import type { HostKeyMode } from '../../src/ssh/host-key.js';
 import { sshAvailable, SSH_HOST, SSH_PORT } from './helpers.js';
+import { mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const knownHosts = new Map<string, string>();
 
@@ -18,6 +22,7 @@ const testProfile: Profile = {
   timeout: 10000,
   maxChars: 5000,
   maxOutputBytes: 1048576,
+  maxTransferBytes: 1_073_741_824,
   role: 'admin',
   readOnly: false,
   approvalPolicy: 'auto',
@@ -76,7 +81,7 @@ describe.skipIf(await SSH_AVAILABLE === false)('SFTP operations', () => {
     const markerPath = '/tmp/ssh-mcp-list-marker.txt';
     await sftp.upload({ remotePath: markerPath, content: 'list marker' });
 
-    const entries = await sftp.list('/tmp');
+    const { entries } = await sftp.list('/tmp', 1_000, { maxBytes: 1_048_576, timeoutMs: 10_000 });
     expect(Array.isArray(entries)).toBe(true);
     const marker = entries.find((e) => e.path.endsWith('ssh-mcp-list-marker.txt'));
     expect(marker).toBeTruthy();
@@ -99,6 +104,58 @@ describe.skipIf(await SSH_AVAILABLE === false)('SFTP operations', () => {
     expect(downloaded).toEqual(binary);
 
     await conn.exec(`rm -f ${remotePath}`);
+  });
+
+  it('streams files through already-open local handles and reports actual bytes', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ssh-mcp-sftp-integration-'));
+    const sourcePath = join(directory, 'source.bin');
+    const destinationPath = join(directory, 'destination.bin');
+    const remotePath = '/tmp/ssh-mcp-stream-test.bin';
+    const content = Buffer.from([0, 1, 2, 3, 255, 254, 253]);
+    await writeFile(sourcePath, content);
+    const source = await open(sourcePath, 'r');
+    const destination = await open(destinationPath, 'wx');
+
+    try {
+      const uploaded = await sftp.uploadFile(createReadStream('', { fd: source.fd, autoClose: false, emitClose: false }), remotePath, {
+        maxBytes: 1024,
+        timeoutMs: 10_000,
+        overwrite: true,
+      });
+      const remoteMode = await conn.exec(`stat -c %a -- ${remotePath}`);
+      const downloaded = await sftp.downloadFile(remotePath, createWriteStream('', { fd: destination.fd, autoClose: false, emitClose: false }), {
+        maxBytes: 1024,
+        timeoutMs: 10_000,
+      });
+      expect(uploaded).toBe(content.length);
+      expect(remoteMode.stdout.trim()).toBe('600');
+      expect(downloaded).toBe(content.length);
+      expect(await readFile(destinationPath)).toEqual(content);
+    } finally {
+      await source.close().catch(() => {});
+      await destination.close().catch(() => {});
+      await conn.exec(`rm -f ${remotePath}`);
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 25_000);
+
+  it('enforces the streaming transfer cap', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ssh-mcp-sftp-cap-'));
+    const sourcePath = join(directory, 'source');
+    const remotePath = '/tmp/ssh-mcp-stream-cap.bin';
+    await writeFile(sourcePath, Buffer.alloc(2048));
+    const source = await open(sourcePath, 'r');
+    try {
+      await expect(sftp.uploadFile(createReadStream('', { fd: source.fd, autoClose: false, emitClose: false }), remotePath, {
+        maxBytes: 1024,
+        timeoutMs: 10_000,
+        overwrite: true,
+      })).rejects.toThrow(/transfer limit/);
+    } finally {
+      await source.close().catch(() => {});
+      await conn.exec(`rm -f ${remotePath}`);
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   // exec output has always been capped; SFTP download was not, so one tool call

@@ -3,8 +3,9 @@ import { promisify } from 'util';
 import { existsSync, realpathSync } from 'fs';
 import { mkdtemp, readFile, rm } from 'fs/promises';
 import { tmpdir, userInfo } from 'os';
-import { join, resolve, relative, isAbsolute, parse as parsePath } from 'path';
+import { join, resolve, parse as parsePath } from 'path';
 import { OperatorError } from '../errors.js';
+import { isWithinRoot } from './path-containment.js';
 import {
   parseDacl,
   aclIdentity,
@@ -357,8 +358,7 @@ function isTightenable(path: string, kind: 'file' | 'directory'): boolean {
   // path.relative rather than a prefix match: a hardcoded separator was wrong on
   // the platform the tests run on, and a bare startsWith would also accept a
   // sibling whose name merely begins with the profile's (`C:\\Users\\meloud`).
-  const rel = relative(canonical(home), canonical(path));
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  return isWithinRoot(canonical(home), canonical(path));
 }
 
 /**

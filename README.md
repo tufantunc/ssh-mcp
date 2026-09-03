@@ -142,7 +142,7 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 
 ---
 
-## Tools (11)
+## Tools (14)
 
 | Tool | Purpose | readOnly | destructive |
 |------|---------|:--------:|:----------:|
@@ -161,12 +161,19 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 | `sftp-download-file` | Stream a remote file to a local path | — | ✅ |
 | `signal-process` | Send INT/TERM/KILL to a remote PID | — | ✅ |
 
-The path-based SFTP tools are confined to the MCP server's working directory.
-Relative paths resolve from that directory; absolute paths and symlinks are accepted only
-when their resolved target remains inside it. Downloads do not overwrite an existing file
-unless `overwrite: true` is passed, and never overwrite a symlink.
+The path-based SFTP tools are disabled until `[defaults].transferRoot` names a dedicated,
+absolute local directory. Relative paths resolve inside that directory; traversal, upload
+symlinks, and destinations outside it are rejected. The transfer root must not overlap the
+SSH MCP installation or its config directory. On POSIX it must be owned by the MCP account
+with mode `0700`; Windows ACLs must prevent other accounts from modifying it. Downloads are
+staged beside their destination and published atomically; they do not replace an existing
+file unless `overwrite: true` is passed, and never overwrite a symlink. `transferMaxBytes` (or a profile's
+`maxTransferBytes`) limits each streaming upload and download independently of command output.
 `sftp-list` returns at most 1,000 entries by default; `maxEntries` can raise that to
-10,000, subject to the profile's `commandMaxOutputBytes` limit.
+10,000, subject to the profile's `maxOutputBytes` limit. File uploads are staged remotely
+with mode `0600` and published after a complete transfer; replacing an existing remote file
+requires `overwrite: true` for `sftp-upload-file`. Guaranteed atomic no-overwrite publication
+uses the OpenSSH hardlink SFTP extension and fails closed when a server does not support it.
 
 ### Interactive Sessions
 
@@ -198,7 +205,8 @@ OpenSSH on Windows 11.
 | | Linux / BSD / macOS | Windows OpenSSH |
 |---|:---:|:---:|
 | `read-command`, `run-command`, `privileged-command`, `signal-process` | ✅ | ✅ |
-| All `sftp-*` tools | ✅ | ✅ |
+| In-memory and metadata `sftp-*` tools | ✅ | ✅ |
+| Streaming local-file `sftp-*` tools | ✅ integration | ✅ unit |
 | Background sessions | ✅ | ✅ |
 | **Interactive sessions** | ✅ | ❌ |
 
@@ -220,6 +228,8 @@ POSIX-specific, not merely non-`cmd`.
 ```toml
 [defaults]
 defaultProfile = "dev"
+transferRoot = "/var/lib/ssh-mcp/transfers" # required by sftp-*-file; use e.g. C:\\ssh-mcp-transfers on Windows
+transferMaxBytes = 1073741824        # 1GB per streaming upload/download
 sessionMaxPerConnection = 5
 sessionIdleTimeoutMs = 600000       # 10min
 sessionBackgroundMaxMs = 3600000    # 1hr
@@ -237,6 +247,7 @@ host = "10.0.1.50"
 port = 22
 user = "deploy"
 auth = "agent"                      # agent | key | password | keychain
+maxTransferBytes = 268435456         # optional profile override (256MB)
 keyRef = "~/.ssh/id_ed25519"        # for auth=key
 keychainEntry = "ssh-mcp/prod"      # for auth=keychain (requires @napi-rs/keyring)
 via = "bastion"                     # ProxyJump — route through bastion profile

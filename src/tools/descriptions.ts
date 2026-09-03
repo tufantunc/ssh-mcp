@@ -12,8 +12,8 @@ export const TOOL_DESCRIPTIONS: Record<string, string> = {
   'sftp-upload': 'Upload a file to the remote server via SFTP (secure file transfer, not shell-based).',
   'sftp-download': 'Download a file from the remote server via SFTP.',
   'sftp-list': 'List a remote directory via SFTP with file type, size, mode, and timestamps.',
-  'sftp-upload-file': 'Stream a file from the MCP working directory to the remote server via SFTP without loading it into the model context.',
-  'sftp-download-file': 'Stream a remote file into the MCP working directory via SFTP without loading it into the model context. Existing files are protected unless overwrite is explicitly enabled.',
+  'sftp-upload-file': 'Atomically stream a file from the dedicated defaults.transferRoot directory to a mode-0600 remote file without loading it into the model context. Existing remote files require overwrite.',
+  'sftp-download-file': 'Stream a remote file into the dedicated defaults.transferRoot directory via SFTP without loading it into the model context. Existing files are protected unless overwrite is explicitly enabled.',
   'signal-process': 'Send a signal (INT, TERM, KILL) to a remote process by PID.',
 };
 

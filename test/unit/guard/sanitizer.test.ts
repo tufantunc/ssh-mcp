@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeCommand, sanitizeSessionName } from '../../../src/guard/sanitizer.js';
+import { sanitizeCommand, sanitizeRemotePath, sanitizeSessionName } from '../../../src/guard/sanitizer.js';
 
 describe('sanitizeCommand', () => {
   it('trims whitespace', () => {
@@ -32,5 +32,15 @@ describe('sanitizeSessionName', () => {
 
   it('rejects names exceeding 64 chars', () => {
     expect(() => sanitizeSessionName('a'.repeat(65))).toThrow();
+  });
+});
+
+describe('sanitizeRemotePath', () => {
+  it('preserves ordinary paths and shell metacharacters as literal SFTP operands', () => {
+    expect(sanitizeRemotePath('/tmp/a; sudo id')).toBe('/tmp/a; sudo id');
+  });
+
+  it.each(['', '   ', '/tmp/a\nb', '/tmp/a\rb', '/tmp/a\0b'])('rejects unsafe path %j', (path) => {
+    expect(() => sanitizeRemotePath(path)).toThrow();
   });
 });

@@ -19,6 +19,7 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
     timeout: 60000,
     maxChars: 5000,
     maxOutputBytes: 1048576,
+    maxTransferBytes: 1_073_741_824,
     role: 'operator',
     readOnly: false,
     approvalPolicy: 'ask-destructive',

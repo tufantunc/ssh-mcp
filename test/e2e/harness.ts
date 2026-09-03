@@ -33,6 +33,8 @@ export async function e2eAvailable(): Promise<boolean> {
 
 export interface E2EClient {
   client: Client;
+  /** Dedicated local directory exposed to the path-based SFTP tools. */
+  transferRoot: string;
   /** Prompts the server sent to the client (approval requests). */
   prompts: string[];
   /** Whether the client accepts approval prompts; flip per test. */
@@ -50,9 +52,10 @@ export interface StartOptions {
   args?: string[];
 }
 
-function configToml(opts: StartOptions): string {
+function configToml(opts: StartOptions, transferRoot: string): string {
   return `[defaults]
 defaultProfile = "admin"
+transferRoot = ${JSON.stringify(transferRoot)}
 ${opts.defaults ?? ''}
 
 [[profiles]]
@@ -83,9 +86,11 @@ readOnly = true
  */
 export async function startE2E(opts: StartOptions = {}): Promise<E2EClient & { cleanup(): Promise<void> }> {
   const dir = await mkdtemp(join(tmpdir(), 'ssh-mcp-e2e-'));
+  const transferRoot = await mkdtemp(join(tmpdir(), 'ssh-mcp-e2e-transfer-'));
   await chmod(dir, 0o700);
+  await chmod(transferRoot, 0o700);
   const configPath = join(dir, 'config.toml');
-  await writeFile(configPath, configToml(opts), 'utf8');
+  await writeFile(configPath, configToml(opts, transferRoot), 'utf8');
   // The loader refuses group/world-readable config, as it should.
   await chmod(configPath, 0o600);
 
@@ -125,6 +130,7 @@ export async function startE2E(opts: StartOptions = {}): Promise<E2EClient & { c
 
   return {
     client,
+    transferRoot,
     prompts,
     setApproval(value) { accept = value; },
     async callTool(name, args = {}) {
@@ -136,6 +142,7 @@ export async function startE2E(opts: StartOptions = {}): Promise<E2EClient & { c
     async cleanup() {
       await client.close().catch(() => {});
       await rm(dir, { recursive: true, force: true });
+      await rm(transferRoot, { recursive: true, force: true });
     },
   };
 }

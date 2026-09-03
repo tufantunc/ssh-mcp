@@ -97,6 +97,8 @@ function checkReservedKeys(
 
 export const defaultsSchema = z.object({
   defaultProfile: z.string().optional(),
+  transferRoot: z.string().min(1).optional(),
+  transferMaxBytes: z.number().int().positive().default(1_073_741_824),
   sessionMaxPerConnection: z.number().int().positive().default(5),
   sessionIdleTimeoutMs: z.number().int().positive().default(600_000),
   sessionBackgroundMaxMs: z.number().int().positive().default(3_600_000),
@@ -140,6 +142,7 @@ export const profileSchema = z.object({
   // 0 = unlimited, as in [defaults].commandMaxChars above.
   maxChars: z.number().int().nonnegative().optional(),
   maxOutputBytes: z.number().int().positive().optional(),
+  maxTransferBytes: z.number().int().positive().optional(),
   approvalPolicy: approvalModeSchema.optional(),
   sessionMaxPerConnection: z.number().int().positive().optional(),
   sessionIdleTimeoutMs: z.number().int().positive().optional(),

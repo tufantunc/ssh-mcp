@@ -14,6 +14,7 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
     timeout: 60000,
     maxChars: 5000,
     maxOutputBytes: 1048576,
+    maxTransferBytes: 1_073_741_824,
     role: 'operator',
     readOnly: false,
     approvalPolicy: 'ask-destructive',
@@ -28,6 +29,12 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
 
 describe('PolicyEngine', () => {
   const engine = new PolicyEngine(DEFAULT_RULES);
+
+  it('does not let the sftp-list tool name widen a path containing shell metacharacters', () => {
+    const result = engine.evaluate('sftp:list /tmp; sudo id', makeProfile({ role: 'admin' }), 'sftp-list');
+    expect(result.commandClass).toBe('privileged');
+    expect(result.decision).not.toBe('allow');
+  });
 
   it('allows read-only commands for operator on dev', () => {
     const profile = makeProfile({ role: 'operator', name: 'dev' });

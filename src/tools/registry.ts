@@ -25,7 +25,7 @@ export function registerTools(
   registry: ConnectionRegistry,
   policy: PolicyEngine,
   audit: AuditStore,
-  opts: { approvalGrantTtlMs?: number } = {},
+  opts: { approvalGrantTtlMs?: number; transferRoot?: string; configPath?: string } = {},
 ) {
   const deps: ToolDeps = { server, registry, policy, audit, ...opts };
   const pipeline = createPipeline(deps);

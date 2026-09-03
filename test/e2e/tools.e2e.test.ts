@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { startE2E, e2eAvailable, textOf } from './harness.js';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 // §5 of the readiness report: exercise all 14 tools through a real MCP client
@@ -110,9 +110,8 @@ describe.skipIf(!available)('E2E — tool surface over stdio', () => {
   }, 30000);
 
   it('lists remote files and streams a binary file through local paths', async () => {
-    const dir = await mkdtemp(join(process.cwd(), '.ssh-mcp-e2e-file-'));
-    const source = join(dir, 'source.bin');
-    const destination = join(dir, 'destination.bin');
+    const source = join(e2e.transferRoot, 'source.bin');
+    const destination = join(e2e.transferRoot, 'destination.bin');
     const remotePath = '/tmp/e2e-file-transfer.bin';
     const content = Buffer.from([0, 1, 2, 3, 255, 254, 253]);
 
@@ -130,7 +129,6 @@ describe.skipIf(!available)('E2E — tool surface over stdio', () => {
       expect(await readFile(destination)).toEqual(content);
     } finally {
       await e2e.callTool('run-command', { command: `rm -f ${remotePath}` }).catch(() => {});
-      await rm(dir, { recursive: true, force: true });
     }
   }, 30000);
 

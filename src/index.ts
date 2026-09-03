@@ -56,6 +56,8 @@ async function main() {
     );
     registerTools(server, registry, policy, audit, {
       approvalGrantTtlMs: config.defaults.approvalGrantTtlMs,
+      transferRoot: config.defaults.transferRoot,
+      configPath: config.configPath,
     });
     registerResources(server, registry);
     return server;

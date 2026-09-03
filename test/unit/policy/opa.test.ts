@@ -21,7 +21,7 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
   return {
     name: 'dev', group: 'dev', host: 'localhost', port: 22, user: 'test',
     auth: 'agent', tty: false, timeout: 60000, maxChars: 5000,
-    maxOutputBytes: 1048576, role: 'operator', readOnly: false,
+    maxOutputBytes: 1048576, maxTransferBytes: 1_073_741_824, role: 'operator', readOnly: false,
     approvalPolicy: 'ask-destructive', cert: false,
     sessionMaxPerConnection: 5, sessionIdleTimeoutMs: 60000,
     sessionBackgroundMaxMs: 3600000, commandQuotaPerDay: 0,

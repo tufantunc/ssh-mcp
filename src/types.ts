@@ -20,6 +20,8 @@ export interface Profile {
   timeout: number;
   maxChars: number;
   maxOutputBytes: number;
+  /** Maximum bytes transferred by a streaming SFTP file operation. */
+  maxTransferBytes: number;
   role: string;
   readOnly: boolean;
   approvalPolicy: ApprovalMode;
@@ -33,6 +35,10 @@ export interface Profile {
 
 export interface Defaults {
   defaultProfile?: string;
+  /** Dedicated local directory exposed to streaming SFTP file tools. */
+  transferRoot?: string;
+  /** Default byte cap for streaming SFTP file operations. */
+  transferMaxBytes: number;
   sessionMaxPerConnection: number;
   sessionIdleTimeoutMs: number;
   sessionBackgroundMaxMs: number;
@@ -70,6 +76,8 @@ export interface AppConfig {
   defaults: Defaults;
   profiles: Profile[];
   policy?: PolicyConfig;
+  /** Absolute config path, when configuration came from a file. */
+  configPath?: string;
 }
 
 // ─── SSH Connection Types ───────────────────────────────────────────────────
