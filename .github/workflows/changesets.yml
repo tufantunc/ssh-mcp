@@ -120,7 +120,26 @@ jobs:
       # on. An admin merge of anything wider is skipping a real check.
       - name: Create Release Pull Request or Publish
         id: changesets
-        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1 (branch, not a tag)
+        # v2, because the CLI is v3. The two are a matched pair and the action
+        # says so itself: v2 refuses to run against CLI v2 ("use Changesets
+        # action v1 instead"), and v1 cannot read what CLI v3 emits. Pairing v1
+        # with CLI v3 is what half-published 2.7.0 — v1 detected releases by
+        # grepping the publish script's stdout for `New tag: <pkg>@<version>`, a
+        # line CLI v2 printed and CLI v3 does not. So `published` came out
+        # `false` after npm had already accepted the tarball: no git tag, no
+        # GitHub release, and both post-publish jobs below skipped, all while
+        # the job reported success. The tag, release and SBOMs for v2.7.0 were
+        # created by hand afterwards.
+        #
+        # That state is not reachable from here again. v2 does not parse stdout
+        # for this: it points the CLI at a temporary NDJSON file through
+        # CHANGESETS_OUTPUT and reads the `git-tag` events the CLI writes there,
+        # so what it acts on is the CLI's own structured record of what shipped
+        # rather than a human-readable line the CLI is free to reword.
+        # And `validateChangesetsCliVersion` checks the pairing before anything
+        # runs, which means a future bump of @changesets/cli back across a major
+        # fails this step immediately instead of publishing and going quiet.
+        uses: changesets/action@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.1.1
         with:
           # No --provenance: trusted publishing generates provenance
           # attestations automatically for a public package from a public repo.
@@ -135,28 +154,41 @@ jobs:
           # Build step above and by the `prepare` lifecycle script, which npm
           # runs before packing on publish.
           #
-          # `changeset publish` rather than `npm publish`: the action learns what
-          # shipped from the structured output the changesets CLI writes, and
-          # nothing else produces it. Publishing with npm directly worked — 2.0.0
-          # reached the registry that way — but the action saw no released
-          # packages, so it silently skipped the git tag and the GitHub release
-          # and still reported success. changeset publish decides what to ship
-          # by asking the registry first — `npm info` — which is why the npm
-          # version above matters: if that lookup cannot be trusted, neither can
-          # this step. (This sentence used to point at an .npmrc, from a wrong
-          # diagnosis of the republish loop; there is no .npmrc here, and
-          # removing `registry-url` was not what fixed it.)
-          publish: npx changeset publish
-          version: npm run version
-          title: 'chore(release): version packages'
-          commit: 'chore(release): version packages'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # NODE_AUTH_TOKEN is deliberately absent. Authentication comes from
-          # the OIDC identity of this workflow (id-token: write above), which is
-          # what the package's trusted publisher is configured against. Leaving
-          # the token here would let a misconfigured trusted publisher fall back
-          # silently, so nobody would notice it had stopped working.
+          # `changeset publish` rather than `npm publish`, and now for a
+          # stronger reason than before: the action learns what shipped from the
+          # NDJSON the CLI writes to CHANGESETS_OUTPUT, and only the changesets
+          # CLI writes it. `npm publish` would leave that file absent — which
+          # the action warns about rather than failing on, then reports nothing
+          # released. v1 broke the same way for a different reason — it grepped
+          # `npm publish`'s stdout for a line only the changesets CLI prints,
+          # which is how 2.0.0 reached the registry with no tag and no release —
+          # so the mechanism changed and the requirement did not.
+          #
+          # changeset publish also decides what to ship by asking the registry
+          # first — `npm info` — which is why the npm version above matters: if
+          # that lookup cannot be trusted, neither can this step.
+          #
+          # These four inputs were `publish`, `version`, `title` and `commit`
+          # under v1. v2 renamed all four and throws on the old names, listing
+          # the mapping — it does not ignore them, so a half-done rename fails
+          # the release outright rather than publishing with the defaults.
+          publish-script: npx changeset publish
+          version-script: npm run version
+          pr-title: 'chore(release): version packages'
+          commit-message: 'chore(release): version packages'
+          # No `github-token` and no GITHUB_TOKEN in the environment. The input
+          # defaults to `github.token`, and v2 fails the step when the
+          # environment variable is set to anything that disagrees with the
+          # input — so passing the same token twice buys a way to break the
+          # release and nothing else. The action puts it back into the publish
+          # script's own environment itself.
+          #
+          # NODE_AUTH_TOKEN is deliberately absent for a different reason.
+          # Authentication against npm comes from the OIDC identity of this
+          # workflow (id-token: write above), which is what the package's
+          # trusted publisher is configured against. Leaving a token here would
+          # let a misconfigured trusted publisher fall back silently, so nobody
+          # would notice it had stopped working.
 
   # An SBOM for what actually shipped, bound to the tarball consumers download.
   #
@@ -318,6 +350,20 @@ jobs:
   sbom-assets:
     name: attach the SBOMs to the release
     needs: sbom
+    # `!cancelled()` for a reason the `sbom` job's own gate does not cover:
+    # skips propagate transitively. `release` is skipped on a `list_only`
+    # dispatch, `sbom` runs anyway on its own `!cancelled()` gate — and this job
+    # was still skipped even with `sbom` reporting success, because a default
+    # `if:` also looks upstream of its direct `needs`. Measured on the recovery
+    # dispatch for 2.7.0: sbom success, this job skipped, and the two files had
+    # to be uploaded by hand. Which made the escape hatch unable to do the one
+    # thing it exists for.
+    #
+    # `needs.sbom.result == 'success'` rather than nothing, because
+    # `!cancelled()` alone would run this after a *failed* sbom job, where
+    # release-tag.txt does not exist and `cat` would fail on a missing file
+    # instead of reporting the real problem upstream.
+    if: ${{ !cancelled() && needs.sbom.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -347,6 +393,14 @@ jobs:
   # immutable: a combined job that failed at the registry could not be re-run —
   # the retry would die earlier, republishing a version npm already has, and the
   # part that actually broke would never be reached. This one retries alone.
+  #
+  # "Retries alone" used to overstate it, and the publish step below is what
+  # makes it true. The registry rejects a version it already holds with a 400,
+  # so re-running after a *successful* listing failed the whole workflow — which
+  # meant a `list_only` dispatch, the escape hatch this file relies on, could
+  # only ever be used once per version and produced a red run for the second
+  # onwards. Measured on the 2026-09-03 dispatch for 2.7.0: `cannot publish
+  # duplicate version`, with all eight versions listed and active.
   #
   # And a job rather than a second workflow. The obvious shape — trigger on the
   # `v*` tag the changesets action pushes — cannot work here: that tag is pushed
@@ -500,8 +554,204 @@ jobs:
           echo "::error::$identifier@$version never became visible on npm. Last error: $err" >&2
           exit 1
 
+      # An already-listed version is the state this step is trying to reach, so
+      # it is not a failure. The registry says so with a 400 carrying `cannot
+      # publish duplicate version`, and swallowing exactly that is what lets the
+      # job be re-run — the `list_only` route is worthless if using it twice
+      # goes red.
+      #
+      # Safe to swallow only because of the `--check` step above: server.json's
+      # version must equal package.json's, so "duplicate" cannot mean "we tried
+      # to change the metadata of a version already published". It can only mean
+      # this exact version is already there. Without that step this would hide a
+      # real rejection.
+      #
+      # Matching on a third-party error *string* is fragile, and deliberately
+      # fragile in the safe direction: if the registry rewords the message, this
+      # stops recognising it and the job goes red on a re-dispatch — today's
+      # behaviour. It can never turn a real failure green, and `verify-release`
+      # below asks the registry directly either way.
       - name: Publish to the registry
         run: |
+          # `-e` stays: it does not fire for a command substitution used as an
+          # `if` condition, so the publish below still gets its exit code
+          # inspected, while a failing `login` aborts here instead of falling
+          # through to a publish attempt with no credential.
           set -euo pipefail
           ./mcp-publisher login github-oidc
-          ./mcp-publisher publish
+
+          if out="$(./mcp-publisher publish 2>&1)"; then
+            echo "$out"
+            exit 0
+          fi
+          echo "$out"
+
+          if grep -qF 'cannot publish duplicate version' <<<"$out"; then
+            echo "::notice::the registry already holds this version; nothing to publish."
+            exit 0
+          fi
+          exit 1
+
+  # Does the release actually exist, in every place it is supposed to?
+  #
+  # This job exists because of 2.7.0. Every job above it reported success, npm
+  # had the tarball, and nothing else had happened: no git tag, no GitHub
+  # release, no SBOM assets. The failure was not an error anywhere — it was an
+  # action reading a line the CLI had stopped printing and concluding, honestly
+  # by its own logic, that nothing had been released. Nothing in this file
+  # noticed, and the gap was found by hand three hours later.
+  #
+  # The v2 upgrade in the release job makes that specific mistake unreachable.
+  # This job is the part that does not depend on having correctly diagnosed it:
+  # it asks about the end state rather than about any step's opinion of the end
+  # state. A future action, CLI or registry change that quietly stops doing its
+  # work fails here even if it fails silently there.
+  #
+  # Deliberately last, deliberately read-only, and deliberately unable to fix
+  # anything. It holds `contents: read` and no `id-token: write` — the two jobs
+  # above explain why that matters in this file: npm's trusted publisher is
+  # bound to a workflow *filename*, so every job here that can mint an OIDC
+  # token is a job that could publish ssh-mcp. A checker needs neither.
+  #
+  # What it does NOT cover, so nobody reads more into a green tick than is
+  # there. It runs inside the workflow it checks: a cancelled run, a runner
+  # that dies, or a `release` job that never starts takes this job with it. It
+  # catches "a step said it worked and did not", which is the failure that
+  # happened; it is not an outside watchdog for "the release never ran".
+  #
+  # The MCP registry listing IS checked, but it was left out of the first
+  # version of this job on the argument that asserting against a third-party
+  # API's response shape would produce false alarms on complete releases — the
+  # failure mode that gets a checker ignored. That argument was made without
+  # reading the API. Read, it turns out to answer the question directly:
+  # `?search=<name>&version=<version>` returns one record when the version is
+  # listed and zero when it is not, so there is no pagination to get wrong and
+  # no version list to scan. The check reads only `.server.name` and
+  # `.server.version`, which come from the published server.json schema rather
+  # than the registry's own `_meta` namespace, and it asserts they match
+  # exactly — `search` is a substring match, so a fuzzy hit on another server
+  # must not count.
+  #
+  # Deliberately not asserted: `_meta`'s `status` and `isLatest`. Those are
+  # registry-internal and vendor-namespaced, which is where churn would
+  # actually land, and neither describes something the release path does. And
+  # "listed the wrong version" is already covered upstream by
+  # `sync-server-json --check`.
+  verify-release:
+    name: verify the release is complete
+    needs: [release, sbom-assets, registry]
+    # `!cancelled()` and explicit `needs` results rather than a bare condition,
+    # for the reason written out on `sbom-assets`: skips propagate past a direct
+    # `needs`, and this job must report on a `list_only` dispatch — where
+    # `release` is skipped — which is exactly the situation where a release is
+    # already known to be incomplete. Note it does not require its `needs` to
+    # have succeeded: if `sbom-assets` failed, this job's whole value is naming
+    # which of the four things is missing rather than skipping in sympathy.
+    if: >-
+      ${{ !cancelled()
+      && github.ref == 'refs/heads/main'
+      && (needs.release.outputs.published == 'true'
+      || github.event.inputs.list_only == 'true') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No setup-node: `jq` reads the version out of package.json and is
+      # preinstalled on the runner. Every other job here pins a Node because
+      # something in it depends on the bundled npm; nothing here does, and a
+      # toolchain this job does not need is a toolchain that can break it.
+      #
+      # Five checks, and all five run before any of them fails the job. A
+      # checker that exits on the first problem turns one broken release into
+      # several rounds of fix-and-rerun, which is the opposite of what this is
+      # for — the point is to say, once, everything that is missing.
+      - name: Assert the release exists everywhere it should
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          version="$(jq -r .version package.json)"
+          name="$(jq -r .name package.json)"
+          tag="v$version"
+          failed=0
+          note() { echo "::error::$1" >&2; failed=1; }
+
+          echo "checking $name@$version ($tag)"
+
+          # 1. npm. `sbom` already verified the tarball digest, but that job can
+          # be skipped and this one is meant to stand alone: the version
+          # consumers install is the first thing worth confirming exists.
+          # The reason is kept rather than discarded, for the same reason the
+          # registry job keeps it: without it a 404, a 429, an npm outage and a
+          # runner DNS failure all read as "not released", on the one job whose
+          # whole purpose is to be diagnosable.
+          if err="$(curl -fsS -o /dev/null "https://registry.npmjs.org/$name/$version" 2>&1)"; then
+            echo "  ok   npm serves $name@$version"
+          else
+            note "npm does not serve $name@$version ($err)."
+          fi
+
+          # 2. The tag. This is the one that was missing for 2.7.0, and it is
+          # missing silently: nothing consumes it inside this workflow, so only
+          # a human following a CHANGELOG link ever finds out.
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "  ok   tag $tag exists"
+          else
+            note "tag $tag does not exist. Create it at the release commit: git tag -a $tag <sha> && git push origin $tag"
+          fi
+
+          # 3. The GitHub release, and not a draft one — a draft is invisible to
+          # everyone but maintainers and pushes no tag, so it would satisfy a
+          # bare existence check while giving consumers nothing.
+          if release="$(gh release view "$tag" --json isDraft,assets --repo "$GITHUB_REPOSITORY" 2>&1)"; then
+            if [ "$(jq -r .isDraft <<<"$release")" = "true" ]; then
+              note "the GitHub release for $tag is still a draft."
+            else
+              echo "  ok   GitHub release $tag is published"
+            fi
+
+            # 4. Both SBOMs, under the names sbom-assets uploads. The README
+            # promises an SBOM on every release after v2.4.0, and v2.4.1 shipped
+            # without one because the upload failed after the attestation had
+            # already been signed — a split this file makes on purpose, and the
+            # exact kind of partial success nothing was checking for.
+            for asset in sbom.cdx.json sbom.spdx.json; do
+              if jq -e --arg a "$asset" 'any(.assets[]; .name == $a)' <<<"$release" >/dev/null; then
+                echo "  ok   $asset is attached to $tag"
+              else
+                note "$asset is not attached to the $tag release."
+              fi
+            done
+          else
+            note "no GitHub release for $tag ($release)"
+          fi
+
+          # 5. The MCP registry. `server.json`'s top-level name is the listing's
+          # identity and is NOT package.json's name — `io.github.tufantunc/ssh-mcp`
+          # against `ssh-mcp` — so reading the wrong one would confirm a listing
+          # that does not exist under a name that does.
+          server="$(jq -r .name server.json)"
+          if body="$(curl -fsS "https://registry.modelcontextprotocol.io/v0/servers?search=$server&version=$version" 2>&1)"; then
+            if jq -e --arg n "$server" --arg v "$version" \
+                 'any(.servers[]?; .server.name == $n and .server.version == $v)' \
+                 <<<"$body" >/dev/null 2>&1; then
+              echo "  ok   the MCP registry lists $server@$version"
+            else
+              note "the MCP registry does not list $server@$version. Re-run with the list_only dispatch."
+            fi
+          else
+            note "could not ask the MCP registry about $server@$version ($body)."
+          fi
+
+          if [ "$failed" -ne 0 ]; then
+            # Not "it is on npm but incomplete" — that sentence was wrong in
+            # the case where npm is itself the missing piece, which is how it
+            # read the first time this script was run against a version that
+            # had never shipped. Each check above carries its own remedy; this
+            # line only says the release is not finished.
+            echo "::error::the release of $name@$version is incomplete — see the errors above. npm versions are immutable, so a version already on the registry has to be completed rather than republished." >&2
+            exit 1
+          fi
+          echo "$name@$version is completely released."
