@@ -86,6 +86,22 @@ describe.skipIf(await SSH_AVAILABLE === false)('SFTP operations', () => {
     await conn.exec(`rm -f ${markerPath}`);
   });
 
+  // sftp-upload reports Buffer.byteLength(content, 'utf8'), which is only the
+  // right number because upload() writes Buffer.from(content) — utf8. Pin that
+  // with a string whose UTF-16 length differs from its utf8 byte length; the
+  // tool used to report content.length and under-reported every such upload.
+  it('writes utf8 bytes, not UTF-16 code units', async () => {
+    const remotePath = '/tmp/ssh-mcp-utf8-size.txt';
+    const content = 'привет мир';
+    expect(Buffer.byteLength(content, 'utf8')).not.toBe(content.length);
+
+    await sftp.upload({ remotePath, content });
+    const stats = await sftp.stat(remotePath);
+    expect(stats.size).toBe(Buffer.byteLength(content, 'utf8'));
+
+    await conn.exec(`rm -f ${remotePath}`);
+  });
+
   it('rejects nonexistent path for stat', async () => {
     await expect(sftp.stat('/tmp/nonexistent-ssh-mcp-test-12345')).rejects.toThrow();
   });
