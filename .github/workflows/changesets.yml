@@ -551,3 +551,140 @@ jobs:
           set -euo pipefail
           ./mcp-publisher login github-oidc
           ./mcp-publisher publish
+
+  # Does the release actually exist, in every place it is supposed to?
+  #
+  # This job exists because of 2.7.0. Every job above it reported success, npm
+  # had the tarball, and nothing else had happened: no git tag, no GitHub
+  # release, no SBOM assets. The failure was not an error anywhere — it was an
+  # action reading a line the CLI had stopped printing and concluding, honestly
+  # by its own logic, that nothing had been released. Nothing in this file
+  # noticed, and the gap was found by hand three hours later.
+  #
+  # The v2 upgrade in the release job makes that specific mistake unreachable.
+  # This job is the part that does not depend on having correctly diagnosed it:
+  # it asks about the end state rather than about any step's opinion of the end
+  # state. A future action, CLI or registry change that quietly stops doing its
+  # work fails here even if it fails silently there.
+  #
+  # Deliberately last, deliberately read-only, and deliberately unable to fix
+  # anything. It holds `contents: read` and no `id-token: write` — the two jobs
+  # above explain why that matters in this file: npm's trusted publisher is
+  # bound to a workflow *filename*, so every job here that can mint an OIDC
+  # token is a job that could publish ssh-mcp. A checker needs neither.
+  #
+  # What it does NOT cover, so nobody reads more into a green tick than is
+  # there. It runs inside the workflow it checks: a cancelled run, a runner
+  # that dies, or a `release` job that never starts takes this job with it. It
+  # catches "a step said it worked and did not", which is the failure that
+  # happened; it is not an outside watchdog for "the release never ran".
+  #
+  # And it does not check the MCP registry listing, even though `registry` is
+  # among its `needs` — that dependency is for ordering, so this runs last.
+  # Checking it would mean asserting against a third-party API's response shape
+  # from the one job whose value is being trustworthy when everything else
+  # lies; a wrong guess there produces false alarms on complete releases, which
+  # is the failure mode that gets a checker ignored. The registry job already
+  # asserts the version it lists matches package.json (`sync-server-json
+  # --check`) and fails loudly, which is the part that was worth having.
+  verify-release:
+    name: verify the release is complete
+    needs: [release, sbom-assets, registry]
+    # `!cancelled()` and explicit `needs` results rather than a bare condition,
+    # for the reason written out on `sbom-assets`: skips propagate past a direct
+    # `needs`, and this job must report on a `list_only` dispatch — where
+    # `release` is skipped — which is exactly the situation where a release is
+    # already known to be incomplete. Note it does not require its `needs` to
+    # have succeeded: if `sbom-assets` failed, this job's whole value is naming
+    # which of the four things is missing rather than skipping in sympathy.
+    if: >-
+      ${{ !cancelled()
+      && github.ref == 'refs/heads/main'
+      && (needs.release.outputs.published == 'true'
+      || github.event.inputs.list_only == 'true') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No setup-node: `jq` reads the version out of package.json and is
+      # preinstalled on the runner. Every other job here pins a Node because
+      # something in it depends on the bundled npm; nothing here does, and a
+      # toolchain this job does not need is a toolchain that can break it.
+      #
+      # Four checks, and all four run before any of them fails the job. A
+      # checker that exits on the first problem turns one broken release into
+      # several rounds of fix-and-rerun, which is the opposite of what this is
+      # for — the point is to say, once, everything that is missing.
+      - name: Assert the release exists everywhere it should
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          version="$(jq -r .version package.json)"
+          name="$(jq -r .name package.json)"
+          tag="v$version"
+          failed=0
+          note() { echo "::error::$1" >&2; failed=1; }
+
+          echo "checking $name@$version ($tag)"
+
+          # 1. npm. `sbom` already verified the tarball digest, but that job can
+          # be skipped and this one is meant to stand alone: the version
+          # consumers install is the first thing worth confirming exists.
+          # The reason is kept rather than discarded, for the same reason the
+          # registry job keeps it: without it a 404, a 429, an npm outage and a
+          # runner DNS failure all read as "not released", on the one job whose
+          # whole purpose is to be diagnosable.
+          if err="$(curl -fsS -o /dev/null "https://registry.npmjs.org/$name/$version" 2>&1)"; then
+            echo "  ok   npm serves $name@$version"
+          else
+            note "npm does not serve $name@$version ($err)."
+          fi
+
+          # 2. The tag. This is the one that was missing for 2.7.0, and it is
+          # missing silently: nothing consumes it inside this workflow, so only
+          # a human following a CHANGELOG link ever finds out.
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "  ok   tag $tag exists"
+          else
+            note "tag $tag does not exist. Create it at the release commit: git tag -a $tag <sha> && git push origin $tag"
+          fi
+
+          # 3. The GitHub release, and not a draft one — a draft is invisible to
+          # everyone but maintainers and pushes no tag, so it would satisfy a
+          # bare existence check while giving consumers nothing.
+          if release="$(gh release view "$tag" --json isDraft,assets --repo "$GITHUB_REPOSITORY" 2>&1)"; then
+            if [ "$(jq -r .isDraft <<<"$release")" = "true" ]; then
+              note "the GitHub release for $tag is still a draft."
+            else
+              echo "  ok   GitHub release $tag is published"
+            fi
+
+            # 4. Both SBOMs, under the names sbom-assets uploads. The README
+            # promises an SBOM on every release after v2.4.0, and v2.4.1 shipped
+            # without one because the upload failed after the attestation had
+            # already been signed — a split this file makes on purpose, and the
+            # exact kind of partial success nothing was checking for.
+            for asset in sbom.cdx.json sbom.spdx.json; do
+              if jq -e --arg a "$asset" 'any(.assets[]; .name == $a)' <<<"$release" >/dev/null; then
+                echo "  ok   $asset is attached to $tag"
+              else
+                note "$asset is not attached to the $tag release."
+              fi
+            done
+          else
+            note "no GitHub release for $tag ($release)"
+          fi
+
+          if [ "$failed" -ne 0 ]; then
+            # Not "it is on npm but incomplete" — that sentence was wrong in
+            # the case where npm is itself the missing piece, which is how it
+            # read the first time this script was run against a version that
+            # had never shipped. Each check above carries its own remedy; this
+            # line only says the release is not finished.
+            echo "::error::the release of $name@$version is incomplete — see the errors above. npm versions are immutable, so a version already on the registry has to be completed rather than republished." >&2
+            exit 1
+          fi
+          echo "$name@$version is completely released."
