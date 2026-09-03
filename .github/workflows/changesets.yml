@@ -394,6 +394,14 @@ jobs:
   # the retry would die earlier, republishing a version npm already has, and the
   # part that actually broke would never be reached. This one retries alone.
   #
+  # "Retries alone" used to overstate it, and the publish step below is what
+  # makes it true. The registry rejects a version it already holds with a 400,
+  # so re-running after a *successful* listing failed the whole workflow — which
+  # meant a `list_only` dispatch, the escape hatch this file relies on, could
+  # only ever be used once per version and produced a red run for the second
+  # onwards. Measured on the 2026-09-03 dispatch for 2.7.0: `cannot publish
+  # duplicate version`, with all eight versions listed and active.
+  #
   # And a job rather than a second workflow. The obvious shape — trigger on the
   # `v*` tag the changesets action pushes — cannot work here: that tag is pushed
   # with GITHUB_TOKEN, and GitHub starts no workflows for those pushes. It is the
@@ -546,11 +554,43 @@ jobs:
           echo "::error::$identifier@$version never became visible on npm. Last error: $err" >&2
           exit 1
 
+      # An already-listed version is the state this step is trying to reach, so
+      # it is not a failure. The registry says so with a 400 carrying `cannot
+      # publish duplicate version`, and swallowing exactly that is what lets the
+      # job be re-run — the `list_only` route is worthless if using it twice
+      # goes red.
+      #
+      # Safe to swallow only because of the `--check` step above: server.json's
+      # version must equal package.json's, so "duplicate" cannot mean "we tried
+      # to change the metadata of a version already published". It can only mean
+      # this exact version is already there. Without that step this would hide a
+      # real rejection.
+      #
+      # Matching on a third-party error *string* is fragile, and deliberately
+      # fragile in the safe direction: if the registry rewords the message, this
+      # stops recognising it and the job goes red on a re-dispatch — today's
+      # behaviour. It can never turn a real failure green, and `verify-release`
+      # below asks the registry directly either way.
       - name: Publish to the registry
         run: |
+          # `-e` stays: it does not fire for a command substitution used as an
+          # `if` condition, so the publish below still gets its exit code
+          # inspected, while a failing `login` aborts here instead of falling
+          # through to a publish attempt with no credential.
           set -euo pipefail
           ./mcp-publisher login github-oidc
-          ./mcp-publisher publish
+
+          if out="$(./mcp-publisher publish 2>&1)"; then
+            echo "$out"
+            exit 0
+          fi
+          echo "$out"
+
+          if grep -qF 'cannot publish duplicate version' <<<"$out"; then
+            echo "::notice::the registry already holds this version; nothing to publish."
+            exit 0
+          fi
+          exit 1
 
   # Does the release actually exist, in every place it is supposed to?
   #
@@ -579,14 +619,24 @@ jobs:
   # catches "a step said it worked and did not", which is the failure that
   # happened; it is not an outside watchdog for "the release never ran".
   #
-  # And it does not check the MCP registry listing, even though `registry` is
-  # among its `needs` — that dependency is for ordering, so this runs last.
-  # Checking it would mean asserting against a third-party API's response shape
-  # from the one job whose value is being trustworthy when everything else
-  # lies; a wrong guess there produces false alarms on complete releases, which
-  # is the failure mode that gets a checker ignored. The registry job already
-  # asserts the version it lists matches package.json (`sync-server-json
-  # --check`) and fails loudly, which is the part that was worth having.
+  # The MCP registry listing IS checked, but it was left out of the first
+  # version of this job on the argument that asserting against a third-party
+  # API's response shape would produce false alarms on complete releases — the
+  # failure mode that gets a checker ignored. That argument was made without
+  # reading the API. Read, it turns out to answer the question directly:
+  # `?search=<name>&version=<version>` returns one record when the version is
+  # listed and zero when it is not, so there is no pagination to get wrong and
+  # no version list to scan. The check reads only `.server.name` and
+  # `.server.version`, which come from the published server.json schema rather
+  # than the registry's own `_meta` namespace, and it asserts they match
+  # exactly — `search` is a substring match, so a fuzzy hit on another server
+  # must not count.
+  #
+  # Deliberately not asserted: `_meta`'s `status` and `isLatest`. Those are
+  # registry-internal and vendor-namespaced, which is where churn would
+  # actually land, and neither describes something the release path does. And
+  # "listed the wrong version" is already covered upstream by
+  # `sync-server-json --check`.
   verify-release:
     name: verify the release is complete
     needs: [release, sbom-assets, registry]
@@ -613,7 +663,7 @@ jobs:
       # something in it depends on the bundled npm; nothing here does, and a
       # toolchain this job does not need is a toolchain that can break it.
       #
-      # Four checks, and all four run before any of them fails the job. A
+      # Five checks, and all five run before any of them fails the job. A
       # checker that exits on the first problem turns one broken release into
       # several rounds of fix-and-rerun, which is the opposite of what this is
       # for — the point is to say, once, everything that is missing.
@@ -676,6 +726,23 @@ jobs:
             done
           else
             note "no GitHub release for $tag ($release)"
+          fi
+
+          # 5. The MCP registry. `server.json`'s top-level name is the listing's
+          # identity and is NOT package.json's name — `io.github.tufantunc/ssh-mcp`
+          # against `ssh-mcp` — so reading the wrong one would confirm a listing
+          # that does not exist under a name that does.
+          server="$(jq -r .name server.json)"
+          if body="$(curl -fsS "https://registry.modelcontextprotocol.io/v0/servers?search=$server&version=$version" 2>&1)"; then
+            if jq -e --arg n "$server" --arg v "$version" \
+                 'any(.servers[]?; .server.name == $n and .server.version == $v)' \
+                 <<<"$body" >/dev/null 2>&1; then
+              echo "  ok   the MCP registry lists $server@$version"
+            else
+              note "the MCP registry does not list $server@$version. Re-run with the list_only dispatch."
+            fi
+          else
+            note "could not ask the MCP registry about $server@$version ($body)."
           fi
 
           if [ "$failed" -ne 0 ]; then
