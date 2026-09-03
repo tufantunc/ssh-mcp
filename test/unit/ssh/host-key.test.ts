@@ -107,6 +107,24 @@ describe('verifyHostKey with a pinned key', () => {
     );
   });
 
+  it('fills an empty slot but never overwrites one', () => {
+    // 2.7.0's write lived in the else-branch of `if (stored)`, so it only ever
+    // filled. An unconditional set made the entry order-dependent: with two
+    // profiles pinning different keys for one host:port, whichever connected last
+    // decided what an *unpinned* profile was compared against — and that profile
+    // then got a false HOST_KEY_MISMATCH for a key the other pin had authorised.
+    // Only a three-connection sequence shows it, which is why it survived the
+    // single-call matrix.
+    const knownHosts = new Map([['shared.com:22', OTHER]]);
+    verifyHostKey('shared.com', 22, PIN, knownHosts, 'tofu', PIN);
+    expect(knownHosts.get('shared.com:22')).toBe(OTHER);
+
+    // And the unpinned sibling still sees what it saw before the pinned profile
+    // connected, which is what keeps this change's disclosure honest: nothing an
+    // unpinned profile experiences differs from 2.7.0.
+    expect(verifyHostKey('shared.com', 22, OTHER, knownHosts, 'tofu', undefined)).toBe(true);
+  });
+
   it('does not record under strict, so one profile\'s pin cannot authorise another', () => {
     // The store is what an *unpinned* profile consults, and under strict that is
     // the only thing that could let it through. Seeding it from a pin would mean

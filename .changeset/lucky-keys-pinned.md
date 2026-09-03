@@ -30,16 +30,33 @@ means two profiles pinning different keys for the same `host:port` collide with 
 false `HOST_KEY_MISMATCH` — once the host presents each of them its own key, which
 is the only way that state arises.
 
-It does still *write*, under `tofu` only. Dropping the write was a draft of this
-fix and it cost a real refusal, found in review after the draft had been written
-down as finished: on 2.7.0 a matching pin fell through into the trust-on-first-use
-accept, so a pinned profile seeded the shared store and an unpinned profile on the
-same `host:port` was compared against a pin-verified fingerprint. Without the write
-that profile trust-on-first-uses whatever it is served, and the store then holds the
-attacker's key — so the next connection served the genuine one is refused, with the
-diagnostic naming the real server as the impostor. Not written under `strict`,
-because there the store is the only thing that can admit an *unpinned* profile, and
-seeding it would mean pinning one profile silently admitted every other.
+It does still *write*, under `tofu`, and only into an empty slot. Both halves of
+that were found by measurement rather than reasoning, in two passes.
+
+Dropping the write entirely was a draft of this fix and it cost a real refusal: on
+2.7.0 a matching pin fell through into the trust-on-first-use accept, so a pinned
+profile seeded the shared store and an unpinned profile on the same `host:port` was
+compared against a pin-verified fingerprint. Without the write that profile
+trust-on-first-uses whatever it is served, and the store then holds the attacker's
+key — so the next connection served the genuine one is refused, with the diagnostic
+naming the real server as the impostor.
+
+Restoring it as an unconditional `set` then broke a different profile. 2.7.0's write
+lived in the else-branch of `if (stored)`, so it only ever filled; overwriting made
+the entry order-dependent, and with two profiles pinning different keys for one
+`host:port` whichever connected last decided what an *unpinned* profile was compared
+against — giving that profile a false `HOST_KEY_MISMATCH` for a key the other pin had
+authorised. Only a three-connection sequence shows it; the single-call matrix does
+not. It is `!knownHosts.has(key)` now, matching what it replaced.
+
+Not written under `strict` at all, because there the store is the only thing that can
+admit an *unpinned* profile and seeding it would mean pinning one profile silently
+admitted every other; nor under `insecure`, where 2.7.0 returned before reaching the
+write.
+
+The net effect is worth stating plainly, because it is simpler than the reasoning
+behind it: **nothing an unpinned profile experiences differs from 2.7.0.** Every
+behaviour change below is about a profile that carries a pin.
 
 `strict` therefore means "every host must be pinned". That is the honest
 description of what it can do while the store lives only for the process, and it is

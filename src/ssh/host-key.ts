@@ -99,7 +99,18 @@ export function verifyHostKey(
     // a different profile that pinned nothing — strict's whole point. Under
     // `insecure` 2.7.0 returned before reaching the write, so writing now would
     // invent a record where there was none.
-    if (mode === 'tofu') knownHosts.set(key, fingerprint);
+    // `has`, not an unconditional set. 2.7.0's write lived in the else-branch of
+    // `if (stored)`, so it only ever filled an empty slot — it never overwrote.
+    // Overwriting made the entry order-dependent: with two profiles pinning
+    // different keys for one host:port, whichever connected last decided what an
+    // *unpinned* profile was compared against, so that profile got a false
+    // HOST_KEY_MISMATCH for a key the other pin had authorised. Measured as a
+    // three-connection sequence; single calls do not show it.
+    //
+    // A single-entry store still cannot represent a host that serves two keys —
+    // nothing here can — but not overwriting keeps the baseline stable and matches
+    // what this write replaced.
+    if (mode === 'tofu' && !knownHosts.has(key)) knownHosts.set(key, fingerprint);
     return true;
   }
 
