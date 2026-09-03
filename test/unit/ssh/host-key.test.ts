@@ -131,6 +131,18 @@ describe('verifyHostKey with a pinned key', () => {
     expect(verifyHostKey('plain.com', 22, OTHER, knownHosts, 'tofu', undefined)).toBe(true);
     expect(knownHosts.get('plain.com:22')).toBe(OTHER);
   });
+
+  it('treats an empty pin as no pin, not as a pin nothing can match', () => {
+    // A regression this change nearly shipped. The gate it replaced tested
+    // truthiness, so `trustedHostKey = ""` was inert on 2.7.0; a `!== undefined`
+    // predicate turned the same config into "refuse every host on every
+    // connection" — fail-closed, but a config that worked would have stopped
+    // working. The schema rejects a blank pin now, so this asserts the runtime
+    // half of a two-layer guard.
+    const knownHosts = new Map<string, string>();
+    expect(verifyHostKey('plain.com', 22, OTHER, knownHosts, 'tofu', '')).toBe(true);
+    expect(knownHosts.get('plain.com:22')).toBe(OTHER);
+  });
 });
 
 describe('fingerprintPublicKey', () => {

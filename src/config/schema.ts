@@ -128,7 +128,15 @@ export const profileSchema = z.object({
   // profile name, and an unrecognised name resolves to the strictest tier.
   group: z.string().optional(),
   workdir: z.string().optional(),
-  trustedHostKey: z.string().optional(),
+  // `.trim().min(1)` rather than a bare string. `trustedHostKey = ""` passed
+  // validation and then did nothing: the old gate in connection.ts tested it for
+  // truthiness, so an empty pin was silently inert and the operator who wrote the
+  // line believed they were pinned. A blank pin is always a mistake, and a loud
+  // one at startup beats a profile that quietly verifies nothing. The trim is for
+  // the same reason in the other direction — the comparison against a fingerprint
+  // is exact, so a trailing newline from a heredoc or an editor refused every
+  // key with no hint as to why.
+  trustedHostKey: z.string().trim().min(1, 'trustedHostKey cannot be empty').optional(),
   tty: z.boolean().default(false),
   role: z.string().default('operator'),
   readOnly: z.boolean().default(false),

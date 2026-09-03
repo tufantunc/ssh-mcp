@@ -45,7 +45,12 @@ export function verifyHostKey(
   // — `insecure` included. Moving the check below the early return would keep the
   // tests green and silently drop that, which is the one way this change could
   // have been a security regression rather than a fix.
-  if (trustedHostKey !== undefined) {
+  // Truthiness, not `!== undefined`. The schema now rejects a blank pin, so this
+  // is defence in depth rather than the primary guard — but `!== undefined` alone
+  // was a regression I nearly shipped: the gate this replaced tested truthiness,
+  // so `trustedHostKey = ""` was inert on 2.7.0 and would have become "refuse
+  // every host" here. Measured both ways before writing this down.
+  if (trustedHostKey) {
     if (trustedHostKey !== fingerprint) {
       // No "or turn the check off" exit here, unlike the two refusals below.
       // Nothing overrides a pin — not tofu, not insecure — so offering a mode

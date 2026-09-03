@@ -50,6 +50,21 @@ accept.
   trust-on-first-use memory. If you were relying on the old refusal, you were
   relying on two profiles disagreeing about one host.
 
+- **A blank `trustedHostKey` is now a startup error.** `z.string().optional()`
+  accepted `trustedHostKey = ""`, and the gate that read it tested truthiness — so
+  the line was inert and the operator who wrote it believed the profile was
+  pinned. That is the worst outcome this field has, and it is now refused at load
+  time with `trustedHostKey cannot be empty`. Surrounding whitespace is trimmed
+  rather than refused, for the mirror-image reason: the comparison against the
+  presented fingerprint is exact, so a trailing newline from a heredoc refused
+  every key with nothing in the message pointing at the stray character. A config
+  carrying a blank pin previously started and now does not.
+
+  This one exists because the first draft of this change used `!== undefined`
+  where the old gate used truthiness, which would have turned `trustedHostKey = ""`
+  from inert into "refuse every host on every connection". Measured both ways.
+  The runtime predicate is truthiness again, and the schema is the primary guard.
+
 Unchanged: `strict` without a pin still refuses with `HOST_KEY_UNKNOWN`; `tofu`
 learns and compares exactly as before; `insecure` without a pin still accepts
 anything; and the store still does not persist across a restart, which
