@@ -714,7 +714,7 @@ Secrets are **never** passed as CLI arguments.
 | `--trustProxy` | false | Read the client address from `X-Forwarded-For`, but only when the peer is the proxy — bare means a loopback peer |
 | `--trustedProxies` | — | Comma-separated peer addresses allowed to send `X-Forwarded-For`. Empty means loopback only |
 | `--allowedHosts` | bind address + localhost | Comma-separated Host headers accepted by the DNS-rebinding guard |
-| `--hostKeyMode` | `tofu` | `tofu \| strict \| insecure`. See [SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart) — `strict` currently refuses every host |
+| `--hostKeyMode` | `tofu` | `tofu \| strict \| insecure`. `strict` accepts only hosts pinned with `trustedHostKey`. See [SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart) |
 | `--insecureHostKey` | false | Disable host key verification (test only!) |
 | `--allowUncheckedConfigAcl` | false | Windows: report every ACL finding and refuse none |
 | `--strictConfigAcl` | false | Windows: refuse on every ACL finding, including a read-only over-grant |
