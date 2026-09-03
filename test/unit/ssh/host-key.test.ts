@@ -55,8 +55,12 @@ describe('verifyHostKey', () => {
  * the branch fails the insecure case, and moving the write fails the two store cases.
  */
 describe('verifyHostKey with a pinned key', () => {
-  const PIN = 'SHA256:pinnedkeypinnedkeypinnedkeypinnedkeypinne';
-  const OTHER = 'SHA256:otherkeyotherkeyotherkeyotherkeyotherkeyo';
+  // Derived rather than hand-written. A real fingerprint is 43 characters of
+  // mixed-case base64 with digits and +/; the hand-written lowercase-alpha strings
+  // these replaced were the reason a case-folding comparison passed the whole
+  // suite — there was no case to fold.
+  const PIN = fingerprintPublicKey(Buffer.from('pinned-host-key'));
+  const OTHER = fingerprintPublicKey(Buffer.from('some-other-host-key'));
 
   it('satisfies strict mode, which is the whole point', () => {
     const knownHosts = new Map<string, string>();
@@ -138,6 +142,17 @@ describe('verifyHostKey with a pinned key', () => {
     const knownHosts = new Map<string, string>();
     expect(verifyHostKey('plain.com', 22, OTHER, knownHosts, 'tofu', undefined)).toBe(true);
     expect(knownHosts.get('plain.com:22')).toBe(OTHER);
+  });
+
+  it('compares the pin case-sensitively', () => {
+    // A fingerprint is base64, so case is significant: two keys differing only in
+    // case are two different keys. `toLowerCase()` on both sides of the comparison
+    // passed all 828 tests before this case existed, because every fixture was
+    // lowercase — which is also why the fixtures above are now derived from
+    // fingerprintPublicKey instead of written by hand.
+    expect(PIN).not.toBe(PIN.toLowerCase());
+    expect(() => verifyHostKey('pinned.com', 22, PIN.toLowerCase(), new Map(), 'strict', PIN))
+      .toThrow(/HOST_KEY_PIN_MISMATCH/);
   });
 
   it('treats an empty pin as no pin, not as a pin nothing can match', () => {
