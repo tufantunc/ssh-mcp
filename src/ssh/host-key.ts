@@ -4,13 +4,9 @@ import { OperatorError } from '../errors.js';
 export type HostKeyMode = 'tofu' | 'strict' | 'insecure';
 
 /**
- * The one operational instruction two of the three refusals below have to give.
- *
- * Shared as a literal rather than through a message builder: the three refusals
- * deliberately diverge in their advice — MISMATCH warns against
- * `--insecureHostKey`, UNKNOWN offers two modes, PIN_MISMATCH offers none —
- * and message-quality.test.ts asserts that divergence per message. Only the
- * command is common, and only it should be.
+ * Shared as a literal, not through a message builder: the three refusals below
+ * diverge in their advice, and message-quality.test.ts asserts each one's wording
+ * separately. Only the command is common, and only it should be.
  */
 const CONFIRM_OUT_OF_BAND =
   '`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server';
@@ -28,10 +24,9 @@ export function fingerprintPublicKey(key: Buffer): string {
  * Decide whether to accept the key a host just presented.
  *
  * `knownHosts` is one Map shared by every profile (connection-registry.ts), which
- * is why a pin answers this without ever *reading* it: seeding the store from the
- * pin makes two profiles pinning different keys for one host:port collide with a
- * false HOST_KEY_MISMATCH, once the host presents each its own key. It still
- * writes, under `tofu` only — see the pin branch.
+ * is why a pin never *reads* it: consulting it for a pinned host would make two
+ * profiles pinning different keys for one host:port collide with a false
+ * HOST_KEY_MISMATCH, once the host presents each its own key.
  *
  * Why `--hostKeyMode=strict` refused every host before 2.8.0 is in
  * .changeset/lucky-keys-pinned.md and SECURITY.md; the branch order here is what
@@ -50,17 +45,17 @@ export function verifyHostKey(
   mode: HostKeyMode,
   pinnedFingerprint: string | undefined,
 ): boolean {
+  const key = `${host}:${port}`;
+
   // Before `insecure`, not after: the gate this replaced sat ahead of
   // verifyHostKey in connection.ts, so a key contradicting the pin was refused in
   // every mode, `insecure` included. Pinned by host-key.test.ts, "refuses a key
-  // that contradicts the pin, in every mode including insecure" — which fails on
-  // the reordering, measured, so this is not a comment you have to take on faith.
-  const key = `${host}:${port}`;
-
-  // Truthiness, not `!== undefined`. `trustedHostKey = ""` was inert on 2.7.0
-  // because the gate this replaced tested truthiness; `!== undefined` would turn
-  // the same config into "refuse every host". The schema rejects a blank pin now,
-  // so this is defence in depth rather than the primary guard.
+  // that contradicts the pin, in every mode including insecure".
+  //
+  // Truthiness, not `!== undefined`: `trustedHostKey = ""` was inert on 2.7.0
+  // because that gate tested truthiness, and `!== undefined` would turn the same
+  // config into "refuse every host". The schema rejects a blank pin, so this is
+  // defence in depth rather than the primary guard.
   if (pinnedFingerprint) {
     if (pinnedFingerprint !== fingerprint) {
       // No "or turn the check off" exit here, unlike the two refusals below.
@@ -77,39 +72,17 @@ export function verifyHostKey(
         'which is what pinning exists to catch.',
       );
     }
-    // Matched. The store is not *read* — that is what keeps two profiles pinning
-    // different keys for one host:port from colliding — but it is still written,
-    // and under `tofu` only.
+    // Matched. Two constraints on the write, neither derivable from the code:
     //
-    // Dropping the write was a draft of this fix, and it cost a real refusal.
-    // On 2.7.0 a matching pin fell through into the trust-on-first-use
-    // accept below, so a pinned profile seeded the shared store and an unpinned
-    // profile on the same host:port was compared against it. Measured: pinned
-    // profile connects (served K, store becomes {H:22 -> K}), then an unpinned
-    // profile is served K' and refuses with HOST_KEY_MISMATCH. Without the write
-    // the unpinned profile trust-on-first-uses K' instead, and the store then
-    // holds the attacker's key — so the next unpinned connection served the
-    // genuine K is refused, with the diagnostic naming the real server as the
-    // impostor. The collision argument does not justify dropping the write: it is
-    // about the read, and the read is already skipped. (Found in review, after
-    // the draft had been written down as finished.)
+    // `tofu` only — under `strict` the store is the only thing that admits an
+    // *unpinned* profile, so seeding it there would let one profile's pin authorise
+    // another. Fill-only — an unconditional set makes the entry order-dependent for
+    // an unpinned sibling, and 2.7.0's write was reachable only on a store miss, so
+    // this writes exactly when that one would have.
     //
-    // `tofu` only, deliberately. Under `strict` the store is what an *unpinned*
-    // profile consults, so seeding it there would let one profile's pin authorise
-    // a different profile that pinned nothing — strict's whole point. Under
-    // `insecure` 2.7.0 returned before reaching the write, so writing now would
-    // invent a record where there was none.
-    // `has`, not an unconditional set. 2.7.0's write lived in the else-branch of
-    // `if (stored)`, so it only ever filled an empty slot — it never overwrote.
-    // Overwriting made the entry order-dependent: with two profiles pinning
-    // different keys for one host:port, whichever connected last decided what an
-    // *unpinned* profile was compared against, so that profile got a false
-    // HOST_KEY_MISMATCH for a key the other pin had authorised. Measured as a
-    // three-connection sequence; single calls do not show it.
-    //
-    // A single-entry store still cannot represent a host that serves two keys —
-    // nothing here can — but not overwriting keeps the baseline stable and matches
-    // what this write replaced.
+    // And it is inside the match, below the throw: recording on the refusal path
+    // would put an interceptor's fingerprint into the shared store, which is the
+    // failure the write exists to prevent.
     if (mode === 'tofu' && !knownHosts.has(key)) knownHosts.set(key, fingerprint);
     return true;
   }

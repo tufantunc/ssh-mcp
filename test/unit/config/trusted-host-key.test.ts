@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { readFile } from 'node:fs/promises';
 import { loadConfig } from '../../../src/config/loader.js';
 import { makeConfigDir, enforceAcl, type ConfigDir } from './helpers.js';
 
@@ -56,5 +57,31 @@ ${line}
     // stray character. A trailing newline is a typo, not an intent.
     const config = await load('trustedHostKey = "  SHA256:abc123  "');
     expect(config.profiles[0].trustedHostKey).toBe('SHA256:abc123');
+  });
+});
+
+/**
+ * The template we ship, loaded the way an operator would load it.
+ *
+ * `config.default.toml` is COPYed into the published image (Dockerfile) as the file
+ * operators start from, and nothing in the suite read it. That mattered for one
+ * field: `trustedHostKey = "SHA256:..."` shipped uncommented, and a placeholder pin
+ * is not an inert example — it is a pin nothing can match, so that profile refused
+ * every connection. The schema catches a *blank* pin; nothing catches a plausible
+ * one, and nothing caught the comment being un-commented by the next tidy-up.
+ */
+describe('the shipped config.default.toml', () => {
+  let cfg: ConfigDir;
+  afterEach(async () => { await cfg?.cleanup(); });
+
+  it('parses, and arms no host key pin', async () => {
+    const text = await readFile(new URL('../../../config.default.toml', import.meta.url), 'utf8');
+    cfg = await makeConfigDir('ssh-mcp-default-');
+    const config = await loadConfig(await cfg.write(text), enforceAcl());
+
+    expect(config.profiles.length).toBeGreaterThan(0);
+    for (const profile of config.profiles) {
+      expect(profile.trustedHostKey, `${profile.name} ships with a pin`).toBeUndefined();
+    }
   });
 });

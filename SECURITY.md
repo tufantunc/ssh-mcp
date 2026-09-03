@@ -88,8 +88,10 @@ that makes a swapped key visible only fires against a key this process already s
 
 **`trustedHostKey` on the profile is the only control here that survives a restart.** Pin
 the fingerprint you expect. It is answered in `verifyHostKey` (`src/ssh/host-key.ts`) ahead
-of every other branch, and it neither reads nor writes the store, so an empty store does not
-weaken it and a stale entry cannot override it. Use it for anything that matters.
+of every other branch. It never *reads* the store, so an empty store does not weaken it and a
+stale entry cannot override it; it writes only under `tofu`, and only into an empty slot — see
+below, because that write is what an unpinned profile on the same host is judged against. Use it
+for anything that matters.
 
 Before 2.8.0 this section claimed the pin "is checked in `connection.ts` before the store is
 consulted at all, so an empty store does not weaken it". Under `strict` that was untrue, and in
@@ -108,8 +110,8 @@ The upshot is that nothing an unpinned profile experiences changed in 2.8.0. The
 pin decide only for the profile that carries them.
 
 **`--hostKeyMode=strict` means "every host must be pinned".** Strict refuses any host whose
-key is not already trusted, and the store it consults is only ever written by the TOFU accept
-— which strict, by definition, does not reach. Since the mode is fixed at startup, no earlier
+key is not already trusted, and the store it consults is only ever written under `tofu`, by
+either write site — which strict, by definition, does not reach. Since the mode is fixed at startup, no earlier
 `tofu` connection can seed it either. So a pin is the only thing that satisfies strict, and
 strict is worth setting for exactly one reason: it turns a missing pin into a refusal instead
 of a first-use accept.

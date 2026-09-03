@@ -83,9 +83,17 @@ describe('verifyHostKey with a pinned key', () => {
     // Putting the pin branch after `mode === 'insecure'` would silently drop
     // that, which is the one way this change could have been a regression.
     for (const mode of ['strict', 'tofu', 'insecure'] as const) {
-      expect(() => verifyHostKey('pinned.com', 22, OTHER, new Map(), mode, PIN)).toThrow(
+      // One store per mode, inspected after the throw. The refusal path's side
+      // effect is the only mutable one on a throwing branch here, and it was
+      // unasserted: hoisting the write above the pin branch records the key the
+      // *interceptor* presented and leaves all 837 tests green. That is the exact
+      // failure the write exists to prevent — a pinned profile that correctly
+      // refused, poisoning every unpinned sibling on the same host:port.
+      const knownHosts = new Map<string, string>();
+      expect(() => verifyHostKey('pinned.com', 22, OTHER, knownHosts, mode, PIN)).toThrow(
         /HOST_KEY_PIN_MISMATCH/,
       );
+      expect(knownHosts.size, `store written on refusal under ${mode}`).toBe(0);
     }
   });
 
@@ -138,6 +146,21 @@ describe('verifyHostKey with a pinned key', () => {
     );
   });
 
+  it('cannot be reached across modes in this process, and is pinned in case that changes', () => {
+    // A pinned tofu write followed by an unpinned strict read admits the sibling
+    // off another profile's pin — the outcome the case above calls strict's
+    // guarantee, by a route that case does not cover. It is unreachable as shipped:
+    // the mode is one process-wide flag, resolved once in resolveHostKeyMode
+    // (src/cli.ts) and stored once on the single ConnectionRegistry, so no process
+    // can perform a tofu write and a strict read. Pinned as the current behaviour
+    // rather than "fixed", because fixing an unreachable path would mean tracking
+    // per-entry provenance in the store for no live case — but if the mode ever
+    // becomes per-profile, this test is the one that has to be revisited first.
+    const knownHosts = new Map<string, string>();
+    verifyHostKey('shared.com', 22, PIN, knownHosts, 'tofu', PIN);
+    expect(verifyHostKey('shared.com', 22, PIN, knownHosts, 'strict', undefined)).toBe(true);
+  });
+
   it('does not record under insecure either, matching what it replaced', () => {
     const knownHosts = new Map<string, string>();
     verifyHostKey('shared.com', 22, PIN, knownHosts, 'insecure', PIN);
@@ -153,6 +176,16 @@ describe('verifyHostKey with a pinned key', () => {
     const knownHosts = new Map([['shared.com:22', OTHER]]);
     expect(verifyHostKey('shared.com', 22, PIN, knownHosts, 'strict', PIN)).toBe(true);
     expect(knownHosts.get('shared.com:22')).toBe(OTHER);
+  });
+
+  it('requires the pin argument, so a caller cannot omit it and silently lose pinning', () => {
+    // The only structural defence against the 2.7.0 shape — a call site that
+    // forgets the pin — and reverting `string | undefined` to `string?` passed the
+    // unit suite, the integration suite and `tsc`. This directive is the gate:
+    // `npm run typecheck` includes test/, so the moment the parameter becomes
+    // optional the unused @ts-expect-error is itself an error.
+    // @ts-expect-error - the sixth argument is required on purpose
+    expect(() => verifyHostKey('plain.com', 22, OTHER, new Map(), 'tofu')).toBeTruthy();
   });
 
   it('is inert when no pin is configured', () => {
