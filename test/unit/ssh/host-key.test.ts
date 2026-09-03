@@ -4,19 +4,19 @@ import { verifyHostKey, fingerprintPublicKey } from '../../../src/ssh/host-key.j
 describe('verifyHostKey', () => {
   it('accepts a key that matches known_hosts', () => {
     const knownHosts = new Map([['example.com:22', 'SHA256:abc123']]);
-    expect(verifyHostKey('example.com', 22, 'SHA256:abc123', knownHosts, 'tofu')).toBe(true);
+    expect(verifyHostKey('example.com', 22, 'SHA256:abc123', knownHosts, 'tofu', undefined)).toBe(true);
   });
 
   it('rejects a key that does not match known_hosts', () => {
     const knownHosts = new Map([['example.com:22', 'SHA256:abc123']]);
-    expect(() => verifyHostKey('example.com', 22, 'SHA256:different', knownHosts, 'tofu')).toThrow(
+    expect(() => verifyHostKey('example.com', 22, 'SHA256:different', knownHosts, 'tofu', undefined)).toThrow(
       /HOST_KEY_MISMATCH/,
     );
   });
 
   it('accepts and records a new key in TOFU mode', () => {
     const knownHosts = new Map<string, string>();
-    const result = verifyHostKey('newhost.com', 22, 'SHA256:newkey', knownHosts, 'tofu');
+    const result = verifyHostKey('newhost.com', 22, 'SHA256:newkey', knownHosts, 'tofu', undefined);
     expect(result).toBe(true);
     expect(knownHosts.get('newhost.com:22')).toBe('SHA256:newkey');
   });
@@ -25,44 +25,34 @@ describe('verifyHostKey', () => {
     const knownHosts = new Map<string, string>();
     // Distinct from HOST_KEY_MISMATCH: nothing changed, the host is simply not
     // known yet. The message must also point at a flag that actually exists.
-    expect(() => verifyHostKey('newhost.com', 22, 'SHA256:newkey', knownHosts, 'strict')).toThrow(
+    expect(() => verifyHostKey('newhost.com', 22, 'SHA256:newkey', knownHosts, 'strict', undefined)).toThrow(
       /HOST_KEY_UNKNOWN/,
     );
-    expect(() => verifyHostKey('newhost.com', 22, 'SHA256:newkey', knownHosts, 'strict')).toThrow(
+    expect(() => verifyHostKey('newhost.com', 22, 'SHA256:newkey', knownHosts, 'strict', undefined)).toThrow(
       /--hostKeyMode=tofu/,
     );
   });
 
   it('always accepts in insecure mode', () => {
     const knownHosts = new Map<string, string>();
-    expect(verifyHostKey('any.com', 22, 'SHA256:whatever', knownHosts, 'insecure')).toBe(true);
+    expect(verifyHostKey('any.com', 22, 'SHA256:whatever', knownHosts, 'insecure', undefined)).toBe(true);
   });
 
   it('uses non-default port in key lookup', () => {
     const knownHosts = new Map([['example.com:2222', 'SHA256:abc']]);
-    expect(verifyHostKey('example.com', 2222, 'SHA256:abc', knownHosts, 'tofu')).toBe(true);
+    expect(verifyHostKey('example.com', 2222, 'SHA256:abc', knownHosts, 'tofu', undefined)).toBe(true);
   });
 });
 
 /**
- * `--hostKeyMode=strict` refused every host on every connection until 2.8.0.
+ * `--hostKeyMode=strict` refused every host on every connection until 2.8.0, and a
+ * pin could not satisfy it. The history is in .changeset/lucky-keys-pinned.md; what
+ * these cases pin is the shape the fix left behind.
  *
- * The store it consults is in-memory and lives for the process, and the only
- * write to it sat *below* the strict throw — so under strict it started empty
- * and stayed empty. Measured on 2.7.0: two consecutive calls both threw with
- * `knownHosts.size === 0`, while tofu populated it on the first call. A pin did
- * not help either, because it was a reject-only gate in `connection.ts` that
- * fell through to this function and threw anyway. So strict plus a correct pin —
- * the combination that reads like the secure configuration — connected to
- * nothing, and the refusal's own advice ("pin the key with trustedHostKey") was
- * the advice that did not work.
- *
- * A pin is now the authority for the host it names, and is deliberately kept
- * *out* of the shared store rather than seeding it: `knownHostsStore` is one Map
- * for every profile (connection-registry.ts), so seeding meant two profiles
- * pinning different keys for the same host:port produced a false
- * HOST_KEY_MISMATCH against each other's entry. A pinned host needs no
- * trust-on-first-use memory — the pin already is that memory, and it outranks it.
+ * Two properties here would regress silently if they were not asserted: the pin
+ * branch sitting ahead of the `insecure` early return, and the store being written
+ * under `tofu` but not under `strict`. Both are measured, not argued — reordering
+ * the branch fails the insecure case, and moving the write fails the two store cases.
  */
 describe('verifyHostKey with a pinned key', () => {
   const PIN = 'SHA256:pinnedkeypinnedkeypinnedkeypinnedkeypinne';
@@ -76,7 +66,7 @@ describe('verifyHostKey with a pinned key', () => {
   it('still refuses an unpinned unknown host under strict', () => {
     // The fix must not turn strict into tofu for hosts nobody pinned.
     const knownHosts = new Map<string, string>();
-    expect(() => verifyHostKey('bare.com', 22, OTHER, knownHosts, 'strict')).toThrow(
+    expect(() => verifyHostKey('bare.com', 22, OTHER, knownHosts, 'strict', undefined)).toThrow(
       /HOST_KEY_UNKNOWN/,
     );
     expect(knownHosts.size).toBe(0);
@@ -95,31 +85,49 @@ describe('verifyHostKey with a pinned key', () => {
     }
   });
 
-  it('names the pin as what decided, and does not offer a way to switch it off', () => {
-    // Same standard as the two refusals next door (see message-quality.test.ts):
-    // a refusal has to say what decided and how to proceed, without pointing at
-    // the least safe exit. Here the operator edits the pin or investigates; there
-    // is no mode that overrides a pin, and the message must not imply one.
-    const refused = () => verifyHostKey('pinned.com', 22, OTHER, new Map(), 'tofu', PIN);
-    expect(refused).toThrow(/trustedHostKey/);
-    expect(refused).toThrow(new RegExp(PIN));
-    expect(refused).toThrow(new RegExp(OTHER));
-    expect(refused).not.toThrow(/--insecureHostKey|--hostKeyMode=insecure/);
+  it('records a pinned key under tofu, so an unpinned sibling profile is still compared', () => {
+    // Dropping this write was a draft of the fix and it cost a real refusal.
+    // The store is one Map for every profile, so on 2.7.0 a pinned profile seeded
+    // it and an unpinned profile on the same host:port was checked against a
+    // pin-verified fingerprint. Without the write that profile trust-on-first-uses
+    // whatever it is served — and the store then holds the attacker's key, so the
+    // next connection served the genuine one is refused with the diagnostic naming
+    // the real server as the impostor.
+    const knownHosts = new Map<string, string>();
+    verifyHostKey('shared.com', 22, PIN, knownHosts, 'tofu', PIN);
+    expect(knownHosts.get('shared.com:22')).toBe(PIN);
+
+    // The sibling, unpinned, served something else.
+    expect(() => verifyHostKey('shared.com', 22, OTHER, knownHosts, 'tofu', undefined)).toThrow(
+      /HOST_KEY_MISMATCH/,
+    );
   });
 
-  it('does not write a pinned host into the shared store', () => {
-    // What makes the cross-profile collision impossible. If this ever records,
-    // a second profile pinning a different key for the same host:port starts
-    // failing with HOST_KEY_MISMATCH against an entry it never agreed to.
+  it('does not record under strict, so one profile\'s pin cannot authorise another', () => {
+    // The store is what an *unpinned* profile consults, and under strict that is
+    // the only thing that could let it through. Seeding it from a pin would mean
+    // pinning one profile silently admitted every other profile to that host —
+    // which is the guarantee strict exists to make.
     const knownHosts = new Map<string, string>();
-    verifyHostKey('pinned.com', 22, PIN, knownHosts, 'strict', PIN);
+    verifyHostKey('shared.com', 22, PIN, knownHosts, 'strict', PIN);
+    expect(knownHosts.size).toBe(0);
+    expect(() => verifyHostKey('shared.com', 22, PIN, knownHosts, 'strict', undefined)).toThrow(
+      /HOST_KEY_UNKNOWN/,
+    );
+  });
+
+  it('does not record under insecure either, matching what it replaced', () => {
+    const knownHosts = new Map<string, string>();
+    verifyHostKey('shared.com', 22, PIN, knownHosts, 'insecure', PIN);
     expect(knownHosts.size).toBe(0);
   });
 
   it('lets the pin win over a stale store entry for the same host', () => {
-    // Reachable with one shared store: profile A (tofu, no pin) learns a key,
-    // profile B pins a different one for the same host:port. B must be judged
-    // against its pin, not against A's memory.
+    // The store entry has to be stale relative to what the host presents *now* —
+    // an earlier tofu connection learned a key the host has since rotated away
+    // from, or learned one from an interceptor. Two profiles merely pinning
+    // different keys does not reach here: whichever pin disagrees with the served
+    // key is stopped by the branch above and never sees the store.
     const knownHosts = new Map([['shared.com:22', OTHER]]);
     expect(verifyHostKey('shared.com', 22, PIN, knownHosts, 'strict', PIN)).toBe(true);
     expect(knownHosts.get('shared.com:22')).toBe(OTHER);

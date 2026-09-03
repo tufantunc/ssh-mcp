@@ -12,7 +12,7 @@ import { verifyHostKey } from '../../../src/ssh/host-key.js';
 describe('host key mismatch explains itself', () => {
   const seen = () => new Map([['10.0.0.5:22', 'SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa']]);
   const mismatch = () =>
-    verifyHostKey('10.0.0.5', 22, 'SHA256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', seen(), 'tofu');
+    verifyHostKey('10.0.0.5', 22, 'SHA256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', seen(), 'tofu', undefined);
 
   it('names both causes rather than only the fact', () => {
     // The reader cannot act on "the key changed" alone: a rebuilt server and an
@@ -40,8 +40,32 @@ describe('host key mismatch explains itself', () => {
 
   // The message next door was already right, and is the standard the one above
   // was measured against: it names the setting that decided and gives two ways out.
+  /**
+   * The third refusal, and the only one that deliberately offers no way out.
+   *
+   * It lives here rather than beside the pin's behaviour cases because this file
+   * is where "a refusal explains itself" is the concern — and because a sweep of
+   * this file should cover all three host-key refusals, not two of them.
+   */
+  it('the pin refusal names the pin, shows both keys, and offers no mode as an escape', () => {
+    const PIN = 'SHA256:pinnedkeypinnedkeypinnedkeypinnedkeypinne';
+    const OTHER = 'SHA256:otherkeyotherkeyotherkeyotherkeyotherkeyo';
+    const refused = () => verifyHostKey('10.0.0.7', 22, OTHER, new Map(), 'tofu', PIN);
+
+    expect(refused).toThrow(/HOST_KEY_PIN_MISMATCH/);
+    expect(refused).toThrow(/trustedHostKey/);
+    // Both in full, for the same reason the mismatch case asserts it: the reader's
+    // whole job is comparing them.
+    expect(refused).toThrow(new RegExp(PIN));
+    expect(refused).toThrow(new RegExp(OTHER));
+    // Nothing overrides a pin — not tofu, not insecure. A refusal that named a
+    // mode would be describing a way out that does not exist, which is the exact
+    // failure #41 was about.
+    expect(refused).not.toThrow(/--insecureHostKey|--hostKeyMode/);
+  });
+
   it('the unknown-key refusal still names what decided and how to proceed', () => {
-    const unknown = () => verifyHostKey('10.0.0.9', 22, 'SHA256:ccc', new Map(), 'strict');
+    const unknown = () => verifyHostKey('10.0.0.9', 22, 'SHA256:ccc', new Map(), 'strict', undefined);
     expect(unknown).toThrow(/--hostKeyMode=strict/);
     expect(unknown).toThrow(/trustedHostKey/);
   });

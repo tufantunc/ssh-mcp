@@ -91,9 +91,16 @@ the fingerprint you expect. It is answered in `verifyHostKey` (`src/ssh/host-key
 of every other branch, and it neither reads nor writes the store, so an empty store does not
 weaken it and a stale entry cannot override it. Use it for anything that matters.
 
-That last sentence was untrue before 2.8.0, and in the direction that mattered: the pin was
-a reject-only gate in `connection.ts`, so it could refuse a wrong key but could never satisfy
-anything. It is now the authority for the host it names, in every mode.
+Before 2.8.0 this section claimed the pin "is checked in `connection.ts` before the store is
+consulted at all, so an empty store does not weaken it". Under `strict` that was untrue, and in
+the direction that mattered: the pin was a reject-only gate, so it could refuse a wrong key but
+could not satisfy the store check that followed it. It is now the authority for the host it
+names, in every mode.
+
+A pinned profile does still record its key in the store under `tofu`, so an unpinned profile on
+the same `host:port` is compared against a pin-verified fingerprint rather than trusting its own
+first use. Not under `strict`: there the store is the only thing that can admit an unpinned
+profile, and seeding it from a pin would mean pinning one profile admitted every other.
 
 **`--hostKeyMode=strict` means "every host must be pinned".** Strict refuses any host whose
 key is not already trusted, and the store it consults is only ever written by the TOFU accept

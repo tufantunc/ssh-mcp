@@ -4,6 +4,10 @@
 
 Make `--hostKeyMode=strict` work, and make `trustedHostKey` able to satisfy it.
 
+`minor` rather than `patch` because a config that started yesterday can refuse to
+start today — see **Behaviour changes** — and because one combination that
+previously refused now connects.
+
 `strict` refused every host on every connection, and had since the mode was
 introduced. The store it consults is an in-memory `Map` shared by every profile,
 and the only write to it is the trust-on-first-use accept at the bottom of
@@ -20,12 +24,22 @@ to nothing, and the refusal's own advice, "pin the key with trustedHostKey", was
 the advice that did not work.
 
 The pin is now answered in `verifyHostKey` ahead of every other branch, and it
-neither reads nor writes the store. Keeping it out of the store is the point rather
-than an omission: `knownHostsStore` is one `Map` for all profiles, so seeding it
-from the pin — the obvious fix, and the one this replaced — made two profiles
-pinning different keys for the same `host:port` produce a false
-`HOST_KEY_MISMATCH` against each other's entry. A pinned host has no use for
-trust-on-first-use memory; the pin already is that memory.
+never *reads* the store. That is the point rather than an omission:
+`knownHostsStore` is one `Map` for all profiles, so consulting it for a pinned host
+means two profiles pinning different keys for the same `host:port` collide with a
+false `HOST_KEY_MISMATCH` — once the host presents each of them its own key, which
+is the only way that state arises.
+
+It does still *write*, under `tofu` only. Dropping the write was a draft of this
+fix and it cost a real refusal, found in review after the draft had been written
+down as finished: on 2.7.0 a matching pin fell through into the trust-on-first-use
+accept, so a pinned profile seeded the shared store and an unpinned profile on the
+same `host:port` was compared against a pin-verified fingerprint. Without the write
+that profile trust-on-first-uses whatever it is served, and the store then holds the
+attacker's key — so the next connection served the genuine one is refused, with the
+diagnostic naming the real server as the impostor. Not written under `strict`,
+because there the store is the only thing that can admit an *unpinned* profile, and
+seeding it would mean pinning one profile silently admitted every other.
 
 `strict` therefore means "every host must be pinned". That is the honest
 description of what it can do while the store lives only for the process, and it is
@@ -43,12 +57,15 @@ accept.
   old gate rather than newly chosen, and losing it would have been a regression
   dressed as a cleanup.
 - **A matching pin now wins over a store entry for the same `host:port`.**
-  Previously it threw `HOST_KEY_MISMATCH`. Reachable with the shared store: one
-  profile learns a key under `tofu`, a second profile pins a different one for the
-  same host and port. This is a widening — a case that refused now connects — and
-  it is intended: an explicit pin is operator configuration and a store entry is
-  trust-on-first-use memory. If you were relying on the old refusal, you were
-  relying on two profiles disagreeing about one host.
+  Previously it threw `HOST_KEY_MISMATCH`. It needs the entry to be stale relative
+  to the key the host presents now — an earlier `tofu` connection learned a key the
+  host has since rotated away from, or learned one from an interceptor. (Two
+  profiles merely pinning different keys does not reach it: whichever pin disagrees
+  with the served key is stopped before the store is consulted.) This is a widening
+  — a case that refused now connects — and it is intended: an explicit pin is
+  operator configuration, a store entry is unauthenticated first-use memory. If you
+  were relying on the old refusal, you were relying on a store entry that no longer
+  matches the host.
 
 - **A blank `trustedHostKey` is now a startup error.** `z.string().optional()`
   accepted `trustedHostKey = ""`, and the gate that read it tested truthiness — so
@@ -66,6 +83,11 @@ accept.
   The runtime predicate is truthiness again, and the schema is the primary guard.
 
 Unchanged: `strict` without a pin still refuses with `HOST_KEY_UNKNOWN`; `tofu`
-learns and compares exactly as before; `insecure` without a pin still accepts
-anything; and the store still does not persist across a restart, which
+without a pin learns and compares exactly as before; `insecure` without a pin still
+accepts anything; a key contradicting a pin is still refused in every mode; and the
+store still does not persist across a restart, which
 [SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart) covers.
+
+Note what `--insecureHostKey` does *not* do: it has never lifted a pin, and now
+that the pin is a documented guarantee rather than an accident, that is worth
+stating. A profile with `trustedHostKey` set verifies its host under every mode.

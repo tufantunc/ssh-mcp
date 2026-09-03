@@ -186,11 +186,10 @@ export class SSHConnection {
         hostVerifier: (key: Buffer) => {
           // The pin used to be checked here, as a `return false` ahead of
           // verifyHostKey. That made it reject-only: a *matching* pin fell
-          // through and was then refused anyway under `strict`, because the
-          // store it consults can never be populated in that mode. Passing the
-          // pin in instead puts one function in charge of the whole decision,
-          // and `return false` gave ssh2 a generic handshake failure where
-          // verifyHostKey raises a message that names what decided.
+          // through and was refused anyway under `strict`, whose store can never
+          // be populated. Passing it in puts one function in charge of the whole
+          // decision, and `return false` gave ssh2 a generic handshake failure
+          // where verifyHostKey raises a message that names what decided.
           return verifyHostKey(
             this.profile.host,
             this.profile.port,
