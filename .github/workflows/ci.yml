@@ -395,7 +395,7 @@ jobs:
       # the release existed to fix.
       - name: Smoke test the built image
         env:
-          TOOL_COUNT: '11'
+          TOOL_COUNT: '14'
         run: |
           set -euo pipefail
           {

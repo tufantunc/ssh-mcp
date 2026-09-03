@@ -26,6 +26,9 @@ const CALLS: Array<[string, Record<string, unknown>]> = [
   ['signal-process', { pid: 4242, signal: 'TERM' }],
   ['sftp-upload', { remotePath: '/tmp/b', content: 'hello' }],
   ['sftp-download', { remotePath: '/tmp/b' }],
+  ['sftp-list', { remotePath: '/tmp' }],
+  ['sftp-upload-file', { localPath: '/tmp/a', remotePath: '/tmp/a' }],
+  ['sftp-download-file', { remotePath: '/tmp/a', localPath: '/tmp/a' }],
 ];
 
 describe('every tool call on an unconfigured server', () => {

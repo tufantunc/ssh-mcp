@@ -9,6 +9,7 @@ import type { CommandResult, Profile } from '../../../src/types.js';
 import type { CloseOutcome } from '../../../src/ssh/session.js';
 import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
 import { defaultsFromArgv } from '../../../src/cli.js';
+import { readFile, writeFile } from 'node:fs/promises';
 
 /**
  * In-process MCP client + server over InMemoryTransport, with the SSH layer
@@ -86,9 +87,40 @@ export async function createHarness(
   });
 
   const sessions = new Map<string, any>();
+  const remoteFiles = new Map<string, Buffer>();
+
+  const sftp = {
+    end() {},
+    fastPut(localPath: string, remotePath: string, callback: (err?: Error) => void) {
+      readFile(localPath).then((data) => {
+        remoteFiles.set(remotePath, data);
+        callback();
+      }, callback);
+    },
+    fastGet(remotePath: string, localPath: string, callback: (err?: Error) => void) {
+      const data = remoteFiles.get(remotePath);
+      if (!data) {
+        callback(new Error(`No such remote file: ${remotePath}`));
+        return;
+      }
+      writeFile(localPath, data).then(() => callback(), callback);
+    },
+    readdir(remotePath: string, callback: (err: Error | undefined, entries?: any[]) => void) {
+      const prefix = remotePath.endsWith('/') ? remotePath : `${remotePath}/`;
+      const entries = [...remoteFiles.entries()]
+        .filter(([path]) => path.startsWith(prefix))
+        .map(([path, data]) => ({
+          filename: path.slice(prefix.length),
+          attrs: { size: data.length, mode: 0o100644, mtime: 1, atime: 1 },
+        }));
+      callback(undefined, entries);
+    },
+  };
 
   const conn: any = {
     profile,
+    async ensureConnected() {},
+    getClient: () => ({ sftp: (callback: any) => callback(undefined, sftp) }),
     async exec(command: string, opts: any = {}) {
       execCalls.push({ command, stdin: opts.stdin });
       return makeResult(command);

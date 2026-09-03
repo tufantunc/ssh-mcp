@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { startE2E, e2eAvailable, textOf } from './harness.js';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
-// §5 of the readiness report: exercise all 11 tools through a real MCP client
+// §5 of the readiness report: exercise all 14 tools through a real MCP client
 // over a real transport against a real SSH server. This is the check that would
 // have caught open-session being registered without a handler — the in-process
 // harness found it, but only because it too went through the MCP layer.
@@ -16,12 +18,13 @@ beforeAll(async () => {
 afterAll(async () => { await e2e?.cleanup(); });
 
 describe.skipIf(!available)('E2E — tool surface over stdio', () => {
-  it('advertises all 11 tools to a real client', async () => {
+  it('advertises all 14 tools to a real client', async () => {
     const { tools } = await e2e.client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       'close-session', 'list-connections', 'list-sessions', 'open-session',
       'privileged-command', 'read-command', 'read-session-output',
-      'run-command', 'sftp-download', 'sftp-upload', 'signal-process',
+      'run-command', 'sftp-download', 'sftp-download-file', 'sftp-list',
+      'sftp-upload', 'sftp-upload-file', 'signal-process',
     ]);
   });
 
@@ -104,6 +107,31 @@ describe.skipIf(!available)('E2E — tool surface over stdio', () => {
     expect(textOf(down)).toContain(content);
 
     await e2e.callTool('run-command', { command: `rm -f ${remotePath}` });
+  }, 30000);
+
+  it('lists remote files and streams a binary file through local paths', async () => {
+    const dir = await mkdtemp(join(process.cwd(), '.ssh-mcp-e2e-file-'));
+    const source = join(dir, 'source.bin');
+    const destination = join(dir, 'destination.bin');
+    const remotePath = '/tmp/e2e-file-transfer.bin';
+    const content = Buffer.from([0, 1, 2, 3, 255, 254, 253]);
+
+    try {
+      await writeFile(source, content);
+      const up = await e2e.callTool('sftp-upload-file', { localPath: source, remotePath });
+      expect(up.isError).toBeFalsy();
+
+      const listed = await e2e.callTool('sftp-list', { remotePath: '/tmp' });
+      expect(listed.isError).toBeFalsy();
+      expect(textOf(listed)).toContain('e2e-file-transfer.bin');
+
+      const down = await e2e.callTool('sftp-download-file', { remotePath, localPath: destination });
+      expect(down.isError).toBeFalsy();
+      expect(await readFile(destination)).toEqual(content);
+    } finally {
+      await e2e.callTool('run-command', { command: `rm -f ${remotePath}` }).catch(() => {});
+      await rm(dir, { recursive: true, force: true });
+    }
   }, 30000);
 
   it('signal-process kills a real remote process', async () => {

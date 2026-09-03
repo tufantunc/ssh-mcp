@@ -1066,6 +1066,8 @@ const SYNTHETIC_CLASSES: Record<string, CommandClass> = Object.assign(
   Object.create(null) as Record<string, CommandClass>,
   {
     'sftp:upload': 'destructive',
+    'sftp:upload-file': 'destructive',
+    'sftp:download-file': 'destructive',
     'session:open': 'destructive',
   },
 );
