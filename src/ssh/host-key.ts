@@ -38,8 +38,9 @@ export function fingerprintPublicKey(key: Buffer): string {
  * that history left behind.
  *
  * @param pinnedFingerprint `trustedHostKey` from the profile. Falsy means no pin.
- *   A value decides the outcome in every mode, `insecure` included, and is never
- *   compared against `knownHosts`.
+ *   A value decides the outcome in every mode, `insecure` included. It is never
+ *   compared against `knownHosts`, but a match does record into it under `tofu` —
+ *   see the pin branch for why those two differ.
  */
 export function verifyHostKey(
   host: string,

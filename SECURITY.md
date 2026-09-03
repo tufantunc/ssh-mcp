@@ -100,7 +100,8 @@ names, in every mode.
 A pinned profile does still record its key in the store under `tofu`, so an unpinned profile on
 the same `host:port` is compared against a pin-verified fingerprint rather than trusting its own
 first use. Not under `strict`: there the store is the only thing that can admit an unpinned
-profile, and seeding it from a pin would mean pinning one profile admitted every other.
+profile, and seeding it from a pin would mean pinning one profile admitted every other. Not
+under `insecure` either, where the store decides nothing anyway.
 
 **`--hostKeyMode=strict` means "every host must be pinned".** Strict refuses any host whose
 key is not already trusted, and the store it consults is only ever written by the TOFU accept
