@@ -120,7 +120,26 @@ jobs:
       # on. An admin merge of anything wider is skipping a real check.
       - name: Create Release Pull Request or Publish
         id: changesets
-        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1 (branch, not a tag)
+        # v2, because the CLI is v3. The two are a matched pair and the action
+        # says so itself: v2 refuses to run against CLI v2 ("use Changesets
+        # action v1 instead"), and v1 cannot read what CLI v3 emits. Pairing v1
+        # with CLI v3 is what half-published 2.7.0 — v1 detected releases by
+        # grepping the publish script's stdout for `New tag: <pkg>@<version>`, a
+        # line CLI v2 printed and CLI v3 does not. So `published` came out
+        # `false` after npm had already accepted the tarball: no git tag, no
+        # GitHub release, and both post-publish jobs below skipped, all while
+        # the job reported success. The tag, release and SBOMs for v2.7.0 were
+        # created by hand afterwards.
+        #
+        # That state is not reachable from here again. v2 does not parse stdout
+        # for this: it points the CLI at a temporary NDJSON file through
+        # CHANGESETS_OUTPUT and reads the `git-tag` events the CLI writes there,
+        # so what it acts on is the CLI's own structured record of what shipped
+        # rather than a human-readable line the CLI is free to reword.
+        # And `validateChangesetsCliVersion` checks the pairing before anything
+        # runs, which means a future bump of @changesets/cli back across a major
+        # fails this step immediately instead of publishing and going quiet.
+        uses: changesets/action@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.1.1
         with:
           # No --provenance: trusted publishing generates provenance
           # attestations automatically for a public package from a public repo.
@@ -135,28 +154,41 @@ jobs:
           # Build step above and by the `prepare` lifecycle script, which npm
           # runs before packing on publish.
           #
-          # `changeset publish` rather than `npm publish`: the action learns what
-          # shipped from the structured output the changesets CLI writes, and
-          # nothing else produces it. Publishing with npm directly worked — 2.0.0
-          # reached the registry that way — but the action saw no released
-          # packages, so it silently skipped the git tag and the GitHub release
-          # and still reported success. changeset publish decides what to ship
-          # by asking the registry first — `npm info` — which is why the npm
-          # version above matters: if that lookup cannot be trusted, neither can
-          # this step. (This sentence used to point at an .npmrc, from a wrong
-          # diagnosis of the republish loop; there is no .npmrc here, and
-          # removing `registry-url` was not what fixed it.)
-          publish: npx changeset publish
-          version: npm run version
-          title: 'chore(release): version packages'
-          commit: 'chore(release): version packages'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # NODE_AUTH_TOKEN is deliberately absent. Authentication comes from
-          # the OIDC identity of this workflow (id-token: write above), which is
-          # what the package's trusted publisher is configured against. Leaving
-          # the token here would let a misconfigured trusted publisher fall back
-          # silently, so nobody would notice it had stopped working.
+          # `changeset publish` rather than `npm publish`, and now for a
+          # stronger reason than before: the action learns what shipped from the
+          # NDJSON the CLI writes to CHANGESETS_OUTPUT, and only the changesets
+          # CLI writes it. `npm publish` would leave that file absent — which
+          # the action warns about rather than failing on, then reports nothing
+          # released. v1 broke the same way for a different reason — it grepped
+          # `npm publish`'s stdout for a line only the changesets CLI prints,
+          # which is how 2.0.0 reached the registry with no tag and no release —
+          # so the mechanism changed and the requirement did not.
+          #
+          # changeset publish also decides what to ship by asking the registry
+          # first — `npm info` — which is why the npm version above matters: if
+          # that lookup cannot be trusted, neither can this step.
+          #
+          # These four inputs were `publish`, `version`, `title` and `commit`
+          # under v1. v2 renamed all four and throws on the old names, listing
+          # the mapping — it does not ignore them, so a half-done rename fails
+          # the release outright rather than publishing with the defaults.
+          publish-script: npx changeset publish
+          version-script: npm run version
+          pr-title: 'chore(release): version packages'
+          commit-message: 'chore(release): version packages'
+          # No `github-token` and no GITHUB_TOKEN in the environment. The input
+          # defaults to `github.token`, and v2 fails the step when the
+          # environment variable is set to anything that disagrees with the
+          # input — so passing the same token twice buys a way to break the
+          # release and nothing else. The action puts it back into the publish
+          # script's own environment itself.
+          #
+          # NODE_AUTH_TOKEN is deliberately absent for a different reason.
+          # Authentication against npm comes from the OIDC identity of this
+          # workflow (id-token: write above), which is what the package's
+          # trusted publisher is configured against. Leaving a token here would
+          # let a misconfigured trusted publisher fall back silently, so nobody
+          # would notice it had stopped working.
 
   # An SBOM for what actually shipped, bound to the tarball consumers download.
   #
@@ -318,6 +350,20 @@ jobs:
   sbom-assets:
     name: attach the SBOMs to the release
     needs: sbom
+    # `!cancelled()` for a reason the `sbom` job's own gate does not cover:
+    # skips propagate transitively. `release` is skipped on a `list_only`
+    # dispatch, `sbom` runs anyway on its own `!cancelled()` gate — and this job
+    # was still skipped even with `sbom` reporting success, because a default
+    # `if:` also looks upstream of its direct `needs`. Measured on the recovery
+    # dispatch for 2.7.0: sbom success, this job skipped, and the two files had
+    # to be uploaded by hand. Which made the escape hatch unable to do the one
+    # thing it exists for.
+    #
+    # `needs.sbom.result == 'success'` rather than nothing, because
+    # `!cancelled()` alone would run this after a *failed* sbom job, where
+    # release-tag.txt does not exist and `cat` would fail on a missing file
+    # instead of reporting the real problem upstream.
+    if: ${{ !cancelled() && needs.sbom.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
