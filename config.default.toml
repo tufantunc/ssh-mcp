@@ -40,7 +40,11 @@ auth = "key"
 keyRef = "~/.ssh/id_ed25519"      # Path to private key
 via = "bastion"                   # ProxyJump profile name
 workdir = "/var/www/myapp"
-trustedHostKey = "SHA256:..."     # Pin host key fingerprint (optional)
+# trustedHostKey = "SHA256:<real fingerprint>"   # Pin the host key (optional, and the
+#   one control here that survives a restart). Commented out on purpose: a placeholder
+#   value is not inert — it is a pin nothing can match, so the profile refuses every
+#   connection. Get the real one with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
+#   on the server.
 role = "operator"
 readOnly = false
 approvalPolicy = "ask-all"        # Prod requires approval for everything

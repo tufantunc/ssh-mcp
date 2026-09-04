@@ -87,18 +87,46 @@ positioned to intercept has to win once per start rather than once ever. The mis
 that makes a swapped key visible only fires against a key this process already saw.
 
 **`trustedHostKey` on the profile is the only control here that survives a restart.** Pin
-the fingerprint you expect; it is checked in `connection.ts` before the store is consulted
-at all, so an empty store does not weaken it. Use it for anything that matters.
+the fingerprint you expect. It is answered in `verifyHostKey` (`src/ssh/host-key.ts`) ahead
+of every other branch. It never *reads* the store, so an empty store does not weaken it and a
+stale entry cannot override it; it writes only under `tofu`, and only into an empty slot — see
+below, because that write is what an unpinned profile on the same host is judged against. Use it
+for anything that matters.
 
-**`--hostKeyMode=strict` refuses every host, and pinning does not rescue it.** Strict rejects
-any host whose key is not already in the store, and the only write to that store is the TOFU
-accept further down the same function — unreachable once the strict branch has thrown.
-`trustedHostKey` never writes to it either. So under strict the store starts empty and stays
-empty: measured, two consecutive connections both throw `HOST_KEY_UNKNOWN` with the store
-still at zero entries, and a matching `trustedHostKey` does not change that. The mode is only
-satisfiable by a key accepted earlier in the same process under `tofu`, and the mode is fixed
-at startup, so that cannot happen. Treat strict as unusable until the code changes; use
-`trustedHostKey`.
+Before 2.8.0 this section claimed the pin "is checked in `connection.ts` before the store is
+consulted at all, so an empty store does not weaken it". Under `strict` that was untrue, and in
+the direction that mattered: the pin was a reject-only gate, so it could refuse a wrong key but
+could not satisfy the store check that followed it. It is now the authority for the host it
+names, in every mode.
+
+A pinned profile does still record its key in the store under `tofu`, and only into an empty
+slot, so an unpinned profile on the same `host:port` is compared against a pin-verified
+fingerprint rather than trusting its own first use — and is never compared against a value some
+*other* pinned profile overwrote. Not recorded under `strict`: there the store is the only thing
+that can admit an unpinned profile, and seeding it from a pin would mean pinning one profile
+admitted every other. Not under `insecure` either, where the store decides nothing anyway.
+
+The upshot is that nothing an unpinned profile experiences changed in 2.8.0. The mode and the
+pin decide only for the profile that carries them.
+
+**`--hostKeyMode=strict` means "every host must be pinned".** Strict refuses any host whose
+key is not already trusted, and the store it consults is only ever written under `tofu`, by
+either write site — which strict, by definition, does not reach. Since the mode is fixed at startup, no earlier
+`tofu` connection can seed it either. So a pin is the only thing that satisfies strict, and
+strict is worth setting for exactly one reason: it turns a missing pin into a refusal instead
+of a first-use accept.
+
+Before 2.8.0 that combination connected to nothing. Strict threw `HOST_KEY_UNKNOWN` for every
+host on every connection — measured, two consecutive connections with the store still at zero
+entries — and a matching `trustedHostKey` did not change it, because the pin never wrote to
+the store and its gate ran before the function that would have consulted it. The refusal's own
+advice, "pin the key with trustedHostKey", was the advice that did not work.
+
+A key that contradicts a pin is refused as `HOST_KEY_PIN_MISMATCH` in **every** mode,
+`insecure` included. That is deliberate and predates the fix — the old gate sat ahead of the
+mode check, and the ordering was preserved because losing it would have been a regression
+dressed as a cleanup. There is no mode that overrides a pin, and the refusal does not offer
+one.
 
 **`ask-destructive` gates less than the name suggests, and `kill` is one example rather
 than the exception.** Outside the never-allowed list, five things produce the `destructive`
