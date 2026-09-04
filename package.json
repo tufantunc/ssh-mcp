@@ -1,7 +1,7 @@
 {
   "name": "ssh-mcp",
   "license": "MIT",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "MCP server exposing policy-gated, audited SSH access for Linux and Windows hosts via the Model Context Protocol.",
   "mcpName": "io.github.tufantunc/ssh-mcp",
   "type": "module",
