@@ -30,7 +30,11 @@ export function registerFileTools(
           await new SftpClient(rt.conn).upload({ remotePath, content });
           return {
             audited: syntheticSuccess(rt.profileName),
-            output: textResult(`Uploaded ${content.length} bytes to ${remotePath}`),
+            // Byte count, not string length: `content` is a JS string, so
+            // `.length` counts UTF-16 code units and under-reports every
+            // multi-byte character. SftpClient.upload writes Buffer.from(content),
+            // which is utf8, so this is exactly what lands on the remote side.
+            output: textResult(`Uploaded ${Buffer.byteLength(content, 'utf8')} bytes to ${remotePath}`),
           };
         },
       );
