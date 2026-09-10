@@ -102,6 +102,63 @@ describe.skipIf(await SSH_AVAILABLE === false)('SFTP operations', () => {
     await conn.exec(`rm -f ${remotePath}`);
   });
 
+  // ─── sftp-upload's contract ──────────────────────────────────────────
+  //
+  // These three pin behaviour that `sftp-upload` has always had and that
+  // nothing else asserts. They exist because a proposed change to the
+  // streaming file tools (#186) rewrote `upload()` to stage a `.part` file and
+  // publish it with rename, at mode 0600 and with `??` instead of `||` — which
+  // silently changed all three for the pre-existing tool. #185 asked for the
+  // text-based tools to stay unchanged. If a future port reintroduces any of
+  // it, one of these fails instead of the change shipping quietly.
+
+  it('creates a remote file 0644 by default, not owner-only', async () => {
+    const remotePath = '/tmp/ssh-mcp-mode-default.txt';
+    await conn.exec(`rm -f ${remotePath}`);
+
+    await sftp.upload({ remotePath, content: 'mode test' });
+
+    const { stdout } = await conn.exec(`stat -c %a ${remotePath}`);
+    expect(stdout.trim()).toBe('644');
+
+    await conn.exec(`rm -f ${remotePath}`);
+  });
+
+  // `mode: 0` is "no permissions", which is never what a caller means. `||`
+  // treats it as unset and falls back; `??` would honour it and produce a file
+  // its own owner cannot read.
+  it('treats mode 0 as unset rather than writing a 0000 file', async () => {
+    const remotePath = '/tmp/ssh-mcp-mode-zero.txt';
+    await conn.exec(`rm -f ${remotePath}`);
+
+    await sftp.upload({ remotePath, content: 'zero mode', mode: 0 });
+
+    const { stdout } = await conn.exec(`stat -c %a ${remotePath}`);
+    expect(stdout.trim()).toBe('644');
+
+    await conn.exec(`rm -f ${remotePath}`);
+  });
+
+  // A direct write needs write permission on the *file*; staging a sibling
+  // `.part` and renaming needs it on the *directory*. Updating a writable file
+  // in a directory you cannot write is exactly the case that distinguishes
+  // them — and a common shape for service configs.
+  it('writes the target directly, so a read-only directory is no obstacle', async () => {
+    const dir = '/tmp/ssh-mcp-ro-dir';
+    const remotePath = `${dir}/existing.conf`;
+    await conn.exec(
+      `rm -rf ${dir} && mkdir -p ${dir} && printf old > ${remotePath} ` +
+      `&& chmod 644 ${remotePath} && chmod 555 ${dir}`,
+    );
+
+    await sftp.upload({ remotePath, content: 'rewritten' });
+
+    const downloaded = await sftp.download({ remotePath });
+    expect(downloaded.toString()).toBe('rewritten');
+
+    await conn.exec(`chmod 755 ${dir} && rm -rf ${dir}`);
+  });
+
   it('rejects nonexistent path for stat', async () => {
     await expect(sftp.stat('/tmp/nonexistent-ssh-mcp-test-12345')).rejects.toThrow();
   });
