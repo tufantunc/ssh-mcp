@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { constants, realpath as realpathCb } from 'node:fs';
 import { open, lstat, rename, link, unlink, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
+import type { Writable } from 'node:stream';
 import { platform } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,6 +51,17 @@ export interface LocalDownload {
   handle: FileHandle;
   temporary: string;
   target: LocalWriteTarget;
+  /**
+   * A write stream over the staged file that does **not** close the handle.
+   *
+   * The transfer engine ends the destination it is given — that is how the
+   * bytes are flushed — and a FileHandle-backed stream closes its handle on
+   * end by default. Publishing then fails: `publish()` calls `handle.sync()`,
+   * gets EBADF, and `cleanup()` deletes a file that had transferred
+   * completely. Handing out the stream from here, rather than letting each
+   * caller build one, is what keeps `autoClose: false` from being forgotten.
+   */
+  createStream(): Writable;
   publish(): Promise<void>;
   cleanup(): Promise<void>;
 }
@@ -306,11 +318,29 @@ export async function createLocalDownload(
   }
   let published = false;
 
+  // Handed out by createStream() and torn down here, because the two belong
+  // together: an `autoClose: false` stream that has finished but not been
+  // destroyed makes `handle.close()` hang indefinitely — measured, not
+  // theorised. Giving the caller the stream without owning its teardown just
+  // moved the hazard one level out.
+  let stream: Writable | undefined;
+  const releaseStream = () => {
+    if (stream && !stream.destroyed) stream.destroy();
+    stream = undefined;
+  };
+
   return {
     handle,
     temporary,
     target,
+    createStream() {
+      stream ??= handle.createWriteStream({ autoClose: false });
+      return stream;
+    },
     async publish() {
+      // No releaseStream() here: destroying the stream closes the handle even
+      // with autoClose: false, and sync() below needs it open. Teardown belongs
+      // to cleanup(), which the caller always runs.
       await assertParentUnchanged(target);
       try {
         await handle.sync();
@@ -338,6 +368,7 @@ export async function createLocalDownload(
       }
     },
     async cleanup() {
+      releaseStream();
       await handle.close().catch(() => {});
       if (!published) {
         await unlink(temporary).catch((err: any) => {
