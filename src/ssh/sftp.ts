@@ -97,6 +97,17 @@ interface DeadlineOptions {
   abortSignal?: AbortSignal;
 }
 
+/**
+ * Thrown when a step's own bound expired, as distinct from the server refusing.
+ *
+ * The difference matters at exactly one place: a publish whose *wait* expired
+ * may still have landed, because the bound covers the wait and not the request.
+ * A publish the server actively refused has definitively not landed. Treating
+ * both as ambiguous told a caller its file "may already hold this upload" when
+ * the real answer was a permission error.
+ */
+export class DeadlineExceededError extends Error {}
+
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /**
@@ -327,7 +338,7 @@ export function callbackBeforeDeadline<T>(
         : new Error(`${label} aborted`),
     );
     const timer = setTimeout(
-      () => finish(new Error(`${label} timed out after ${opts.idleTimeoutMs}ms`)),
+      () => finish(new DeadlineExceededError(`${label} timed out after ${opts.idleTimeoutMs}ms`)),
       opts.idleTimeoutMs,
     );
     opts.abortSignal?.addEventListener('abort', abort, { once: true });
@@ -351,8 +362,14 @@ function remoteTemporaryPath(remotePath: string): string {
  * `code === 8`, so the plain-`rename` fallback written for exactly these servers
  * was unreachable and `overwrite: true` failed outright against anything that
  * does not advertise posix-rename@openssh.com.
+ *
+ * Exported for its own tests. No server in this repo can exercise the throw:
+ * docker-compose pins OpenSSH's sftp-server, and even the Dropbear image
+ * installs openssh-sftp-server because Dropbear ships no SFTP subsystem — so
+ * both extensions are always advertised and the fallback would stay unverified
+ * without a stub.
  */
-function publishRemote(
+export function publishRemote(
   sftp: SFTPWrapper,
   temporary: string,
   remotePath: string,
@@ -518,12 +535,14 @@ export class SftpClient {
           await publishRemote(sftp, temporary, remotePath, opts);
           published = true;
         } catch (err) {
-          // callbackBeforeDeadline bounds the wait, not the request, so a
-          // publish that timed out may still have landed. Reporting that as a
-          // plain failure sent a retrying caller into "Refusing to overwrite an
-          // existing remote file" — indistinguishable from a squatter, and an
-          // argument for `overwrite: true` built on a false premise.
-          if (await exists().catch(() => false)) {
+          // Only a bound that expired is ambiguous: the request may still be
+          // in flight, so the destination existing afterwards could be this
+          // upload. Reporting that as a plain failure sent a retrying caller
+          // into "Refusing to overwrite an existing remote file" —
+          // indistinguishable from a squatter, and an argument for
+          // `overwrite: true` built on a false premise. A publish the server
+          // actively refused is not ambiguous and must keep its own error.
+          if (err instanceof DeadlineExceededError && await exists().catch(() => false)) {
             published = true;
             throw new Error(
               'SFTP upload publish did not confirm within its bound, but the destination now exists. ' +

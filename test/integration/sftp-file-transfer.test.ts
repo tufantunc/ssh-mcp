@@ -205,6 +205,31 @@ describe.skipIf(await SSH_AVAILABLE === false)('streaming SFTP file transfer', (
       await conn.exec(`rm -rf ${dir}`);
     }, 15000);
 
+    // A publish the server refuses is not ambiguous, and must not be reported
+    // as "the destination now exists; it may already hold this upload" — that
+    // message exists only for a bound that expired with the request in flight.
+    // A directory target refuses definitively while `exists()` still says yes,
+    // which is exactly the shape that would trip a too-broad check.
+    it('keeps a definite publish failure distinct from an unconfirmed one', async () => {
+      const dir = await remoteDir('uf-definite');
+      const target = `${dir}/a-directory`;
+      await conn.exec(`mkdir -p ${target}`);
+      const source = join(local, 'definite.txt');
+      await writeFile(source, 'payload');
+
+      const message = await sftp
+        .uploadFile(createReadStream(source), target, { ...OPTS, overwrite: true })
+        .then(() => '')
+        .catch((err: Error) => err.message);
+
+      expect(message).not.toMatch(/may already hold this upload/);
+      expect(message).not.toMatch(/did not confirm/);
+      expect(message).toBeTruthy();
+      expect(await stagingFiles(dir)).toBe(0);
+
+      await conn.exec(`rm -rf ${dir}`);
+    });
+
     // upload()'s mode contract is pinned by three tests; this one's was not, so
     // the deliberate divergence could be "harmonised" away unnoticed.
     it('publishes 0600 by default and honours an explicit mode', async () => {

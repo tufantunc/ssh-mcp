@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { callbackBeforeDeadline } from '../../../src/ssh/sftp.js';
+import { callbackBeforeDeadline, DeadlineExceededError } from '../../../src/ssh/sftp.js';
 
 /**
  * The per-step bound is what stops one SFTP metadata round-trip hanging a whole
@@ -17,6 +17,21 @@ describe('callbackBeforeDeadline', () => {
       }),
     ).rejects.toThrow(/SFTP probe timed out after 50ms/);
     expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  // The type is what lets uploadFile tell "the wait expired, the request may
+  // still land" from "the server refused". Both are Errors; only one is
+  // ambiguous.
+  it('marks a deadline failure with its own type, and a server error without it', async () => {
+    const expired = await callbackBeforeDeadline({ idleTimeoutMs: 20 }, 'SFTP probe', () => {})
+      .catch((e) => e);
+    expect(expired).toBeInstanceOf(DeadlineExceededError);
+
+    const refused = await callbackBeforeDeadline({ idleTimeoutMs: 1000 }, 'SFTP probe', (cb) => {
+      cb(new Error('permission denied'));
+    }).catch((e) => e);
+    expect(refused).toBeInstanceOf(Error);
+    expect(refused).not.toBeInstanceOf(DeadlineExceededError);
   });
 
   it('resolves with the value when the operation answers in time', async () => {
