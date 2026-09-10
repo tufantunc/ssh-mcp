@@ -203,6 +203,39 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info
 
+  # macOS exists in this matrix for one reason: `os.tmpdir()` here is
+  # /var/folders/..., a symlink to /private/var/folders/.... Neither
+  # ubuntu-latest nor windows-latest has a symlinked temp directory, so a path
+  # gate that compares a caller's spelling against a realpath'd root passes
+  # both of them and refuses every legitimate absolute path on a developer's
+  # Mac. That is exactly what happened to the streaming SFTP file tools: two
+  # tests were red locally and no CI job could see it.
+  #
+  # Deliberately lean — no docker, so no integration or e2e suite, and no
+  # coverage upload. The lines are the same ones Ubuntu already covers; what
+  # differs is the filesystem underneath them, which only the unit suite needs.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      # `prepare` runs the build on npm ci, as on the windows job.
+      - run: npm ci
+
+      - name: Typecheck (src + tests)
+        run: npm run typecheck
+
+      # The script, not a raw vitest invocation: it also sets
+      # SSH_MCP_DISABLE_MAIN=1, without which importing the entry point starts
+      # a real server during the suite.
+      - name: Run unit and property tests
+        run: npm run test:unit
+
   # One context that fails if any other job fails.
   #
   # The ruleset used to require `test` and nothing else, so a red `windows` job was
@@ -219,7 +252,7 @@ jobs:
   # review round reasoned from it that a Windows-only regression could still ship.
   ci:
     runs-on: ubuntu-latest
-    needs: [test, windows, security-scan, codeql, docker]
+    needs: [test, windows, macos, security-scan, codeql, docker]
     # Not `always()`: that reports red for a run someone cancelled on purpose.
     if: ${{ !cancelled() }}
     steps:
