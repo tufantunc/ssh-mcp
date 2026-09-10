@@ -328,6 +328,68 @@ describe.skipIf(IS_WINDOWS)('createLocalDownload', () => {
   });
 });
 
+describe.skipIf(IS_WINDOWS)('the transfer root, continued', () => {
+  // The privacy checks walk every ancestor, because a world-writable parent
+  // could swap the root between realpath() and open(). /tmp is exempt by being
+  // sticky; a plain 0777 directory is not.
+  it('refuses a root under a world-writable, non-sticky parent', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'ssh-mcp-openparent-'));
+    const root = join(parent, 'transfers');
+    await mkdir(root);
+    await chmod(root, 0o700);
+    await chmod(parent, 0o777);
+    try {
+      await expect(localFileForRead({ transferRoot: root }, 'x')).rejects.toThrow(
+        /unsafe writable parent directory/,
+      );
+    } finally {
+      await chmod(parent, 0o700).catch(() => {});
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+});
+
+describe.skipIf(IS_WINDOWS)('createLocalDownload, publishing over an existing file', () => {
+  // The overwrite path publishes with rename rather than link, so it replaces
+  // the destination instead of refusing on EEXIST.
+  it('replaces the destination when overwrite is requested', async () => {
+    const existing = join(rootCanonical, 'target.txt');
+    await writeFile(existing, 'old contents');
+
+    const download = await createLocalDownload(ctx, 'target.txt', true);
+    try {
+      await download.handle.write('new contents');
+      await download.publish();
+    } finally {
+      await download.cleanup();
+    }
+
+    const { readFile } = await import('node:fs/promises');
+    expect(await readFile(existing, 'utf8')).toBe('new contents');
+    // The staging file is gone: rename consumed it rather than leaving a link.
+    const { readdir } = await import('node:fs/promises');
+    expect((await readdir(rootCanonical)).filter((n) => n.endsWith('.part'))).toEqual([]);
+  });
+
+  it('hands out one stream, and the same one on a second call', async () => {
+    const download = await createLocalDownload(ctx, 'streamed.txt', false);
+    try {
+      const first = download.createStream();
+      expect(download.createStream()).toBe(first);
+      first.end('streamed');
+      await new Promise((resolve) => first.once('finish', resolve));
+      await download.publish();
+    } finally {
+      // cleanup() destroys the stream before closing the handle; without that
+      // ordering this call hangs, which is why the object owns both.
+      await download.cleanup();
+    }
+
+    const { readFile } = await import('node:fs/promises');
+    expect(await readFile(join(rootCanonical, 'streamed.txt'), 'utf8')).toBe('streamed');
+  });
+});
+
 describe.runIf(IS_WINDOWS)('on Windows', () => {
   it('refuses any transfer root rather than verifying it with the config-file posture', async () => {
     await expect(localFileForRead({ transferRoot: rootAsSpelled }, 'payload.txt')).rejects.toThrow(

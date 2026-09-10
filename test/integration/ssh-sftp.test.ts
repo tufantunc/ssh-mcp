@@ -72,20 +72,29 @@ describe.skipIf(await SSH_AVAILABLE === false)('SFTP operations', () => {
     await conn.exec(`rm -f ${remotePath}`);
   });
 
-  const LIST_OPTS = { idleTimeoutMs: 10_000, maxBytes: 1_048_576 };
+  const listOpts = (over: Partial<{ maxEntries: number; maxResponseBytes: number }> = {}) => ({
+    maxEntries: 1000,
+    maxResponseBytes: 1_048_576,
+    idleTimeoutMs: 10_000,
+    ...over,
+  });
 
   it('lists a directory with valid entries', async () => {
-    const markerPath = '/tmp/ssh-mcp-list-marker.txt';
+    const dir = '/tmp/ssh-mcp-list-marker';
+    const markerPath = `${dir}/marker.txt`;
+    await conn.exec(`rm -rf ${dir} && mkdir -p ${dir}`);
     await sftp.upload({ remotePath: markerPath, content: 'list marker' });
 
-    const result = await sftp.list('/tmp', 1000, LIST_OPTS);
-    expect(Array.isArray(result.entries)).toBe(true);
-    const marker = result.entries.find((e) => e.path.endsWith('ssh-mcp-list-marker.txt'));
-    expect(marker).toBeTruthy();
-    expect(marker!.isFile).toBe(true);
-    expect(typeof marker!.size).toBe('number');
+    const result = await sftp.list(dir, listOpts());
+    // `truncated` asserted so a cut listing fails here rather than further down
+    // as a mysteriously missing marker.
+    expect(result.truncated).toBe(false);
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].path).toBe(markerPath);
+    expect(result.entries[0].isFile).toBe(true);
+    expect(typeof result.entries[0].size).toBe('number');
 
-    await conn.exec(`rm -f ${markerPath}`);
+    await conn.exec(`rm -rf ${dir}`);
   });
 
   // The bound is what stops a directory with a million entries becoming a
@@ -95,12 +104,16 @@ describe.skipIf(await SSH_AVAILABLE === false)('SFTP operations', () => {
     const dir = '/tmp/ssh-mcp-list-many';
     await conn.exec(`rm -rf ${dir} && mkdir -p ${dir} && for i in $(seq 1 12); do touch ${dir}/f$i; done`);
 
-    const capped = await sftp.list(dir, 5, LIST_OPTS);
+    const capped = await sftp.list(dir, listOpts({ maxEntries: 5 }));
     expect(capped.entries).toHaveLength(5);
     expect(capped.truncated).toBe(true);
 
-    const full = await sftp.list(dir, 100, LIST_OPTS);
-    expect(full.entries.length).toBeGreaterThanOrEqual(12);
+    // Exactly 12, not 14: ssh2 removes `.` and `..` before the callback unless
+    // readdir is given `{ full: true }`, and list() filters them itself. An
+    // earlier version of this test asserted `>= 12`, which passed under either
+    // belief and so pinned neither.
+    const full = await sftp.list(dir, listOpts());
+    expect(full.entries).toHaveLength(12);
     expect(full.truncated).toBe(false);
 
     await conn.exec(`rm -rf ${dir}`);
@@ -112,22 +125,103 @@ describe.skipIf(await SSH_AVAILABLE === false)('SFTP operations', () => {
     const dir = '/tmp/ssh-mcp-list-exact';
     await conn.exec(`rm -rf ${dir} && mkdir -p ${dir} && for i in 1 2 3; do touch ${dir}/f$i; done`);
 
-    // . and .. are listed too, so an entry count of exactly N needs N-2 files.
-    const all = await sftp.list(dir, 100, LIST_OPTS);
-    const exact = await sftp.list(dir, all.entries.length, LIST_OPTS);
-    expect(exact.entries).toHaveLength(all.entries.length);
+    const exact = await sftp.list(dir, listOpts({ maxEntries: 3 }));
+    expect(exact.entries).toHaveLength(3);
     expect(exact.truncated).toBe(false);
 
     await conn.exec(`rm -rf ${dir}`);
   });
 
-  it('truncates on the byte budget even when the entry count fits', async () => {
+  // The budget bills filename + longname + 256 per retained entry, so the
+  // admitted count is arithmetic rather than a range. Asserting an exact count
+  // is what makes an accounting change fail here instead of passing quietly.
+  //
+  // Measured against this server: a two-character name carries a 58-byte
+  // longname, so one entry costs 316. The budgets below sit inside their bands
+  // (316..631 admits exactly 1; 1264..1579 admits exactly 4) rather than on an
+  // edge, so a small change in the server's `ls -l` width does not flip them.
+  it('truncates on the response budget, admitting exactly what fits', async () => {
     const dir = '/tmp/ssh-mcp-list-bytes';
     await conn.exec(`rm -rf ${dir} && mkdir -p ${dir} && for i in $(seq 1 10); do touch ${dir}/f$i; done`);
 
-    const tight = await sftp.list(dir, 1000, { idleTimeoutMs: 10_000, maxBytes: 200 });
-    expect(tight.truncated).toBe(true);
-    expect(tight.entries.length).toBeLessThan(10);
+    const one = await sftp.list(dir, listOpts({ maxResponseBytes: 400 }));
+    expect(one.entries).toHaveLength(1);
+    expect(one.truncated).toBe(true);
+
+    const several = await sftp.list(dir, listOpts({ maxResponseBytes: 1300 }));
+    expect(several.entries).toHaveLength(4);
+    expect(several.truncated).toBe(true);
+
+    // A budget below the cost of a single entry admits none, and must still say
+    // it truncated rather than reporting an empty directory.
+    const none = await sftp.list(dir, listOpts({ maxResponseBytes: 100 }));
+    expect(none.entries).toHaveLength(0);
+    expect(none.truncated).toBe(true);
+
+    await conn.exec(`rm -rf ${dir}`);
+  });
+
+  // The name is part of the bill. Charging only a flat per-entry constant is
+  // what let a server with huge `longname` values retain far more than the
+  // budget claimed, so a long name has to buy fewer entries.
+  it('bills the entry name, so long names admit fewer entries', async () => {
+    const dir = '/tmp/ssh-mcp-list-longnames';
+    const long = 'n'.repeat(200);
+    await conn.exec(
+      `rm -rf ${dir} && mkdir -p ${dir} && cd ${dir} && ` +
+      `touch ${long}1 ${long}2 ${long}3 s1 s2 s3`,
+    );
+
+    // 1300 admitted four two-character names above; here every entry costs at
+    // least 200 more, so the same budget cannot admit four of the long ones.
+    const budgeted = await sftp.list(dir, listOpts({ maxResponseBytes: 1300 }));
+    const longAdmitted = budgeted.entries.filter((e) => e.path.includes(long)).length;
+    expect(longAdmitted).toBeLessThan(4);
+    expect(budgeted.truncated).toBe(true);
+
+    await conn.exec(`rm -rf ${dir}`);
+  });
+
+  it('refuses a bound that cannot do its job', async () => {
+    await expect(sftp.list('/tmp', listOpts({ maxEntries: 0 }))).rejects.toThrow(
+      /maxEntries must be a positive integer/,
+    );
+    // 0 means "no limit" elsewhere in this codebase, so it has to be refused
+    // here rather than silently clamped to an immediate failure.
+    await expect(
+      sftp.list('/tmp', { ...listOpts(), idleTimeoutMs: 0 }),
+    ).rejects.toThrow(/does not mean "unlimited"/);
+    await expect(
+      sftp.list('/tmp', { ...listOpts(), idleTimeoutMs: Infinity }),
+    ).rejects.toThrow(/must be an integer between 1 and/);
+  });
+
+  it('reports a nonexistent directory rather than an empty listing', async () => {
+    await expect(
+      sftp.list('/tmp/ssh-mcp-no-such-dir-9f3a', listOpts()),
+    ).rejects.toThrow(/SFTP list error/);
+  });
+
+  // The names the accounting and the path construction are least safe with are
+  // exactly the ones no fixture used.
+  it('handles names with spaces, quotes, leading dots and multi-byte characters', async () => {
+    const dir = '/tmp/ssh-mcp-list-odd';
+    await conn.exec(
+      `rm -rf ${dir} && mkdir -p ${dir} && cd ${dir} && ` +
+      `touch -- 'a b' 'x'"'"'y' '..z' 'привет'`,
+    );
+
+    const result = await sftp.list(dir, listOpts());
+    const names = result.entries.map((e) => e.path).sort();
+    expect(names).toEqual([
+      `${dir}/..z`,
+      `${dir}/a b`,
+      `${dir}/привет`,
+      `${dir}/x'y`,
+    ].sort());
+    // `..z` is a real entry, not a parent reference — only exact `.` and `..`
+    // are filtered.
+    expect(result.truncated).toBe(false);
 
     await conn.exec(`rm -rf ${dir}`);
   });
