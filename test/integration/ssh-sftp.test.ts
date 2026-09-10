@@ -72,18 +72,64 @@ describe.skipIf(await SSH_AVAILABLE === false)('SFTP operations', () => {
     await conn.exec(`rm -f ${remotePath}`);
   });
 
+  const LIST_OPTS = { idleTimeoutMs: 10_000, maxBytes: 1_048_576 };
+
   it('lists a directory with valid entries', async () => {
     const markerPath = '/tmp/ssh-mcp-list-marker.txt';
     await sftp.upload({ remotePath: markerPath, content: 'list marker' });
 
-    const entries = await sftp.list('/tmp');
-    expect(Array.isArray(entries)).toBe(true);
-    const marker = entries.find((e) => e.path.endsWith('ssh-mcp-list-marker.txt'));
+    const result = await sftp.list('/tmp', 1000, LIST_OPTS);
+    expect(Array.isArray(result.entries)).toBe(true);
+    const marker = result.entries.find((e) => e.path.endsWith('ssh-mcp-list-marker.txt'));
     expect(marker).toBeTruthy();
     expect(marker!.isFile).toBe(true);
     expect(typeof marker!.size).toBe('number');
 
     await conn.exec(`rm -f ${markerPath}`);
+  });
+
+  // The bound is what stops a directory with a million entries becoming a
+  // million-object array in the MCP process. `truncated` has to be honest
+  // without a second round-trip, which is why one entry past the limit is read.
+  it('caps the entries it returns and says so', async () => {
+    const dir = '/tmp/ssh-mcp-list-many';
+    await conn.exec(`rm -rf ${dir} && mkdir -p ${dir} && for i in $(seq 1 12); do touch ${dir}/f$i; done`);
+
+    const capped = await sftp.list(dir, 5, LIST_OPTS);
+    expect(capped.entries).toHaveLength(5);
+    expect(capped.truncated).toBe(true);
+
+    const full = await sftp.list(dir, 100, LIST_OPTS);
+    expect(full.entries.length).toBeGreaterThanOrEqual(12);
+    expect(full.truncated).toBe(false);
+
+    await conn.exec(`rm -rf ${dir}`);
+  });
+
+  // Exactly at the limit is not truncation. Off by one here would either
+  // report a complete listing as partial or hide a real cut.
+  it('does not report truncation when the count lands exactly on the cap', async () => {
+    const dir = '/tmp/ssh-mcp-list-exact';
+    await conn.exec(`rm -rf ${dir} && mkdir -p ${dir} && for i in 1 2 3; do touch ${dir}/f$i; done`);
+
+    // . and .. are listed too, so an entry count of exactly N needs N-2 files.
+    const all = await sftp.list(dir, 100, LIST_OPTS);
+    const exact = await sftp.list(dir, all.entries.length, LIST_OPTS);
+    expect(exact.entries).toHaveLength(all.entries.length);
+    expect(exact.truncated).toBe(false);
+
+    await conn.exec(`rm -rf ${dir}`);
+  });
+
+  it('truncates on the byte budget even when the entry count fits', async () => {
+    const dir = '/tmp/ssh-mcp-list-bytes';
+    await conn.exec(`rm -rf ${dir} && mkdir -p ${dir} && for i in $(seq 1 10); do touch ${dir}/f$i; done`);
+
+    const tight = await sftp.list(dir, 1000, { idleTimeoutMs: 10_000, maxBytes: 200 });
+    expect(tight.truncated).toBe(true);
+    expect(tight.entries.length).toBeLessThan(10);
+
+    await conn.exec(`rm -rf ${dir}`);
   });
 
   // sftp-upload reports Buffer.byteLength(content, 'utf8'), which is only the
