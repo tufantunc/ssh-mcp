@@ -54,13 +54,17 @@ describe.skipIf(!allServersUp(await checkAllServers()))('Host key verification (
       [`${profiles.admin.host}:${profiles.admin.port}`, 'SHA256:definitelyNotTheRealHostKeyAAAAAAAAAAAAAAAA'],
     ]);
     const conn = await connect(knownHosts, 'tofu');
-    await expect(conn.ensureConnected()).rejects.toThrow();
+    // The code, not just the throw. A bare `rejects.toThrow()` passes for a
+    // handshake that failed for any reason at all, so it cannot tell this refusal
+    // from a container that was not listening — and it is the only thing proving
+    // the message survives ssh2's callback boundary and reaches the operator.
+    await expect(conn.ensureConnected()).rejects.toThrow(/HOST_KEY_MISMATCH/);
     await conn.close();
   }, 30000);
 
   it('strict mode refuses an unknown host', async () => {
     const conn = await connect(new Map(), 'strict');
-    await expect(conn.ensureConnected()).rejects.toThrow();
+    await expect(conn.ensureConnected()).rejects.toThrow(/HOST_KEY_UNKNOWN/);
     await conn.close();
   }, 30000);
 
@@ -79,7 +83,29 @@ describe.skipIf(!allServersUp(await checkAllServers()))('Host key verification (
     const conn = await connect(new Map(), 'tofu', {
       trustedHostKey: 'SHA256:pinnedToSomethingElseAAAAAAAAAAAAAAAAAAAAAA',
     });
-    await expect(conn.ensureConnected()).rejects.toThrow();
+    // Named, because the change's whole claim about this path is that it stopped
+    // being an anonymous handshake failure. This assertion passed identically
+    // before and after while it read `rejects.toThrow()`.
+    await expect(conn.ensureConnected()).rejects.toThrow(/HOST_KEY_PIN_MISMATCH/);
+    await conn.close();
+  }, 30000);
+
+  it('strict mode connects with nothing but a matching pin', async () => {
+    // The headline fix, and it had no coverage at this level: both pinning cases
+    // here used `tofu`, where a matching pin reached a trust-on-first-use accept
+    // on 2.7.0 and so passed before the change as well. This one cannot: an empty
+    // store under `strict` is exactly the state that refused every host, so it
+    // fails on 2.7.0 and on any regression that stops the pin reaching
+    // verifyHostKey.
+    const discovered = new Map<string, string>();
+    const seed = await connect(discovered, 'tofu');
+    await seed.ensureConnected();
+    await seed.close();
+    const real = discovered.get(`${profiles.admin.host}:${profiles.admin.port}`);
+    expect(real).toBeDefined();
+
+    const conn = await connect(new Map(), 'strict', { trustedHostKey: real });
+    await expect(conn.ensureConnected()).resolves.not.toThrow();
     await conn.close();
   }, 30000);
 

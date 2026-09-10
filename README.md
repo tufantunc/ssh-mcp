@@ -714,8 +714,8 @@ Secrets are **never** passed as CLI arguments.
 | `--trustProxy` | false | Read the client address from `X-Forwarded-For`, but only when the peer is the proxy — bare means a loopback peer |
 | `--trustedProxies` | — | Comma-separated peer addresses allowed to send `X-Forwarded-For`. Empty means loopback only |
 | `--allowedHosts` | bind address + localhost | Comma-separated Host headers accepted by the DNS-rebinding guard |
-| `--hostKeyMode` | `tofu` | `tofu \| strict \| insecure`. See [SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart) — `strict` currently refuses every host |
-| `--insecureHostKey` | false | Disable host key verification (test only!) |
+| `--hostKeyMode` | `tofu` | `tofu \| strict \| insecure`. `strict` accepts only hosts pinned with `trustedHostKey`. See [SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart) |
+| `--insecureHostKey` | false | Disable host key verification for hosts with no `trustedHostKey` — a pin still refuses (test only!) |
 | `--allowUncheckedConfigAcl` | false | Windows: report every ACL finding and refuse none |
 | `--strictConfigAcl` | false | Windows: refuse on every ACL finding, including a read-only over-grant |
 | `--disableApproval` | false | Skip the approval gate (quick start profile only) |
@@ -788,7 +788,8 @@ process fails the connection. Nothing is written to disk and `~/.ssh/known_hosts
 is not consulted, so a restart accepts afresh — see
 [SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart). Pin
 explicitly with `trustedHostKey` in a profile, which is the only control here that
-survives a restart, or pass `--insecureHostKey` to opt out (test environments only).
+survives a restart — and which no host key mode overrides, so `--insecureHostKey`
+is an opt-out only for hosts you have not pinned (test environments only).
 
 ---
 
