@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { platform, tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import {
   createLocalDownload,
@@ -14,6 +14,14 @@ import {
 // are usually identical. Every test that matters here is written so that it
 // passes on both, and the ones that specifically exercise the difference skip
 // themselves where there is no difference to exercise.
+// B1 refuses a transfer root on Windows outright: the config-file ACL posture
+// waives a read-exposed directory, never consults the `O:` owner, and treats a
+// missing icacls.exe as a pass, so an unverifiable root has to disable the
+// tools. Everything below this line therefore describes POSIX behaviour, and
+// the Windows contract gets its own block at the end — which is where that
+// refusal is actually covered rather than merely untested.
+const IS_WINDOWS = platform() === 'win32';
+
 let rootAsSpelled: string;
 let rootCanonical: string;
 let ctx: LocalPathContext;
@@ -38,7 +46,7 @@ afterEach(async () => {
   await rm(rootAsSpelled, { recursive: true, force: true });
 });
 
-describe('localFileForRead', () => {
+describe.skipIf(IS_WINDOWS)('localFileForRead', () => {
   it('accepts a relative path inside the root', async () => {
     await writeFile(join(rootCanonical, 'payload.txt'), 'hello');
 
@@ -152,7 +160,7 @@ describe('localFileForRead', () => {
   });
 });
 
-describe('the transfer root itself', () => {
+describe.skipIf(IS_WINDOWS)('the transfer root itself', () => {
   it('is required', async () => {
     await expect(localFileForRead({ transferRoot: undefined }, 'x')).rejects.toThrow(
       /require defaults.transferRoot/,
@@ -240,7 +248,7 @@ describe('the transfer root itself', () => {
   });
 });
 
-describe('localFileForWrite', () => {
+describe.skipIf(IS_WINDOWS)('localFileForWrite', () => {
   it('resolves a destination that does not exist yet', async () => {
     const target = await localFileForWrite(ctx, 'new.txt', false);
     expect(target.displayPath).toBe('new.txt');
@@ -283,7 +291,7 @@ describe('localFileForWrite', () => {
   });
 });
 
-describe('createLocalDownload', () => {
+describe.skipIf(IS_WINDOWS)('createLocalDownload', () => {
   it('stages a .part file in the destination directory and publishes it', async () => {
     const download = await createLocalDownload(ctx, 'result.txt', false);
     expect(download.temporary.startsWith(rootCanonical + sep)).toBe(true);
@@ -317,5 +325,21 @@ describe('createLocalDownload', () => {
     } finally {
       await download.cleanup();
     }
+  });
+});
+
+describe.runIf(IS_WINDOWS)('on Windows', () => {
+  it('refuses any transfer root rather than verifying it with the config-file posture', async () => {
+    await expect(localFileForRead({ transferRoot: rootAsSpelled }, 'payload.txt')).rejects.toThrow(
+      /not available on Windows/,
+    );
+  });
+
+  it('refuses before deciding anything about the path, so the message never varies', async () => {
+    const inside = await localFileForRead({ transferRoot: rootAsSpelled }, 'payload.txt')
+      .catch((err) => String(err.message));
+    const outside = await localFileForRead({ transferRoot: rootAsSpelled }, 'C:\\Windows\\win.ini')
+      .catch((err) => String(err.message));
+    expect(inside).toBe(outside);
   });
 });
