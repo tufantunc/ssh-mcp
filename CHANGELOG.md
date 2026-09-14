@@ -1,5 +1,33 @@
 # ssh-mcp
 
+## 2.8.2
+
+### Patch Changes
+
+- [#213](https://github.com/tufantunc/ssh-mcp/pull/213) [`7b1c6cb`](https://github.com/tufantunc/ssh-mcp/commit/7b1c6cb3a05f5b92b759ab782f3a3029f7690cef) Thanks [@tufantunc](https://github.com/tufantunc)! - **Fix:** `sftp-download` can no longer hang forever on a server that accepts its size probe and never answers.
+  
+  Before downloading, the tool asks the server how big the file is, so it can refuse an oversized one without transferring it. That probe was an unbounded promise with no reject path and no timeout: a server that accepted `SSH_FXP_STAT` and never replied left the tool call suspended for the life of the connection — no error, no progress, and nothing for the caller to act on. It is the same shape as the `exec` hang reported in [#197](https://github.com/tufantunc/ssh-mcp/issues/197), on the SFTP side.
+  
+  The probe is now bounded by the profile's command timeout, which is what every other step of a tool call already answers to. A probe that expires is treated exactly as an unavailable one always was: the size is unknown, and the byte cap is enforced on the stream as it flows.
+
+- [#212](https://github.com/tufantunc/ssh-mcp/pull/212) [`f14ec6e`](https://github.com/tufantunc/ssh-mcp/commit/f14ec6e01d0e84eb359073fc63b2622a6c1ae460) Thanks [@tufantunc](https://github.com/tufantunc)! - **Policy:** `sftp:upload-file` and `sftp:download-file` now carry a `destructive` floor.
+  
+  Each writes a file — the first on the remote host, the second inside the operator's transfer root — but from the verb alone both classified `safe`, which is the class an `operator` binding already allows. The floor is added ahead of the tools that emit these verbs, so the authorization decision is reviewable on its own rather than arriving inside a larger change.
+  
+  `sftp:list` deliberately keeps `safe`, for the same reason `sftp:download` does: a `read-only` entry would be a lowering, and lowering a class is a widening. It would also be inert, since the synthetic class can only raise.
+
+- [#213](https://github.com/tufantunc/ssh-mcp/pull/213) [`7b1c6cb`](https://github.com/tufantunc/ssh-mcp/commit/7b1c6cb3a05f5b92b759ab782f3a3029f7690cef) Thanks [@tufantunc](https://github.com/tufantunc)! - **Security:** require `smol-toml` 1.7.1 or newer, which fixes a denial of service via malformed TOML documents ([GHSA-7w5x-hrqm-74c2](https://github.com/advisories/GHSA-7w5x-hrqm-74c2), high).
+  
+  `smol-toml` is what parses `config.toml`, so the parser sits directly in front of operator-supplied input. The declared range was `^1.7.0`, which still permits the affected version: a fresh install resolves to a fixed one, but anything holding an existing lockfile entry at 1.7.0 would keep it. Raising the floor is the only part of that we control.
+  
+  The transitive `hono` bump that landed alongside it (moderate, reachable only through the HTTP transport, which pulls it via `@hono/node-server` inside the MCP SDK) is a lockfile update: the range belongs to the SDK, not to this package.
+
+- [#208](https://github.com/tufantunc/ssh-mcp/pull/208) [`5b96290`](https://github.com/tufantunc/ssh-mcp/commit/5b962901b999354cce2af16c2ad7742d4b6d9e8f) Thanks [@tufantunc](https://github.com/tufantunc)! - **Fix (Windows):** a directory whose name begins with `..` is no longer mistaken for an escape when deciding whether a config file sits inside the user profile.
+  
+  `isTightenable` compared paths with `!rel.startsWith('..')`, which rejects a legitimately named child such as `..cache` as if it were `../cache`. The remediation printed for a config-ACL problem in such a directory was therefore the wrong one. Containment now goes through a single shared helper that tests the `..` path segment instead of the string prefix.
+  
+  No other behaviour changes: the local-path gate added alongside it is not yet wired to any tool.
+
 ## 2.8.1
 
 ### Patch Changes
