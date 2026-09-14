@@ -1057,15 +1057,26 @@ function hasUnnameableCommand(command: string): boolean {
  * `~/.ssh/authorized_keys` without touching a shell. Opening a session is the same
  * argument, since it hands over an interactive shell.
  *
- * `sftp:download` and `session:close` are deliberately absent. Both would move *down*
- * from `safe` — download to `read-only`, matching its `readOnlyHint`, and close being a
- * release rather than an acquisition. Lowering a class is a widening, and a security
- * release is the wrong place for one; they keep the class they have today.
+ * `sftp:download`, `sftp:list` and `session:close` are deliberately absent. Each would
+ * move *down* from `safe` — download and list to `read-only`, matching their
+ * `readOnlyHint`, and close being a release rather than an acquisition. Lowering a class
+ * is a widening, and a security release is the wrong place for one; they keep the class
+ * they have today. `sftp:list` is worth spelling out because it is new: a `read-only`
+ * entry for it would also be inert, since the floor below can only raise, and the effect
+ * anyone reaching for it actually wants — letting a `viewer` list a remote directory — is
+ * a binding change, not a classification one.
+ *
+ * `sftp:upload-file` and `sftp:download-file` are `destructive` because each writes a
+ * file: the first on the remote host, the second inside the operator's transfer root.
+ * Without a floor both classify `safe` from the verb alone, which would let an `operator`
+ * write to disk through a tool nobody had approved for it.
  */
 const SYNTHETIC_CLASSES: Record<string, CommandClass> = Object.assign(
   Object.create(null) as Record<string, CommandClass>,
   {
     'sftp:upload': 'destructive',
+    'sftp:upload-file': 'destructive',
+    'sftp:download-file': 'destructive',
     'session:open': 'destructive',
   },
 );
