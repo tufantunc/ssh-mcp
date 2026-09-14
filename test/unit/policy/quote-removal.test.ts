@@ -173,10 +173,24 @@ describe('synthesised commands are classified (F3)', () => {
 
   it.each([
     ['sftp:download /etc/shadow', 'safe'],
+    ['sftp:list /etc', 'safe'],
     ['session:close interactive s1', 'safe'],
   ])('%s keeps the class it has today', (command, expected) => {
-    // Both would move DOWN from `safe`, and lowering a class is a widening. Pinned so
-    // that neither is quietly changed inside a security release.
+    // Each would move DOWN from `safe`, and lowering a class is a widening. Pinned so
+    // that none is quietly changed inside a security release. `sftp:list` is here rather
+    // than in SYNTHETIC_CLASSES on purpose: a `read-only` entry could not raise anything
+    // and so would be inert, and letting a `viewer` list a directory is a role-binding
+    // decision rather than a classification one.
+    expect(classifyCommand(command).class, command).toBe(expected);
+  });
+
+  it.each([
+    ['sftp:upload-file report.csv', 'destructive'],
+    ['sftp:download-file report.csv', 'destructive'],
+  ])('%s is destructive because it writes a file', (command, expected) => {
+    // Each writes: upload-file on the remote host, download-file inside the operator's
+    // transfer root. From the verb alone both classify `safe`, which would put a
+    // disk-writing tool inside an `operator` binding that never approved one.
     expect(classifyCommand(command).class, command).toBe(expected);
   });
 
@@ -189,7 +203,16 @@ describe('synthesised commands are classified (F3)', () => {
   it('the verbs match what the tools actually emit', () => {
     // src/tools/file-tools.ts and src/tools/session-tools.ts build these strings.
     expect(classifyCommand('sftp:upload /tmp/x').binary).toBe('sftp:upload');
+    expect(classifyCommand('sftp:upload-file x.txt').binary).toBe('sftp:upload-file');
+    expect(classifyCommand('sftp:download-file x.txt').binary).toBe('sftp:download-file');
     expect(classifyCommand('session:open interactive s1').binary).toBe('session:open');
+  });
+
+  it('a floor still cannot lower what the arguments raise', () => {
+    // The floor is a minimum. A path that carries a command has to keep winning,
+    // or the new verbs would become a way to launder one.
+    expect(classifyCommand('sftp:upload-file $(sudo id)').class).toBe('privileged');
+    expect(classifyCommand('sftp:download-file `rm -rf /`').class).toBe('destructive');
   });
 });
 
