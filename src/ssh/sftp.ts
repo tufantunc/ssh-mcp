@@ -621,9 +621,22 @@ export class SftpClient {
 
     return this.withSftp(async (sftp) => {
       // Refuse before transferring anything when the size is known up front.
-      const size = await new Promise<number | undefined>((resolve) => {
-        sftp.stat(opts.remotePath, (err, stats) => resolve(err ? undefined : stats?.size));
-      });
+      //
+      // Bounded, because this promise had no reject path and no timeout: a
+      // server that accepted SSH_FXP_STAT and never answered left this tool
+      // call suspended for the life of the connection, with no error and
+      // nothing for a caller to act on. That is the same shape as #197 on the
+      // exec side. The bound is the profile's command timeout, which is what
+      // every other step of a tool call already answers to; an unanswerable
+      // stat now falls through to the streaming cap below, exactly as an
+      // unavailable one always did.
+      const size = await callbackBeforeDeadline<number | undefined>(
+        { idleTimeoutMs: this.conn.profile.timeout },
+        'SFTP download stat',
+        (callback) => {
+          sftp.stat(opts.remotePath, (err, stats) => callback(undefined, err ? undefined : stats?.size));
+        },
+      ).catch(() => undefined);
       if (size !== undefined && size > maxBytes) {
         throw new Error(
           `Refusing to download ${opts.remotePath}: ${size} bytes exceeds the ${maxBytes} byte limit ` +
