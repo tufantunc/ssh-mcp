@@ -44,6 +44,26 @@ describe('download()', () => {
     expect(Date.now() - started).toBeLessThan(5000);
   });
 
+  // The other half of "the size is unknown": the server answers, but with an
+  // error — no permission on the parent, a path that is a directory. That was
+  // already non-fatal before the bound was added, and it has to stay that way,
+  // or bounding the probe would have quietly turned a working download into a
+  // failure.
+  it('still downloads when the probe answers with an error', async () => {
+    const body = Buffer.from('stat refused, transfer still ran');
+    const client = clientWith(
+      {
+        stat: ((_p: string, cb: (e: Error | undefined) => void) =>
+          cb(new Error('permission denied'))) as never,
+        createReadStream: () => Readable.from([body]) as never,
+      },
+      1000,
+    );
+
+    const out = await client.download({ remotePath: '/tmp/x' });
+    expect(out.toString()).toBe(body.toString());
+  });
+
   it('refuses up front when the probe does answer and the file is too big', async () => {
     const client = clientWith(
       {
