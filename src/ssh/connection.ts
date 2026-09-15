@@ -56,6 +56,8 @@ export class SSHConnection {
   private readonly sessions: SessionManager;
   private activeChannels = 0;
   private connecting: Promise<void> | null = null;
+  /** Which connect() call currently owns `connecting`; see connect(). */
+  private connectAttempt: symbol | null = null;
   private connected = false;
   private connectedAt: Date | null = null;
   private lastActivity = new Date();
@@ -118,6 +120,23 @@ export class SSHConnection {
   }
 
   private async connect(): Promise<void> {
+    // Identity for this attempt, so "does this attempt still own `connecting`?"
+    // can be asked without going through `this.client`.
+    //
+    // Those are two different questions and conflating them is #197: settle()
+    // used to clear `connecting` only `if (isCurrent())`, and the disconnect
+    // handler nulls `this.client` *before* it settles. `isCurrent()` was
+    // therefore already false, `connecting` kept the rejected promise, and
+    // `ensureConnected()` replayed it for the life of the process — every later
+    // call on the profile failing instantly with a stale message, and no way
+    // back even once the server recovered. Restarting the server was the only
+    // exit, which is exactly how it was reported.
+    //
+    // Reordering the two statements would also have worked and would have left
+    // the same trap for the next edit; the coupling is what had to go.
+    const attempt = Symbol('connect');
+    this.connectAttempt = attempt;
+
     return new Promise((resolve, reject) => {
       // Every handler below acts on `client`, not `this.client`, and only
       // mutates shared state while it is still the current client. A late event
@@ -132,7 +151,9 @@ export class SSHConnection {
         if (settled) return;
         settled = true;
         clearTimeout(timeoutId);
-        if (isCurrent()) this.connecting = null;
+        // Unconditional for *this* attempt: a superseded one leaves the newer
+        // attempt's promise alone, and nothing else can strand it.
+        if (this.connectAttempt === attempt) this.connecting = null;
         fn();
       };
 
