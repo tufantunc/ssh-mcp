@@ -1,5 +1,31 @@
 # ssh-mcp
 
+## 2.8.3
+
+### Patch Changes
+
+- [#215](https://github.com/tufantunc/ssh-mcp/pull/215) [`13fde96`](https://github.com/tufantunc/ssh-mcp/commit/13fde96aaa33d45cc3c578fa2e93b742d3f4e157) Thanks [@tufantunc](https://github.com/tufantunc)! - **Test:** the text of every tool description is now asserted against what a client actually receives, so a reword cannot ship unnoticed.
+  
+  A description is what the model reads when deciding whether and how to call a tool, and `run-command` and `privileged-command` execute on a remote host — their wording is part of the approval surface rather than documentation about it. MCP clients ask a user to approve a server once and never re-check, so a reword changes how a remote shell gets driven for someone who approved months ago.
+  
+  The tool *count* was already pinned in two places. The text was pinned nowhere that runs: the one test for it drives a tool named `exec`, the v1 name, and lives under `test/legacy/`, which vitest excludes.
+  
+  No behaviour change.
+
+- [#215](https://github.com/tufantunc/ssh-mcp/pull/215) [`13fde96`](https://github.com/tufantunc/ssh-mcp/commit/13fde96aaa33d45cc3c578fa2e93b742d3f4e157) Thanks [@tufantunc](https://github.com/tufantunc)! - **Fix:** a profile whose handshake was cut short can reconnect, instead of failing every later call until the server is restarted ([#197](https://github.com/tufantunc/ssh-mcp/issues/197)).
+  
+  If a connection dropped mid-handshake — an `sshd` restarting under a running command is the usual way — the failed attempt stayed cached. `ensureConnected()` returned that same rejected promise to every later call on the profile, so every tool call failed instantly with a stale message, including read-only ones, and the profile stayed broken even after the server came back. Restarting the MCP server was the only way out.
+  
+  The cause was a conflation: clearing the cached attempt was gated on the connection still owning the current client, and the disconnect handler clears that client first. Ownership of the cached attempt is now tracked on its own, so a failed handshake leaves nothing behind and the next call tries again.
+
+- [#215](https://github.com/tufantunc/ssh-mcp/pull/215) [`13fde96`](https://github.com/tufantunc/ssh-mcp/commit/13fde96aaa33d45cc3c578fa2e93b742d3f4e157) Thanks [@tufantunc](https://github.com/tufantunc)! - **Fix:** a `command` containing a line break is now refused instead of being silently joined into one line ([#198](https://github.com/tufantunc/ssh-mcp/issues/198)).
+  
+  The constraint itself does not change — a newline inside `command` would let a second command ride along past a classifier that only parsed the first — but the enforcement does. Replacing the break with a space returned no error and ran something the caller never asked for: two lines joined, so `ls\necho x` ran `ls echo x`; or a `#` comment in a `python3 -c` body pulled onto the same line, commenting out the rest. Sometimes that raises. Sometimes it runs and quietly does half the work.
+  
+  An embedded null byte is likewise named rather than turned into a space — and a command that was *only* a null byte used to be reported as empty, which was a lie about what was sent.
+  
+  Leading and trailing breaks are still trimmed, so a client that appends a newline keeps working; only a break between two pieces of a command is refused. The error names `sftp-upload` as the way to run a multi-line script, and `read-command`, `run-command` and `privileged-command` now say so in their descriptions.
+
 ## 2.8.2
 
 ### Patch Changes
