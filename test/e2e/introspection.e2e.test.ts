@@ -31,6 +31,35 @@ import { SERVER_ENTRY, serverBuilt } from './harness.js';
 /** The complete registered set. A reduced list would mean the config had leaked into the metadata. */
 const TOOL_COUNT = 11;
 
+/**
+ * Every tool description, as a client receives it.
+ *
+ * A description is what the model reads when deciding whether and how to call a
+ * tool, and `run-command` and `privileged-command` execute on a remote host — so
+ * their wording is part of the approval surface, not documentation about it. MCP
+ * clients ask a user to approve a server once and never re-check, which means a
+ * reword can change how a remote shell gets driven for someone who approved
+ * months ago, with nothing surfacing it (#214, raised from #193).
+ *
+ * Written out rather than compared against TOOL_DESCRIPTIONS, which would only
+ * assert the source equals itself. Updating this table is the point: it makes a
+ * reword a deliberate act, and leaves one file that records what the server
+ * actually told the model.
+ */
+const TOOL_DESCRIPTIONS: Record<string, string> = {
+  "list-connections": "List all configured SSH profiles and their connection status. Use this to discover available hosts before running commands.",
+  "list-sessions": "List active sessions for a given SSH profile.",
+  "open-session": "Open a named session on a remote host. Use type=\"interactive\" for stateful shell (CWD/env persists between commands) or type=\"background\" for long-running processes.",
+  "close-session": "Close a named session. A background session's command is signalled on the host (INT, then TERM, then KILL) before its channel is dropped; an interactive session's shell is ended. The response says so if the command could not be signalled or had not stopped in time.",
+  "read-session-output": "Read recent output from a background session (e.g., tail -f logs).",
+  "read-command": "Execute a READ-ONLY command from an allowlist (ls, cat, grep, find, stat, df, etc.). This tool does NOT modify the system. Prefer this tool for all read operations.",
+  "run-command": "Execute an arbitrary shell command on the remote server. May modify the system. Commands classified destructive or privileged go through the approval gate; approvalPolicy on the profile decides whether that is a prompt, an automatic allow, or a refusal.",
+  "privileged-command": "Execute a command with sudo elevation. Goes through the approval gate; approvalPolicy on the profile decides whether that is a prompt, an automatic allow, or a refusal. The sudo password is piped via stdin (never visible in process list).",
+  "sftp-upload": "Upload a file to the remote server via SFTP (secure file transfer, not shell-based).",
+  "sftp-download": "Download a file from the remote server via SFTP.",
+  "signal-process": "Send a signal (INT, TERM, KILL) to a remote process by PID.",
+};
+
 interface Probe { stdout: string; stderr: string; replies: any[] }
 
 /** Speak JSON-RPC lines to the built server with nothing configured anywhere, and collect the replies. */
@@ -94,6 +123,19 @@ describe.skipIf(!serverBuilt)('introspection without a config', () => {
     // "more than zero" would not have caught a set that quietly shrank.
     expect(tools?.result?.tools, `no tools/list reply. stderr: ${stderr}`).toHaveLength(TOOL_COUNT);
     expect(tools.result.tools.map((t: { name: string }) => t.name)).toContain('run-command');
+  }, 30000);
+
+  it('serves the exact descriptions it is supposed to', async () => {
+    const { stderr, replies } = await introspect();
+    const tools = replies.find((r) => r.id === 2)?.result?.tools as
+      | { name: string; description: string }[]
+      | undefined;
+    expect(tools, `no tools/list reply. stderr: ${stderr}`).toBeDefined();
+
+    // Asserted as one object rather than per tool, so a failure shows every
+    // difference at once instead of stopping at the first.
+    const served = Object.fromEntries(tools!.map((t) => [t.name, t.description]));
+    expect(served).toEqual(TOOL_DESCRIPTIONS);
   }, 30000);
 
   it('refuses a real tool call, naming the platform config path', async () => {
