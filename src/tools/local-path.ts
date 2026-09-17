@@ -9,10 +9,13 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { isWithinRoot, pathsOverlap } from '../config/path-containment.js';
+// One class, one threat model. It lived here as a private copy and in
+// guard/sanitizer.ts as a byte-identical second one, so widening it — a bidi
+// mark, a zero-width formatter — reached whichever file the author had open.
+import { PATH_CONTROL_CHARS } from '../guard/sanitizer.js';
 
 const INSTALL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
-const PATH_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/;
 
 /**
  * `fs.promises.realpath` does not expand Windows 8.3 short names, so two
@@ -84,6 +87,33 @@ function validateInput(input: string): void {
   if (!input.trim()) invalid('Local path cannot be empty');
   if (PATH_CONTROL_CHARS.test(input)) {
     invalid('Local path cannot contain control or bidi formatting characters');
+  }
+}
+
+/** What the audit record and the approval prompt call a path that never validated. */
+export const REJECTED_LOCAL_PATH = '(rejected: invalid local path)';
+
+/**
+ * The caller's own spelling of a local path, or a placeholder — never throws,
+ * and touches no filesystem.
+ *
+ * Everything else in this file has to stat, which is why it all runs after the
+ * policy decision. This one does not, which is what lets the *approval prompt*
+ * name both ends of a transfer. Without it the human approving a download saw
+ * the remote path and nothing about where on their own disk the bytes would
+ * land — and the local write is the half that makes a download `destructive`.
+ *
+ * It is the caller's spelling, not the resolved one: resolving needs `realpath`.
+ * `onResolved` replaces it with the canonical form once the gate has run, so the
+ * audit record ends up with the path actually used.
+ */
+export function localPathForAudit(input: unknown): string {
+  if (typeof input !== 'string') return REJECTED_LOCAL_PATH;
+  try {
+    validateInput(input);
+    return input;
+  } catch {
+    return REJECTED_LOCAL_PATH;
   }
 }
 

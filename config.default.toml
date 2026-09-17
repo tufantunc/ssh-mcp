@@ -19,6 +19,25 @@ commandMaxOutputBytes = 1048576   # 1MB output cap per command
 connectionIdleReapMs = 900000     # 15min -> close idle connection
 approvalMode = "ask-destructive"  # auto | ask-destructive | ask-all | deny
 
+# Streaming SFTP file tools (sftp-list, sftp-upload-file, sftp-download-file).
+#
+# transferRoot is the consent: it is the only directory those tools may read
+# from or write to on this machine, and without it they refuse. There is no
+# setting that means "anywhere". The directory must be 0700, owned by the
+# account running this server, and separate from the installation, this config
+# file, the audit log and ~/.ssh — the server checks all of that at call time
+# and refuses rather than degrading.
+#
+# Commented out on purpose: a placeholder path here would either not exist (the
+# tools refuse, with a message about a directory the operator never chose) or,
+# worse, exist and be wrong. Uncomment it with a directory you made for this.
+# transferRoot = "/srv/ssh-mcp-transfers"
+transferMaxBytes = 268435456       # 256MB cap per transfer; also bounds what one
+                                   #   call can stage inside transferRoot
+transferTimeoutMs = 300000         # 5min with *no bytes moving*, not a total
+                                   #   budget: a slow large transfer survives,
+                                   #   a stalled channel still fails fast
+
 # Development server — permissive
 [[profiles]]
 name = "dev"

@@ -39,6 +39,7 @@ const profileFor = (port: number): Profile => ({
   sessionIdleTimeoutMs: 60_000,
   sessionBackgroundMaxMs: 3_600_000,
   commandQuotaPerDay: 0,
+  transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,
 });
 
 let server: Server | undefined;

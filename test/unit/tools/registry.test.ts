@@ -16,7 +16,8 @@ describe('MCP tool surface', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'close-session', 'list-connections', 'list-sessions', 'open-session',
       'privileged-command', 'read-command', 'read-session-output',
-      'run-command', 'sftp-download', 'sftp-upload', 'signal-process',
+      'run-command', 'sftp-download', 'sftp-download-file', 'sftp-list',
+      'sftp-upload', 'sftp-upload-file', 'signal-process',
     ]);
   });
 
@@ -25,7 +26,13 @@ describe('MCP tool surface', () => {
     const { tools } = await h.client.listTools();
     const readOnly = tools.filter((t) => t.annotations?.readOnlyHint).map((t) => t.name).sort();
     // A mutating tool advertised as read-only invites auto-approval by clients.
-    expect(readOnly).toEqual(['list-connections', 'list-sessions', 'read-command', 'read-session-output', 'sftp-download']);
+    // sftp-list belongs here and sftp-download-file does not: listing reads a
+    // remote directory, while the download writes a file on local disk, which
+    // is the whole reason it is classified destructive.
+    expect(readOnly).toEqual([
+      'list-connections', 'list-sessions', 'read-command', 'read-session-output',
+      'sftp-download', 'sftp-list',
+    ]);
   });
 });
 

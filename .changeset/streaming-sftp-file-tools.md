@@ -1,0 +1,15 @@
+---
+"ssh-mcp": minor
+---
+
+**Feature:** three streaming SFTP tools — `sftp-list`, `sftp-upload-file` and `sftp-download-file` ([#185](https://github.com/tufantunc/ssh-mcp/issues/185)).
+
+`sftp-upload`/`sftp-download` carry file contents as a tool argument and a tool response, which is right for a config snippet and wrong for anything binary or large. The two new transfer tools stream between the remote host and local disk instead: the response is a byte count and two paths, and the contents never enter model context. `sftp-list` returns a bounded directory listing.
+
+The two **transfer** tools are off until `defaults.transferRoot` names a directory, and refuse with an explanation until then — there is no spelling that means "anywhere". That directory is the whole of their local reach, and it is verified on every call rather than at startup: `0700`, owned by this account, no group- or world-writable parent, and not overlapping the installation, the config directory, the audit log directory or `~/.ssh`. Caller paths are confined to it, symlinks are refused rather than followed, and a download is staged as a sibling `.part` and published atomically. On Windows the root cannot yet be verified private, so those two refuse there. `sftp-list` has no local side and needs none of this — it works wherever the other SFTP tools do.
+
+Two new settings come with them, in `[defaults]` and per profile: `transferMaxBytes` (default 256 MiB) and `transferTimeoutMs` (default 5 minutes). The timeout is an **idle** budget, re-armed on progress, not a total one — so a slow transfer of a large file survives it while a stalled channel still fails within one window, and the byte cap does not have to be divided by it ([#206](https://github.com/tufantunc/ssh-mcp/issues/206)). Both are separate from `commandTimeoutMs`, so buying a transfer window no longer buys a hang budget for every shell command on the same profile.
+
+Nothing on local disk happens before the call is authorized ([#207](https://github.com/tufantunc/ssh-mcp/issues/207)). The string policy classifies is built from the caller's own spelling of both paths, validated without touching a filesystem; the staged file, the existence check and the errors that quote the operator's configuration all live after the approval. It also names the arguments that change what the call does — `--overwrite` and `--mode` — so a human approving one sees them and an approval grant cannot be replayed with different ones. What the path resolved to is appended to the audit record afterwards, and the pipeline enforces that such an append can only elaborate what was approved, never replace it.
+
+**Fix:** an upload that replaces an existing remote file no longer carries that file's setuid, setgid or sticky bit onto the new contents. `uploadFile` re-applied the destination's whole mode, so `overwrite: true` with no explicit `mode` — the one argument a caller can omit — turned "may replace this file" into "may run code as its owner". Only the permission bits are inherited now. The path was unreachable before this release, because nothing called `uploadFile`.

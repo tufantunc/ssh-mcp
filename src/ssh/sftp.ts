@@ -486,8 +486,9 @@ export class SftpClient {
    *
    * Note what `overwrite: true` costs, since it is the case where the
    * destination is *not* new: publishing by rename replaces the inode, so the
-   * target's owner and ACL do not survive. The mode does, unless the caller
-   * passes one — see the chmod below.
+   * target's owner and ACL do not survive. The permission bits do, unless the
+   * caller passes a mode — but only the low nine: setuid, setgid and the sticky
+   * bit are dropped rather than carried across. See the chmod below.
    */
   async uploadFile(source: Readable, remotePath: string, opts: UploadFileOptions): Promise<number> {
     assertBounds(opts.idleTimeoutMs, opts.maxBytes, 'SFTP upload');
@@ -523,8 +524,16 @@ export class SftpClient {
         if (inheritedMode !== undefined) {
           // Without this, replacing a 0644 service config with a 0600 one is a
           // successful-looking upload that silently breaks every other reader.
+          //
+          // The low nine bits only. `& 0o7777` also carried setuid, setgid and
+          // the sticky bit across, which turns "may replace this file" into "may
+          // run code as its owner" — measured against a 04755 destination owned
+          // by the SSH user: the content became the caller's and the mode stayed
+          // 4755. Nothing else in the upload path could have caught it, because
+          // the caller never named a mode; it arrived by inheritance, through the
+          // one argument the caller can omit.
           await callbackBeforeDeadline<void>(opts, 'SFTP upload chmod', (callback) => {
-            sftp.chmod(temporary, inheritedMode & 0o7777, (err) => callback(err ?? undefined));
+            sftp.chmod(temporary, inheritedMode & 0o777, (err) => callback(err ?? undefined));
           });
         }
         if (!opts.overwrite && await exists()) {
@@ -690,6 +699,15 @@ export class SftpClient {
       let retained = 0;
       let responseBytes = 0;
       let budgetTruncated = false;
+      // The loop advances on retained entries or on EOF, and neither is
+      // guaranteed: a batch holding only `.`/`..` is legitimately empty after
+      // filtering and must not be read as EOF, so a server answering every
+      // READDIR that way kept this issuing requests forever. Each step has its
+      // own idle bound; nothing bounded the number of steps, and a synthetic
+      // tool call carries no overall deadline — so the call never settled.
+      // Sixteen is far past any real directory layout and still terminates.
+      const MAX_BARREN_BATCHES = 16;
+      let barren = 0;
 
       try {
         while (retained <= opts.maxEntries && !budgetTruncated) {
@@ -715,6 +733,7 @@ export class SftpClient {
           );
           if (batch === null) break;
 
+          const before = retained;
           for (const entry of batch) {
             if (entry.filename === '.' || entry.filename === '..') continue;
             // Bill what is actually retained. `longname` is the server's `ls -l`
@@ -733,6 +752,16 @@ export class SftpClient {
             retained++;
             if (retained > opts.maxEntries) break;
             entries.push(toSftpStat(join(remotePath, entry.filename), entry.attrs));
+          }
+
+          if (retained === before && !budgetTruncated) {
+            if (++barren >= MAX_BARREN_BATCHES) {
+              throw new Error(
+                `SFTP list error: server returned ${MAX_BARREN_BATCHES} consecutive batches with no entries and no EOF`,
+              );
+            }
+          } else {
+            barren = 0;
           }
         }
       } finally {

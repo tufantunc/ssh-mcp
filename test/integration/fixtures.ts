@@ -27,6 +27,7 @@ const baseProfile: Omit<Profile, 'name' | 'host' | 'port' | 'user' | 'role'> = {
   sessionIdleTimeoutMs: 60000,
   sessionBackgroundMaxMs: 3600000,
   commandQuotaPerDay: 0,
+  transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,
 };
 
 export const profiles: Record<string, Profile> = {
@@ -97,6 +98,7 @@ export function createAppConfig(): AppConfig {
     commandMaxOutputBytes: 1048576,
     connectionIdleReapMs: 60000,
     commandQuotaPerDay: 0,
+    transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,
     approvalGrantTtlMs: 0,
     approvalMode: 'ask-destructive',
   };

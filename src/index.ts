@@ -7,7 +7,9 @@ import { ConnectionRegistry } from './ssh/connection-registry.js';
 import { PolicyEngine, resolvePolicyRules } from './policy/engine.js';
 import { AuditStore } from './audit/store.js';
 import { registerTools, registerResources, getToolHashes } from './tools/registry.js';
+import { transferForbiddenDirs } from './tools/forbidden-dirs.js';
 import { initKeychain } from './config/credential-resolver.js';
+import { getConfigPath } from './config/loader.js';
 import { SERVER_VERSION } from './version.js';
 import {
   parseArgv,
@@ -41,6 +43,14 @@ async function main() {
     await initTracing(argv.otelEndpoint as string, (argv.otelServiceName as string) || 'ssh-mcp');
   }
 
+  // Everything the transfer-root gate needs that it must not reach for itself:
+  // which config file was actually loaded, and which directories are off limits.
+  const localPath = {
+    transferRoot: config.defaults.transferRoot,
+    configPath: getConfigPath(argv.config || undefined),
+    forbidden: transferForbiddenDirs(),
+  };
+
   const registry = new ConnectionRegistry(config, hostKeyMode);
   const policy = new PolicyEngine(resolvePolicyRules(config.profiles, config.policy));
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);
@@ -68,6 +78,7 @@ async function main() {
     );
     registerTools(server, registry, policy, audit, {
       approvalGrantTtlMs: config.defaults.approvalGrantTtlMs,
+      localPath,
     });
     registerResources(server, registry);
     return server;

@@ -25,6 +25,7 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
     approvalPolicy: 'ask-destructive', cert: false,
     sessionMaxPerConnection: 5, sessionIdleTimeoutMs: 60000,
     sessionBackgroundMaxMs: 3600000, commandQuotaPerDay: 0,
+    transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,
     ...overrides,
   };
 }

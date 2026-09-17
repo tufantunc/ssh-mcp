@@ -17,6 +17,7 @@ const readOnlyAuditor: Profile = {
   role: 'viewer', group: 'prod', readOnly: true, approvalPolicy: 'ask-destructive',
   cert: false, sessionMaxPerConnection: 5, sessionIdleTimeoutMs: 600_000,
   sessionBackgroundMaxMs: 3_600_000, commandQuotaPerDay: 0,
+  transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,
 } as Profile;
 
 const adminProd: Profile = { ...readOnlyAuditor, name: 'prod-web', role: 'admin', readOnly: false };
