@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import fc from 'fast-check';
-import { sanitizeCommand } from '../../src/guard/sanitizer.js';
+import {
+  REJECTED_REMOTE_PATH,
+  remotePathForAudit,
+  sanitizeCommand,
+  sanitizeRemotePath,
+} from '../../src/guard/sanitizer.js';
 
 // sanitizeCommand is the boundary that keeps caller-controlled text from
 // carrying a newline into the remote shell (Issue #44 was exactly that, via a
@@ -85,3 +90,91 @@ describe('sanitizeCommand property tests', () => {
   });
 });
 
+
+/**
+ * The same argument, for the path boundary.
+ *
+ * `sanitizeRemotePath` guards the confusion between three renderings of one
+ * call: the string policy classifies, the message a human approves, and the path
+ * actually transferred. Six example cases covered six representatives of a class
+ * with roughly ninety members — narrowing the class to `/[\r\n\0]/` passed all
+ * of them. This draws from the whole set.
+ */
+/**
+ * Written out here rather than imported from the module under test.
+ *
+ * Importing `PATH_CONTROL_CHARS` and asserting against it makes the property
+ * assert the source equals itself: narrowing the class narrows the check and the
+ * assertion together. Measured — with the class cut down to CR/LF/NUL, every one
+ * of these properties still passed. This literal is the contract; the module has
+ * to meet it.
+ */
+const MUST_REJECT = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
+
+const FORBIDDEN_CODES: number[] = [
+  ...Array.from({ length: 0x20 }, (_, i) => i),           // C0
+  ...Array.from({ length: 0x21 }, (_, i) => 0x7f + i),    // DEL + C1
+  0x061c,                                                 // ALM
+  ...Array.from({ length: 5 }, (_, i) => 0x200b + i),     // ZWSP..RLM
+  ...Array.from({ length: 7 }, (_, i) => 0x2028 + i),     // separators + LRE..RLO
+  ...Array.from({ length: 5 }, (_, i) => 0x2060 + i),     // WJ + invisible ops
+  ...Array.from({ length: 4 }, (_, i) => 0x2066 + i),     // isolates
+  0xfeff,                                                 // BOM
+];
+
+const pathWithForbiddenChars = fc
+  .array(
+    fc.oneof(
+      { weight: 3, arbitrary: fc.string({ minLength: 1, maxLength: 12 }) },
+      { weight: 2, arbitrary: fc.constantFrom(...FORBIDDEN_CODES).map((c) => String.fromCharCode(c)) },
+      { weight: 1, arbitrary: fc.constantFrom('/', '.', '-', ' ') },
+    ),
+    { maxLength: 40 },
+  )
+  .map((parts) => parts.join(''));
+
+describe('sanitizeRemotePath property tests', () => {
+  it('never returns a path carrying any character from the forbidden class', () => {
+    fc.assert(
+      fc.property(pathWithForbiddenChars, (input) => {
+        let result: string;
+        try {
+          result = sanitizeRemotePath(input);
+        } catch {
+          return; // a refusal is the other safe outcome
+        }
+        expect(result).not.toMatch(MUST_REJECT);
+      }),
+      { numRuns: 10000 },
+    );
+  });
+
+  it('returns the input unchanged whenever it returns at all', () => {
+    // The one property that separates this from sanitizeCommand: a path is never
+    // rewritten. Trimming would retarget the transfer, because a POSIX filename
+    // may legitimately begin or end with whitespace.
+    fc.assert(
+      fc.property(pathWithForbiddenChars, (input) => {
+        let result: string;
+        try {
+          result = sanitizeRemotePath(input);
+        } catch {
+          return;
+        }
+        expect(result).toBe(input);
+      }),
+      { numRuns: 10000 },
+    );
+  });
+
+  it('remotePathForAudit never throws and never yields an unsafe string', () => {
+    fc.assert(
+      fc.property(pathWithForbiddenChars, (input) => {
+        const result = remotePathForAudit(input);
+        expect(result === REJECTED_REMOTE_PATH || result === input).toBe(true);
+        expect(result).not.toMatch(MUST_REJECT);
+      }),
+      { numRuns: 10000 },
+    );
+  });
+});

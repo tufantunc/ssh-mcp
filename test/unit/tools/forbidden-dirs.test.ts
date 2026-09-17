@@ -15,7 +15,8 @@ import { localFileForRead } from '../../../src/tools/local-path.js';
  * both are conventionally 0700 and owner-owned — and both would be disastrous
  * as a transfer root. Nothing else can catch a list that silently lost an
  * entry: the gate is generic over whatever it is handed, and the handing-over
- * used to happen inside `index.ts`, which runs `main()` on import.
+ * used to sit inside `main()`'s body in `index.ts`, which is unexported and so
+ * unreachable from any test.
  */
 
 const IS_WINDOWS = platform() === 'win32';

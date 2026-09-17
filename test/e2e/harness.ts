@@ -48,6 +48,15 @@ export interface StartOptions {
   adminProfile?: string;
   /** Extra CLI args for the server process. */
   args?: string[];
+  /**
+   * Environment overrides for the child.
+   *
+   * The transfer-root gate refuses a root that overlaps the audit log directory
+   * or `~/.ssh`, and both are derived from the child's own environment — so
+   * testing that wiring means controlling it rather than pointing at the
+   * developer's real home.
+   */
+  env?: Record<string, string>;
 }
 
 function configToml(opts: StartOptions): string {
@@ -102,6 +111,7 @@ export async function startE2E(opts: StartOptions = {}): Promise<E2EClient & { c
       SSH_MCP_ADMIN_PASSWORD: 'secret',
       SSH_MCP_ADMIN_SUDO_PASSWORD: 'secret',
       SSH_MCP_VIEWER_PASSWORD: 'viewpass',
+      ...(opts.env ?? {}),
     } as Record<string, string>,
     stderr: 'pipe',
   });

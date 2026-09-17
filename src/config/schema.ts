@@ -127,13 +127,25 @@ export const defaultsSchema = z.object({
   // 256 MiB. Also a disk-usage bound on `transferRoot`, because a download is
   // staged there as a `.part` before it is published, so the cap is how much a
   // single call can put in a directory the operator may not be watching.
-  transferMaxBytes: z.number().int().positive().default(268_435_456),
-  // An *idle* budget, not a wall-clock one: it bounds one metadata round-trip
-  // or one stretch of the copy with no bytes moving (see TransferBounds in
-  // ssh/sftp.ts). That is why it can be this generous without making a stalled
-  // channel take five minutes to notice — and why the byte cap above does not
-  // have to be divided by it to check the two are coherent (#206).
-  transferTimeoutMs: z.number().int().positive().default(300_000),
+  //
+  // Bounded above at MAX_SAFE_INTEGER because `assertBounds` in ssh/sftp.ts
+  // refuses anything larger. Without that bound here, a config naming a bigger
+  // number started cleanly and then failed every transfer at call time — the
+  // "accepted by the schema but never applied" shape this file's other comments
+  // exist to prevent, moved one layer down.
+  transferMaxBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(268_435_456),
+  // An *idle* budget, not a wall-clock one: it bounds one metadata round-trip,
+  // or one stretch of the copy with no bytes moving, and is re-armed on progress
+  // (see TransferBounds in ssh/sftp.ts). That is what lets a slow-but-live
+  // transfer of a large file survive a generous byte cap, so the two do not have
+  // to be divided into each other to check they are coherent (#206). It does not
+  // make a stall cheaper to notice: a channel that stops delivering still costs
+  // one full window, which at this default is five minutes.
+  //
+  // Capped at 2^31-1, the largest delay `setTimeout` honours — Node clamps a
+  // larger one to 1ms, so every step would fail immediately while quoting the
+  // value the operator asked for.
+  transferTimeoutMs: z.number().int().positive().max(2_147_483_647).default(300_000),
 }).strict();
 
 export const profileSchema = z.object({
@@ -175,9 +187,10 @@ export const profileSchema = z.object({
   sessionBackgroundMaxMs: z.number().int().positive().optional(),
   commandQuotaPerDay: z.number().int().nonnegative().optional(),
   // Per-profile, unlike transferRoot: how large a transfer may be, and how long
-  // a silent wire is tolerated, are properties of the link to that host.
-  transferMaxBytes: z.number().int().positive().optional(),
-  transferTimeoutMs: z.number().int().positive().optional(),
+  // a silent wire is tolerated, are properties of the link to that host. Same
+  // upper bounds as [defaults], for the same reason.
+  transferMaxBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  transferTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
 }).strict();
 
 /**

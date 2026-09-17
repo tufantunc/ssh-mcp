@@ -172,8 +172,9 @@ tarball or anything binary.
 local disk instead. Neither the bytes nor a base64 encoding of them ever reaches
 the model — the response is a byte count and two paths.
 
-They are **off until you configure `defaults.transferRoot`**, and refuse with an
-explanation until then. That directory is the whole of their local reach:
+The two transfer tools are **off until you configure `defaults.transferRoot`**,
+and refuse with an explanation until then. (`sftp-list` has no local side and
+needs none of this.) That directory is the whole of their local reach:
 
 ```toml
 [defaults]
@@ -198,8 +199,19 @@ does not have to be divided by it — a total budget would have made a 256MB cap
 mean "only if the link sustains 900 KB/s".
 
 Not available on Windows, where the transfer root cannot yet be verified
-private; the tools refuse there rather than writing into a directory other
-accounts may be able to read.
+private; the two transfer tools refuse there rather than writing into a
+directory other accounts may be able to read.
+
+`sftp-upload-file` takes an optional `mode` (1–511; setuid, setgid and the
+sticky bit are refused). Omitted, a new remote file is published `0600`; an
+overwritten one inherits the replaced file's permission bits — its permission
+bits only, not its setuid or setgid.
+
+What a transfer is authorized for includes these arguments: the string the
+policy engine classifies, the approval prompt a human reads, and the audit
+record all name `--overwrite` and `--mode` when they are given. So approving one
+upload to a path does not approve a different one to the same path, and an
+approval grant (`approvalGrantTtlMs`) cannot be replayed with a different mode.
 
 ### Interactive Sessions
 

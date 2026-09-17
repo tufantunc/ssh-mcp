@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeCommand, sanitizeRemotePath, sanitizeSessionName } from '../../../src/guard/sanitizer.js';
+import {
+  REJECTED_REMOTE_PATH,
+  remotePathForAudit,
+  sanitizeCommand,
+  sanitizeRemotePath,
+  sanitizeSessionName,
+} from '../../../src/guard/sanitizer.js';
 
 const NUL = String.fromCharCode(0);
 const LF = String.fromCharCode(10);
@@ -75,34 +81,70 @@ describe('sanitizeSessionName', () => {
 describe('sanitizeRemotePath', () => {
   it('accepts the paths a remote host actually has', () => {
     expect(sanitizeRemotePath('/etc/nginx/nginx.conf')).toBe('/etc/nginx/nginx.conf');
-    // Spaces inside a path are legitimate and must survive; only the ends trim.
-    expect(sanitizeRemotePath('  /var/log/my app.log  ')).toBe('/var/log/my app.log');
+    // Spaces inside a path are legitimate and must survive untouched.
+    expect(sanitizeRemotePath('/var/log/my app.log')).toBe('/var/log/my app.log');
     // Relative and Windows spellings are not refused: the remote side decides
     // what an absolute path is, and ssh-mcp drives Windows hosts too.
     expect(sanitizeRemotePath('logs/today.txt')).toBe('logs/today.txt');
     expect(sanitizeRemotePath('C:/Users/me/x.txt')).toBe('C:/Users/me/x.txt');
   });
 
-  it('refuses a non-string, an empty path and a whitespace-only one', () => {
+  it('refuses a non-string and an empty path', () => {
     expect(() => sanitizeRemotePath(42)).toThrow(/must be a string/);
     expect(() => sanitizeRemotePath('')).toThrow(/cannot be empty/);
-    expect(() => sanitizeRemotePath('   ')).toThrow(/cannot be empty/);
+  });
+
+  it('refuses edge whitespace rather than trimming it away', () => {
+    // A POSIX filename may legitimately end in a space, so "report.txt " and
+    // "report.txt" are two files. Trimming transferred the second while the
+    // approval prompt and the audit record both named... also the second, with
+    // nothing anywhere showing the substitution.
+    for (const padded of [' /tmp/x', '/tmp/x ', '\t/tmp/x', '/tmp/report.txt  ']) {
+      expect(() => sanitizeRemotePath(padded), padded).toThrow(/begin or end with whitespace/);
+    }
+    expect(() => sanitizeRemotePath('   ')).toThrow(/begin or end with whitespace/);
   });
 
   it('refuses a null byte, which would truncate the path at the syscall', () => {
-    expect(() => sanitizeRemotePath('/tmp/safe' + NUL + '/../../etc/shadow')).toThrow(/control or bidirectional/);
+    expect(() => sanitizeRemotePath('/tmp/safe' + NUL + '/../../etc/shadow')).toThrow(/control, bidirectional or zero-width/);
   });
 
   it('refuses a line break, which would forge a second line in the audit record', () => {
-    expect(() => sanitizeRemotePath('/tmp/a' + LF + 'sudo id')).toThrow(/control or bidirectional/);
-    expect(() => sanitizeRemotePath('/tmp/a' + CR + 'x')).toThrow(/control or bidirectional/);
-    expect(() => sanitizeRemotePath('/tmp/a' + LSEP + 'x')).toThrow(/control or bidirectional/);
+    expect(() => sanitizeRemotePath('/tmp/a' + LF + 'sudo id')).toThrow(/control, bidirectional or zero-width/);
+    expect(() => sanitizeRemotePath('/tmp/a' + CR + 'x')).toThrow(/control, bidirectional or zero-width/);
+    expect(() => sanitizeRemotePath('/tmp/a' + LSEP + 'x')).toThrow(/control, bidirectional or zero-width/);
   });
 
   it('refuses a bidirectional override, so the prompt cannot show a different path', () => {
     // The classic trick: renders as "...cod.exe", opens "...exe.doc".
-    expect(() => sanitizeRemotePath('/tmp/annual' + RLO + 'cod.exe')).toThrow(/control or bidirectional/);
-    expect(() => sanitizeRemotePath('/tmp/x' + LRI + 'y')).toThrow(/control or bidirectional/);
+    expect(() => sanitizeRemotePath('/tmp/annual' + RLO + 'cod.exe')).toThrow(/control, bidirectional or zero-width/);
+    expect(() => sanitizeRemotePath('/tmp/x' + LRI + 'y')).toThrow(/control, bidirectional or zero-width/);
+  });
+
+  it('refuses the weaker bidi marks and the zero-width formatters too', () => {
+    // An earlier class stopped at the overrides and isolates. These reorder
+    // *neutral* characters — and a path is mostly neutrals — or render as
+    // nothing at all, so two distinct paths print identically.
+    const sneaky: [string, number][] = [
+      ['ALM', 0x061c], ['LRM', 0x200e], ['RLM', 0x200f],
+      ['ZWSP', 0x200b], ['ZWNJ', 0x200c], ['WJ', 0x2060], ['BOM', 0xfeff],
+      ['LRE', 0x202a], ['PDF', 0x202c], ['PDI', 0x2069],
+    ];
+    for (const [name, code] of sneaky) {
+      expect(
+        () => sanitizeRemotePath('/tmp/a' + String.fromCharCode(code) + 'b'),
+        `${name} (U+${code.toString(16)}) survived`,
+      ).toThrow(/control, bidirectional or zero-width/);
+    }
+  });
+
+  it('refuses every C0 and C1 control, not just the three with names', () => {
+    for (let code = 0x00; code <= 0x1f; code++) {
+      expect(() => sanitizeRemotePath('/tmp/a' + String.fromCharCode(code))).toThrow();
+    }
+    for (let code = 0x7f; code <= 0x9f; code++) {
+      expect(() => sanitizeRemotePath('/tmp/a' + String.fromCharCode(code))).toThrow();
+    }
   });
 
   it('refuses a path longer than any filesystem accepts', () => {
@@ -115,5 +157,25 @@ describe('sanitizeRemotePath', () => {
     // the higher of the outer and carried classes, so this reaches policy as
     // privileged and is refused there rather than passing as destructive.
     expect(sanitizeRemotePath('/tmp/x; sudo id')).toBe('/tmp/x; sudo id');
+  });
+});
+
+describe('remotePathForAudit', () => {
+  it('returns the path when it is valid', () => {
+    expect(remotePathForAudit('/etc/nginx.conf')).toBe('/etc/nginx.conf');
+  });
+
+  it('returns a fixed placeholder instead of throwing, for every refusal', () => {
+    // It exists so a refused call still has something to file an audit record
+    // under. Building the record from the raw path would put a control
+    // character into a hash-chained log; building it from nothing left a client
+    // probing the validation boundary invisible to the operator.
+    for (const bad of [42, '', '  ', '/tmp/a' + NUL, '/tmp/a' + RLO + 'b', '/' + 'a'.repeat(4096)]) {
+      expect(remotePathForAudit(bad)).toBe(REJECTED_REMOTE_PATH);
+    }
+  });
+
+  it('never returns anything the sanitizer would reject', () => {
+    expect(() => sanitizeRemotePath(REJECTED_REMOTE_PATH)).not.toThrow();
   });
 });
