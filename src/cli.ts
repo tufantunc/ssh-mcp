@@ -245,6 +245,13 @@ export function defaultsFromArgv(argv: Record<string, string | null>): Defaults 
     commandQuotaPerDay: parseInt(argv.commandQuota as string) || 0,
     approvalGrantTtlMs: parseInt(argv.approvalGrantTtl as string) || 0,
     approvalMode: 'ask-destructive',
+    // No flag for transferRoot on purpose. It is the consent to touch local
+    // disk, and the quick-start path exists for someone who passed a host and a
+    // user on a command line — not a place to acquire that consent in passing.
+    // The streaming file tools therefore refuse under `--host/--user` until a
+    // config file names a root.
+    transferMaxBytes: 268_435_456,
+    transferTimeoutMs: 300_000,
   };
 }
 
@@ -353,6 +360,8 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
     sessionIdleTimeoutMs: defaults.sessionIdleTimeoutMs,
     sessionBackgroundMaxMs: defaults.sessionBackgroundMaxMs,
     commandQuotaPerDay: defaults.commandQuotaPerDay,
+    transferMaxBytes: defaults.transferMaxBytes,
+    transferTimeoutMs: defaults.transferTimeoutMs,
   };
 
   return { defaults, profiles: [profile] };

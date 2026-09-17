@@ -56,6 +56,8 @@ commandMaxOutputBytes = 2048
 sessionBackgroundMaxMs = 111000
 sessionMaxPerConnection = 9
 sessionIdleTimeoutMs = 222000
+transferMaxBytes = 4096
+transferTimeoutMs = 7000
 
 [[profiles]]
 name = "dev"
@@ -71,6 +73,83 @@ user = "test"
     expect(p.sessionBackgroundMaxMs).toBe(111000);
     expect(p.sessionMaxPerConnection).toBe(9);
     expect(p.sessionIdleTimeoutMs).toBe(222000);
+    expect(p.transferMaxBytes).toBe(4096);
+    expect(p.transferTimeoutMs).toBe(7000);
+  });
+
+  describe('the streaming transfer settings', () => {
+    it('defaults to a byte cap and an idle budget that are coherent with each other', async () => {
+      const path = await writeConfig(MINIMAL_CONFIG);
+      const config = await loadConfig(path);
+      // 256 MiB and a 5-minute *idle* budget. The pairing is the point of #206:
+      // an earlier proposal shipped a 1 GiB cap against a 60s wall-clock
+      // timeout, which demanded 17.9 MB/s sustained to be reachable at all.
+      expect(config.defaults.transferMaxBytes).toBe(268_435_456);
+      expect(config.defaults.transferTimeoutMs).toBe(300_000);
+      expect(config.profiles[0].transferMaxBytes).toBe(268_435_456);
+      expect(config.profiles[0].transferTimeoutMs).toBe(300_000);
+    });
+
+    it('has no transferRoot unless the operator wrote one', async () => {
+      const path = await writeConfig(MINIMAL_CONFIG);
+      // Absence is the refusal: the streaming file tools have no "anywhere"
+      // setting, so an operator who did not choose a directory has not
+      // consented to those tools touching local disk.
+      expect((await loadConfig(path)).defaults.transferRoot).toBeUndefined();
+    });
+
+    it('reads a transferRoot from [defaults]', async () => {
+      const path = await writeConfig(`${MINIMAL_CONFIG}
+[defaults]
+transferRoot = "/srv/ssh-mcp-transfers"
+`);
+      expect((await loadConfig(path)).defaults.transferRoot).toBe('/srv/ssh-mcp-transfers');
+    });
+
+    it('lets a profile override the cap and the budget but not the root', async () => {
+      const path = await writeConfig(`
+[defaults]
+transferRoot = "/srv/transfers"
+transferMaxBytes = 4096
+transferTimeoutMs = 7000
+
+[[profiles]]
+name = "slow-link"
+host = "localhost"
+user = "test"
+transferMaxBytes = 512
+transferTimeoutMs = 60000
+`);
+      const config = await loadConfig(path);
+      expect(config.profiles[0].transferMaxBytes).toBe(512);
+      expect(config.profiles[0].transferTimeoutMs).toBe(60_000);
+      // transferRoot names a directory on this machine, not anything about a
+      // host, so it is refused on a profile rather than quietly ignored.
+      await expect(loadConfig(await writeConfig(`
+[[profiles]]
+name = "dev"
+host = "localhost"
+user = "test"
+transferRoot = "/tmp/elsewhere"
+`))).rejects.toThrow(/transferRoot/);
+    });
+
+    it('refuses a zero or negative cap rather than reading it as unlimited', async () => {
+      // 0 means "unlimited" for commandQuotaPerDay and approvalGrantTtlMs in
+      // this same file. It must not mean that here, where it would remove the
+      // only bound on how much a single call writes to local disk.
+      for (const value of ['0', '-1']) {
+        await expect(loadConfig(await writeConfig(`
+[defaults]
+transferMaxBytes = ${value}
+
+[[profiles]]
+name = "dev"
+host = "localhost"
+user = "test"
+`))).rejects.toThrow(/transferMaxBytes/);
+      }
+    });
   });
 
   it('lets an explicit profile value override [defaults]', async () => {

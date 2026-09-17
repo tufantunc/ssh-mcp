@@ -9,6 +9,9 @@ import type { CommandResult, Profile } from '../../../src/types.js';
 import type { CloseOutcome } from '../../../src/ssh/session.js';
 import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
 import { defaultsFromArgv } from '../../../src/cli.js';
+import type { ToolDeps } from '../../../src/tools/pipeline.js';
+
+type ToolOpts = Omit<ToolDeps, 'server' | 'registry' | 'policy' | 'audit'>;
 
 /**
  * In-process MCP client + server over InMemoryTransport, with the SSH layer
@@ -36,6 +39,7 @@ export const testProfile: Profile = {
   sessionIdleTimeoutMs: 60_000,
   sessionBackgroundMaxMs: 3_600_000,
   commandQuotaPerDay: 0,
+  transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,
 };
 
 export interface ExecCall {
@@ -66,7 +70,7 @@ export interface Harness {
 
 export async function createHarness(
   overrides: Partial<Profile> = {},
-  toolOpts: { approvalGrantTtlMs?: number } = {},
+  toolOpts: ToolOpts = {},
 ): Promise<Harness> {
   const profile: Profile = { ...testProfile, ...overrides };
   const execCalls: ExecCall[] = [];

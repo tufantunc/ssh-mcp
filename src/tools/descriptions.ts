@@ -11,7 +11,10 @@ export const TOOL_DESCRIPTIONS: Record<string, string> = {
   'privileged-command': 'Execute a command with sudo elevation. Goes through the approval gate; approvalPolicy on the profile decides whether that is a prompt, an automatic allow, or a refusal. The sudo password is piped via stdin (never visible in process list). Single-line only: a command containing a line break is refused, so upload a multi-line script with sftp-upload and run it by path.',
   'sftp-upload': 'Upload a file to the remote server via SFTP (secure file transfer, not shell-based).',
   'sftp-download': 'Download a file from the remote server via SFTP.',
-  'signal-process': 'Send a signal (INT, TERM, KILL) to a remote process by PID.',
+  'sftp-list': 'List a remote directory over SFTP, with a bounded number of entries and a bounded response size. Read-only.',
+  'sftp-upload-file': 'Upload a local file to the remote host over SFTP, streaming it without passing the contents through model context. The local file must be inside the transferRoot directory the operator configured; without that setting this tool refuses. Use this for binary or large files; use sftp-upload for short text you already have.',
+  'sftp-download-file': 'Download a remote file to local disk over SFTP, streaming it without passing the contents through model context. The destination must be inside the transferRoot directory the operator configured; without that setting this tool refuses. Use this for binary or large files; use sftp-download when you need to read the contents.',
+  'signal-process':'Send a signal (INT, TERM, KILL) to a remote process by PID.',
 };
 
 export function getToolHashes(): Record<string, string> {

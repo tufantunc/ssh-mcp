@@ -67,6 +67,7 @@ const profile = {
   tty: false, timeout: 50, maxChars: 100, maxOutputBytes: 1000, readOnly: false,
   approvalPolicy: 'auto', cert: false, sessionMaxPerConnection: 5, sessionIdleTimeoutMs: 1000,
   sessionBackgroundMaxMs: 1000, commandQuotaPerDay: 0,
+  transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,
 } as unknown as Profile;
 
 let signalled: Signalled[];

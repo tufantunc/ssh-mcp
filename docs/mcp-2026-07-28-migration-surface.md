@@ -143,7 +143,7 @@ Not luck — most of these are positions we already took for other reasons.
 - **HTTP over stdio (priority 2).** Streamable HTTP as the single binding, spoken over stdin/stdout.
   Would collapse our two transports into one. Nothing to do now, and an argument against writing more
   transport-specific code in the meantime.
-- **Progressive discovery (priority 4).** For servers with large catalogues. We have 11 tools; not
+- **Progressive discovery (priority 4).** For servers with large catalogues. We have 14 tools; not
   our problem yet.
 - **Conformance test suite (priority 5).** Worth running against ourselves once it exists.
 

@@ -142,7 +142,7 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 
 ---
 
-## Tools (11)
+## Tools (14)
 
 | Tool | Purpose | readOnly | destructive |
 |------|---------|:--------:|:----------:|
@@ -156,7 +156,50 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 | `privileged-command` | Execute with sudo (needs approval, unless `approvalPolicy = "auto"`) | — | ✅ |
 | `sftp-upload` | Upload a file via SFTP | — | ✅ |
 | `sftp-download` | Download a file via SFTP | ✅ | — |
+| `sftp-list` | List a remote directory, bounded in entries and bytes | ✅ | — |
+| `sftp-upload-file` | Stream a local file to the remote host, never through model context | — | ✅ |
+| `sftp-download-file` | Stream a remote file to local disk, never through model context | — | ✅ |
 | `signal-process` | Send INT/TERM/KILL to a remote PID | — | ✅ |
+
+### Streaming file transfer
+
+`sftp-upload`/`sftp-download` move file *contents* through the model's context:
+the text is an argument on the way out and a response on the way back. That is
+what you want for a config snippet and exactly what you do not want for a 200 MB
+tarball or anything binary.
+
+`sftp-upload-file` and `sftp-download-file` stream between the remote host and
+local disk instead. Neither the bytes nor a base64 encoding of them ever reaches
+the model — the response is a byte count and two paths.
+
+They are **off until you configure `defaults.transferRoot`**, and refuse with an
+explanation until then. That directory is the whole of their local reach:
+
+```toml
+[defaults]
+transferRoot = "/srv/ssh-mcp-transfers"
+transferMaxBytes = 268435456        # 256MB per transfer
+transferTimeoutMs = 300000          # 5min with no bytes moving
+```
+
+Checked on every call, and refused rather than degraded if any of it fails: the
+directory must be `0700` and owned by the account running this server, with no
+group- or world-writable parent, and must not overlap the ssh-mcp installation,
+the config directory, the audit log directory, or `~/.ssh`. Caller paths are
+confined to it, symlinks are refused rather than followed, and a download is
+staged as a sibling `.part` file and published atomically, so a failed transfer
+never leaves a half-written file at the destination.
+
+`transferTimeoutMs` is an **idle** budget, not a total one: it bounds one
+metadata round-trip, or one stretch of the copy with no bytes moving, and is
+re-armed on progress. A slow but live transfer of a large file survives it; a
+stalled channel still fails within one window. That is why the byte cap above
+does not have to be divided by it — a total budget would have made a 256MB cap
+mean "only if the link sustains 900 KB/s".
+
+Not available on Windows, where the transfer root cannot yet be verified
+private; the tools refuse there rather than writing into a directory other
+accounts may be able to read.
 
 ### Interactive Sessions
 
@@ -189,6 +232,8 @@ OpenSSH on Windows 11.
 |---|:---:|:---:|
 | `read-command`, `run-command`, `privileged-command`, `signal-process` | ✅ | ✅ |
 | `sftp-upload`, `sftp-download` | ✅ | ✅ |
+| `sftp-list` | ✅ | ✅ |
+| `sftp-upload-file`, `sftp-download-file` | ✅ | ❌ (local side unverifiable) |
 | Background sessions | ✅ | ✅ |
 | **Interactive sessions** | ✅ | ❌ |
 
@@ -220,6 +265,9 @@ connectionIdleReapMs = 900000       # 15min
 commandQuotaPerDay = 0              # 0 = unlimited; circuit breaker for runaway agents
 approvalGrantTtlMs = 0              # 0 = always prompt; see "Approval Grants"
 approvalMode = "ask-destructive"    # auto | ask-destructive | ask-all | deny
+# transferRoot = "/srv/ssh-mcp-transfers"   # enables the streaming file tools; see above
+transferMaxBytes = 268435456        # 256MB per streaming transfer
+transferTimeoutMs = 300000          # 5min with no bytes moving (idle, not total)
 
 [[profiles]]
 name = "prod-web-1"
@@ -242,6 +290,8 @@ sessionMaxPerConnection = 3         # per-profile override
 sessionIdleTimeoutMs = 300000       # stricter for prod
 commandQuotaPerDay = 200            # per-profile override
 maxChars = 2000                     # per-profile override; stricter for prod
+transferMaxBytes = 16777216         # per-profile override; transferRoot is not per-profile
+transferTimeoutMs = 60000           # per-profile override
 
 # Optional. Merged over the built-in role matrix; see "Policy Engine" below.
 # roleBindings is keyed by role and then by tier, so the block below changes

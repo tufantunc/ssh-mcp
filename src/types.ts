@@ -29,6 +29,10 @@ export interface Profile {
   sessionBackgroundMaxMs: number;
   /** Max commands per rolling 24h window; 0 = unlimited. */
   commandQuotaPerDay: number;
+  /** Byte cap for one streaming SFTP transfer on this profile. */
+  transferMaxBytes: number;
+  /** Idle budget for one step of a streaming SFTP transfer on this profile. */
+  transferTimeoutMs: number;
 }
 
 export interface Defaults {
@@ -44,6 +48,13 @@ export interface Defaults {
   /** Lifetime of a just-in-time approval grant; 0 = always prompt. */
   approvalGrantTtlMs: number;
   approvalMode: ApprovalMode;
+  /**
+   * Local directory the streaming SFTP file tools are confined to. Absent means
+   * those tools refuse — there is no "anywhere" setting.
+   */
+  transferRoot?: string;
+  transferMaxBytes: number;
+  transferTimeoutMs: number;
 }
 
 /**

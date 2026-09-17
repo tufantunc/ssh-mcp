@@ -113,6 +113,27 @@ export const defaultsSchema = z.object({
   // it is opt-in rather than a default convenience.
   approvalGrantTtlMs: z.number().int().nonnegative().default(0),
   approvalMode: approvalModeSchema.default('ask-destructive'),
+  /**
+   * Where the streaming SFTP file tools may read and write on this machine.
+   *
+   * No default, and deliberately not a per-profile key. It names a directory on
+   * the machine running this server rather than anything about a remote host,
+   * and the gate in tools/local-path.ts insists the directory be 0700 and owned
+   * by this account — so an operator who has not chosen one has not consented to
+   * those tools touching local disk at all. Absent, they refuse; there is no
+   * spelling of it that means "anywhere".
+   */
+  transferRoot: z.string().optional(),
+  // 256 MiB. Also a disk-usage bound on `transferRoot`, because a download is
+  // staged there as a `.part` before it is published, so the cap is how much a
+  // single call can put in a directory the operator may not be watching.
+  transferMaxBytes: z.number().int().positive().default(268_435_456),
+  // An *idle* budget, not a wall-clock one: it bounds one metadata round-trip
+  // or one stretch of the copy with no bytes moving (see TransferBounds in
+  // ssh/sftp.ts). That is why it can be this generous without making a stalled
+  // channel take five minutes to notice — and why the byte cap above does not
+  // have to be divided by it to check the two are coherent (#206).
+  transferTimeoutMs: z.number().int().positive().default(300_000),
 }).strict();
 
 export const profileSchema = z.object({
@@ -153,6 +174,10 @@ export const profileSchema = z.object({
   sessionIdleTimeoutMs: z.number().int().positive().optional(),
   sessionBackgroundMaxMs: z.number().int().positive().optional(),
   commandQuotaPerDay: z.number().int().nonnegative().optional(),
+  // Per-profile, unlike transferRoot: how large a transfer may be, and how long
+  // a silent wire is tolerated, are properties of the link to that host.
+  transferMaxBytes: z.number().int().positive().optional(),
+  transferTimeoutMs: z.number().int().positive().optional(),
 }).strict();
 
 /**

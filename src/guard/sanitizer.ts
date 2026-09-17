@@ -47,6 +47,64 @@ export function sanitizeCommand(command: unknown, maxChars: number): string {
   return cleaned;
 }
 
+/**
+ * Every character that could make the audited string, the approval prompt and
+ * the path actually used disagree with each other.
+ *
+ * C0 and C1 controls, the Unicode line separators, the bidi overrides and the
+ * invisible directional isolates. A remote path is quoted back to a human in
+ * the approval prompt and written into a hash-chained audit record, so a name
+ * carrying a right-to-left override renders as one path and transfers another.
+ */
+const PATH_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/;
+
+/** Longer than any path a real filesystem accepts, so this bounds nothing legitimate. */
+const MAX_REMOTE_PATH_CHARS = 4096;
+
+/**
+ * Validate a caller-supplied *remote* path for the streaming SFTP file tools.
+ *
+ * Pure: it touches no filesystem and reaches no host, which is what lets it run
+ * before the policy decision (#207). The local half of the same question is
+ * `tools/local-path.ts`, and that one cannot be pure — it has to stat — so it
+ * runs after approval instead.
+ *
+ * Shell metacharacters are deliberately *not* refused. The path is interpolated
+ * into a synthetic command (`sftp:upload-file <path>`) that the classifier then
+ * reads, and `classifyCommand` treats anything a shell would read as a carrier
+ * by taking the *higher* class — so `/tmp/x; sudo id` classifies `privileged`
+ * and is refused by policy rather than slipping through at `destructive`. A
+ * filename that genuinely contains a `$` is refused for the same reason, which
+ * is the direction to fail in.
+ */
+export function sanitizeRemotePath(path: unknown): string {
+  if (typeof path !== 'string') {
+    throw new McpError(ErrorCode.InvalidParams, 'Remote path must be a string');
+  }
+  // Trimmed rather than refused, matching sanitizeCommand: a client that pads
+  // the value works, and whitespace at either end cannot change which file is
+  // named. Whitespace *inside* a path is legitimate and is left alone.
+  const cleaned = path.trim();
+  if (!cleaned) {
+    throw new McpError(ErrorCode.InvalidParams, 'Remote path cannot be empty');
+  }
+  if (cleaned.length > MAX_REMOTE_PATH_CHARS) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `Remote path is too long (max ${MAX_REMOTE_PATH_CHARS} characters)`,
+    );
+  }
+  if (PATH_CONTROL_CHARS.test(cleaned)) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      'Remote path cannot contain control or bidirectional formatting characters: ' +
+      'the approval prompt and the audit record quote this path back, and such a ' +
+      'character makes what is shown differ from what is transferred.',
+    );
+  }
+  return cleaned;
+}
+
 export function sanitizeSessionName(name: string): string {
   if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) {
     throw new McpError(

@@ -7,6 +7,7 @@ import { sanitizeCommand } from '../guard/sanitizer.js';
 import { requestApproval } from '../guard/elicitation.js';
 import { commandOutput, type ToolResult } from './results.js';
 import { CommandQuota } from '../policy/quota.js';
+import type { LocalPathContext } from './local-path.js';
 import { ApprovalGrants } from '../guard/approval-grants.js';
 import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass } from '../types.js';
 
@@ -49,6 +50,15 @@ export interface ToolDeps {
   registry: ConnectionRegistry;
   policy: PolicyEngine;
   audit: AuditStore;
+  /**
+   * Where the streaming SFTP file tools may touch local disk, and which
+   * directories they must stay clear of.
+   *
+   * Optional so the tool layer can be built without it — an unconfigured server
+   * still has to answer `tools/list`. Absent, those tools register and refuse,
+   * which is the same answer a configured server with no `transferRoot` gives.
+   */
+  localPath?: LocalPathContext;
 }
 
 /**
@@ -204,6 +214,23 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     onProgress?: (bytes: number, tail: string) => void;
     abortSignal?: AbortSignal;
     extra: any;
+    /**
+     * Append detail that only exists once the operation has started, so the
+     * audit record describes what actually happened.
+     *
+     * The streaming SFTP tools are why this exists (#207). Their local path can
+     * only be resolved by touching the filesystem — creating a staged `.part`,
+     * and answering "does this exist?" through the error it returns — and doing
+     * that before the policy decision hands those effects to a caller who is
+     * about to be denied. So the resolved local path is not available when
+     * policy runs, and the audit record still has to name it.
+     *
+     * Append-only, and enforced rather than documented: the refined string must
+     * start with the exact string policy evaluated and the approver saw. That
+     * keeps this from being a way to audit a different operation than the one
+     * that was authorized — the subject can be elaborated, never replaced.
+     */
+    refineCommand: (command: string) => void;
   }
 
   interface AuditedOpts {
@@ -287,11 +314,23 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
         );
       }
 
+      const approved = effective;
+      const refineCommand = (refined: string) => {
+        if (!refined.startsWith(approved)) {
+          throw new Error('Internal: an audited command may only be elaborated, not replaced');
+        }
+        state.command = refined;
+      };
+
       const { audited, output } = await run({
         conn, command: effective, profileName, onProgress, abortSignal, extra: opts.extra,
+        refineCommand,
       });
 
-      await auditResult(ctx, profileName, effective, evaluation, audited, approver);
+      // `state.command`, not `effective`: identical unless the handler refined
+      // it, and the refinement is exactly what the success record should carry.
+      // The failure path below already reads `state`, so the two agree.
+      await auditResult(ctx, profileName, state.command, evaluation, audited, approver);
       return output;
     } catch (err: any) {
       await auditFailure(ctx, profileName, state, opts.failureClass, err);

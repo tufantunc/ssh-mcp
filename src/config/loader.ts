@@ -186,6 +186,8 @@ function normalizeConfig(raw: RawConfig): AppConfig {
     sessionIdleTimeoutMs: p.sessionIdleTimeoutMs ?? defaults.sessionIdleTimeoutMs,
     sessionBackgroundMaxMs: p.sessionBackgroundMaxMs ?? defaults.sessionBackgroundMaxMs,
     commandQuotaPerDay: p.commandQuotaPerDay ?? defaults.commandQuotaPerDay,
+    transferMaxBytes: p.transferMaxBytes ?? defaults.transferMaxBytes,
+    transferTimeoutMs: p.transferTimeoutMs ?? defaults.transferTimeoutMs,
   }));
 
   // Passed through untouched. mergePolicyRules() owns the layering over
