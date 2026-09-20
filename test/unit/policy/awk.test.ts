@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyCommand } from '../../../src/policy/classifier.js';
+import { classifyCommand, nestedCommands } from '../../../src/policy/classifier.js';
 import { readAwkInvocation } from '../../../src/policy/awk.js';
 
 /**
@@ -40,9 +40,61 @@ describe('an awk program that starts a process', () => {
     }
   });
 
-  it('classifies a non-elevated system() by what it actually runs', () => {
+  it('hands the inner command to the classifier, verbatim', () => {
+    // Asserted on `nestedCommands` rather than on the class, because the class
+    // collapses this. Measured: with the awk reader disabled outright, both
+    // `.class` assertions this replaced still passed — the first because the raw
+    // text matches the `rm -rf` pattern with no awk reading at all, the second
+    // because `safe` is the default for anything unrecognised.
+    expect(nestedCommands(`awk 'BEGIN{system("rm -rf /var/lib/thing")}'`))
+      .toEqual(['rm -rf /var/lib/thing']);
+    expect(nestedCommands(`awk 'BEGIN{system("ls")}'`)).toEqual(['ls']);
     expect(classOf(`awk 'BEGIN{system("rm -rf /var/lib/thing")}'`)).toBe('destructive');
-    expect(classOf(`awk 'BEGIN{system("ls")}'`)).toBe('safe');
+  });
+
+  it('is not switched off by an explicitly empty flag value', () => {
+    // Through `classifyCommand`, not the reader: the defect was in the
+    // *tokenizer*, which dropped a quoted empty word, so the reader saw three
+    // words instead of four and consumed the program as `-F`'s value. It then
+    // reported "this invocation runs no program" and the whole gate went silent
+    // for a five-character edit. Real awk warns about the empty FS and runs the
+    // program anyway — measured, including the file write.
+    expect(classOf(`awk -F '' 'BEGIN{system("sudo id")}'`)).toBe('privileged');
+    expect(classOf(`awk -F "" 'BEGIN{system("sudo id")}'`)).toBe('privileged');
+    // With a data file after it, so a bail-out on "no operand left" would not
+    // have been enough: the filename would have been read as the program.
+    expect(classOf(`awk -F '' 'BEGIN{system("sudo id")}' /etc/passwd`)).toBe('privileged');
+    expect(classOf(`awk -F '' '{print "p" > "/etc/cron.d/x"}'`)).toBe('destructive');
+    expect(classOf(`awk -v '' 'BEGIN{system("sudo id")}'`)).toBe('privileged');
+  });
+
+  it('reads a path-qualified awk', () => {
+    expect(classOf(`/usr/bin/awk 'BEGIN{system("sudo id")}'`)).toBe('privileged');
+    expect(classOf(`/bin/gawk 'BEGIN{print "x" > "/etc/passwd"}'`)).toBe('destructive');
+  });
+
+  it("reads gawk's coprocess operator, not only the plain pipe", () => {
+    expect(classOf(`awk 'BEGIN{print "x" |& "sudo tee /etc/passwd"}'`)).toBe('privileged');
+    expect(classOf(`awk 'BEGIN{"sudo id" |& getline r; print r}'`)).toBe('privileged');
+  });
+
+  it('decodes octal and hex escapes, which change the bytes the shell gets', () => {
+    // Every awk decodes these. Reading them literally meant the string handed to
+    // the classifier was not the command that runs — measured on BWK awk
+    // 20200816, `system("\\163udo id")` runs `sudo id` — and the raw text also
+    // slips past the never-allowed list, which matches on the text as sent.
+    expect(classOf(`awk 'BEGIN{system("\\163udo id")}'`)).toBe('privileged');
+    expect(classOf(`awk 'BEGIN{system("\\x73udo id")}'`)).toBe('privileged');
+    // `privileged`, not `destructive`: once the escape is decoded the target is
+    // `sudo sh`, and the classifier reads it as itself.
+    expect(classOf(`awk 'BEGIN{print "x" | "\\163udo sh"}'`)).toBe('privileged');
+    expect(classOf(`awk 'BEGIN{system("\\162m -rf \\057")}'`)).toBe('destructive');
+    expect(nestedCommands(`awk 'BEGIN{system("\\163udo id")}'`)).toEqual(['sudo id']);
+  });
+
+  it('is not fooled by an escaped quote re-pairing the string delimiters', () => {
+    expect(classOf(`awk 'BEGIN{s="\\""; system("sudo id"); t="\\""}'`)).toBe('privileged');
+    expect(classOf(`awk '"" || system("sudo id") || ""'`)).toBe('privileged');
   });
 
   it('reads a command piped out of print, and one piped into getline', () => {
@@ -50,10 +102,49 @@ describe('an awk program that starts a process', () => {
     expect(classOf(`awk 'BEGIN{"sudo id" | getline r; print r}'`)).toBe('privileged');
   });
 
-  it('refuses to guess at a system() argument it cannot read', () => {
+  it('refuses to guess at a command it cannot read in full', () => {
     // Assembled at run time. Reading the literal half and classifying that would
     // describe a command that never runs.
     expect(classOf(`awk -v f=/etc 'BEGIN{system("rm -rf " f)}'`)).toBe('destructive');
+    expect(classOf(`awk -v c=id 'BEGIN{c | getline r; print r}'`)).toBe('destructive');
+    expect(classOf(`awk -v c=id 'BEGIN{print "x" | c}'`)).toBe('destructive');
+  });
+
+  it('refuses a concatenated command rather than classifying half of it', () => {
+    // awk joins adjacent literals into the command it runs, so reading only one
+    // of them classifies a *shorter* command than the one that executes — the
+    // single shape in this module that could lower a class rather than raise it.
+    // Measured on BWK awk: `"ech" "o CONCAT" | getline` runs `echo CONCAT`.
+    expect(classOf(`awk 'BEGIN{"sudo" " id" | getline v}'`)).toBe('destructive');
+    expect(classOf(`awk 'BEGIN{print "x" | "id" "; sudo sh"}'`)).toBe('destructive');
+  });
+
+  it('gates a program that pipes its output into an interpreter', () => {
+    // The awk spelling of `echo "sudo id" | sh`, which this repo already gates
+    // through `readsProgramFromStdin`. Classifying the target alone says `sh`,
+    // which is not dangerous; what is dangerous is what awk prints into it, and
+    // that is assembled at run time.
+    for (const shell of ['sh', '/bin/sh', 'bash']) {
+      expect(classOf(`awk 'BEGIN{print "sudo id" | "${shell}"}'`), shell).toBe('destructive');
+    }
+    // A pipe target that is not an interpreter is still classified as itself.
+    expect(classOf(`awk 'BEGIN{print "x" | "sudo tee /etc/passwd"}'`)).toBe('privileged');
+  });
+
+  it('treats a word that is not reserved as a variable, so the / after it divides', () => {
+    // `and`, `or`, `not` and `case` are ordinary identifiers in POSIX awk, BWK
+    // awk, mawk and busybox awk — verified locally: `BEGIN{not=4; print not/2}`
+    // prints 2. Listing them as keywords made the lexer open a regex where awk
+    // divides, and the regex swallowed everything up to the next `/`.
+    for (const word of ['not', 'or', 'and', 'case']) {
+      expect(classOf(`awk 'BEGIN{${word}=2; x = ${word} / system("sudo id") / 3}'`), word)
+        .toBe('privileged');
+    }
+    // `getline` is the mirror case: it is reserved, but it yields a value, so an
+    // operand has ended and the `/` divides.
+    expect(classOf(`awk 'BEGIN{x = getline / system("sudo id") / 2}'`)).toBe('privileged');
+    expect(classOf(`awk 'BEGIN{f="/root/.ssh/authorized_keys"; not=4; print not / 2 > f}'`))
+      .toBe('destructive');
   });
 });
 
@@ -63,6 +154,13 @@ describe("an awk program that writes a file", () => {
       .toBe('destructive');
     expect(classOf(`awk 'BEGIN{print "x" >> "/root/.ssh/authorized_keys"}'`))
       .toBe('destructive');
+  });
+
+  it('keeps an output statement open across a backslash-newline continuation', () => {
+    // The continuation joins the lines, so the `>` still belongs to the print.
+    // Without it the newline closes the statement and a genuine file write reads
+    // as a comparison — measured: destructive becomes safe.
+    expect(classOf("awk '{print $1 \\\n > \"/tmp/f\"}'")).toBe('destructive');
   });
 
   it('gates a redirection whose target is computed', () => {
@@ -75,7 +173,7 @@ describe("an awk program that writes a file", () => {
   });
 
   it('leaves the standard streams alone, which scripts write to routinely', () => {
-    for (const target of ['/dev/stderr', '/dev/stdout', '/dev/null']) {
+    for (const target of ['/dev/stderr', '/dev/stdout', '/dev/null', '/dev/fd/1', '/dev/fd/2']) {
       expect(classOf(`awk 'BEGIN{print "note" > "${target}"}'`), target).toBe('safe');
     }
   });
@@ -102,6 +200,18 @@ describe('an awk invocation this process cannot read', () => {
     }
   });
 
+  it('refuses a program too large to be worth reading', () => {
+    // Linear is not the same as bounded: with `commandMaxChars = 0` — the config
+    // spelling of unlimited — a 1MB program of `system()` calls measured 2.1s on
+    // the thread that serves every other tool call. Above the bound it is the
+    // module's existing "we cannot read this" answer, which costs nothing.
+    const huge = `awk '{${'print $1;'.repeat(40_000)}}'`;
+    expect(huge.length).toBeGreaterThan(256 * 1024);
+    const started = process.hrtime.bigint();
+    expect(classOf(huge)).toBe('destructive');
+    expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(3000);
+  });
+
   it('gates a program whose string or regex never closes', () => {
     // Lexing the rest in the wrong mode is how a system() call hides, so an
     // unterminated literal fails closed rather than being guessed past.
@@ -117,8 +227,9 @@ describe('an awk invocation this process cannot read', () => {
 });
 
 /**
- * Every entry here is a shape one of the five abandoned attempts classified
- * wrongly. They are the reason this is a parser and not a pattern.
+ * The set #184 names as having broken the five abandoned attempts, plus the
+ * adjacent shapes the same parser has to get right. They are the reason this is
+ * a parser and not a pattern.
  */
 describe('ordinary awk stays out of the gate', () => {
   it.each([
@@ -137,6 +248,23 @@ describe('ordinary awk stays out of the gate', () => {
     `awk '{n = split($0, parts, "/"); print parts[n]}'`,
     `awk '# a comment with > and "quotes"\n{print $1}'`,
     `awk -v threshold=5 '$2 > threshold {print $1}'`,
+    // Division after punctuation, which `regexCanStart` has to read as division
+    // and not as a regex open. Untested before, and every one of these flips to
+    // destructive if the exclusion list is replaced with `return true`.
+    `awk '{print (a)/2}'`,
+    `awk '{print a[1]/2}'`,
+    `awk '{print $1/2}'`,
+    `awk '{if (!/x/) print}'`,
+    `awk '/[/]/{print}'`,
+    `awk '{gsub(/[/]/,"-"); print}'`,
+    // A multi-line program: the newline is what closes the output statement, so
+    // without it the second line's `> 3` reads as a redirection of the first
+    // line's print. (`print $2 > 3` on its own really does write a file named
+    // `3` — verified — which is why the second line here has no `print`.)
+    `awk '{print $1\n$2 > 3}'`,
+    // Backslashes, which a second round of unquoting used to delete.
+    `awk '{print "\\\\"}'`,
+    `awk 'BEGIN{FS="\\\\."} {print $1}'`,
   ])('%s', (command) => {
     expect(classOf(command)).toBe('safe');
   });
@@ -160,6 +288,12 @@ describe('ordinary awk stays out of the gate', () => {
 });
 
 describe('cost', () => {
+  const costMs = (program: string) => {
+    const started = process.hrtime.bigint();
+    expect(classOf(program), program.slice(0, 24)).toBe('safe');
+    return Number(process.hrtime.bigint() - started) / 1e6;
+  };
+
   /**
    * Seeded with repeated `print` tokens rather than repeated spaces.
    *
@@ -168,33 +302,37 @@ describe('cost', () => {
    * the single thread that also serves every other tool call. A whitespace seed
    * missed it, because the backtracking needed tokens to backtrack over.
    */
-  it('stays linear on a program built from repeated print statements', () => {
+  it('classifies a 211KB program of repeated print statements promptly', () => {
     const program = `awk '{${'print $1;'.repeat(24_000)}}'`;
     expect(program.length).toBeGreaterThan(192 * 1024);
-
-    const started = process.hrtime.bigint();
-    expect(classOf(program)).toBe('safe');
-    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
-
-    // Measured at ~75ms on the development machine; the quadratic shape this
-    // guards against was 8.7s, so the bound is generous without being useless.
-    expect(elapsedMs, `classifying 192KB of awk took ${elapsedMs.toFixed(0)}ms`)
-      .toBeLessThan(1500);
+    // An absolute bound measures the runner, so it is only a smoke check here —
+    // the growth assertion below is what carries the "linear" claim. Three
+    // seconds matches the neighbouring budgets in classifier.test.ts, which were
+    // widened after CI failed at 3677ms against a 1000ms bound under coverage
+    // instrumentation.
+    expect(costMs(program)).toBeLessThan(3000);
   });
 
-  it('stays linear on a long argument list, a long regex and many strings', () => {
-    const shapes = [
-      `awk '{print ${'$1 "x" '.repeat(24_000)}}'`,
-      `awk '/${'a'.repeat(190_000)}/{print}'`,
-      `awk '{print ${'"aaaaaaaa" '.repeat(20_000)}}'`,
-    ];
-    for (const program of shapes) {
-      const started = process.hrtime.bigint();
-      classOf(program);
-      const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
-      expect(elapsedMs, `${program.slice(0, 20)}… took ${elapsedMs.toFixed(0)}ms`)
-        .toBeLessThan(1500);
-    }
+  /**
+   * A ratio rather than a wall-clock bound, matching classifier.test.ts:290.
+   *
+   * "Stays linear" is a claim about growth, and only a growth measurement can
+   * check it: the previous version of this test timed one input size and called
+   * that linearity. Quadrupling the input should roughly quadruple the cost; the
+   * quadratic shape this guards against grew sixteen-fold.
+   */
+  it.each([
+    ['repeated print statements', (n: number) => `awk '{${'print $1;'.repeat(Math.ceil(n / 9))}}'`],
+    ['one long argument list', (n: number) => `awk '{print ${'$1 "x" '.repeat(Math.ceil(n / 8))}}'`],
+    ['many string literals', (n: number) => `awk '{print ${'"aaaaaaaa" '.repeat(Math.ceil(n / 11))}}'`],
+    ['punctuation that matches no operator', (n: number) => `awk '{x = ${'?:,~'.repeat(Math.ceil(n / 4))} 1}'`],
+  ])('stays linear on %s', (_label, build) => {
+    // 50KB and 200KB, both under the 256KB refusal bound so the lexer actually
+    // runs. Max(…, 0.01) because a fast small case can measure as zero.
+    const small = Math.max(costMs(build(50_000)), 0.01);
+    const large = costMs(build(200_000));
+    expect(large / small, `4x the input cost ${(large / small).toFixed(1)}x the time`)
+      .toBeLessThan(8);
   });
 });
 
@@ -208,7 +346,7 @@ describe('cost', () => {
 describe('readAwkInvocation', () => {
   it('reports nothing for a program that does nothing dangerous', () => {
     expect(readAwkInvocation(['{print $1}'])).toEqual({
-      commands: [], writesFile: false, unreadable: false,
+      commands: [], pipedInto: [], writesFile: false, unreadable: false,
     });
   });
 
@@ -217,10 +355,28 @@ describe('readAwkInvocation', () => {
     expect(readAwkInvocation(['--version'])).toBeNull();
   });
 
-  it('decodes the escapes in a system() argument', () => {
-    // The bytes that reach the shell are what the classifier re-reads, so an
-    // undecoded `\t` would be classified as a backslash and a `t`.
-    expect(readAwkInvocation([`BEGIN{system("echo\\tone")}`])?.commands).toEqual(['echo\tone']);
+  it.each([
+    ['\\t', '\t'], ['\\n', '\n'], ['\\\\', '\\'], ['\\"', '"'],
+    ['\\061', '1'], ['\\x41', 'A'], ['\\q', 'q'],
+  ])('decodes %s in a system() argument', (escape, decoded) => {
+    // The bytes that reach the shell are what the classifier re-reads. `\n`
+    // matters most: the multi-line-command refusal only sees a real newline.
+    expect(readAwkInvocation([`BEGIN{system("a${escape}b")}`])?.commands)
+      .toEqual([`a${decoded}b`]);
+  });
+
+  it('separates "found a command" from "could not read one"', () => {
+    // `.class` collapses these, and which one an operator is told is the
+    // difference between a named command and "we cannot tell".
+    expect(readAwkInvocation(['{print $1 > $2}'])).toEqual({
+      commands: [], pipedInto: [], writesFile: true, unreadable: false,
+    });
+    expect(readAwkInvocation(['BEGIN{system(x)}'])).toEqual({
+      commands: [], pipedInto: [], writesFile: false, unreadable: true,
+    });
+    expect(readAwkInvocation([`BEGIN{print "x" | "sh"}`])).toEqual({
+      commands: [], pipedInto: ['sh'], writesFile: false, unreadable: false,
+    });
   });
 
   it('separates the flags that are skipped from the flag that is not', () => {
@@ -232,9 +388,22 @@ describe('readAwkInvocation', () => {
   });
 
   it('treats a bare - and -- as operands rather than flags', () => {
-    // `awk -- '{...}'` ends the options; `awk '{...}' -` reads stdin as data.
+    // `awk -- '{...}'` ends the options; a bare `-` is stdin as a data file.
     expect(readAwkInvocation(['--', 'BEGIN{system("sudo id")}'])?.commands).toEqual(['sudo id']);
-    expect(readAwkInvocation(['BEGIN{system("sudo id")}', '-'])?.commands).toEqual(['sudo id']);
+    // With the `-` first, the branch that recognises it runs — and a bare `-`
+    // is an operand, so it becomes the program and the real program becomes a
+    // data file. That is what awk does too: `awk - 'BEGIN{print "RAN"}'` is a
+    // syntax error, not a run. Nothing is found, and nothing should be.
+    expect(readAwkInvocation(['-', 'BEGIN{system("sudo id")}'])?.commands).toEqual([]);
+  });
+
+  it('keeps an explicitly empty flag value from eating the program', () => {
+    // The tokenizer used to drop a quoted empty word, so this arrived one word
+    // short and the program was consumed as `-F`'s value: the reader reported
+    // "no program" and the whole gate went silent. Real awk warns about the
+    // empty FS and runs the program anyway — measured, including the file write.
+    expect(readAwkInvocation(['-F', '', 'BEGIN{system("sudo id")}'])?.commands)
+      .toEqual(['sudo id']);
   });
 
   it('does not read a data file as the program', () => {
