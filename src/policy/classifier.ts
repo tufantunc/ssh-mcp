@@ -1,4 +1,5 @@
 import type { CommandClass, ParsedCommand } from '../types.js';
+import { AWK_NAMES, readAwkInvocation, type AwkFindings } from './awk.js';
 
 /**
  * Anything through which the shell can start a second command.
@@ -154,7 +155,6 @@ const CLASS_RANK: Record<CommandClass, number> = {
   privileged: 3,
 };
 
-/** Shells that run their next argument as a command when given `-c`. */
 /**
  * Interpreters, the flags that hand them a program, and whether this file can read it.
  *
@@ -195,7 +195,6 @@ const INTERPRETERS: Record<string, { flags: string[]; readable: boolean }> = Obj
   },
 );
 
-/** Flags whose value is a separate word, which is not the program. `awk -F ':' '{…}'`. */
 /** `find … -exec <cmd> +` runs cmd. */
 const FIND_EXEC_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
 
@@ -242,9 +241,26 @@ function tokenizeSegmentsDetailed(
   let quote: string | null = null;
   let escaped = false;
 
+  /**
+   * Whether the word being built was quoted, so an *empty* one survives.
+   *
+   * `if (current)` alone dropped it, and a dropped word is not cosmetic for
+   * anything that reads arguments by position: `awk -F '' 'BEGIN{system("sudo
+   * id")}'` arrived as three words instead of four, so the awk reader consumed
+   * the program as `-F`'s value and reported that the invocation ran no program
+   * — `safe`, for a command real awk runs. Measured on BWK awk 20200816: it
+   * warns "field separator FS is empty" on stderr and then executes both the
+   * `system()` call and a file redirection.
+   *
+   * Only a *quoted* empty survives. Pushing every empty `current` would emit a
+   * word per run of whitespace, which is not what a shell does.
+   */
+  let quotedWord = false;
+
   const endWord = () => {
-    if (current) words.push(current);
+    if (current || quotedWord) words.push(current);
     current = '';
+    quotedWord = false;
   };
   const endSegment = (sep: string) => {
     endWord();
@@ -269,7 +285,7 @@ function tokenizeSegmentsDetailed(
       continue;
     }
     if (ch === '\\') { escaped = true; continue; }
-    if (honorQuotes && (ch === '"' || ch === "'")) { quote = ch; continue; }
+    if (honorQuotes && (ch === '"' || ch === "'")) { quote = ch; quotedWord = true; continue; }
     if (ch === ';' || ch === '&' || ch === '|' || ch === '\n') { endSegment(ch); continue; }
     if (/\s/.test(ch)) { endWord(); continue; }
     current += ch;
@@ -416,11 +432,18 @@ export function nestedCommands(command: string): string[] {
     // where it looks but what it requires: `programAfterFlag` returns null unless a
     // program-bearing flag actually follows, so `cat /usr/bin/python3` carries nothing.
     //
-    // awk is deliberately absent. Its program is a positional operand rather than the
-    // value of a flag, so nothing distinguishes running awk from naming it, and its four
-    // implementations disagree about which flags consume a value — modelling that wrongly
-    // opened five separate holes across two review rounds. `awk` keeps the class it has on
-    // 2.5.1 and is tracked separately.
+    // awk is handled below rather than in this loop, and the difference is the
+    // point: this loop reads *every* word so a carrier behind an unlisted
+    // wrapper is not lost, and doing that to awk is what made `man awk`
+    // destructive. awk's program is a positional operand, so the only evidence
+    // it was invoked is that it is the segment's command word (#184).
+    const awk = awkFindings(words);
+    for (const inner of awk?.commands ?? []) found.push(inner);
+    // A pipe target is classified too, so `print … | "sudo tee /etc/passwd"`
+    // still names `tee`. Whether the *direction* makes it worse is decided in
+    // hasDangerousAwk, which is where this file already keeps that rule.
+    for (const inner of awk?.pipedInto ?? []) found.push(inner);
+
     if (!operandsAreData(words)) {
       for (let i = 0; i < words.length; i++) {
         const spec = INTERPRETERS[stripPath(unquote(words[i]))];
@@ -903,6 +926,21 @@ function operandsAreData(words: string[]): boolean {
  * here can know an arbitrary tool's grammar, so `sed -n perl -e p` — a shape no one
  * writes — is still read as a carrier.
  */
+/**
+ * Words that may sit between an interpreter and its program flag.
+ *
+ * A quoted empty word survives tokenization now, because a positional reader
+ * cannot work with an argument list that silently drops operands. That made an
+ * empty word break this chain: `sh '' -c 'sudo id'` stopped finding the program
+ * and fell from `privileged` to `safe`. Real `sh` does not run it either — it
+ * reports "No such file or directory" and exits, measured — but over-reporting a
+ * command that fails costs nothing and under-reporting one is the whole hazard,
+ * so the chain keeps the answer it had.
+ */
+function skippableBetweenFlags(word: string): boolean {
+  return word === '' || word.startsWith('-');
+}
+
 function isFlagValue(words: string[], i: number, flags: string[]): boolean {
   if (i === 0) return false;
   const previous = words[i - 1];
@@ -932,7 +970,7 @@ function programAfterFlag(words: string[], from: number, flags: string[]): strin
     // The program flag need not lead the cluster: `bash -xc 'sudo id'` runs exactly what
     // `bash -cx 'sudo id'` runs, and a prefix test saw the second and missed the first.
     if (clusterCarriesFlag(word, flags)) return words[j + 1] ?? null;
-    if (!word.startsWith('-')) return null;
+    if (!skippableBetweenFlags(word)) return null;
   }
   return null;
 }
@@ -1003,6 +1041,56 @@ function readsProgramFromStdin(words: string[]): boolean {
  * records fixing as #91, and `cat /usr/bin/python3` names an interpreter without running
  * one. A program-bearing flag must actually be present, so naming one is not enough.
  */
+/**
+ * What this segment's awk program does, or null when it runs no awk program.
+ *
+ * Keyed on `effectiveCommandIndex` — the word that actually runs — never on any
+ * word that happens to say "awk". `readlink -f /usr/bin/awk` and `man awk` name
+ * an interpreter without invoking one, and an earlier attempt that scanned every
+ * word classified both destructive.
+ */
+function awkFindings(words: string[]): AwkFindings | null {
+  const idx = effectiveCommandIndex(words);
+  if (idx === -1) return null;
+  if (!AWK_NAMES.has(stripPath(unquote(words[idx])))) return null;
+  // No second `unquote`. `tokenizeSegmentsDetailed` has already resolved shell
+  // quoting, and inside single quotes a backslash is literal — so the program
+  // word arrives exactly as awk will see it. Unquoting again ran
+  // `.replace(/\\(.)/g, '$1')` over the *awk program*, which deleted the
+  // backslash of every escape it contains. Measured, all three ways that broke:
+  // `system("\163udo id")` became `system("163udo id")` and classified `safe`;
+  // `s="\""` collapsed and re-paired the string delimiters so the code between
+  // them was read as string content; and `print "\\"` became an unterminated
+  // string, gating ordinary awk as unreadable.
+  return readAwkInvocation(words.slice(idx + 1));
+}
+
+/**
+ * Whether any segment's awk program writes a file, or could not be read.
+ *
+ * The commands an awk program hands to a shell are not here: `nestedCommands`
+ * emits those so they are classified as themselves, which is how
+ * `awk 'BEGIN{system("sudo id")}'` comes out `privileged` rather than flattened
+ * to the `destructive` this function reports.
+ */
+function hasDangerousAwk(command: string): boolean {
+  for (const { words } of tokenizeSegmentsDetailed(command)) {
+    const findings = awkFindings(words);
+    if (findings === null) continue;
+    if (findings.writesFile || findings.unreadable) return true;
+    // `print … | "sh"` is the awk spelling of `echo "sudo id" | sh`, which this
+    // file already gates through `readsProgramFromStdin`. Classifying the target
+    // alone says `sh`, which is not dangerous; what is dangerous is what awk
+    // prints into it, and that is assembled at run time. So it is the same
+    // "we cannot tell" this module reports for `-f progfile`.
+    for (const target of findings.pipedInto) {
+      const stage = tokenizeSegmentsDetailed(target)[0];
+      if (stage !== undefined && readsProgramFromStdin(stage.words)) return true;
+    }
+  }
+  return false;
+}
+
 function hasUnreadableProgram(command: string): boolean {
   const segments = tokenizeSegmentsDetailed(command);
   for (let i = 0; i < segments.length; i++) {
@@ -1143,7 +1231,8 @@ function classifyOuter(trimmed: string): ParsedCommand {
     return { binary: elevated, fullCommand, class: 'privileged' as CommandClass };
   }
 
-  if (hasUnreadableProgram(trimmed) || isDestructive(trimmed) || hasDisqualifyingArgs(trimmed)) {
+  if (hasUnreadableProgram(trimmed) || hasDangerousAwk(trimmed)
+    || isDestructive(trimmed) || hasDisqualifyingArgs(trimmed)) {
     return { binary, fullCommand, class: 'destructive' as CommandClass };
   }
 
