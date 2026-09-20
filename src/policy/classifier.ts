@@ -1,4 +1,5 @@
 import type { CommandClass, ParsedCommand } from '../types.js';
+import { AWK_NAMES, readAwkInvocation, type AwkFindings } from './awk.js';
 
 /**
  * Anything through which the shell can start a second command.
@@ -154,7 +155,6 @@ const CLASS_RANK: Record<CommandClass, number> = {
   privileged: 3,
 };
 
-/** Shells that run their next argument as a command when given `-c`. */
 /**
  * Interpreters, the flags that hand them a program, and whether this file can read it.
  *
@@ -195,7 +195,6 @@ const INTERPRETERS: Record<string, { flags: string[]; readable: boolean }> = Obj
   },
 );
 
-/** Flags whose value is a separate word, which is not the program. `awk -F ':' '{…}'`. */
 /** `find … -exec <cmd> +` runs cmd. */
 const FIND_EXEC_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
 
@@ -416,11 +415,14 @@ export function nestedCommands(command: string): string[] {
     // where it looks but what it requires: `programAfterFlag` returns null unless a
     // program-bearing flag actually follows, so `cat /usr/bin/python3` carries nothing.
     //
-    // awk is deliberately absent. Its program is a positional operand rather than the
-    // value of a flag, so nothing distinguishes running awk from naming it, and its four
-    // implementations disagree about which flags consume a value — modelling that wrongly
-    // opened five separate holes across two review rounds. `awk` keeps the class it has on
-    // 2.5.1 and is tracked separately.
+    // awk is handled below rather than in this loop, and the difference is the
+    // point: this loop reads *every* word so a carrier behind an unlisted
+    // wrapper is not lost, and doing that to awk is what made `man awk`
+    // destructive. awk's program is a positional operand, so the only evidence
+    // it was invoked is that it is the segment's command word (#184).
+    const awk = awkFindings(words);
+    for (const inner of awk?.commands ?? []) found.push(inner);
+
     if (!operandsAreData(words)) {
       for (let i = 0; i < words.length; i++) {
         const spec = INTERPRETERS[stripPath(unquote(words[i]))];
@@ -1003,6 +1005,37 @@ function readsProgramFromStdin(words: string[]): boolean {
  * records fixing as #91, and `cat /usr/bin/python3` names an interpreter without running
  * one. A program-bearing flag must actually be present, so naming one is not enough.
  */
+/**
+ * What this segment's awk program does, or null when it runs no awk program.
+ *
+ * Keyed on `effectiveCommandIndex` — the word that actually runs — never on any
+ * word that happens to say "awk". `readlink -f /usr/bin/awk` and `man awk` name
+ * an interpreter without invoking one, and an earlier attempt that scanned every
+ * word classified both destructive.
+ */
+function awkFindings(words: string[]): AwkFindings | null {
+  const idx = effectiveCommandIndex(words);
+  if (idx === -1) return null;
+  if (!AWK_NAMES.has(stripPath(unquote(words[idx])))) return null;
+  return readAwkInvocation(words.slice(idx + 1).map(unquote));
+}
+
+/**
+ * Whether any segment's awk program writes a file, or could not be read.
+ *
+ * The commands an awk program hands to a shell are not here: `nestedCommands`
+ * emits those so they are classified as themselves, which is how
+ * `awk 'BEGIN{system("sudo id")}'` comes out `privileged` rather than flattened
+ * to the `destructive` this function reports.
+ */
+function hasDangerousAwk(command: string): boolean {
+  for (const { words } of tokenizeSegmentsDetailed(command)) {
+    const findings = awkFindings(words);
+    if (findings !== null && (findings.writesFile || findings.unreadable)) return true;
+  }
+  return false;
+}
+
 function hasUnreadableProgram(command: string): boolean {
   const segments = tokenizeSegmentsDetailed(command);
   for (let i = 0; i < segments.length; i++) {
@@ -1143,7 +1176,8 @@ function classifyOuter(trimmed: string): ParsedCommand {
     return { binary: elevated, fullCommand, class: 'privileged' as CommandClass };
   }
 
-  if (hasUnreadableProgram(trimmed) || isDestructive(trimmed) || hasDisqualifyingArgs(trimmed)) {
+  if (hasUnreadableProgram(trimmed) || hasDangerousAwk(trimmed)
+    || isDestructive(trimmed) || hasDisqualifyingArgs(trimmed)) {
     return { binary, fullCommand, class: 'destructive' as CommandClass };
   }
 
