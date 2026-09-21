@@ -31,6 +31,24 @@ const READ_ONLY_ALLOWLIST = new Set([
   'netstat', 'ss', 'ifconfig', 'ip addr', 'ip route', 'arp', 'dig', 'nslookup',
   'host', 'ping', 'traceroute', 'git status', 'git log',
   'git diff', 'git branch', 'git show', 'git remote',
+  // The SFTP read verbs, synthesised by the tool layer rather than typed by a
+  // caller. They are here so the policy agrees with what the tools advertise:
+  // both carry `readOnlyHint: true`, both say "read-only" in their description
+  // and in the README, and without an entry here both fall through to `safe` —
+  // which `engine.getAllowedClasses` refuses outright on a `readOnly` profile.
+  // The one tool whose annotation targets that profile class was the one tool
+  // that profile class could not run (#217).
+  //
+  // A lowering, and lowerings are widenings, so it needs its own argument: this
+  // grants a `viewer` nothing it does not already hold. `cat /etc/shadow` and
+  // `ls /root` are `read-only` today, so the authority to read any file the SSH
+  // user can read is already granted — these two reach it through SFTP instead
+  // of a shell, which is *narrower*, because no shell parses the path.
+  //
+  // `sftp:upload`, `sftp:upload-file` and `sftp:download-file` stay out: the
+  // first two write on the remote host and the third writes inside the
+  // operator's transfer root, so none of them is a read.
+  'sftp:list', 'sftp:download',
 ]);
 // Deliberately NOT read-only: `env`, because it is an exec wrapper. `env <cmd>`
 // runs <cmd>, so allowlisting the name `env` vouched for a command the
