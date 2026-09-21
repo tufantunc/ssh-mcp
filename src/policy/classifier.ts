@@ -31,24 +31,6 @@ const READ_ONLY_ALLOWLIST = new Set([
   'netstat', 'ss', 'ifconfig', 'ip addr', 'ip route', 'arp', 'dig', 'nslookup',
   'host', 'ping', 'traceroute', 'git status', 'git log',
   'git diff', 'git branch', 'git show', 'git remote',
-  // The SFTP read verbs, synthesised by the tool layer rather than typed by a
-  // caller. They are here so the policy agrees with what the tools advertise:
-  // both carry `readOnlyHint: true`, both say "read-only" in their description
-  // and in the README, and without an entry here both fall through to `safe` —
-  // which `engine.getAllowedClasses` refuses outright on a `readOnly` profile.
-  // The one tool whose annotation targets that profile class was the one tool
-  // that profile class could not run (#217).
-  //
-  // A lowering, and lowerings are widenings, so it needs its own argument: this
-  // grants a `viewer` nothing it does not already hold. `cat /etc/shadow` and
-  // `ls /root` are `read-only` today, so the authority to read any file the SSH
-  // user can read is already granted — these two reach it through SFTP instead
-  // of a shell, which is *narrower*, because no shell parses the path.
-  //
-  // `sftp:upload`, `sftp:upload-file` and `sftp:download-file` stay out: the
-  // first two write on the remote host and the third writes inside the
-  // operator's transfer root, so none of them is a read.
-  'sftp:list', 'sftp:download',
 ]);
 // Deliberately NOT read-only: `env`, because it is an exec wrapper. `env <cmd>`
 // runs <cmd>, so allowlisting the name `env` vouched for a command the
@@ -68,6 +50,34 @@ const READ_ONLY_ALLOWLIST = new Set([
 // Residual risk kept on purpose: dig/nslookup/host/ping/traceroute can leak
 // small amounts of data through DNS/ICMP queries. They cannot modify the host,
 // so they stay read-only; tighten them via profile policy if egress matters.
+
+/**
+ * The SFTP read verbs, which the tool layer synthesises rather than a caller typing.
+ *
+ * A second set rather than two more entries in READ_ONLY_ALLOWLIST, and the
+ * reason is that that Set is dual-purpose: `operandsAreData` reads it too, to
+ * decide whether a segment's operands are data rather than commands. Putting
+ * these verbs there silenced the carrier scan for them — measured,
+ * `sftp:list /tmp sh -c 'sudo id'` fell from `privileged` to `read-only`,
+ * because `nestedCommands` stopped extracting the `sh -c` payload. That is the
+ * one carrier form carrying no character from SHELL_CONTROL_CHARS, i.e. exactly
+ * the form the scan is load-bearing for.
+ *
+ * The suppression buys nothing here anyway. It exists so `grep python3 -c file`
+ * is not read as invoking python; these verbs take a path nobody parses, so
+ * there is no false positive to suppress.
+ *
+ * Why they are lowered at all: both tools carry `readOnlyHint: true`, both say
+ * read-only in their description and in the README, and `safe` is refused
+ * outright by a `readOnly` profile — so the one profile class the annotation
+ * targets was the one that could not run them (#217). The lowering grants that
+ * profile nothing new: `cat /etc/shadow` and `ls /root` are already `read-only`,
+ * so the authority to read any file the SSH user can read is already held.
+ *
+ * `sftp:upload`, `sftp:upload-file` and `sftp:download-file` stay out — the
+ * first two write on the remote host, the third inside the transfer root.
+ */
+const READ_ONLY_SYNTHETIC = new Set(['sftp:list', 'sftp:download']);
 
 /**
  * Commands that are never allowed, whatever the role or approval policy.
@@ -1163,14 +1173,22 @@ function hasUnnameableCommand(command: string): boolean {
  * `~/.ssh/authorized_keys` without touching a shell. Opening a session is the same
  * argument, since it hands over an interactive shell.
  *
- * `sftp:download`, `sftp:list` and `session:close` are deliberately absent. Each would
- * move *down* from `safe` — download and list to `read-only`, matching their
- * `readOnlyHint`, and close being a release rather than an acquisition. Lowering a class
- * is a widening, and a security release is the wrong place for one; they keep the class
- * they have today. `sftp:list` is worth spelling out because it is new: a `read-only`
- * entry for it would also be inert, since the floor below can only raise, and the effect
- * anyone reaching for it actually wants — letting a `viewer` list a remote directory — is
- * a binding change, not a classification one.
+ * `session:close` is deliberately absent: it is a release rather than an acquisition, and
+ * no tool advertises it as a read.
+ *
+ * `sftp:download` and `sftp:list` are absent for a different reason now. They *are*
+ * lowered to `read-only` — by `READ_ONLY_SYNTHETIC` near the top of this file — because
+ * both tools advertise `readOnlyHint: true` and `safe` is refused outright by a `readOnly`
+ * profile, so the one profile class the annotation targeted was the one that could not run
+ * them (#217). They cannot be lowered *here*, because this table is a floor and a floor
+ * can only raise; an entry would be inert. That inertness is the trap worth keeping
+ * written down — it produced two wrong attempts during #212.
+ *
+ * What this paragraph used to say, and what was wrong with it: that the effect anyone
+ * wants from lowering `sftp:list` — letting a `viewer` list a remote directory — is "a
+ * binding change, not a classification one". It is a classification one, because the tool
+ * ships an annotation and a description that both claim read-only, and a policy that
+ * disagreed with them was the defect rather than the binding.
  *
  * `sftp:upload-file` and `sftp:download-file` are `destructive` because each writes a
  * file: the first on the remote host, the second inside the operator's transfer root.
@@ -1267,7 +1285,8 @@ function classifyOuter(trimmed: string): ParsedCommand {
   }
 
   const twoWordPrefix = (tokenizeSegments(fullCommand)[0] ?? []).slice(0, 2).join(' ');
-  if (READ_ONLY_ALLOWLIST.has(binary) || READ_ONLY_ALLOWLIST.has(twoWordPrefix)) {
+  if (READ_ONLY_ALLOWLIST.has(binary) || READ_ONLY_ALLOWLIST.has(twoWordPrefix)
+    || READ_ONLY_SYNTHETIC.has(binary)) {
     if (SHELL_CONTROL_CHARS.test(trimmed)) {
       return { binary, fullCommand, class: 'safe' as CommandClass };
     }

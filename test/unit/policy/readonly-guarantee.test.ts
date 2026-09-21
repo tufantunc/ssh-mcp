@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { PolicyEngine, DEFAULT_RULES } from '../../../src/policy/engine.js';
+import { READ_ONLY_ALLOWLIST } from '../../../src/policy/classifier.js';
 import type { Profile } from '../../../src/types.js';
 
 /**
@@ -56,20 +57,34 @@ describe('a readOnly profile cannot write, whatever the command is called', () =
  */
 describe('a readOnly profile can use the SFTP tools that only read', () => {
   const engine = new PolicyEngine(DEFAULT_RULES);
-  const decide = (command: string, tool: string) =>
-    engine.evaluate(command, readOnlyAuditor, tool).decision;
+  // One fixed tool name, like the first describe block in this file. `evaluate`
+  // takes the name as `_toolName` and never reads it (engine.ts:277), so a
+  // per-command name would read as per-tool coverage while asserting nothing
+  // about the tool — and two of the blocks below were passing `sftp-list` for
+  // `sftp:download` commands, a pairing the product never produces.
+  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor, 'sftp-list');
 
   it('allows listing and downloading', () => {
-    expect(decide('sftp:list /var/log', 'sftp-list')).toBe('allow');
-    expect(decide('sftp:download /etc/nginx/nginx.conf', 'sftp-download')).toBe('allow');
+    expect(decide('sftp:list /var/log').decision).toBe('allow');
+    expect(decide('sftp:download /etc/nginx/nginx.conf').decision).toBe('allow');
+  });
+
+  it('keeps every SFTP verb that writes out of the read-only allowlist', () => {
+    // The invariant the allowlist's comment states in prose and nothing stated
+    // in code. The `destructive` floor would still catch a write verb added
+    // here — measured, adding all three changes no test — so without this the
+    // mistake is silent until someone also touches the floor.
+    for (const verb of ['sftp:upload', 'sftp:upload-file', 'sftp:download-file']) {
+      expect(READ_ONLY_ALLOWLIST.has(verb), verb).toBe(false);
+    }
   });
 
   it('grants nothing the profile did not already hold', () => {
     // The argument for the lowering: a viewer can already read any file the SSH
     // user can, through the shell. If these two were a new capability, this
     // assertion would fail and the lowering would need a different defence.
-    expect(decide('cat /etc/shadow', 'read-command')).toBe('allow');
-    expect(decide('ls /root', 'read-command')).toBe('allow');
+    expect(decide('cat /etc/shadow').decision).toBe('allow');
+    expect(decide('ls /root').decision).toBe('allow');
   });
 
   // Two things would have to break for a write verb to become read-only: this
@@ -79,28 +94,42 @@ describe('a readOnly profile can use the SFTP tools that only read', () => {
   // the outcome rather than the allowlist's composition, and that is worth
   // having: the outcome is the guarantee.
   it('still refuses every SFTP verb that writes', () => {
-    for (const [command, tool] of [
-      ['sftp:upload /etc/passwd', 'sftp-upload'],
-      ['sftp:upload-file /etc/passwd', 'sftp-upload-file'],
-      ['sftp:download-file /etc/passwd', 'sftp-download-file'],
-    ] as const) {
-      expect(decide(command, tool), command).toBe('deny');
+    for (const command of [
+      'sftp:upload /etc/passwd',
+      'sftp:upload-file /etc/passwd',
+      'sftp:download-file /etc/passwd',
+    ]) {
+      expect(decide(command).decision, command).toBe('deny');
     }
   });
 
-  it('refuses a path a carrier could ride out on', () => {
-    // These are refused by the *raising*: `nestedCommands` pulls the carried
-    // command out and the higher class wins. Listed separately from the case
-    // below because they would still be refused with the metacharacter gate
-    // removed — measured — so they pin the carrier scan, not the gate.
-    for (const command of [
-      'sftp:list /tmp/x; sudo id',
-      'sftp:download /tmp/$(sudo id)',
-      'sftp:list `sudo id`',
-      'sftp:download /tmp/x && rm -rf /',
-    ]) {
-      expect(decide(command, 'sftp-list'), command).toBe('deny');
-    }
+  // Asserting the CLASS, not the decision. For a `readOnly` profile
+  // `getAllowedClasses` returns exactly `['read-only']`, so every other class
+  // denies identically and `toBe('deny')` cannot tell which mechanism fired —
+  // measured, the previous version of this block stayed green with
+  // `nestedCommands` stubbed to return nothing, while claiming in its comment
+  // to pin exactly that scan.
+  it.each([
+    ['sftp:list /tmp/x; sudo id', 'privileged'],
+    ['sftp:list `sudo id`', 'privileged'],
+    ['sftp:download /tmp/$(sudo id)', 'privileged'],
+    ['sftp:download /tmp/x && rm -rf /', 'destructive'],
+  ])('%s is raised to %s by what it carries', (command, expected) => {
+    const evaluation = decide(command);
+    expect(evaluation.commandClass, command).toBe(expected);
+    expect(evaluation.decision, command).toBe('deny');
+  });
+
+  it('reads an interpreter carrier that hides behind no metacharacter', () => {
+    // The form the carrier scan is actually load-bearing for: `sh -c` carries
+    // nothing from SHELL_CONTROL_CHARS, so neither the metacharacter gate nor
+    // the segment split sees it. This is the case that regressed when the verbs
+    // were first added to READ_ONLY_ALLOWLIST — `operandsAreData` reads that
+    // same set, and putting them in it switched the scan off, dropping this from
+    // `privileged` to `read-only`.
+    expect(decide("sftp:list /tmp sh -c 'sudo id'").commandClass).toBe('privileged');
+    expect(decide('sftp:download /tmp sh -c reboot').commandClass).toBe('destructive');
+    expect(decide('sftp:list /tmp python3 -c foo').commandClass).toBe('destructive');
   });
 
   it('refuses a path carrying a metacharacter even when it carries no command', () => {
@@ -109,7 +138,8 @@ describe('a readOnly profile can use the SFTP tools that only read', () => {
     // and `read-only`. The allowlist vouches for the verb, never for what a
     // shell might do with the rest of the line.
     for (const command of ['sftp:list /tmp/a>b', 'sftp:download /tmp/a<b', 'sftp:list /tmp/a{b}']) {
-      expect(decide(command, 'sftp-list'), command).toBe('deny');
+      expect(decide(command).commandClass, command).toBe('safe');
+      expect(decide(command).decision, command).toBe('deny');
     }
   });
 });

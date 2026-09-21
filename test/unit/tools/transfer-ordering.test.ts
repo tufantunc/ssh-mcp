@@ -287,6 +287,96 @@ describe('a refused call is audited', () => {
   });
 });
 
+/**
+ * #217 at the layer it was reported at.
+ *
+ * The engine-level assertions live in readonly-guarantee.test.ts. This one
+ * drives the actual tools, because the engine tests hard-code the synthesised
+ * strings (`sftp:list …`) independently of the handlers that build them — so
+ * renaming a verb, or changing what the handler composes, leaves them green
+ * while the tools go back to being refused for the profile the fix targeted.
+ */
+describe('a readOnly profile reaches the SFTP tools that only read', () => {
+  const READ_ONLY = { role: 'viewer', readOnly: true, approvalPolicy: 'deny' as const };
+
+  /** The audit record is written on the failure path too, so a stubbed conn is enough. */
+  const decisionFor = async (name: string, args: Record<string, unknown>) => {
+    await h.client.callTool({ name, arguments: args }).catch(() => {});
+    return h.auditRecords.at(-1);
+  };
+
+  const callResult = (name: string, args: Record<string, unknown>) =>
+    h.client.callTool({ name, arguments: args })
+      .catch((err: any) => ({ isError: true, content: [{ text: err.message }] })) as Promise<any>;
+
+  it('is allowed to list', async () => {
+    h = await createHarness(READ_ONLY, { localPath: { transferRoot: root } });
+    const record = await decisionFor('sftp-list', { remotePath: '/var/log' });
+    expect(record.command).toBe('sftp:list /var/log');
+    expect(record.commandClass).toBe('read-only');
+    expect(record.decision).toBe('allow');
+  });
+
+  it('is allowed to download', async () => {
+    h = await createHarness(READ_ONLY, { localPath: { transferRoot: root } });
+    const record = await decisionFor('sftp-download', { remotePath: '/etc/nginx.conf' });
+    expect(record.command).toBe('sftp:download /etc/nginx.conf');
+    expect(record.commandClass).toBe('read-only');
+    expect(record.decision).toBe('allow');
+  });
+
+  it('is still refused every tool that writes', async () => {
+    h = await createHarness(READ_ONLY, { localPath: { transferRoot: root } });
+    for (const [name, args] of [
+      ['sftp-upload', { remotePath: '/tmp/x', content: 'x' }],
+      ['sftp-upload-file', { localPath: 'x.bin', remotePath: '/tmp/x' }],
+      ['sftp-download-file', { remotePath: '/etc/hostname', localPath: 'x.bin' }],
+    ] as const) {
+      const record = await decisionFor(name, args);
+      expect(record.decision, name).toBe('deny');
+      expect(record.commandClass, name).toBe('destructive');
+    }
+  });
+
+  it('refuses a spoofed remote path on the text tools too, not only the streaming ones', async () => {
+    // `sftp-download` interpolated the caller's raw path into the audited string
+    // and the approval prompt, with no validation at all — `synthetic: true`
+    // skips `sanitizeCommand`. Harmless while only roles holding `safe` could
+    // reach it; lowering its class is what would have opened it to every
+    // readOnly profile.
+    h = await createHarness({}, { localPath: { transferRoot: root } });
+    const spoofed = `/tmp/${String.fromCharCode(0x202e)}txt.exe`;
+
+    // The call has to be REFUSED, not merely audited under a placeholder. An
+    // earlier version of this test asserted only the audit string, which comes
+    // from `remotePathForAudit` — so deleting the `preCheck` that does the
+    // refusing left it green while a spoofed path went through to the SFTP
+    // layer.
+    const result = await callResult('sftp-download', { remotePath: spoofed });
+    expect(result.isError).toBeTruthy();
+    expect(textOf(result)).toContain('bidirectional or zero-width');
+
+    const record = h.auditRecords.at(-1);
+    expect(record.decision).toBe('deny');
+    expect(record.command).toBe('sftp:download (rejected: invalid remote path)');
+    expect(record.command).not.toContain(String.fromCharCode(0x202e));
+  });
+
+  it('refuses a spoofed remote path on sftp-upload as well', async () => {
+    h = await createHarness({}, { localPath: { transferRoot: root } });
+    const result = await callResult('sftp-upload', {
+      remotePath: `/tmp/${String.fromCharCode(0x200b)}x`,
+      content: 'x',
+    });
+    expect(result.isError).toBeTruthy();
+    // The message, not just `isError`: this harness's SFTP client is a stub, so
+    // the call fails either way and only the *reason* distinguishes a refusal
+    // from a transfer that was attempted with a spoofed path.
+    expect(textOf(result)).toContain('bidirectional or zero-width');
+    expect(h.auditRecords.at(-1).command).toBe('sftp:upload (rejected: invalid remote path)');
+  });
+});
+
 describe('refineCommand can elaborate the audited string but not replace it', () => {
   /** A pipeline over stubs, so the guard can be driven directly. */
   async function runWith(refined: string) {
