@@ -1,5 +1,23 @@
 # ssh-mcp
 
+## 2.11.0
+
+### Minor Changes
+
+- [#229](https://github.com/tufantunc/ssh-mcp/pull/229) [`87817a0`](https://github.com/tufantunc/ssh-mcp/commit/87817a09bf0564ef734eaf5c45fbf0e14969a473) Thanks [@tufantunc](https://github.com/tufantunc)! - `sftp-upload`'s approval prompt and audit record now describe what it does, not only where it does it: `sftp:upload --overwrite --bytes=142 --sha256=<32 hex> /etc/crontab`.
+  
+  The tool has always replaced an existing file at that path unconditionally, while its sibling `sftp-upload-file` refuses unless you pass `overwrite: true` and spells `--overwrite` into its own string. `sftp-upload` named a destination and no effect, and said nothing at all about the bytes — it takes its content as an argument rather than naming a local file — so two different uploads to one path produced one string. One thing for the approver to decide, one entry for an approval grant to key on, one indistinguishable audit record.
+  
+  No behaviour change: the same uploads still succeed and still replace.
+  
+  **If you write your own `[policy].denylist`, check it.** Patterns are matched against the whole approved string, and that string changed. A rule anchored on the path still works — the path deliberately comes last — but a rule anchored on the whole string, such as `^sftp:upload /root/.*$`, silently stops matching and the refusal degrades to an approval prompt with no warning. Anchor on the path segment instead. The same applies to a Rego rule matching the full `input.resource.command`. Minor rather than patch for this reason: a denylist that refused yesterday can prompt today.
+  
+  Approval grants are per-process and in-memory, so an upgrade clears them regardless; there is nothing to re-approve that a restart would not have re-asked anyway.
+
+- [#227](https://github.com/tufantunc/ssh-mcp/pull/227) [`0d56e9a`](https://github.com/tufantunc/ssh-mcp/commit/0d56e9a8da6d4b33ec1bb041f1ca77734a1935c0) Thanks [@mthamil107](https://github.com/mthamil107)! - `run-command`, `read-command`, `privileged-command` and both session types now send `AI_AGENT=ssh-mcp` to the host, so an operator can tell an agent's session from a person's. The variable appears in the session only on a host whose `sshd_config` has `AcceptEnv AI_AGENT`; everywhere else the session is unchanged.
+  
+  The request itself goes to every host regardless, so a host you do not control learns that an agent is driving. The new profile field `announceAgent = false` turns it off per host. Minor rather than patch because of that field: it is new configuration, and a release that adds one is not a fix.
+
 ## 2.10.0
 
 ### Minor Changes
