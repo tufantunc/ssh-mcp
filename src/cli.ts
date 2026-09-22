@@ -354,6 +354,9 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
     role: 'admin',
     group: resolveHostGroup(argv),
     readOnly: false,
+    // Same default as the config schema. A CLI profile is the one-off case —
+    // --host/--user with no config file — and it announces like any other.
+    announceAgent: true,
     approvalPolicy: flagEnabled(argv, 'disableApproval') ? 'auto' : defaults.approvalMode,
     cert: false,
     sessionMaxPerConnection: defaults.sessionMaxPerConnection,

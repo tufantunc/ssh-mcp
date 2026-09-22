@@ -33,6 +33,7 @@ export const testProfile: Profile = {
   maxOutputBytes: 1_048_576,
   role: 'admin',
   readOnly: false,
+  announceAgent: true,
   approvalPolicy: 'ask-destructive',
   cert: false,
   sessionMaxPerConnection: 5,

@@ -56,7 +56,7 @@ describe('roleBindings cannot be reached through the prototype chain', () => {
   it('leaves every real policy decision where it was', () => {
     const profile = (role: string) => ({
       name: 'p', group: 'prod', host: 'h', port: 22, user: 'u', auth: 'key' as const, role,
-      readOnly: false, approvalPolicy: 'ask-destructive' as const, tty: false, timeout: 5000,
+      readOnly: false, announceAgent: true, approvalPolicy: 'ask-destructive' as const, tty: false, timeout: 5000,
       maxChars: 5000, maxOutputBytes: 1_048_576, cert: false, sessionMaxPerConnection: 5,
       sessionIdleTimeoutMs: 60_000, sessionBackgroundMaxMs: 3_600_000, commandQuotaPerDay: 0,
       transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,

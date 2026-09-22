@@ -298,6 +298,7 @@ role = "operator"                   # viewer | operator | admin
 readOnly = false
 approvalPolicy = "ask-all"
 cert = false                        # SSH CA cert auth — auto-detects keyRef-cert.pub
+announceAgent = true                # Send AI_AGENT=ssh-mcp to this host (see below); clear it for a host you do not control
 sessionMaxPerConnection = 3         # per-profile override
 sessionIdleTimeoutMs = 300000       # stricter for prod
 commandQuotaPerDay = 200            # per-profile override
@@ -322,15 +323,42 @@ and tier names: every one you write under `[policy.roleBindings]` has to be
 reachable by some profile, and every profile's role and tier has to resolve to
 real bindings. Both directions are checked at startup.
 
+### Host-side identification
+
 Every command this server runs announces itself to the host as the environment
 variable `AI_AGENT=ssh-mcp`, so an operator can tell an agent's session from a
-person's — from a login hook, `auditd`, or anything else that reads the session's
-environment. It is inert unless the host opts in with
-`AcceptEnv AI_AGENT` in `sshd_config`: without that line sshd ignores the request
-and nothing changes. No version is sent, deliberately — a version would tell a
-host that may be hostile exactly which build is talking to it. There is no
-setting to turn this off; it carries the tool's name and nothing about you, your
-session or the command.
+person's from anything on the host that reads the session environment — a
+`/etc/profile` snippet or a `ForceCommand` wrapper, for instance. It covers all
+three channels a command can run on: one-shot commands, background sessions and
+interactive sessions. SFTP transfers do not carry it, because the SSH library
+this server uses offers no way to send an environment request on a subsystem
+channel.
+
+**The variable only lands in the session if the host opts in** with
+`AcceptEnv AI_AGENT` in `sshd_config`. Without that line sshd ignores it and the
+session environment is unchanged — measured against Dropbear, which has no
+`AcceptEnv` mechanism at all, and against Windows OpenSSH on a default
+configuration: the command runs, the exit code is unchanged, the variable is
+simply absent.
+
+**The request is nevertheless sent to every host, opted in or not.** `AcceptEnv`
+is the server's policy about what it stores; it is not a gate on what this client
+transmits. A host that has not opted in — including one that is hostile — can
+still see on the wire that an agent rather than a person is driving the session.
+That is why `announceAgent = false` exists on the profile: set it for any host you
+do not control and nothing is sent to it. It is on by default, because the
+operators who benefit are the ones running the hosts you do control.
+
+No version is sent, deliberately. A version would narrow a hostile host to one
+specific build; the tool's name alone does not. (The SSH transport already
+discloses the *library* version in its identification string, which is one
+library's version across every program that uses it.)
+
+Treat the variable as a courtesy label, not an attestation. Any SSH client can
+set it and any agent can omit it, so it is useful for attributing sessions you
+already trust and must not be used as an authorization or intrusion-detection
+input. Authoritative attribution belongs to the key or principal that
+authenticated.
 
 ### ProxyJump (Bastion)
 
@@ -656,11 +684,12 @@ level number.
 - **Non-root** user in all examples
 - **TOFU** host key verification (accept on first connect, verify after — within one process; see [SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart))
 - **RFC 9142** algorithm allow-list (no SHA-1, no CBC, no ssh-rsa)
-- **exec()-only** (no persistent su shells — fixes PTY leak)
+- **exec()-only for elevation** (`privileged-command` takes no `session`, so sudo never runs in a persistent shell — fixes PTY leak. Interactive sessions exist for ordinary commands; this bullet is about elevation, not about every path being an exec channel)
 - **Sudo via stdin** (not argv — fixes process list leak)
 - **Sanitizer** strips CR/LF/NUL from all metadata
 - **3-layer redaction** (field → regex → entropy) on audit logs
 - **No CLI-arg secrets** (use env vars, keychain, or config)
+- **Agent announcement is disclosed, not hidden** — every command tells the host `AI_AGENT=ssh-mcp`, including hosts that never opted in to storing it; clear `announceAgent` on a profile pointing at a host you do not control (see [Host-side identification](#host-side-identification))
 
 ### Hardening Checklist
 
@@ -868,8 +897,10 @@ is an opt-out only for hosts you have not pinned (test environments only).
 ## Testing
 
 ```bash
-# Start test SSH server
-docker-compose --profile test up -d
+# Start test SSH servers. --build matters: compose reuses an existing image, and a
+# fixture change (such as the alpine target's AcceptEnv line) then never lands,
+# which shows up as a product failure in the integration suite.
+docker compose --profile test up -d --build
 
 # Run all tests
 npm test

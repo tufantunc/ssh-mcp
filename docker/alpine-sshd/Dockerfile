@@ -17,8 +17,9 @@ RUN sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh
  && printf '\nMaxStartups 100:30:200\nMaxSessions 50\n' >> /etc/ssh/sshd_config
 
 # An operator who wants to see which sessions are agent-driven opts in with
-# AcceptEnv; sshd ignores the client's request otherwise. The dropbear target has
-# no AcceptEnv mechanism at all, which covers the other side of that.
+# AcceptEnv; sshd ignores the client's request otherwise. This line is what makes
+# the announcement observable from the session, so it is what the integration
+# case in test/integration/shell-compat.test.ts can actually falsify.
 RUN printf 'AcceptEnv AI_AGENT\n' >> /etc/ssh/sshd_config
 
 EXPOSE 2222

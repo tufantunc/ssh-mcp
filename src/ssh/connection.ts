@@ -12,21 +12,50 @@ import { openWithRetry } from './channel-retry.js';
 import { terminateChannel, COULD_NOT_SIGNAL } from './channel-signal.js';
 
 /**
- * What this server tells a host it is, on every command it runs.
+ * What this server tells a host it is, on every channel it opens for a command.
  *
- * An SSH server only puts a client's environment request into the session when
- * its own `AcceptEnv` list allows the name; otherwise sshd ignores it (and
- * debug-logs it at LogLevel DEBUG2). ssh2's `exec()` calls `reqEnv(chan,
- * opts.env)` with no callback, so the request goes out with `want_reply=0` and
- * the server has nothing to reply to: an unaccepted name cannot fail the exec
- * either. The declaration is therefore inert on every host that has not opted in.
+ * ssh2's `exec()` calls `reqEnv(chan, opts.env)` with no callback, so the request
+ * goes out with `want_reply=0` and the server has nothing to reply to: an
+ * unaccepted name cannot fail the exec. Measured against ssh2 1.17.0
+ * (`lib/client.js:1230` and the `wantReply` line at `:1863`), against Dropbear,
+ * and against Windows OpenSSH on a default config — the command runs, the
+ * variable is simply absent, exit code unchanged.
  *
- * Name only, deliberately. A version number would tell a host that may be
- * hostile exactly which build is talking to it, and this tool exists to drive
- * machines an agent was pointed at. A name is an announcement; a version is a
- * fingerprint.
+ * **The request is sent to every host, `AcceptEnv` or not.** `AcceptEnv` is the
+ * server's policy about whether it *stores* the pair in the session environment;
+ * it is not a client-side gate, and nothing here consults it. Measured on the
+ * wire against Dropbear, which has no `AcceptEnv` mechanism at all:
+ *
+ *     Outbound: Sending CHANNEL_REQUEST (r:0, env: AI_AGENT=ssh-mcp)
+ *     Outbound: Sending CHANNEL_REQUEST (r:0, exec: echo hi)
+ *
+ * So a host that never opted in still learns that an agent, not a person, is
+ * driving this session. That is a disclosure, and SECURITY.md's threat model
+ * includes a host tailoring its output to inject the model — which is why
+ * `announceAgent = false` exists on the profile. An earlier draft of this comment
+ * called the declaration "inert" on a host that had not opted in; that is true of
+ * the session environment and false of the wire, and the distinction is the whole
+ * reason the profile has a switch.
+ *
+ * Name only, deliberately — no ssh-mcp build number. The transport already
+ * discloses the *library* version in its identification string (ssh2 sends
+ * `SSH-2.0-ssh2js<ver>` and nothing here overrides `ident`), but that is one
+ * library's version across every user of it; a per-build number for this tool
+ * would narrow a hostile host to one deployment.
+ *
+ * `AI_AGENT` is deliberately outside this project's `SSH_MCP_*` namespace. Every
+ * other environment name this repo owns is prefixed; this one is not, because it
+ * is a cross-tool convention read by server-side detectors that do not know or
+ * care which client sent it, and a prefixed name would defeat the only purpose it
+ * has. Renaming it to `SSH_MCP_AGENT` would look like a consistency fix and would
+ * silently break every consumer — hence this paragraph.
+ *
+ * Frozen because it is one object shared by every channel on every connection in
+ * the process. Nothing mutates it today; the first per-command addition to a
+ * channel's `env` would, and would leak across profiles for the life of the
+ * process.
  */
-const AGENT_ENV: ExecOptions['env'] = { AI_AGENT: 'ssh-mcp' };
+const AGENT_ENV = Object.freeze({ AI_AGENT: 'ssh-mcp' });
 
 /**
  * Stop the command behind `channel`, record why on the span, and return the sentence the
@@ -110,6 +139,12 @@ export class SSHConnection {
         return new Promise<ClientChannel>((resolve, reject) => {
           this.getClient().shell(
             { term: 'xterm-256color', cols: 200, rows: 50 },
+            // Three-argument form, deliberately. ssh2 reclassifies the first
+            // argument as the options object when it carries `env` or `x11`
+            // (lib/client.js:1260), so folding the announcement into the window
+            // object above would silently drop term/cols/rows on every
+            // interactive session.
+            this.channelEnv(),
             (err, stream) => (err ? reject(err) : resolve(stream)),
           );
         });
@@ -119,7 +154,7 @@ export class SSHConnection {
         return new Promise<ClientChannel>((resolve, reject) => {
           this.getClient().exec(
             this.applyWorkdir(command),
-            { env: AGENT_ENV },
+            this.channelEnv(),
             (err, stream) => (err ? reject(err) : resolve(stream)),
           );
         });
@@ -127,6 +162,28 @@ export class SSHConnection {
       onChannelOpened: () => { this.activeChannels++; },
       onChannelClosed: () => { this.activeChannels--; },
     });
+  }
+
+  /**
+   * The announcement for a channel about to be opened, or nothing.
+   *
+   * One accessor rather than an object literal at each site. The first version of
+   * this feature wrote `{ env: AGENT_ENV }` at two of the three channel-opening
+   * sites and missed `openShell`, which left every command run inside an
+   * interactive session unannounced while the README claimed otherwise. Three
+   * literals give a site the chance to look complete while carrying nothing; a
+   * missing call to this does not.
+   *
+   * Read live, like every other profile field here: the profile object can be
+   * replaced after construction, so an operator clearing `announceAgent` is
+   * honoured on the next channel rather than at the next restart.
+   *
+   * The return type is the intersection both callers accept — `ExecOptions` and
+   * `ShellOptions` declare `env` identically — so one accessor serves `exec()`,
+   * `openExec` and `openShell` without naming either API.
+   */
+  private channelEnv(): { env?: NodeJS.ProcessEnv } {
+    return this.profile.announceAgent === false ? {} : { env: AGENT_ENV };
   }
 
   async ensureConnected(): Promise<void> {
@@ -312,7 +369,7 @@ export class SSHConnection {
         }
       }, timeoutMs);
 
-      const execOpts: ExecOptions = { env: AGENT_ENV };
+      const execOpts: ExecOptions = { ...this.channelEnv() };
       if (opts.tty || this.profile.tty) {
         execOpts.pty = { term: 'xterm-256color', cols: 200, rows: 50 };
       }
