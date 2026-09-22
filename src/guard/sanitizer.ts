@@ -1,26 +1,45 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+// The classifier's own resolver, not a second one. See SYNTHETIC_NAMESPACE below.
+import { extractBinary } from '../policy/classifier.js';
 
 /** Every character a shell would read as the end of one command and the start of another. */
 const LINE_BREAKS = /[\r\n\u2028\u2029]/;
 const NUL = /\u0000/;
 
 /**
- * Validate a caller-supplied command.
+ * Verbs this server builds for itself, which a caller may therefore not type.
  *
- * A line break is refused, not removed. The constraint itself is not negotiable
- * — a newline inside `command` would let a second command ride along past a
- * classifier that parsed only the first, which is #44 — but an earlier version
- * enforced it by replacing the break with a space, and *that* is the part worth
- * changing. The caller got no error and a different command than it asked for:
- * two lines joined, so `ls\necho x` ran `ls echo x`; or a `#` comment in a
- * `python3 -c` body pulled onto the same line, commenting out everything after
- * it. Sometimes that raises. Sometimes it runs and quietly does half the work,
- * which is the failure mode worth removing (#198).
+ * `classifyOuter` cannot tell a synthetic string from one a caller typed — both
+ * arrive as text. So the moment `sftp:list` was given a class, `read-command`
+ * accepted it as a command word too: measured, a `readOnly` viewer could send
+ * `read-command "sftp:list /tmp sudo id"` and the classifier answered
+ * `read-only`, the gate allowed it, and `exec` ran it. On main the same string
+ * was `safe` and refused.
  *
- * Trailing and leading breaks are trimmed rather than refused. A client that
- * appends a newline works today, refusing it would break that for no gain, and
- * a break at either end cannot join two commands.
+ * The audit log had the same problem from the other side: a forged record was
+ * identical in every field to one the tool itself produced.
+ *
+ * `sanitizeCommand` is the right place because it runs, by construction, only
+ * for commands that did *not* come from us — `runAudited` skips it when
+ * `synthetic: true`.
+ *
+ * Tested against `extractBinary`, the classifier's own resolver, rather than
+ * against a first-token helper of this file's own. A private one was written
+ * first and drifted immediately: `extractBinary` strips a leading `-c ` and the
+ * leading privilege prefixes, which the helper did not, so
+ * `read-command "-c sftp:download /etc/shadow"` resolved to binary
+ * `sftp:download`, classified `read-only`, was allowed on a profile that denies
+ * it on main, and executed. Two resolvers answering one question is the bug;
+ * asking the one that decides is the fix.
+ *
+ * Scope of the guarantee, stated narrowly on purpose: an `sftp:*` or `session:*`
+ * audit record is provably tool-generated. `signal-process` synthesises
+ * `kill -TERM <pid>`, which is outside this namespace and cannot be reserved —
+ * `kill` is a binary a caller may legitimately need — so a record of that shape
+ * is not covered.
  */
+const SYNTHETIC_NAMESPACE = /^(?:sftp|session):/;
+
 export function sanitizeCommand(command: unknown, maxChars: number): string {
   if (typeof command !== 'string') {
     throw new McpError(ErrorCode.InvalidParams, 'Command must be a string');
@@ -41,6 +60,14 @@ export function sanitizeCommand(command: unknown, maxChars: number): string {
   if (NUL.test(cleaned)) {
     throw new McpError(ErrorCode.InvalidParams, 'Command cannot contain a null byte');
   }
+  if (SYNTHETIC_NAMESPACE.test(extractBinary(cleaned))) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      'Command cannot begin with "sftp:" or "session:": that namespace is reserved for the ' +
+      'strings this server builds for its own tools, and the classifier cannot tell a typed ' +
+      'one from a generated one. Use the sftp-* and *-session tools instead.',
+    );
+  }
   if (Number.isFinite(maxChars) && cleaned.length > maxChars) {
     throw new McpError(ErrorCode.InvalidParams, `Command is too long (max ${maxChars} characters)`);
   }
@@ -51,16 +78,28 @@ export function sanitizeCommand(command: unknown, maxChars: number): string {
  * Every character that could make the audited string, the approval prompt and
  * the path actually used disagree with each other.
  *
- * C0 and C1 controls, the Unicode line separators, the whole Bidi_Control set
- * (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069) and the zero-width
- * formatters. A remote path is quoted back to a human in the approval prompt
- * and written into a hash-chained audit record, so a name carrying a
- * right-to-left override renders as one path and transfers another, and one
- * carrying a zero-width space renders identically to a different path.
+ * C0 and C1 controls, the Unicode line separators, the Bidi_Control set
+ * (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069), and the zero-width
+ * characters that carry no meaning of their own. A remote path is quoted back to
+ * a human in the approval prompt and written into a hash-chained audit record,
+ * so a name carrying a right-to-left override renders as one path and transfers
+ * another, and one carrying a zero-width space renders identically to a
+ * different path.
  *
  * An earlier version stopped at the overrides and isolates, which left the
  * marks that reorder *neutral* characters — and a path is mostly neutrals:
  * slashes, dots, hyphens and digits.
+ *
+ * **U+200C and U+200D are deliberately not here**, though they sit inside the
+ * range an earlier version of this class swept up. ZWNJ and ZWJ are invisible
+ * but not meaningless: they are orthographically required in Persian and in the
+ * Indic scripts, and structural inside an emoji sequence. Refusing them rejected
+ * real filenames — measured, `/srv/mi<ZWNJ>ravad.txt` is a name a filesystem
+ * accepts and a user types. The spoofing argument does not reach them either,
+ * since it rests on two *different* paths rendering identically, and this
+ * codebase already accepts that for homoglyphs (Cyrillic а against Latin a),
+ * which no character class can catch. Refusing the joiners while accepting those
+ * was inconsistent and cost legitimate input.
  *
  * Exported because `tools/local-path.ts` asks the same question of the local
  * half. The two *functions* are split for a real reason — that one has to stat
@@ -68,7 +107,7 @@ export function sanitizeCommand(command: unknown, maxChars: number): string {
  * copies of it drift the first time a codepoint is added.
  */
 export const PATH_CONTROL_CHARS =
-  /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
+  /[\u0000-\u001f\u007f-\u009f\u061c\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
 
 /** Longer than any path a real filesystem accepts, so this bounds nothing legitimate. */
 const MAX_REMOTE_PATH_CHARS = 4096;

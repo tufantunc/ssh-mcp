@@ -158,6 +158,18 @@ describe.skipIf(IS_WINDOWS)('localFileForRead', () => {
       /control or bidi formatting/,
     );
   });
+
+  it('accepts a local name carrying a zero-width joiner', async () => {
+    // The local half of the same character class, which `guard/sanitizer.ts`
+    // exports and this file's `validateInput` consumes. Narrowing it to let
+    // U+200C/U+200D through was argued on the remote half and silently changed
+    // this one too — measured, widening it back was caught only by remote-half
+    // tests, so the local side of a deliberate change was unpinned in both
+    // directions. ZWNJ is orthographic in Persian; the file really exists.
+    const name = 'mi\u200Cravad.txt';
+    await writeFile(join(rootCanonical, name), 'x');
+    await expect(localFileForRead(ctx, name)).resolves.toBeDefined();
+  });
 });
 
 describe.skipIf(IS_WINDOWS)('the transfer root itself', () => {

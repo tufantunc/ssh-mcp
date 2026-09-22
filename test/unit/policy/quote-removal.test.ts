@@ -172,16 +172,29 @@ describe('synthesised commands are classified (F3)', () => {
   });
 
   it.each([
-    ['sftp:download /etc/shadow', 'safe'],
-    ['sftp:list /etc', 'safe'],
-    ['session:close interactive s1', 'safe'],
-  ])('%s keeps the class it has today', (command, expected) => {
-    // Each would move DOWN from `safe`, and lowering a class is a widening. Pinned so
-    // that none is quietly changed inside a security release. `sftp:list` is here rather
-    // than in SYNTHETIC_CLASSES on purpose: a `read-only` entry could not raise anything
-    // and so would be inert, and letting a `viewer` list a directory is a role-binding
-    // decision rather than a classification one.
+    ['sftp:download /etc/shadow', 'read-only'],
+    ['sftp:list /etc', 'read-only'],
+  ])('%s reads and is classified as reading', (command, expected) => {
+    // These two were pinned at `safe` when the streaming tools landed, on the
+    // argument that lowering a class is a widening and does not belong inside a
+    // security release. That was right about the release and wrong about the
+    // end state: both tools advertise `readOnlyHint: true`, and `safe` is
+    // refused outright by a `readOnly` profile, so the one profile class the
+    // annotation targets was the one that could not run them (#217).
+    //
+    // The lowering is defensible on its own terms rather than by convenience: a
+    // `readOnly` profile already holds `cat` and `ls`, so the authority to read
+    // any file the SSH user can read is already granted. These reach it without
+    // a shell, which is narrower. The guards are pinned in
+    // readonly-guarantee.test.ts, which drives the engine rather than the
+    // classifier.
     expect(classifyCommand(command).class, command).toBe(expected);
+  });
+
+  it('session:close keeps the class it has today', () => {
+    // Still `safe`, and still deliberately so: closing a session is a release
+    // rather than an acquisition, and there is no tool advertising it as a read.
+    expect(classifyCommand('session:close interactive s1').class).toBe('safe');
   });
 
   it.each([
