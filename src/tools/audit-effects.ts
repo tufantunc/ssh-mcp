@@ -44,9 +44,14 @@ const DIGEST_CHARS = 12;
  * Byte length rather than `content.length`: a JS string counts UTF-16 code
  * units, and the upload writes `Buffer.from(content)` as utf8, so the two
  * disagree on every multi-byte character. The digest is over the same bytes.
+ *
+ * `string` only, though `SftpClient.upload` also accepts a Buffer: the one tool
+ * that calls this takes its content through `z.string()`, so a Buffer branch
+ * here would be a branch no test could reach honestly. Widen it when a caller
+ * needs it, with the case that needs it.
  */
-export function payloadSuffix(content: string | Buffer): string {
-  const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
+export function payloadSuffix(content: string): string {
+  const bytes = Buffer.from(content, 'utf8');
   const digest = createHash('sha256').update(bytes).digest('hex').slice(0, DIGEST_CHARS);
   return ` --bytes=${bytes.byteLength} --sha256=${digest}`;
 }
