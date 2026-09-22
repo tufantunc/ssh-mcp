@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { redactText } from '../guard/redactor.js';
 import { remotePathForAudit, sanitizeRemotePath } from '../guard/sanitizer.js';
 import { SftpClient } from '../ssh/sftp.js';
+import { effectSuffix, payloadSuffix } from './audit-effects.js';
 import { TOOL_DESCRIPTIONS as D } from './descriptions.js';
 import { syntheticSuccess, textResult } from './results.js';
 import type { ToolDeps, Pipeline } from './pipeline.js';
@@ -10,12 +11,15 @@ import type { ToolDeps, Pipeline } from './pipeline.js';
  * SFTP transfer tools.
  *
  * Both paths go through `sanitizeRemotePath`, the same bar the streaming tools
- * hold — for the *path*, which is the only axis brought level here. `sftp-upload`
- * still truncates an existing remote file unconditionally while
- * `sftp-upload-file` refuses unless `overwrite` is passed and spells
- * `--overwrite` into the approved string, and `content` is still absent from that
- * string. Both predate this change and are tracked as #223; saying "the same
- * bar" without this sentence claimed a parity that does not exist. `synthetic: true` skips `sanitizeCommand`, and these two interpolated
+ * hold — for the *path*. `sftp-upload` still truncates an existing remote file
+ * unconditionally where `sftp-upload-file` refuses unless `overwrite` is passed;
+ * what changed with #223 is that the approved string now says so, and carries a
+ * descriptor for the inline payload, so an approver is no longer shown a string
+ * that means "will not clobber" on the sibling tool while approving an
+ * unconditional replacement with bytes they were never shown. The behaviour is
+ * unchanged on purpose: a default of `overwrite: false` would break every caller
+ * that relies on replacement, and one of `true` would put `--overwrite` on almost
+ * every call and train the approver to skip it. `synthetic: true` skips `sanitizeCommand`, and these two interpolated
  * the caller's raw string, so nothing refused a bidi override or a zero-width
  * character in a path that is quoted back in the approval prompt and written
  * into a hash-chained audit record — the exact confusion that validator exists
@@ -44,7 +48,10 @@ export function registerFileTools(
     { destructiveHint: true },
     async ({ remotePath, content, profile }, extra) => {
       return runAudited(
-        `sftp:upload ${remotePathForAudit(remotePath)}`,
+        // `effectSuffix(true)` rather than a literal ' --overwrite': this tool
+        // always replaces, and spelling it through the same helper the streaming
+        // pair uses is what keeps the two vocabularies from drifting apart again.
+        `sftp:upload ${remotePathForAudit(remotePath)}${effectSuffix(true)}${payloadSuffix(content)}`,
         {
           toolName: 'sftp-upload',
           failureClass: 'destructive',

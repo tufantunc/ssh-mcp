@@ -4,6 +4,7 @@ import { redactText } from '../guard/redactor.js';
 import { remotePathForAudit, sanitizeRemotePath } from '../guard/sanitizer.js';
 import { SftpClient } from '../ssh/sftp.js';
 import type { SftpStat } from '../types.js';
+import { effectSuffix } from './audit-effects.js';
 import { TOOL_DESCRIPTIONS as D } from './descriptions.js';
 import {
   createLocalDownload,
@@ -156,11 +157,6 @@ export function checkMode(mode: number | undefined): number | undefined {
     );
   }
   return mode;
-}
-
-/** The arguments that change what a transfer does, spelled for policy and the approver. */
-function effectSuffix(overwrite: boolean | undefined, mode?: number): string {
-  return (overwrite ? ' --overwrite' : '') + (mode !== undefined ? ` --mode=${mode.toString(8)}` : '');
 }
 
 /**

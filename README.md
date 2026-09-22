@@ -154,7 +154,7 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 | `read-command` | Execute allowlisted read-only commands (`ls`, `cat`, `grep`, ...) | ✅ | — |
 | `run-command` | Execute arbitrary commands (destructive/privileged need approval, unless `approvalPolicy = "auto"`) | — | — |
 | `privileged-command` | Execute with sudo (needs approval, unless `approvalPolicy = "auto"`) | — | ✅ |
-| `sftp-upload` | Upload a file via SFTP | — | ✅ |
+| `sftp-upload` | Upload a file via SFTP (replaces the destination unconditionally) | — | ✅ |
 | `sftp-download` | Download a file via SFTP | ✅ | — |
 | `sftp-list` | List a remote directory, bounded in entries and bytes | ✅ | — |
 | `sftp-upload-file` | Stream a local file to the remote host, never through model context | — | ✅ |
@@ -167,6 +167,15 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 the text is an argument on the way out and a response on the way back. That is
 what you want for a config snippet and exactly what you do not want for a 200 MB
 tarball or anything binary.
+
+The two also differ on what they do to an existing destination, and the approved
+string now says which is which. `sftp-upload` replaces unconditionally and spells
+`--overwrite` every time, because that is what it always does; `sftp-upload-file`
+refuses unless you pass `overwrite: true`, and only then carries the flag. Since
+`sftp-upload` takes its content as an argument rather than naming a local file,
+its string also carries `--bytes=<n> --sha256=<12 hex>` — without that, two
+uploads to the same path are the same string, which means one approval covers
+both and an auditor cannot tell which set of bytes landed.
 
 `sftp-upload-file` and `sftp-download-file` stream between the remote host and
 local disk instead. Neither the bytes nor a base64 encoding of them ever reaches
