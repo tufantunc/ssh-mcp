@@ -34,7 +34,7 @@ async function upload(args: Record<string, unknown>) {
 }
 
 describe('the approved string for sftp-upload describes the operation', () => {
-  it('spells the destination, the replacement and the payload, in that order', async () => {
+  it('spells the replacement, the payload and the destination, in that order', async () => {
     h = await createHarness({});
     const record = await upload({ remotePath: '/etc/crontab', content: 'x' });
     // The decision, not only the string. Measured in review: without this, the
@@ -49,7 +49,7 @@ describe('the approved string for sftp-upload describes the operation', () => {
     expect(String(record.error ?? ''), 'the call must not have been refused')
       .not.toMatch(/APPROVAL_DENIED|POLICY_DENIED/);
     expect(record.command).toMatch(
-      new RegExp(`^sftp:upload /etc/crontab --overwrite --bytes=1 --sha256=${DIGEST}$`),
+      new RegExp(`^sftp:upload --overwrite --bytes=1 --sha256=${DIGEST} /etc/crontab$`),
     );
   });
 
@@ -86,7 +86,7 @@ describe('the approved string for sftp-upload describes the operation', () => {
       .toBeGreaterThan(content.length);
     const record = await upload({ remotePath: '/srv/x', content });
     expect(record.command).toMatch(
-      new RegExp(`^sftp:upload /srv/x --overwrite --bytes=6 --sha256=${DIGEST}$`),
+      new RegExp(`^sftp:upload --overwrite --bytes=6 --sha256=${DIGEST} /srv/x$`),
     );
   });
 

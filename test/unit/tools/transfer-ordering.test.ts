@@ -389,7 +389,7 @@ describe('a readOnly profile reaches the SFTP tools that only read', () => {
     // Shape rather than a hard-coded digest: what this line is for is that the
     // path is the placeholder, and the suffixes must not paper over that.
     expect(h.auditRecords.at(-1).command).toMatch(
-      /^sftp:upload \(rejected: invalid remote path\) --overwrite --bytes=1 --sha256=[0-9a-f]{32}$/,
+      /^sftp:upload --overwrite --bytes=1 --sha256=[0-9a-f]{32} \(rejected: invalid remote path\)$/,
     );
   });
 });

@@ -53,8 +53,18 @@ export function registerFileTools(
     { destructiveHint: true },
     async ({ remotePath, content, profile }, extra) => {
       return runAudited(
-        // Constant, because this tool has no overwrite parameter — it always replaces.
-        `sftp:upload ${remotePathForAudit(remotePath)}${OVERWRITE_FLAG}${payloadSuffix(content)}`,
+        // Verb, then what the operation does, then the path it does it to — and the
+        // path LAST on purpose. The engine matches `[policy].denylist` against this
+        // whole string, so an operator rule anchored on the path (`authorized_keys$`,
+        // the natural and portable way to write "nothing may write here") keeps
+        // working only while the path ends the line. Measured: with the suffixes
+        // appended after the path instead, that rule silently stops matching and the
+        // refusal degrades to a prompt with no warning. A whole-string rule
+        // (`^sftp:upload /root.*$`) breaks either way — it is coupled to a format
+        // that is ours to change — so the layout is chosen for the form that is not.
+        // `sftp:list` and `sftp:download` carry no flags, so they already read this
+        // way and need no change.
+        `sftp:upload${OVERWRITE_FLAG}${payloadSuffix(content)} ${remotePathForAudit(remotePath)}`,
         {
           toolName: 'sftp-upload',
           failureClass: 'destructive',

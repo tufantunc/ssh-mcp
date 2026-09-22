@@ -179,10 +179,12 @@ both and an auditor cannot tell which set of bytes landed. The digest is 128
 bits rather than a short prefix because that claim has to hold against a caller
 who picks both payloads, not only against an accidental repeat.
 
-One upgrade note if you write your own `[policy].denylist`: the approved string
-for `sftp-upload` is longer than it was, so a pattern anchored on the end — say
-`authorized_keys$` — no longer matches and the rule silently stops firing. Drop
-the `$`, or anchor on the path segment instead.
+The path comes last in that string on purpose. `[policy].denylist` patterns are
+matched against the whole approved string, so a rule anchored on the path —
+`authorized_keys$`, the natural way to write "nothing may write here" — keeps
+working. A rule anchored on the *whole* string (`^sftp:upload /root/.*$`) does
+not: it was coupled to a format that is ours to change, and this release changes
+it. Anchor on the path segment instead.
 
 `sftp-upload-file` and `sftp-download-file` stream between the remote host and
 local disk instead. Neither the bytes nor a base64 encoding of them ever reaches
