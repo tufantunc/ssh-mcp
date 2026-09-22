@@ -6,82 +6,117 @@ import { createHarness, type Harness } from './harness.js';
  * #223: what `sftp-upload`'s approved string says about what it is going to do.
  *
  * The tool replaces an existing remote file unconditionally — `createWriteStream`
- * with default flags — while its sibling `sftp-upload-file` refuses unless
- * `overwrite: true` and spells `--overwrite` into its own string. Both used to
- * render as `sftp:upload[-file] <path>`, so an approver was shown a string that
- * means "will not clobber" on one tool while approving an unconditional
- * replacement on the other, with bytes that appeared nowhere.
+ * with default flags — and its string used to name a destination and no effect,
+ * while saying nothing at all about the bytes. So two uploads to one path were one
+ * string: one thing for the approver to decide, one entry for `ApprovalGrants` to
+ * key on, and one indistinguishable audit record for whoever later asks which set
+ * of bytes landed.
  *
- * `ApprovalGrants` keys on this same string, which is what turns a cosmetic
- * complaint into a security one: one approval covered the create case and the
- * destroy case because they were spelled identically.
- *
- * These assert the string, not the transfer, because the string *is* the thing
- * under test — it is what the approver reads, what policy classifies, and what
- * the audit record keeps.
+ * The assertions are anchored on the whole string rather than `toContain`. Measured
+ * in review: with substring assertions, renaming the flag to `--overwrite-always`,
+ * multiplying the byte count by ten, lengthening the digest and swapping the suffix
+ * order all left this file green. A substring assertion on a string whose whole
+ * point is its exact shape tests almost nothing.
  */
+
+/** 32 hex characters — see DIGEST_CHARS in audit-effects.ts for why not fewer. */
+const DIGEST = '[0-9a-f]{32}';
 
 let h: Harness;
 afterEach(async () => { await h?.close(); });
 
-/** The audited command for one `sftp-upload` call, with exactly one record required. */
-async function auditedUpload(args: Record<string, unknown>): Promise<string> {
+/** The audit record for one `sftp-upload` call, with exactly one record required. */
+async function upload(args: Record<string, unknown>) {
   const before = h.auditRecords.length;
   await h.client.callTool({ name: 'sftp-upload', arguments: args }).catch(() => {});
   expect(h.auditRecords.length, 'sftp-upload wrote no audit record').toBe(before + 1);
-  return h.auditRecords[before].command as string;
+  return h.auditRecords[before];
 }
 
 describe('the approved string for sftp-upload describes the operation', () => {
-  it('spells the replacement it always performs', async () => {
+  it('spells the destination, the replacement and the payload, in that order', async () => {
     h = await createHarness({});
-    const command = await auditedUpload({ remotePath: '/etc/crontab', content: 'x' });
-    expect(command).toContain('sftp:upload /etc/crontab');
-    expect(command, 'the tool truncates unconditionally, so the string must say so')
-      .toContain(' --overwrite');
+    const record = await upload({ remotePath: '/etc/crontab', content: 'x' });
+    // The decision, not only the string. Measured in review: without this, the
+    // whole file passed with the approver declining, with a readOnly profile, and
+    // with approvalPolicy 'never' — because a refusal records the same command.
+    expect(record.decision, 'a destructive upload must reach the approval gate')
+      .toBe('require-approval');
+    // And got past it. `decision` is the policy's answer, not the approver's, so
+    // it reads `require-approval` whether the human said yes or no — measured, a
+    // declining approver left this whole file green when `decision` was the only
+    // thing asserted. The refusals name themselves in `error`.
+    expect(String(record.error ?? ''), 'the call must not have been refused')
+      .not.toMatch(/APPROVAL_DENIED|POLICY_DENIED/);
+    expect(record.command).toMatch(
+      new RegExp(`^sftp:upload /etc/crontab --overwrite --bytes=1 --sha256=${DIGEST}$`),
+    );
   });
 
-  it('distinguishes two uploads to the same path', async () => {
-    // The defect itself. Without a payload descriptor these two are the same
-    // string, so one approval — and one ApprovalGrants entry — covers both, and
-    // an auditor reading the log cannot tell which set of bytes landed.
+  it('distinguishes two same-length uploads to the same path', async () => {
+    // Same length on purpose. An earlier version used payloads of 16 and 20 bytes,
+    // so `--bytes` alone separated them and the digest was never load-bearing —
+    // measured, digesting a constant left that version passing. These two differ
+    // only in content, which is the case an attacker constructs and the one the
+    // digest exists for.
     h = await createHarness({});
-    const first = await auditedUpload({ remotePath: '/etc/crontab', content: '* * * * * true\n' });
-    const second = await auditedUpload({ remotePath: '/etc/crontab', content: '* * * * * curl evil\n' });
-    expect(first).not.toBe(second);
+    const a = await upload({ remotePath: '/etc/crontab', content: '* * * * * /bin/true\n' });
+    const b = await upload({ remotePath: '/etc/crontab', content: '* * * * * /bin/evil\n' });
+    expect(a.command).toContain(' --bytes=20 ');
+    expect(b.command).toContain(' --bytes=20 ');
+    expect(a.command).not.toBe(b.command);
   });
 
   it('gives identical bytes an identical string, so a repeat is still one operation', async () => {
-    // The other half of the previous case: the descriptor must be a function of
-    // the payload, not of the call. A nonce here would make every upload a new
-    // approval and train the approver to click through.
+    // The other half: the descriptor must be a function of the payload, not of the
+    // call. Measured, both a counter and `Date.now()` in the suffix fail this.
     h = await createHarness({});
-    const first = await auditedUpload({ remotePath: '/srv/app.conf', content: 'port = 8080\n' });
-    const second = await auditedUpload({ remotePath: '/srv/app.conf', content: 'port = 8080\n' });
-    expect(first).toBe(second);
+    const first = await upload({ remotePath: '/srv/app.conf', content: 'port = 8080\n' });
+    const second = await upload({ remotePath: '/srv/app.conf', content: 'port = 8080\n' });
+    expect(first.command).toBe(second.command);
   });
 
   it('counts the bytes that land on the host, not the characters in the argument', async () => {
-    // 'é' and the emoji are one JS string unit each and several utf8 bytes;
-    // `SftpClient.upload` writes Buffer.from(content), so a length-based count
-    // under-reports exactly what an approver is trying to judge.
     h = await createHarness({});
     const content = 'é🔑';
-    const command = await auditedUpload({ remotePath: '/srv/x', content });
-    // 3 UTF-16 units: 'é' is one, the emoji is a surrogate pair. 6 utf8 bytes.
-    expect(content.length, 'precondition: the string is shorter than its utf8 encoding').toBe(3);
-    expect(command).toContain(` --bytes=${Buffer.byteLength(content, 'utf8')}`);
-    expect(command).toContain(' --bytes=6');
+    // The invariant, not a number: an ASCII fixture satisfies `content.length === 3`
+    // too, and then the case silently stops exercising the encoding at all.
+    expect(Buffer.byteLength(content, 'utf8'),
+      'precondition: the fixture must encode to more bytes than it has UTF-16 units')
+      .toBeGreaterThan(content.length);
+    const record = await upload({ remotePath: '/srv/x', content });
+    expect(record.command).toMatch(
+      new RegExp(`^sftp:upload /srv/x --overwrite --bytes=6 --sha256=${DIGEST}$`),
+    );
   });
 
-  it('digests the same bytes it uploads', async () => {
-    // Computed here from the input rather than read back from the module, so
-    // this fails if the digest is ever taken over something else — the string,
-    // a normalised copy, or the path.
+  it('digests the same bytes it uploads, in the same encoding', async () => {
+    // Multi-byte fixture deliberately: for pure ASCII, latin1 and utf8 are
+    // byte-identical, so an ASCII fixture cannot tell a wrong encoding from a right
+    // one — measured, digesting latin1 while counting utf8 left the whole repo green.
     h = await createHarness({});
-    const content = 'hello world\n';
-    const expected = createHash('sha256').update(Buffer.from(content, 'utf8')).digest('hex').slice(0, 12);
-    const command = await auditedUpload({ remotePath: '/srv/x', content });
-    expect(command).toContain(` --sha256=${expected}`);
+    const content = 'é🔑 hello world\n';
+    const expected = createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 32);
+    const record = await upload({ remotePath: '/srv/x', content });
+    expect(record.command).toContain(` --sha256=${expected}`);
+  });
+});
+
+describe('the string is what an approval grant is keyed on', () => {
+  // The security argument for the whole change, exercised through the mechanism
+  // rather than through string equality. Grants are off by default
+  // (`approvalGrantTtlMs` 0), so this block has to turn them on.
+  it('does not let one approval cover a different payload to the same path', async () => {
+    h = await createHarness({}, { approvalGrantTtlMs: 60_000 });
+    await upload({ remotePath: '/etc/crontab', content: '* * * * * /bin/true\n' });
+    await upload({ remotePath: '/etc/crontab', content: '* * * * * /bin/evil\n' });
+    expect(h.approvalPrompts(), 'the second payload must be approved on its own').toBe(2);
+  });
+
+  it('still lets one approval cover a byte-identical repeat', async () => {
+    h = await createHarness({}, { approvalGrantTtlMs: 60_000 });
+    await upload({ remotePath: '/etc/crontab', content: '* * * * * /bin/true\n' });
+    await upload({ remotePath: '/etc/crontab', content: '* * * * * /bin/true\n' });
+    expect(h.approvalPrompts(), 'an identical repeat is the same operation').toBe(1);
   });
 });

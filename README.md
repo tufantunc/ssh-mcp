@@ -173,9 +173,16 @@ string now says which is which. `sftp-upload` replaces unconditionally and spell
 `--overwrite` every time, because that is what it always does; `sftp-upload-file`
 refuses unless you pass `overwrite: true`, and only then carries the flag. Since
 `sftp-upload` takes its content as an argument rather than naming a local file,
-its string also carries `--bytes=<n> --sha256=<12 hex>` — without that, two
+its string also carries `--bytes=<n> --sha256=<32 hex>` — without that, two
 uploads to the same path are the same string, which means one approval covers
-both and an auditor cannot tell which set of bytes landed.
+both and an auditor cannot tell which set of bytes landed. The digest is 128
+bits rather than a short prefix because that claim has to hold against a caller
+who picks both payloads, not only against an accidental repeat.
+
+One upgrade note if you write your own `[policy].denylist`: the approved string
+for `sftp-upload` is longer than it was, so a pattern anchored on the end — say
+`authorized_keys$` — no longer matches and the rule silently stops firing. Drop
+the `$`, or anchor on the path segment instead.
 
 `sftp-upload-file` and `sftp-download-file` stream between the remote host and
 local disk instead. Neither the bytes nor a base64 encoding of them ever reaches
