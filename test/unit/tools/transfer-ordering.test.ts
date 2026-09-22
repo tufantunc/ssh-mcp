@@ -386,7 +386,11 @@ describe('a readOnly profile reaches the SFTP tools that only read', () => {
     // the call fails either way and only the *reason* distinguishes a refusal
     // from a transfer that was attempted with a spoofed path.
     expect(textOf(result)).toContain('bidirectional or zero-width');
-    expect(h.auditRecords.at(-1).command).toBe('sftp:upload (rejected: invalid remote path)');
+    // Shape rather than a hard-coded digest: what this line is for is that the
+    // path is the placeholder, and the suffixes must not paper over that.
+    expect(h.auditRecords.at(-1).command).toMatch(
+      /^sftp:upload --overwrite --bytes=1 --sha256=[0-9a-f]{32} \(rejected: invalid remote path\)$/,
+    );
   });
 });
 

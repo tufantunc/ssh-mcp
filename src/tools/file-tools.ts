@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { redactText } from '../guard/redactor.js';
 import { remotePathForAudit, sanitizeRemotePath } from '../guard/sanitizer.js';
 import { SftpClient } from '../ssh/sftp.js';
+import { OVERWRITE_FLAG, payloadSuffix } from './audit-effects.js';
 import { TOOL_DESCRIPTIONS as D } from './descriptions.js';
 import { syntheticSuccess, textResult } from './results.js';
 import type { ToolDeps, Pipeline } from './pipeline.js';
@@ -10,12 +11,20 @@ import type { ToolDeps, Pipeline } from './pipeline.js';
  * SFTP transfer tools.
  *
  * Both paths go through `sanitizeRemotePath`, the same bar the streaming tools
- * hold — for the *path*, which is the only axis brought level here. `sftp-upload`
- * still truncates an existing remote file unconditionally while
- * `sftp-upload-file` refuses unless `overwrite` is passed and spells
- * `--overwrite` into the approved string, and `content` is still absent from that
- * string. Both predate this change and are tracked as #223; saying "the same
- * bar" without this sentence claimed a parity that does not exist. `synthetic: true` skips `sanitizeCommand`, and these two interpolated
+ * hold — for the *path*.
+ *
+ * `sftp-upload` truncates an existing remote file unconditionally where
+ * `sftp-upload-file` refuses unless `overwrite` is passed. What #223 changed is
+ * that the approved string says so: before it named a destination and no effect,
+ * and said nothing at all about the bytes, so two uploads to one path were one
+ * string — one approval, one indistinguishable audit record. The behaviour is
+ * unchanged on purpose: a default of `overwrite: false` would break every caller
+ * that relies on replacement. `--overwrite` is therefore constant here, which does
+ * mean it carries no per-call information — the per-call signal is `--bytes` and
+ * `--sha256`. It stays because the sibling tool omits the flag when it will not
+ * clobber, so an approver comparing the two needs its presence to mean something.
+ *
+ * `synthetic: true` skips `sanitizeCommand`, and these two interpolated
  * the caller's raw string, so nothing refused a bidi override or a zero-width
  * character in a path that is quoted back in the approval prompt and written
  * into a hash-chained audit record — the exact confusion that validator exists
@@ -44,7 +53,18 @@ export function registerFileTools(
     { destructiveHint: true },
     async ({ remotePath, content, profile }, extra) => {
       return runAudited(
-        `sftp:upload ${remotePathForAudit(remotePath)}`,
+        // Verb, then what the operation does, then the path it does it to — and the
+        // path LAST on purpose. The engine matches `[policy].denylist` against this
+        // whole string, so an operator rule anchored on the path (`authorized_keys$`,
+        // the natural and portable way to write "nothing may write here") keeps
+        // working only while the path ends the line. Measured: with the suffixes
+        // appended after the path instead, that rule silently stops matching and the
+        // refusal degrades to a prompt with no warning. A whole-string rule
+        // (`^sftp:upload /root.*$`) breaks either way — it is coupled to a format
+        // that is ours to change — so the layout is chosen for the form that is not.
+        // `sftp:list` and `sftp:download` carry no flags, so they already read this
+        // way and need no change.
+        `sftp:upload${OVERWRITE_FLAG}${payloadSuffix(content)} ${remotePathForAudit(remotePath)}`,
         {
           toolName: 'sftp-upload',
           failureClass: 'destructive',
@@ -57,10 +77,8 @@ export function registerFileTools(
           await new SftpClient(rt.conn).upload({ remotePath, content });
           return {
             audited: syntheticSuccess(rt.profileName),
-            // Byte count, not string length: `content` is a JS string, so
-            // `.length` counts UTF-16 code units and under-reports every
-            // multi-byte character. SftpClient.upload writes Buffer.from(content),
-            // which is utf8, so this is exactly what lands on the remote side.
+            // utf8 bytes, matching the count the approved string already carries —
+            // see `payloadSuffix` in audit-effects.ts for why `.length` is wrong.
             output: textResult(`Uploaded ${Buffer.byteLength(content, 'utf8')} bytes to ${remotePath}`),
           };
         },
