@@ -67,10 +67,13 @@ const READ_ONLY_ALLOWLIST = new Set([
  * is not read as invoking python; these verbs take a path nobody parses, so
  * there is no false positive to suppress.
  *
- * Why they are lowered at all: both tools carry `readOnlyHint: true`, both say
- * read-only in their description and in the README, and `safe` is refused
- * outright by a `readOnly` profile — so the one profile class the annotation
- * targets was the one that could not run them (#217). The lowering grants that
+ * Why they are lowered at all: both carry `readOnlyHint: true`, the README marks
+ * both read-only, `sftp-list`'s description ends "Read-only." — and `safe` is
+ * refused outright by a `readOnly` profile, so the one profile class the
+ * annotation targets was the one that could not run them (#217).
+ * (`sftp-download`'s description makes no read-only claim; an earlier version of
+ * this paragraph said both did, which is the overstatement this file keeps
+ * catching.) The lowering grants that
  * profile nothing new: `cat /etc/shadow` and `ls /root` are already `read-only`,
  * so the authority to read any file the SSH user can read is already held.
  *
@@ -1296,4 +1299,4 @@ function classifyOuter(trimmed: string): ParsedCommand {
   return { binary, fullCommand, class: 'safe' as CommandClass };
 }
 
-export { READ_ONLY_ALLOWLIST, isDestructive };
+export { READ_ONLY_ALLOWLIST, READ_ONLY_SYNTHETIC, isDestructive };

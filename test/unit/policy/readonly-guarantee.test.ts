@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { PolicyEngine, DEFAULT_RULES } from '../../../src/policy/engine.js';
-import { READ_ONLY_ALLOWLIST } from '../../../src/policy/classifier.js';
+import { READ_ONLY_ALLOWLIST, READ_ONLY_SYNTHETIC } from '../../../src/policy/classifier.js';
 import type { Profile } from '../../../src/types.js';
 
 /**
@@ -74,8 +74,13 @@ describe('a readOnly profile can use the SFTP tools that only read', () => {
     // in code. The `destructive` floor would still catch a write verb added
     // here — measured, adding all three changes no test — so without this the
     // mistake is silent until someone also touches the floor.
+    // Both sets, because there are two now and the one a future author would
+    // edit to lower an SFTP verb is the synthetic one. Asserting only the
+    // allowlist left the guard watching a door nobody walks through — measured,
+    // adding all three write verbs to READ_ONLY_SYNTHETIC broke no test.
     for (const verb of ['sftp:upload', 'sftp:upload-file', 'sftp:download-file']) {
       expect(READ_ONLY_ALLOWLIST.has(verb), verb).toBe(false);
+      expect(READ_ONLY_SYNTHETIC.has(verb), verb).toBe(false);
     }
   });
 
