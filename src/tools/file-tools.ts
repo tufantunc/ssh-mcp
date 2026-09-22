@@ -1,11 +1,31 @@
 import { z } from 'zod';
 import { redactText } from '../guard/redactor.js';
+import { remotePathForAudit, sanitizeRemotePath } from '../guard/sanitizer.js';
 import { SftpClient } from '../ssh/sftp.js';
 import { TOOL_DESCRIPTIONS as D } from './descriptions.js';
 import { syntheticSuccess, textResult } from './results.js';
 import type { ToolDeps, Pipeline } from './pipeline.js';
 
-/** SFTP transfer tools. */
+/**
+ * SFTP transfer tools.
+ *
+ * Both paths go through `sanitizeRemotePath`, the same bar the streaming tools
+ * hold — for the *path*, which is the only axis brought level here. `sftp-upload`
+ * still truncates an existing remote file unconditionally while
+ * `sftp-upload-file` refuses unless `overwrite` is passed and spells
+ * `--overwrite` into the approved string, and `content` is still absent from that
+ * string. Both predate this change and are tracked as #223; saying "the same
+ * bar" without this sentence claimed a parity that does not exist. `synthetic: true` skips `sanitizeCommand`, and these two interpolated
+ * the caller's raw string, so nothing refused a bidi override or a zero-width
+ * character in a path that is quoted back in the approval prompt and written
+ * into a hash-chained audit record — the exact confusion that validator exists
+ * to stop. The check runs as a `preCheck`, inside the pipeline's try, so a
+ * refused call still leaves an audit record.
+ *
+ * Pre-existing, and reachable before only by roles holding `safe`; lowering
+ * `sftp:download` to `read-only` (#217) is what would have opened it to every
+ * `readOnly` profile, so it is closed here rather than after.
+ */
 export function registerFileTools(
   { server }: ToolDeps,
   pipeline: Pipeline,
@@ -17,15 +37,22 @@ export function registerFileTools(
     'sftp-upload',
     D["sftp-upload"],
     {
-      remotePath: z.string().describe('Remote file path'),
+      remotePath: z.string().describe('Remote file path. No leading or trailing whitespace, and no control, bidirectional or zero-width characters: the approval prompt and the audit record quote this path back.'),
       content: z.string().describe('File content to upload'),
       profile: z.string().optional().describe('Profile name'),
     },
     { destructiveHint: true },
     async ({ remotePath, content, profile }, extra) => {
       return runAudited(
-        `sftp:upload ${remotePath}`,
-        { toolName: 'sftp-upload', failureClass: 'destructive', profile, extra, synthetic: true },
+        `sftp:upload ${remotePathForAudit(remotePath)}`,
+        {
+          toolName: 'sftp-upload',
+          failureClass: 'destructive',
+          profile,
+          extra,
+          synthetic: true,
+          preCheck: () => { sanitizeRemotePath(remotePath); },
+        },
         async (rt) => {
           await new SftpClient(rt.conn).upload({ remotePath, content });
           return {
@@ -46,14 +73,21 @@ export function registerFileTools(
     'sftp-download',
     D["sftp-download"],
     {
-      remotePath: z.string().describe('Remote file path to download'),
+      remotePath: z.string().describe('Remote file path. No leading or trailing whitespace, and no control, bidirectional or zero-width characters: the approval prompt and the audit record quote this path back.'),
       profile: z.string().optional().describe('Profile name'),
     },
     { readOnlyHint: true },
     async ({ remotePath, profile }, extra) => {
       return runAudited(
-        `sftp:download ${remotePath}`,
-        { toolName: 'sftp-download', failureClass: 'read-only', profile, extra, synthetic: true },
+        `sftp:download ${remotePathForAudit(remotePath)}`,
+        {
+          toolName: 'sftp-download',
+          failureClass: 'read-only',
+          profile,
+          extra,
+          synthetic: true,
+          preCheck: () => { sanitizeRemotePath(remotePath); },
+        },
         async (rt) => {
           const data = await new SftpClient(rt.conn).download({ remotePath });
           return {

@@ -108,14 +108,19 @@ describe('sanitizeCommand property tests', () => {
  * assertion together. Measured — with the class cut down to CR/LF/NUL, every one
  * of these properties still passed. This literal is the contract; the module has
  * to meet it.
+ *
+ * It earned that: narrowing the class to let U+200C and U+200D through was a
+ * deliberate change, and this literal is what made it deliberate rather than
+ * silent — it failed until it was updated too. The joiners are asserted from the
+ * other side below.
  */
-const MUST_REJECT = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
+const MUST_REJECT = /[\u0000-\u001f\u007f-\u009f\u061c\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
 
 const FORBIDDEN_CODES: number[] = [
   ...Array.from({ length: 0x20 }, (_, i) => i),           // C0
   ...Array.from({ length: 0x21 }, (_, i) => 0x7f + i),    // DEL + C1
   0x061c,                                                 // ALM
-  ...Array.from({ length: 5 }, (_, i) => 0x200b + i),     // ZWSP..RLM
+  0x200b, 0x200e, 0x200f,                                 // ZWSP, LRM, RLM — not the joiners
   ...Array.from({ length: 7 }, (_, i) => 0x2028 + i),     // separators + LRE..RLO
   ...Array.from({ length: 5 }, (_, i) => 0x2060 + i),     // WJ + invisible ops
   ...Array.from({ length: 4 }, (_, i) => 0x2066 + i),     // isolates
@@ -175,6 +180,55 @@ describe('sanitizeRemotePath property tests', () => {
         expect(result).not.toMatch(MUST_REJECT);
       }),
       { numRuns: 10000 },
+    );
+  });
+});
+
+describe('the two hand-written lists cannot drift apart', () => {
+  it('every code the generator emits is one the contract refuses, and nothing is missing', () => {
+    // `MUST_REJECT` is written out so the property cannot assert the source
+    // equals itself — but `FORBIDDEN_CODES` decides what the generator ever
+    // emits, and a shrinking generator is invisible to the property it feeds.
+    // Measured: deleting the zero-width entries from FORBIDDEN_CODES alone, and
+    // deleting the whole C1 range, both survived the entire suite. Two lists,
+    // one contract, and nothing tying them together.
+    for (const code of FORBIDDEN_CODES) {
+      expect(String.fromCharCode(code), 'U+' + code.toString(16)).toMatch(MUST_REJECT);
+    }
+    const missing: string[] = [];
+    for (let code = 0; code <= 0xffff; code++) {
+      if (MUST_REJECT.test(String.fromCharCode(code)) && !FORBIDDEN_CODES.includes(code)) {
+        missing.push('U+' + code.toString(16));
+      }
+    }
+    expect(missing, 'codepoints the contract refuses that the generator never emits').toEqual([]);
+  });
+});
+
+describe('the zero-width joiners sit outside the forbidden class, in both directions', () => {
+  const ZWNJ = String.fromCharCode(0x200c);
+  const ZWJ = String.fromCharCode(0x200d);
+
+  it('never refuses a path whose only zero-width characters are joiners', () => {
+    // The other half of the contract above. ZWNJ and ZWJ are orthography — a
+    // Persian or Indic filename needs them, and an emoji sequence is built from
+    // them — so a class that refused them refused real input.
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.oneof(
+            { weight: 3, arbitrary: fc.constantFrom('report', 'srv', 'data', 'x1') },
+            { weight: 2, arbitrary: fc.constantFrom(ZWNJ, ZWJ) },
+            { weight: 1, arbitrary: fc.constantFrom('/', '.', '-') },
+          ),
+          { minLength: 1, maxLength: 20 },
+        ).map((parts) => '/srv/' + parts.join('')),
+        (input) => {
+          expect(() => sanitizeRemotePath(input)).not.toThrow();
+          expect(sanitizeRemotePath(input)).toBe(input);
+        },
+      ),
+      { numRuns: 2000 },
     );
   });
 });

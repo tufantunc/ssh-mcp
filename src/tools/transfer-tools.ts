@@ -224,7 +224,7 @@ export function registerTransferTools(
     'sftp-list',
     D['sftp-list'],
     {
-      remotePath: z.string().describe('Remote directory to list'),
+      remotePath: z.string().describe('Remote directory to list. No leading or trailing whitespace, and no control, bidirectional or zero-width characters.'),
       maxEntries: z.number().int().min(1).max(MAX_LIST_ENTRIES).optional()
         .describe(`Max entries to return (default ${DEFAULT_LIST_ENTRIES}, hard cap ${MAX_LIST_ENTRIES})`),
       profile: z.string().optional().describe('Profile name'),
@@ -274,7 +274,7 @@ export function registerTransferTools(
     D['sftp-upload-file'],
     {
       localPath: z.string().describe('Local file to upload, inside defaults.transferRoot'),
-      remotePath: z.string().describe('Remote destination path'),
+      remotePath: z.string().describe('Remote destination path. No leading or trailing whitespace, and no control, bidirectional or zero-width characters.'),
       overwrite: z.boolean().optional().describe('Replace an existing remote file (default false)'),
       // The range is deliberately NOT declared here, only in `checkMode`. The SDK
       // validates this schema before the handler runs, so a zod bound refuses a
@@ -351,7 +351,7 @@ export function registerTransferTools(
     'sftp-download-file',
     D['sftp-download-file'],
     {
-      remotePath: z.string().describe('Remote file to download'),
+      remotePath: z.string().describe('Remote file to download. No leading or trailing whitespace, and no control, bidirectional or zero-width characters.'),
       localPath: z.string().describe('Local destination, inside defaults.transferRoot'),
       overwrite: z.boolean().optional().describe('Replace an existing local file (default false)'),
       profile: z.string().optional().describe('Profile name'),

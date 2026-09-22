@@ -62,6 +62,57 @@ describe('sanitizeCommand', () => {
   });
 });
 
+describe('the synthetic namespace is reserved', () => {
+  it('refuses a caller-typed sftp: or session: command, in every spelling', () => {
+    // `classifyOuter` cannot tell a string this server built from one a caller
+    // typed — both arrive as text. So giving `sftp:list` a read-only class also
+    // taught `read-command` to accept it: measured, a readOnly viewer could send
+    // `read-command "sftp:list /tmp sudo id"` and it executed. The command word
+    // is resolved the way the classifier resolves it, because the quoted
+    // spelling slipped a check on the raw string.
+    for (const command of [
+      'sftp:list /tmp sudo id',
+      "'sftp:list' /tmp",
+      '"sftp:download" /etc/shadow',
+      String.fromCharCode(92) + 'sftp:list /tmp',
+      'session:open interactive s1',
+      '  sftp:download /etc/shadow',
+      // The prefixes `extractBinary` strips and a first-token helper did not.
+      // The first version of this check used its own resolver, and every one of
+      // these walked around it: measured, `read-command "-c sftp:download
+      // /etc/shadow"` classified `read-only`, was allowed on a readOnly profile
+      // that denies it on main, and reached `exec`. Two resolvers answering one
+      // question was the bug.
+      '-c sftp:list /tmp',
+      '-c' + String.fromCharCode(9) + 'sftp:list /tmp',
+      "-c 'sftp:list' /tmp",
+      '-c "sftp:download" /etc/shadow',
+      '; sftp:list /tmp',
+      'sudo sftp:list /tmp',
+    ]) {
+      expect(() => sanitizeCommand(command, 5000), command).toThrow(/reserved/);
+    }
+  });
+
+  it('leaves a command that merely mentions the namespace alone', () => {
+    for (const command of [
+      'echo "sftp:list is a string"',
+      'grep sftp: /var/log/syslog',
+      'ls /tmp',
+      'cat /etc/hosts',
+      // Words that merely begin with the namespace text, and a URL scheme as an
+      // operand. None is a command word in the reserved namespace.
+      'curl sftp://host/path',
+      'sftp -b - host',
+      'sftpx y',
+      'sessionctl start',
+      'rsync -a a b',
+    ]) {
+      expect(() => sanitizeCommand(command, 5000), command).not.toThrow();
+    }
+  });
+});
+
 describe('sanitizeSessionName', () => {
   it('accepts valid names', () => {
     expect(sanitizeSessionName('deploy-1')).toBe('deploy-1');
@@ -121,13 +172,24 @@ describe('sanitizeRemotePath', () => {
     expect(() => sanitizeRemotePath('/tmp/x' + LRI + 'y')).toThrow(/control, bidirectional or zero-width/);
   });
 
+  it('accepts the zero-width joiners, which are orthography and not a spoof', () => {
+    // ZWNJ and ZWJ are invisible but meaningful — required in Persian and the
+    // Indic scripts, structural inside an emoji sequence. An earlier class swept
+    // them up with the rest of U+200B..U+200F and refused real filenames;
+    // measured, `/srv/mi<ZWNJ>ravad.txt` is a name a filesystem accepts.
+    const ZWNJ = String.fromCharCode(0x200c);
+    const ZWJ = String.fromCharCode(0x200d);
+    expect(sanitizeRemotePath('/srv/mi' + ZWNJ + 'ravad.txt')).toContain(ZWNJ);
+    expect(sanitizeRemotePath('/srv/a' + ZWJ + 'b.txt')).toContain(ZWJ);
+  });
+
   it('refuses the weaker bidi marks and the zero-width formatters too', () => {
     // An earlier class stopped at the overrides and isolates. These reorder
     // *neutral* characters — and a path is mostly neutrals — or render as
     // nothing at all, so two distinct paths print identically.
     const sneaky: [string, number][] = [
       ['ALM', 0x061c], ['LRM', 0x200e], ['RLM', 0x200f],
-      ['ZWSP', 0x200b], ['ZWNJ', 0x200c], ['WJ', 0x2060], ['BOM', 0xfeff],
+      ['ZWSP', 0x200b], ['WJ', 0x2060], ['BOM', 0xfeff],
       ['LRE', 0x202a], ['PDF', 0x202c], ['PDI', 0x2069],
     ];
     for (const [name, code] of sneaky) {
