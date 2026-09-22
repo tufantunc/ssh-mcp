@@ -26,11 +26,13 @@ interface Target {
   port: number;
   user: string;
   password: string;
+  /** Whether this server's sshd is configured to accept the AI_AGENT env request. */
+  acceptsEnv: boolean;
 }
 
 const TARGETS: Target[] = [
-  { name: 'alpine', port: 2226, user: 'alpineuser', password: 'alpinepass' },
-  { name: 'dropbear', port: 2227, user: 'dropuser', password: 'droppass' },
+  { name: 'alpine', port: 2226, user: 'alpineuser', password: 'alpinepass', acceptsEnv: true },
+  { name: 'dropbear', port: 2227, user: 'dropuser', password: 'droppass', acceptsEnv: false },
 ];
 
 function profileFor(t: Target): Profile {
@@ -93,6 +95,17 @@ for (const target of TARGETS) {
       const result = await conn.exec('id -un');
       expect(result.exitCode).toBe(0);
       expect(result.stdout.trim()).toBe(target.user);
+    });
+
+    it('announces the tool where the host accepts it, and is inert where it does not', async () => {
+      // The declaration is an environment request, which a server only honours when its
+      // own AcceptEnv list allows the name. alpine's sshd_config carries
+      // `AcceptEnv AI_AGENT` (docker/alpine-sshd/Dockerfile); dropbear has no AcceptEnv
+      // mechanism at all, so there the same request must be ignored rather than fail the
+      // command. Delete the env field in connection.ts and the alpine case fails.
+      const result = await conn.exec('echo "${AI_AGENT:-}"');
+      expect(result.exitCode, 'the command runs on both').toBe(0);
+      expect(result.stdout.trim()).toBe(target.acceptsEnv ? 'ssh-mcp' : '');
     });
 
     it('reports a non-zero exit code', async () => {

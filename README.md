@@ -322,6 +322,16 @@ and tier names: every one you write under `[policy.roleBindings]` has to be
 reachable by some profile, and every profile's role and tier has to resolve to
 real bindings. Both directions are checked at startup.
 
+Every command this server runs announces itself to the host as the environment
+variable `AI_AGENT=ssh-mcp`, so an operator can tell an agent's session from a
+person's — from a login hook, `auditd`, or anything else that reads the session's
+environment. It is inert unless the host opts in with
+`AcceptEnv AI_AGENT` in `sshd_config`: without that line sshd ignores the request
+and nothing changes. No version is sent, deliberately — a version would tell a
+host that may be hostile exactly which build is talking to it. There is no
+setting to turn this off; it carries the tool's name and nothing about you, your
+session or the command.
+
 ### ProxyJump (Bastion)
 
 Reach internal hosts behind a bastion/jump server. The `via` field specifies a profile name to tunnel through:

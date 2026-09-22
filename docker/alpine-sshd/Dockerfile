@@ -16,5 +16,10 @@ RUN sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh
  && sed -i 's/^#\?Port .*/Port 2222/' /etc/ssh/sshd_config \
  && printf '\nMaxStartups 100:30:200\nMaxSessions 50\n' >> /etc/ssh/sshd_config
 
+# An operator who wants to see which sessions are agent-driven opts in with
+# AcceptEnv; sshd ignores the client's request otherwise. The dropbear target has
+# no AcceptEnv mechanism at all, which covers the other side of that.
+RUN printf 'AcceptEnv AI_AGENT\n' >> /etc/ssh/sshd_config
+
 EXPOSE 2222
 CMD ["/usr/sbin/sshd", "-D", "-e"]

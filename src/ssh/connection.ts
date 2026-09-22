@@ -12,6 +12,23 @@ import { openWithRetry } from './channel-retry.js';
 import { terminateChannel, COULD_NOT_SIGNAL } from './channel-signal.js';
 
 /**
+ * What this server tells a host it is, on every command it runs.
+ *
+ * An SSH server only puts a client's environment request into the session when
+ * its own `AcceptEnv` list allows the name; otherwise sshd ignores it (and
+ * debug-logs it at LogLevel DEBUG2). ssh2's `exec()` calls `reqEnv(chan,
+ * opts.env)` with no callback, so the request goes out with `want_reply=0` and
+ * the server has nothing to reply to: an unaccepted name cannot fail the exec
+ * either. The declaration is therefore inert on every host that has not opted in.
+ *
+ * Name only, deliberately. A version number would tell a host that may be
+ * hostile exactly which build is talking to it, and this tool exists to drive
+ * machines an agent was pointed at. A name is an announcement; a version is a
+ * fingerprint.
+ */
+const AGENT_ENV: ExecOptions['env'] = { AI_AGENT: 'ssh-mcp' };
+
+/**
  * Stop the command behind `channel`, record why on the span, and return the sentence the
  * rejection should carry.
  *
@@ -102,6 +119,7 @@ export class SSHConnection {
         return new Promise<ClientChannel>((resolve, reject) => {
           this.getClient().exec(
             this.applyWorkdir(command),
+            { env: AGENT_ENV },
             (err, stream) => (err ? reject(err) : resolve(stream)),
           );
         });
@@ -294,7 +312,7 @@ export class SSHConnection {
         }
       }, timeoutMs);
 
-      const execOpts: ExecOptions = {};
+      const execOpts: ExecOptions = { env: AGENT_ENV };
       if (opts.tty || this.profile.tty) {
         execOpts.pty = { term: 'xterm-256color', cols: 200, rows: 50 };
       }
