@@ -299,10 +299,21 @@ describe('a refused call is audited', () => {
 describe('a readOnly profile reaches the SFTP tools that only read', () => {
   const READ_ONLY = { role: 'viewer', readOnly: true, approvalPolicy: 'deny' as const };
 
-  /** The audit record is written on the failure path too, so a stubbed conn is enough. */
+  /**
+   * The audit record *this* call produced.
+   *
+   * `auditRecords.at(-1)` is the last record written by anyone, and the harness
+   * is shared across a loop — so a tool that wrote none re-read the previous
+   * iteration's record and the assertion passed for it. Measured: breaking one
+   * tool's schema so the SDK rejects before the pipeline, emitting no record at
+   * all, left the loop green. Binding to the call is what makes per-tool
+   * coverage real.
+   */
   const decisionFor = async (name: string, args: Record<string, unknown>) => {
+    const before = h.auditRecords.length;
     await h.client.callTool({ name, arguments: args }).catch(() => {});
-    return h.auditRecords.at(-1);
+    expect(h.auditRecords.length, `${name} wrote no audit record`).toBe(before + 1);
+    return h.auditRecords[before];
   };
 
   const callResult = (name: string, args: Record<string, unknown>) =>
@@ -333,6 +344,8 @@ describe('a readOnly profile reaches the SFTP tools that only read', () => {
       ['sftp-download-file', { remotePath: '/etc/hostname', localPath: 'x.bin' }],
     ] as const) {
       const record = await decisionFor(name, args);
+      // The verb too, so the record is provably this tool's and not a neighbour's.
+      expect(record.command, name).toMatch(new RegExp('^' + name.replace('sftp-', 'sftp:') + ' '));
       expect(record.decision, name).toBe('deny');
       expect(record.commandClass, name).toBe('destructive');
     }

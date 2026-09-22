@@ -184,6 +184,27 @@ describe('sanitizeRemotePath property tests', () => {
   });
 });
 
+describe('the two hand-written lists cannot drift apart', () => {
+  it('every code the generator emits is one the contract refuses, and nothing is missing', () => {
+    // `MUST_REJECT` is written out so the property cannot assert the source
+    // equals itself — but `FORBIDDEN_CODES` decides what the generator ever
+    // emits, and a shrinking generator is invisible to the property it feeds.
+    // Measured: deleting the zero-width entries from FORBIDDEN_CODES alone, and
+    // deleting the whole C1 range, both survived the entire suite. Two lists,
+    // one contract, and nothing tying them together.
+    for (const code of FORBIDDEN_CODES) {
+      expect(String.fromCharCode(code), 'U+' + code.toString(16)).toMatch(MUST_REJECT);
+    }
+    const missing: string[] = [];
+    for (let code = 0; code <= 0xffff; code++) {
+      if (MUST_REJECT.test(String.fromCharCode(code)) && !FORBIDDEN_CODES.includes(code)) {
+        missing.push('U+' + code.toString(16));
+      }
+    }
+    expect(missing, 'codepoints the contract refuses that the generator never emits').toEqual([]);
+  });
+});
+
 describe('the zero-width joiners sit outside the forbidden class, in both directions', () => {
   const ZWNJ = String.fromCharCode(0x200c);
   const ZWJ = String.fromCharCode(0x200d);
