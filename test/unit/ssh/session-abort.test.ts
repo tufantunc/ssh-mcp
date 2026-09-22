@@ -120,6 +120,28 @@ describe('cancelling a command in an interactive session', () => {
     );
   });
 
+  it('times out a command that never finishes, then escalates to TERM', async () => {
+    // Same environment-dependent coverage as the abort path, and the same fix:
+    // the timeout handler is reached in CI and not by the same command locally,
+    // because it needs a command that genuinely never returns. A fake channel
+    // that simply never answers is deterministic. Note the escalation delay is
+    // 500ms here and 1000ms on the abort path — pinning both stops one being
+    // "corrected" to match the other.
+    vi.useFakeTimers();
+    const { sess, channel } = session();
+
+    const run = sess.run('sleep 300', 1000);
+    expect(channel.writes).toHaveLength(1);
+
+    vi.advanceTimersByTime(1000);
+    await expect(run).rejects.toThrow('Command timed out after 1000ms in session work');
+    expect(channel.writes[1], 'an interrupt is written before any signal').toBe('\x03');
+    expect(channel.signals).toEqual([]);
+
+    vi.advanceTimersByTime(500);
+    expect(channel.signals).toEqual(['TERM']);
+  });
+
   it('runs without a signal at all, and leaves the abort path untouched', async () => {
     // The default path still works — `detachAbort` starts as a no-op and every
     // settle path calls it, so a wrong initialiser would throw here rather than
