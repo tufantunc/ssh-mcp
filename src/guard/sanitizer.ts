@@ -1,4 +1,6 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+// The classifier's own resolver, not a second one. See SYNTHETIC_NAMESPACE below.
+import { extractBinary } from '../policy/classifier.js';
 
 /** Every character a shell would read as the end of one command and the start of another. */
 const LINE_BREAKS = /[\r\n\u2028\u2029]/;
@@ -19,44 +21,25 @@ const NUL = /\u0000/;
  *
  * `sanitizeCommand` is the right place because it runs, by construction, only
  * for commands that did *not* come from us — `runAudited` skips it when
- * `synthetic: true`. Refusing the namespace here makes an `sftp:*` or `session:*`
- * audit record provably tool-generated.
+ * `synthetic: true`.
+ *
+ * Tested against `extractBinary`, the classifier's own resolver, rather than
+ * against a first-token helper of this file's own. A private one was written
+ * first and drifted immediately: `extractBinary` strips a leading `-c ` and the
+ * leading privilege prefixes, which the helper did not, so
+ * `read-command "-c sftp:download /etc/shadow"` resolved to binary
+ * `sftp:download`, classified `read-only`, was allowed on a profile that denies
+ * it on main, and executed. Two resolvers answering one question is the bug;
+ * asking the one that decides is the fix.
+ *
+ * Scope of the guarantee, stated narrowly on purpose: an `sftp:*` or `session:*`
+ * audit record is provably tool-generated. `signal-process` synthesises
+ * `kill -TERM <pid>`, which is outside this namespace and cannot be reserved —
+ * `kill` is a binary a caller may legitimately need — so a record of that shape
+ * is not covered.
  */
 const SYNTHETIC_NAMESPACE = /^(?:sftp|session):/;
 
-/**
- * The command word as the classifier will resolve it, for the namespace test.
- *
- * Testing the raw string was not enough: the classifier unquotes before it
- * extracts a binary, so `'sftp:list' /tmp` reached it as `sftp:list` while the
- * raw form began with a quote and slipped the check — measured, that one spelling
- * still executed when the two unquoted ones were already refused. Quote and
- * escape characters are removed rather than parsed, because the question here is
- * only "could this resolve into the reserved namespace", and over-answering it
- * costs nothing: no real command word contains a quote.
- */
-function commandWord(command: string): string {
-  const first = command.split(/[\s]/, 1)[0] ?? '';
-  return first.replace(/['\"\\]/g, '');
-}
-
-/**
- * Validate a caller-supplied command.
- *
- * A line break is refused, not removed. The constraint itself is not negotiable
- * — a newline inside `command` would let a second command ride along past a
- * classifier that parsed only the first, which is #44 — but an earlier version
- * enforced it by replacing the break with a space, and *that* is the part worth
- * changing. The caller got no error and a different command than it asked for:
- * two lines joined, so `ls\necho x` ran `ls echo x`; or a `#` comment in a
- * `python3 -c` body pulled onto the same line, commenting out everything after
- * it. Sometimes that raises. Sometimes it runs and quietly does half the work,
- * which is the failure mode worth removing (#198).
- *
- * Trailing and leading breaks are trimmed rather than refused. A client that
- * appends a newline works today, refusing it would break that for no gain, and
- * a break at either end cannot join two commands.
- */
 export function sanitizeCommand(command: unknown, maxChars: number): string {
   if (typeof command !== 'string') {
     throw new McpError(ErrorCode.InvalidParams, 'Command must be a string');
@@ -77,7 +60,7 @@ export function sanitizeCommand(command: unknown, maxChars: number): string {
   if (NUL.test(cleaned)) {
     throw new McpError(ErrorCode.InvalidParams, 'Command cannot contain a null byte');
   }
-  if (SYNTHETIC_NAMESPACE.test(commandWord(cleaned))) {
+  if (SYNTHETIC_NAMESPACE.test(extractBinary(cleaned))) {
     throw new McpError(
       ErrorCode.InvalidParams,
       'Command cannot begin with "sftp:" or "session:": that namespace is reserved for the ' +

@@ -77,6 +77,18 @@ describe('the synthetic namespace is reserved', () => {
       String.fromCharCode(92) + 'sftp:list /tmp',
       'session:open interactive s1',
       '  sftp:download /etc/shadow',
+      // The prefixes `extractBinary` strips and a first-token helper did not.
+      // The first version of this check used its own resolver, and every one of
+      // these walked around it: measured, `read-command "-c sftp:download
+      // /etc/shadow"` classified `read-only`, was allowed on a readOnly profile
+      // that denies it on main, and reached `exec`. Two resolvers answering one
+      // question was the bug.
+      '-c sftp:list /tmp',
+      '-c' + String.fromCharCode(9) + 'sftp:list /tmp',
+      "-c 'sftp:list' /tmp",
+      '-c "sftp:download" /etc/shadow',
+      '; sftp:list /tmp',
+      'sudo sftp:list /tmp',
     ]) {
       expect(() => sanitizeCommand(command, 5000), command).toThrow(/reserved/);
     }
@@ -88,6 +100,13 @@ describe('the synthetic namespace is reserved', () => {
       'grep sftp: /var/log/syslog',
       'ls /tmp',
       'cat /etc/hosts',
+      // Words that merely begin with the namespace text, and a URL scheme as an
+      // operand. None is a command word in the reserved namespace.
+      'curl sftp://host/path',
+      'sftp -b - host',
+      'sftpx y',
+      'sessionctl start',
+      'rsync -a a b',
     ]) {
       expect(() => sanitizeCommand(command, 5000), command).not.toThrow();
     }

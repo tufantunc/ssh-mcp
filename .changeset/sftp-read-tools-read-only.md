@@ -29,3 +29,5 @@ Newly refused on these two tools: an empty path, a path over 4096 characters, a 
 The lowering is expressed as its own set rather than as two more entries in the read-only allowlist, because that allowlist is dual-purpose: `operandsAreData` reads it too, and putting the verbs there switched the interpreter-carrier scan off for them — measured, `sftp:list /tmp sh -c 'sudo id'` fell from `privileged` to `read-only`, `sh -c` being the one carrier form that carries no shell metacharacter.
 
 Still true and unchanged: a path carrying a shell metacharacter drops back to `safe`, a path carrying a command is raised by what it carries, and `sftp-upload`, `sftp-upload-file` and `sftp-download-file` remain `destructive`.
+
+That first rule leaves #217 unfixed for one case worth naming: a remote path containing `( ) { } ; & | < > $` or a backtick still drops to `safe`, so `sftp-list` on `/srv/backup(old)` is refused for a `readOnly` profile — and the refusal names the profile rather than the parenthesis. The guard is kept because it is what stops a path from carrying a command; the poor message is tracked as [#224](https://github.com/tufantunc/ssh-mcp/issues/224).
