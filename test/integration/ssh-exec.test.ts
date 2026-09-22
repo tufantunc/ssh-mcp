@@ -19,6 +19,7 @@ const testProfile: Profile = {
   maxOutputBytes: 1048576,
   role: 'admin',
   readOnly: false,
+  announceAgent: true,
   approvalPolicy: 'auto',
   cert: false,
   sessionMaxPerConnection: 5,

@@ -39,6 +39,7 @@ const testProfile: Profile = {
   maxOutputBytes: 1_048_576,
   role: 'admin',
   readOnly: false,
+  announceAgent: true,
   // The handler layer is what this file tests, not the elicitation prompt.
   approvalPolicy: 'auto',
   cert: false,

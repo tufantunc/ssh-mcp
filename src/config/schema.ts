@@ -174,6 +174,12 @@ export const profileSchema = z.object({
   role: z.string().default('operator'),
   readOnly: z.boolean().default(false),
   cert: z.boolean().default(false),
+  // A schema-level default rather than a [defaults] entry, like tty/readOnly/cert
+  // above: which hosts an operator trusts with the announcement is a property of
+  // the individual host, not something worth setting globally and overriding per
+  // profile. Defaults to true — the announcement is the feature; the switch is for
+  // the host you do not control.
+  announceAgent: z.boolean().default(true),
   // Left optional on purpose: normalizeConfig() fills these from [defaults], and
   // a schema-level .default() would make "user omitted it" indistinguishable
   // from "user set the default value", silently shadowing [defaults].

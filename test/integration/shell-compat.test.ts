@@ -26,11 +26,13 @@ interface Target {
   port: number;
   user: string;
   password: string;
+  /** Whether this server's sshd is configured to accept the AI_AGENT env request. */
+  acceptsEnv: boolean;
 }
 
 const TARGETS: Target[] = [
-  { name: 'alpine', port: 2226, user: 'alpineuser', password: 'alpinepass' },
-  { name: 'dropbear', port: 2227, user: 'dropuser', password: 'droppass' },
+  { name: 'alpine', port: 2226, user: 'alpineuser', password: 'alpinepass', acceptsEnv: true },
+  { name: 'dropbear', port: 2227, user: 'dropuser', password: 'droppass', acceptsEnv: false },
 ];
 
 function profileFor(t: Target): Profile {
@@ -47,6 +49,7 @@ function profileFor(t: Target): Profile {
     maxOutputBytes: 1048576,
     role: 'admin',
     readOnly: false,
+    announceAgent: true,
     approvalPolicy: 'auto',
     cert: false,
     sessionMaxPerConnection: 5,
@@ -93,6 +96,42 @@ for (const target of TARGETS) {
       const result = await conn.exec('id -un');
       expect(result.exitCode).toBe(0);
       expect(result.stdout.trim()).toBe(target.user);
+    });
+
+    it.runIf(target.acceptsEnv)('delivers AI_AGENT to a host that accepts it', async () => {
+      // The falsifiable half. alpine's sshd_config carries `AcceptEnv AI_AGENT`
+      // (docker/alpine-sshd/Dockerfile), so the variable is in the session only if
+      // the request was actually sent. Delete `env` from `channelEnv()` in
+      // connection.ts and this fails.
+      //
+      // If this fails with an empty string on a machine where it used to pass, the
+      // alpine image is stale before you suspect the product: compose only builds
+      // when no image exists. Re-run with `docker compose --profile test up -d --build`.
+      const result = await conn.exec('echo "${AI_AGENT:-}"');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('ssh-mcp');
+    });
+
+    it('keeps the channel correct on a host with no AcceptEnv mechanism', async () => {
+      // Deliberately NOT asserting that AI_AGENT is empty here. An empty variable is
+      // what a host that ignored the request produces AND what a build with the
+      // feature deleted produces, so the assertion this replaces could not fail for
+      // any product reason: it read like a two-host proof and was a one-host test
+      // with a passing decoration.
+      //
+      // What dropbear can actually falsify is the risk that is specific to it: it is
+      // the only non-OpenSSH server here, and ssh2 sends the env request with
+      // `want_reply=0`, so a server that replied anyway would desync the shared
+      // channel callback FIFO and corrupt the NEXT request on that channel rather
+      // than this one. Sequential execs are what surfaces that; a single command
+      // cannot.
+      for (const [command, expected] of [
+        ['echo one', 'one'], ['echo two', 'two'], ['id -un', target.user],
+      ] as const) {
+        const result = await conn.exec(command);
+        expect(result.exitCode, command).toBe(0);
+        expect(result.stdout.trim(), command).toBe(expected);
+      }
     });
 
     it('reports a non-zero exit code', async () => {

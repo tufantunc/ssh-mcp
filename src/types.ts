@@ -24,6 +24,14 @@ export interface Profile {
   readOnly: boolean;
   approvalPolicy: ApprovalMode;
   cert: boolean;
+  /**
+   * Send `AI_AGENT=ssh-mcp` to this host on every channel opened for a command.
+   *
+   * Defaults to true. Clear it for a host you do not control: the request is on
+   * the wire whether or not the host set `AcceptEnv`, so it tells that host an
+   * agent rather than a person is driving.
+   */
+  announceAgent: boolean;
   sessionMaxPerConnection: number;
   sessionIdleTimeoutMs: number;
   sessionBackgroundMaxMs: number;

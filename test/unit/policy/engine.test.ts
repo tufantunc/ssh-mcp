@@ -16,6 +16,7 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
     maxOutputBytes: 1048576,
     role: 'operator',
     readOnly: false,
+    announceAgent: true,
     approvalPolicy: 'ask-destructive',
     cert: false,
     sessionMaxPerConnection: 5,
