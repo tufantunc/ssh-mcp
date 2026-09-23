@@ -161,3 +161,8 @@ sonar-project.properties
 
 # Agent worktrees, created by review tooling.
 .claude/worktrees/
+
+# Session-local change artifacts. Intent and spec are committed; the execution
+# plan and raw verification evidence stay local by repository policy.
+/docs/features/*/plan.md
+/docs/features/*/evidence.md
