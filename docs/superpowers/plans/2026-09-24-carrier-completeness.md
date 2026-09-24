@@ -19,19 +19,19 @@
 - **Changeset: `minor`.** Classification results change; a command that ran silently can now prompt. The 2.9.0 awk security fix set this precedent.
 - **Run `npm run build` before any `node -e` probe against `build/`** — the probes read compiled output, not source.
 
-## Deviation proposed — decide before Task 2
+## Decision recorded
 
-The spec specifies a second Set, `OPERANDS_NEVER_COMMANDS`, with membership identical to `READ_ONLY_ALLOWLIST`. Two independent literals holding the same 68 names is its own hazard: they can be copy-pasted, and they can drift silently in the direction nobody notices.
-
-An alternative that serves the spec's stated purpose better — *"the next person adding a reader has to decide the second question explicitly, because the name asks it"* — is one table with two answers:
+The spec specified two Sets with identical membership. The maintainer chose one
+table with two answers instead, and Task 2 is written to that:
 
 ```ts
-const READERS: Record<string, { readOnly: boolean; operandsAreData: boolean }> = …
+const READERS: Record<string, { readOnly: boolean; operandsAreData: boolean }>
 ```
 
-Adding an entry then forces both decisions at the point of adding, and there is one list to keep true rather than two.
-
-**Task 2 is written to the spec as approved (two Sets).** If the maintainer prefers the record, Task 2's steps change shape but its tests do not. Ask before starting Task 2.
+Two literals holding the same 68 names can be copy-pasted and can drift in the
+direction nobody notices. One table forces both decisions at the point of adding
+a name, which is what the spec wanted the naming to achieve, and leaves one list
+to keep true.
 
 ## Review Focus
 
@@ -221,15 +221,15 @@ The message must record the three mutations and their results.
 
 ### Task 2: The dual-purpose Set is split
 
-**Read the "Deviation proposed" section above and get a decision before starting.**
+**The maintainer chose the single table — see "Decision recorded" above.**
 
 **Files:**
-- Modify: `src/policy/classifier.ts` — declare `OPERANDS_NEVER_COMMANDS` next to `READ_ONLY_ALLOWLIST`; change `operandsAreData()` (line 941) to read it
+- Modify: `src/policy/classifier.ts` — replace the `READ_ONLY_ALLOWLIST` literal (line 23) with the `READERS` table and derive the Set from it; change `operandsAreData()` (line 941) to read `READERS[...].operandsAreData`
 - Test: `test/unit/policy/carrier-completeness.test.ts` (append)
 
 **Interfaces:**
 - Consumes: the existing `READ_ONLY_ALLOWLIST` literal
-- Produces: `OPERANDS_NEVER_COMMANDS: Set<string>`, exported alongside `READ_ONLY_ALLOWLIST` so tests can assert on it
+- Produces: `READERS: Record<string, { readOnly: boolean; operandsAreData: boolean }>`, exported alongside the derived `READ_ONLY_ALLOWLIST` so tests can assert on both
 
 - [ ] **Step 1: Record the measurement the spec asks for**
 
@@ -248,22 +248,31 @@ The spec forbids claiming more for the split than this measurement supports.
 Append to `test/unit/policy/carrier-completeness.test.ts`:
 
 ```ts
-import { READ_ONLY_ALLOWLIST, OPERANDS_NEVER_COMMANDS } from '../../../src/policy/classifier.js';
+import { READ_ONLY_ALLOWLIST, READERS } from '../../../src/policy/classifier.js';
 
 describe('the two questions the read-only allowlist used to answer', () => {
   it('keeps the carrier scan running for a reader that is not exempt', () => {
     // The regression #217's review found: one Set read by two mechanisms, so
     // adding a name for its class silently switched the carrier scan off for it.
-    // This is the behaviour the split protects; with identical membership there is
-    // nothing about the sets themselves to assert.
+    // This is the behaviour the table protects.
     expect(classifyCommand(`sftp:list /tmp sh -c 'sudo id'`).class).toBe('privileged');
   });
 
-  it('declares both sets independently rather than deriving one from the other', () => {
-    // Not a behavioural guarantee — a structural one. If a later edit makes
-    // OPERANDS_NEVER_COMMANDS derive from READ_ONLY_ALLOWLIST, the second question
-    // stops being asked at the point of adding a name, which is the whole point.
-    expect(OPERANDS_NEVER_COMMANDS).not.toBe(READ_ONLY_ALLOWLIST);
+  it('makes every reader answer both questions', () => {
+    // The point of the table. A name cannot be added for its class without
+    // stating whether its operands can hide a command — TypeScript requires the
+    // field, and this asserts nobody has defaulted it away.
+    for (const [name, entry] of Object.entries(READERS)) {
+      expect(typeof entry.readOnly, name).toBe('boolean');
+      expect(typeof entry.operandsAreData, name).toBe('boolean');
+    }
+    expect(Object.keys(READERS).length).toBe(68);
+  });
+
+  it('derives the class allowlist from the table rather than repeating it', () => {
+    // If these ever diverge, one of the two questions has been answered twice.
+    expect(READ_ONLY_ALLOWLIST.size)
+      .toBe(Object.values(READERS).filter((e) => e.readOnly).length);
   });
 });
 ```
@@ -271,62 +280,123 @@ describe('the two questions the read-only allowlist used to answer', () => {
 - [ ] **Step 3: Run the test to verify it fails**
 
 Run: `npx vitest run test/unit/policy/carrier-completeness.test.ts`
-Expected: FAIL — `OPERANDS_NEVER_COMMANDS` is not exported yet.
+Expected: FAIL — `READERS` is not exported yet.
 
 - [ ] **Step 4: Make the change**
 
-In `src/policy/classifier.ts`, after the `READ_ONLY_ALLOWLIST` declaration, add the second Set with the same 68 names, and this docblock:
+In `src/policy/classifier.ts`, replace the `READ_ONLY_ALLOWLIST` literal (line 23) with the table, and derive the Set from it:
 
 ```ts
 /**
- * Binaries whose operands can never be a command.
+ * The binaries this classifier will vouch for, and what it vouches for about them.
  *
- * Separate from `READ_ONLY_ALLOWLIST` because they answer different questions,
- * which one Set could not: "does this binary only read?" decides the class, and
- * "can this binary's operands hide a command?" decides whether the carrier scan
- * runs. Adding a name for the first silently answered the second, which is how
- * #217 turned the interpreter scan off for two verbs by adding them to a list
- * about classes.
+ * Two questions, kept apart because one Set answering both is how #217 turned the
+ * interpreter carrier scan off for two verbs by adding them to a list about
+ * classes:
  *
- * Membership is identical to `READ_ONLY_ALLOWLIST` today, and the point is the
- * name rather than the contents: the next person adding a reader has to answer
- * the second question because it is written down. Two mechanisms answer it
- * outside this gate and are not affected by either set — `DISQUALIFYING_ARGS`
- * and `FIND_EXEC_FLAGS` — which is why `find` can stay here while
- * `find … -exec sudo id +` is still `privileged`.
+ *   readOnly         does this binary only read?  -> decides the class
+ *   operandsAreData  can its operands hide a command?  -> decides whether the
+ *                    carrier scan runs
+ *
+ * Both are `true` for every entry today. The value is not the contents but that
+ * the type will not let the next person add a name without answering both.
+ *
+ * Two mechanisms answer the second question outside this table and are not
+ * affected by it — `DISQUALIFYING_ARGS` and `FIND_EXEC_FLAGS` — which is why
+ * `find` can carry `operandsAreData: true` while `find … -exec sudo id +` is
+ * still `privileged`.
+ *
+ * The two-word entries are looked up only for the class: `operandsAreData` reads
+ * a single word, so those rows never reach the second question.
  */
-const OPERANDS_NEVER_COMMANDS = new Set<string>([
-// 54 single-word entries
-  "arp", "basename", "cat", "comm", "cut", "date",
-  "df", "diff", "dig", "dirname", "du", "echo",
-  "false", "file", "find", "free", "grep", "head",
-  "host", "hostname", "htop", "id", "ifconfig", "iostat",
-  "journalctl", "ls", "netstat", "nslookup", "ping", "printenv",
-  "printf", "ps", "pwd", "readlink", "realpath", "seq",
-  "sort", "ss", "stat", "tail", "test", "top",
-  "tr", "traceroute", "true", "uname", "uniq", "uptime",
-  "vmstat", "wc", "whereis", "which", "who", "whoami",
-// 14 two-word entries, inert here (operandsAreData looks up one word)
-  "docker images", "docker inspect", "docker logs", "docker ps", "docker stats", "git branch",
-  "git diff", "git log", "git remote", "git show", "git status", "ip addr",
-  "ip route", "systemctl status",
-]);
+const READERS: Record<string, { readOnly: boolean; operandsAreData: boolean }> = {
+  "arp":              { readOnly: true, operandsAreData: true },
+  "basename":         { readOnly: true, operandsAreData: true },
+  "cat":              { readOnly: true, operandsAreData: true },
+  "comm":             { readOnly: true, operandsAreData: true },
+  "cut":              { readOnly: true, operandsAreData: true },
+  "date":             { readOnly: true, operandsAreData: true },
+  "df":               { readOnly: true, operandsAreData: true },
+  "diff":             { readOnly: true, operandsAreData: true },
+  "dig":              { readOnly: true, operandsAreData: true },
+  "dirname":          { readOnly: true, operandsAreData: true },
+  "docker images":    { readOnly: true, operandsAreData: true },  // two-word: class only
+  "docker inspect":   { readOnly: true, operandsAreData: true },  // two-word: class only
+  "docker logs":      { readOnly: true, operandsAreData: true },  // two-word: class only
+  "docker ps":        { readOnly: true, operandsAreData: true },  // two-word: class only
+  "docker stats":     { readOnly: true, operandsAreData: true },  // two-word: class only
+  "du":               { readOnly: true, operandsAreData: true },
+  "echo":             { readOnly: true, operandsAreData: true },
+  "false":            { readOnly: true, operandsAreData: true },
+  "file":             { readOnly: true, operandsAreData: true },
+  "find":             { readOnly: true, operandsAreData: true },
+  "free":             { readOnly: true, operandsAreData: true },
+  "git branch":       { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git diff":         { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git log":          { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git remote":       { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git show":         { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git status":       { readOnly: true, operandsAreData: true },  // two-word: class only
+  "grep":             { readOnly: true, operandsAreData: true },
+  "head":             { readOnly: true, operandsAreData: true },
+  "host":             { readOnly: true, operandsAreData: true },
+  "hostname":         { readOnly: true, operandsAreData: true },
+  "htop":             { readOnly: true, operandsAreData: true },
+  "id":               { readOnly: true, operandsAreData: true },
+  "ifconfig":         { readOnly: true, operandsAreData: true },
+  "iostat":           { readOnly: true, operandsAreData: true },
+  "ip addr":          { readOnly: true, operandsAreData: true },  // two-word: class only
+  "ip route":         { readOnly: true, operandsAreData: true },  // two-word: class only
+  "journalctl":       { readOnly: true, operandsAreData: true },
+  "ls":               { readOnly: true, operandsAreData: true },
+  "netstat":          { readOnly: true, operandsAreData: true },
+  "nslookup":         { readOnly: true, operandsAreData: true },
+  "ping":             { readOnly: true, operandsAreData: true },
+  "printenv":         { readOnly: true, operandsAreData: true },
+  "printf":           { readOnly: true, operandsAreData: true },
+  "ps":               { readOnly: true, operandsAreData: true },
+  "pwd":              { readOnly: true, operandsAreData: true },
+  "readlink":         { readOnly: true, operandsAreData: true },
+  "realpath":         { readOnly: true, operandsAreData: true },
+  "seq":              { readOnly: true, operandsAreData: true },
+  "sort":             { readOnly: true, operandsAreData: true },
+  "ss":               { readOnly: true, operandsAreData: true },
+  "stat":             { readOnly: true, operandsAreData: true },
+  "systemctl status": { readOnly: true, operandsAreData: true },  // two-word: class only
+  "tail":             { readOnly: true, operandsAreData: true },
+  "test":             { readOnly: true, operandsAreData: true },
+  "top":              { readOnly: true, operandsAreData: true },
+  "tr":               { readOnly: true, operandsAreData: true },
+  "traceroute":       { readOnly: true, operandsAreData: true },
+  "true":             { readOnly: true, operandsAreData: true },
+  "uname":            { readOnly: true, operandsAreData: true },
+  "uniq":             { readOnly: true, operandsAreData: true },
+  "uptime":           { readOnly: true, operandsAreData: true },
+  "vmstat":           { readOnly: true, operandsAreData: true },
+  "wc":               { readOnly: true, operandsAreData: true },
+  "whereis":          { readOnly: true, operandsAreData: true },
+  "which":            { readOnly: true, operandsAreData: true },
+  "who":              { readOnly: true, operandsAreData: true },
+  "whoami":           { readOnly: true, operandsAreData: true },
+};
 
-The two-word entries are carried for parity and are inert in this position:
-`operandsAreData` looks up a single word, so only the 54 single-word names can
-ever match here. They are kept so the two sets can be diffed by eye.
+/** The class half of READERS, as the shape its consumers already expect. */
+const READ_ONLY_ALLOWLIST = new Set(
+  Object.entries(READERS).filter(([, e]) => e.readOnly).map(([name]) => name),
+);
 ```
 
-Change `operandsAreData` (line 941):
+Change `operandsAreData` (line 941) to read the other half:
 
 ```ts
 function operandsAreData(words: string[]): boolean {
   const idx = effectiveCommandIndex(words);
-  return idx !== -1 && OPERANDS_NEVER_COMMANDS.has(stripPath(unquote(words[idx])));
+  if (idx === -1) return false;
+  return READERS[stripPath(unquote(words[idx]))]?.operandsAreData === true;
 }
 ```
 
-Add `OPERANDS_NEVER_COMMANDS` to the existing export statement at the end of the file.
+Add `READERS` to the export statement at the end of the file.
 
 - [ ] **Step 5: Run the tests and commit**
 
@@ -335,7 +405,7 @@ Expected: all pass, same count as after Task 1.
 
 ```bash
 git add src/policy/classifier.ts test/unit/policy/carrier-completeness.test.ts
-git commit -m "refactor(policy): split the set that answered two questions"
+git commit -m "refactor(policy): one table, two answers, instead of one set answering two questions"
 ```
 
 The message carries the Step 1 measurement.
