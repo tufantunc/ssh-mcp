@@ -290,24 +290,38 @@ const CLASS_RANK: Record<CommandClass, number> = {
  */
 // Null-prototype for the reason `mergePolicyRules` spells out (#172): this is indexed by
 // a command word, which is a free string, so on a plain object `INTERPRETERS['toString']`
-// resolves to a function and reading `.flags` off it throws inside the policy gate.
-const INTERPRETERS: Record<string, { flags: string[]; readable: boolean }> = Object.assign(
-  Object.create(null) as Record<string, { flags: string[]; readable: boolean }>,
+// resolves to a function and reading `.programBearingWords` off it throws inside the
+// policy gate.
+const INTERPRETERS: Record<string, { programBearingWords: string[]; readable: boolean }> = Object.assign(
+  Object.create(null) as Record<string, { programBearingWords: string[]; readable: boolean }>,
   {
-  sh: { flags: ['-c'], readable: true },
-  bash: { flags: ['-c'], readable: true },
-  dash: { flags: ['-c'], readable: true },
-  zsh: { flags: ['-c'], readable: true },
-  ksh: { flags: ['-c'], readable: true },
-  ash: { flags: ['-c'], readable: true },
-  python: { flags: ['-c'], readable: false },
-  python2: { flags: ['-c'], readable: false },
-  python3: { flags: ['-c'], readable: false },
-  perl: { flags: ['-e', '-E'], readable: false },
-  ruby: { flags: ['-e'], readable: false },
+  sh: { programBearingWords: ['-c'], readable: true },
+  bash: { programBearingWords: ['-c'], readable: true },
+  dash: { programBearingWords: ['-c'], readable: true },
+  zsh: { programBearingWords: ['-c'], readable: true },
+  ksh: { programBearingWords: ['-c'], readable: true },
+  ash: { programBearingWords: ['-c'], readable: true },
+  python: { programBearingWords: ['-c'], readable: false },
+  python2: { programBearingWords: ['-c'], readable: false },
+  python3: { programBearingWords: ['-c'], readable: false },
+  perl: { programBearingWords: ['-e', '-E'], readable: false },
+  ruby: { programBearingWords: ['-e'], readable: false },
   // `-p`/`--print` evaluate exactly as `-e` does and then print the result.
-  node: { flags: ['-e', '--eval', '-p', '--print'], readable: false },
-  php: { flags: ['-r'], readable: false },
+  node: { programBearingWords: ['-e', '--eval', '-p', '--print'], readable: false },
+  php: { programBearingWords: ['-r'], readable: false },
+  // Measured on 2.11.0: each of these classified `safe` while the identical
+  // attack through python3 -c classified `destructive` (GHSA-qmx6-47vm-3vf7).
+  // `readable: false` throughout, matching python/perl/node: the program is not
+  // shell text, so its presence is what counts rather than its content.
+  osascript: { programBearingWords: ['-e'], readable: false },
+  lua: { programBearingWords: ['-e'], readable: false },
+  Rscript: { programBearingWords: ['-e'], readable: false },
+  bun: { programBearingWords: ['-e'], readable: false },
+  tclsh: { programBearingWords: ['-c'], readable: false },
+  // `eval` is a subcommand, not a flag — the field is named for what it holds.
+  deno: { programBearingWords: ['eval'], readable: false },
+  pwsh: { programBearingWords: ['-c', '-Command', '-e', '-EncodedCommand'], readable: false },
+  powershell: { programBearingWords: ['-c', '-Command', '-e', '-EncodedCommand'], readable: false },
   },
 );
 
@@ -563,9 +577,24 @@ export function nestedCommands(command: string): string[] {
     if (!operandsAreData(words)) {
       for (let i = 0; i < words.length; i++) {
         const spec = INTERPRETERS[stripPath(unquote(words[i]))];
-        if (spec === undefined || isFlagValue(words, i, spec.flags)) continue;
-        const program = programAfterFlag(words, i, spec.flags);
-        if (program !== null) found.push(program);
+        if (spec === undefined || isFlagValue(words, i, spec.programBearingWords)) continue;
+        const result = programAfterFlag(words, i, spec.programBearingWords);
+        if (result !== null) {
+          found.push(result.program);
+          // An encoded program is opaque to every text scan until it is decoded. Gated on
+          // the word `programAfterFlag` actually matched, not a scan of the whole segment
+          // for the long spelling: `-EncodedCommand` and its `-e` abbreviation both reach
+          // here as `result.flag`, and `spec.programBearingWords.includes('-EncodedCommand')`
+          // keeps this specific to pwsh/powershell — every other interpreter's `-e` (perl,
+          // ruby, node, osascript, lua, bun) has no such flag in its own table entry.
+          if (
+            spec.programBearingWords.includes('-EncodedCommand') &&
+            (result.flag === '-EncodedCommand' || result.flag === '-e')
+          ) {
+            const decoded = decodedPowerShellCommand(result.program);
+            if (decoded !== null) found.push(decoded);
+          }
+        }
       }
 
       // An operand of a binary nothing more specific has read is classified as a
@@ -1099,31 +1128,73 @@ function isFlagValue(words: string[], i: number, flags: string[]): boolean {
 }
 
 /**
+ * A program an interpreter was handed on its command line, and the word that carried it.
+ */
+interface FlaggedProgram {
+  program: string;
+  /** The exact word from `flags` that matched — never the cluster or attached form. */
+  flag: string;
+}
+
+/**
  * The program an interpreter was handed on its command line, or null.
  *
  * Only flags may sit between the interpreter and its flag; anything else means this was
  * not that kind of invocation, which is what keeps `python3 script.py` — a program this
  * cannot read either, but one every deployment runs — out of the gate.
+ *
+ * Returns which of `flags` matched alongside the program, not just the program text, so
+ * a caller can tell `-EncodedCommand` from its `-e` abbreviation apart from every other
+ * program-bearing word — decoding is specific to that one flag, and both spellings reach
+ * here as an ordinary match.
  */
-function programAfterFlag(words: string[], from: number, flags: string[]): string | null {
+function programAfterFlag(words: string[], from: number, flags: string[]): FlaggedProgram | null {
   for (let j = from + 1; j < words.length; j++) {
     const word = words[j];
-    if (flags.includes(word)) return words[j + 1] ?? null;
+    if (flags.includes(word)) {
+      const program = words[j + 1];
+      return program === undefined ? null : { program, flag: word };
+    }
     const attached = flags.find((f) => word.startsWith(f) && word.length > f.length);
     if (attached !== undefined) {
       const rest = word.slice(attached.length);
       // `sh -c'sudo id'` tokenises to `-csudo id`, so the program is attached. `bash -cx`
       // is a flag cluster and the program is the next word. A space, or the `=` of
       // `--eval=…`, is what tells them apart: a cluster is letters only.
-      if (/\s/.test(rest) || rest.startsWith('=')) return rest.replace(/^=/, '');
-      return words[j + 1] ?? null;
+      if (/\s/.test(rest) || rest.startsWith('=')) return { program: rest.replace(/^=/, ''), flag: attached };
+      const program = words[j + 1];
+      return program === undefined ? null : { program, flag: attached };
     }
     // The program flag need not lead the cluster: `bash -xc 'sudo id'` runs exactly what
     // `bash -cx 'sudo id'` runs, and a prefix test saw the second and missed the first.
-    if (clusterCarriesFlag(word, flags)) return words[j + 1] ?? null;
+    if (clusterCarriesFlag(word, flags)) {
+      const program = words[j + 1];
+      // The cluster itself is reported as `flag`: it is not one exact program-bearing
+      // word, so it cannot be mistaken for `-EncodedCommand` or `-e` by a caller that
+      // compares against those literal spellings.
+      return program === undefined ? null : { program, flag: word };
+    }
     if (!skippableBetweenFlags(word)) return null;
   }
   return null;
+}
+
+/** How much base64 is worth decoding before the answer stops changing. */
+const MAX_ENCODED_CHARS = 64 * 1024;
+
+/**
+ * The command inside `-EncodedCommand`, or null.
+ *
+ * PowerShell encodes UTF-16LE, so decoding as utf8 yields text with a NUL between
+ * every character and no pattern matches it. `Buffer.from(x, 'base64')` never
+ * throws — it drops characters outside the alphabet — so malformed input produces
+ * a wrong answer rather than an exception, and the caller must treat null and
+ * nonsense alike: the flag alone has already made the command `destructive`.
+ */
+function decodedPowerShellCommand(operand: string): string | null {
+  if (operand.length > MAX_ENCODED_CHARS) return null;
+  const decoded = Buffer.from(operand, 'base64').toString('utf16le');
+  return decoded.includes('�') || decoded.trim() === '' ? null : decoded;
 }
 
 /**
@@ -1162,7 +1233,7 @@ function readsProgramFromStdin(words: string[]): boolean {
   // file flag; every other piped awk reads data, not a program.
   const spec = INTERPRETERS[bin];
   if (spec === undefined) return false;
-  const flags = spec.flags;
+  const flags = spec.programBearingWords;
   let sawStdinFlag = false;
   for (let j = idx + 1; j < words.length; j++) {
     const word = words[j];
@@ -1252,8 +1323,8 @@ function hasUnreadableProgram(command: string): boolean {
       for (let j = 0; j < words.length; j++) {
         const spec = INTERPRETERS[stripPath(unquote(words[j]))];
         if (spec === undefined || spec.readable) continue;
-        if (isFlagValue(words, j, spec.flags)) continue;
-        if (programAfterFlag(words, j, spec.flags) !== null) return true;
+        if (isFlagValue(words, j, spec.programBearingWords)) continue;
+        if (programAfterFlag(words, j, spec.programBearingWords) !== null) return true;
       }
     }
 

@@ -127,3 +127,75 @@ describe('the two questions the read-only allowlist used to answer', () => {
       .toBe(Object.values(READERS).filter((e) => e.readOnly).length);
   });
 });
+
+/** PowerShell emits UTF-16LE base64 for -EncodedCommand. */
+const encode = (s: string) => Buffer.from(s, 'utf16le').toString('base64');
+
+describe('interpreters that take a program on the command line', () => {
+  it.each([
+    ['osascript', `osascript -e 'do shell script "systemctl stop nginx"'`],
+    ['lua', `lua -e 'os.execute("systemctl stop nginx")'`],
+    ['Rscript', `Rscript -e 'system("systemctl stop nginx")'`],
+    ['bun', `bun -e 'require("child_process").execSync("systemctl stop nginx")'`],
+    ['tclsh', `tclsh -c 'exec systemctl stop nginx'`],
+    ['deno eval', `deno eval 'new Deno.Command("systemctl").outputSync()'`],
+    ['pwsh -Command', `pwsh -Command 'Stop-Service nginx'`],
+  ])('treats a program handed to %s as unreadable', (_label, command) => {
+    // No elevation in these payloads, so Task 1's scan does not reach them. This
+    // is the half that needs the name.
+    expect(classifyCommand(command).class, command).toBe('destructive');
+  });
+
+  it('reads a carrier through a path and through quotes', () => {
+    expect(classifyCommand(`/usr/bin/osascript -e 'do shell script "id"'`).class).toBe('destructive');
+    expect(classifyCommand(`"osascript" -e 'do shell script "id"'`).class).toBe('destructive');
+  });
+
+  it('decodes -EncodedCommand so elevation inside it is elevation', () => {
+    expect(classifyCommand(`pwsh -EncodedCommand ${encode('sudo id')}`).class).toBe('privileged');
+  });
+
+  it('decodes the -e abbreviation of -EncodedCommand the same way', () => {
+    // pwsh/powershell accept -e as an abbreviation of -EncodedCommand. The brief's
+    // original gate — words.includes('-EncodedCommand') — never fires for this
+    // spelling, so it silently stayed at destructive instead of privileged. The
+    // gate must key off the flag programAfterFlag actually matched, not a scan
+    // for the long spelling.
+    expect(classifyCommand(`pwsh -e ${encode('sudo id')}`).class).toBe('privileged');
+  });
+
+  it('still refuses an encoded payload that does not elevate', () => {
+    // readable: false means the presence of a program is enough.
+    expect(classifyCommand(`pwsh -EncodedCommand ${encode('Get-Process')}`).class).toBe('destructive');
+  });
+
+  it('does not throw on base64 that decodes to nothing useful', () => {
+    // Buffer.from(x, 'base64') never throws — it drops invalid characters — so the
+    // failure mode is a wrong answer, not an exception. Both must be safe.
+    //
+    // The empty case is quoted (`''`) rather than a bare empty string: an unquoted
+    // empty operand leaves no token at all after `-EncodedCommand`, which is a
+    // different, pre-existing shape — "the flag has no argument" — that this file
+    // already answers `safe` for every interpreter in the table (`python3 -c` with
+    // nothing after it is `safe` too). A quoted empty word does survive
+    // tokenization and is the case this test means to exercise: an operand that is
+    // present but decodes to nothing useful.
+    for (const junk of ['!!!!not base64!!!!', "''", 'QQ', 'a'.repeat(4001)]) {
+      expect(() => classifyCommand(`pwsh -EncodedCommand ${junk}`)).not.toThrow();
+      expect(classifyCommand(`pwsh -EncodedCommand ${junk}`).class).toBe('destructive');
+    }
+  });
+
+  it('stays cheap on a large encoded operand', () => {
+    // Decoding is attacker-controlled work done before the policy decision. The
+    // bound is a growth ratio, not a wall clock: this repo's CI runs under
+    // coverage and an absolute bound once failed at 3677ms.
+    const small = encode('Get-Process '.repeat(100));
+    const large = encode('Get-Process '.repeat(10_000));
+    const time = (c: string) => { const t = performance.now(); classifyCommand(c); return performance.now() - t; };
+    time(`pwsh -EncodedCommand ${small}`); // warm
+    const ratioSmall = time(`pwsh -EncodedCommand ${small}`);
+    const ratioLarge = time(`pwsh -EncodedCommand ${large}`);
+    expect(ratioLarge).toBeLessThan(Math.max(ratioSmall * 200, 50));
+  });
+});
