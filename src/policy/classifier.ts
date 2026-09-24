@@ -595,7 +595,12 @@ export function nestedCommands(command: string): string[] {
         // is the signal for which interpreter this is, not a hardcoded name check.
         const caseInsensitive = spec?.programBearingWords.includes('-EncodedCommand') ?? false;
         if (spec === undefined || isFlagValue(words, i, spec.programBearingWords, caseInsensitive)) continue;
-        const result = programAfterFlag(words, i, spec.programBearingWords, caseInsensitive);
+        // Same signal, second job: pwsh/powershell's argument parser also does not stop
+        // at an unrecognised option's bare value (`-ExecutionPolicy Bypass`) the way a
+        // POSIX interpreter stops at its first positional argument. See
+        // `programAfterFlag`'s `tolerateUnknownWordsAtHead` for why this is scoped to
+        // `i === 0` there rather than here.
+        const result = programAfterFlag(words, i, spec.programBearingWords, caseInsensitive, caseInsensitive);
         if (result !== null) {
           foundProgram = true;
           found.push(result.program);
@@ -1178,16 +1183,34 @@ interface FlaggedProgram {
  *
  * Only flags may sit between the interpreter and its flag; anything else means this was
  * not that kind of invocation, which is what keeps `python3 script.py` — a program this
- * cannot read either, but one every deployment runs — out of the gate.
+ * cannot read either, but one every deployment runs — out of the gate. That rule holds
+ * for every interpreter here except pwsh/powershell (see `tolerateUnknownWordsAtHead`):
+ * real POSIX interpreters stop parsing their own options at the first positional
+ * argument — `python3 script.py -c 'evil'` hands `-c evil` to the script as `argv`, not
+ * to python — so treating a bare word as "not this kind of invocation" is correct for
+ * them, not merely convenient.
  *
  * Returns which of `flags` matched alongside the program, not just the program text, so
  * a caller can tell `-EncodedCommand` from its `-e` abbreviation apart from every other
  * program-bearing word — decoding is specific to that one flag, and both spellings reach
  * here as an ordinary match.
+ *
+ * @param tolerateUnknownWordsAtHead pwsh/powershell's own argument parser walks the
+ *   whole command line looking for named parameters it recognises and does not stop at
+ *   an unrecognised one's value (`-ExecutionPolicy Bypass`) the way a POSIX interpreter
+ *   stops at its first positional argument. Only takes effect when `from === 0` — the
+ *   interpreter is the segment's own head, so it is unambiguously the thing being
+ *   invoked, not a value or a search term this file has no business reinterpreting
+ *   (`grep -e perl -e python` never reaches here with this set, because `perl` is not
+ *   the segment's head and isn't pwsh-family regardless). Structural, not a list of
+ *   pwsh's value-taking flags: this file does not need to know `-ExecutionPolicy` exists
+ *   to stop being confused by it.
  */
 function programAfterFlag(
   words: string[], from: number, flags: string[], caseInsensitive = false,
+  tolerateUnknownWordsAtHead = false,
 ): FlaggedProgram | null {
+  const tolerateUnknownWords = tolerateUnknownWordsAtHead && from === 0;
   for (let j = from + 1; j < words.length; j++) {
     const word = words[j];
     const exact = flags.find((f) => sameFlag(word, f, caseInsensitive));
@@ -1231,7 +1254,7 @@ function programAfterFlag(
       const program = words[j + 1];
       return program === undefined ? null : { program, flag: clusterFlag };
     }
-    if (!skippableBetweenFlags(word)) return null;
+    if (!skippableBetweenFlags(word) && !tolerateUnknownWords) return null;
   }
   return null;
 }
@@ -1408,7 +1431,7 @@ function hasUnreadableProgram(command: string): boolean {
         // `-EC` from `-ec`, so neither should this.
         const caseInsensitive = spec.programBearingWords.includes('-EncodedCommand');
         if (isFlagValue(words, j, spec.programBearingWords, caseInsensitive)) continue;
-        if (programAfterFlag(words, j, spec.programBearingWords, caseInsensitive) !== null) return true;
+        if (programAfterFlag(words, j, spec.programBearingWords, caseInsensitive, caseInsensitive) !== null) return true;
       }
     }
 

@@ -262,3 +262,59 @@ describe('fix round 1: pwsh/powershell flag matching is case-insensitive, nothin
     expect(classifyCommand(`ruby -E somefile.rb`).class).toBe('safe');
   });
 });
+
+describe('fix round 2: an unrecognised pwsh option with a value must not hide -EncodedCommand', () => {
+  // `-ExecutionPolicy` is skipped as an unrecognised flag, but its *value* `Bypass` is a
+  // bare word — not a flag, not skippable — so `programAfterFlag` gave up right there and
+  // never reached `-EncodedCommand`. `hasUnreadableProgram` failed the same way, so there
+  // was no `destructive` floor either, and the catch-all cannot rescue it: a base64
+  // payload is one token with no whitespace. `-ExecutionPolicy Bypass` plus an encoded
+  // payload is the single most common real-world hostile pwsh spelling.
+  it('finds -EncodedCommand past -ExecutionPolicy Bypass', () => {
+    expect(classifyCommand(`pwsh -ExecutionPolicy Bypass -EncodedCommand ${encode('sudo id')}`).class)
+      .toBe('privileged');
+  });
+
+  it('finds -EncodedCommand past two unrecognised options in a row', () => {
+    expect(
+      classifyCommand(`pwsh -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encode('sudo id')}`).class,
+    ).toBe('privileged');
+  });
+
+  it('finds -EncodedCommand past -WindowStyle Hidden, and works for powershell too', () => {
+    expect(
+      classifyCommand(`powershell -WindowStyle Hidden -EncodedCommand ${encode('sudo id')}`).class,
+    ).toBe('privileged');
+  });
+
+  it('pins the mechanism: a non-elevating payload past the same option stays destructive', () => {
+    // If this were `privileged` too, the test above could be passing because pwsh
+    // invocations are treated as privileged outright, not because -EncodedCommand was
+    // actually found and decoded. `readable: false` means the mere presence of the
+    // program is enough for `destructive`; only its *content* elevates further.
+    expect(classifyCommand(`pwsh -ExecutionPolicy Bypass -EncodedCommand ${encode('Get-Process')}`).class)
+      .toBe('destructive');
+  });
+
+  it('does not widen an unrelated wrapper: nsenter -m sh -c still requires no unknown value between them', () => {
+    // The historical case the current `programAfterFlag` behaviour protects: `sh` here
+    // is not the segment's head (nsenter is), so the fix below — scoped to an
+    // interpreter found at position 0 — must not touch this shape. Still finds the
+    // elevation (nothing sits between `-m` and `sh -c`, so this was never broken); the
+    // point is that it still runs through the ordinary, narrower path.
+    expect(classifyCommand(`nsenter -t 1 -m sh -c 'sudo id'`).class).toBe('privileged');
+  });
+
+  it('does not reopen mention-vs-invocation: a mid-command "pwsh" that is a value, not the binary, stays safe', () => {
+    // The case the `from === 0` scoping exists for, constructed the same shape as
+    // `grep -e perl -e python`: `pwsh` here is the VALUE of an unrelated tool's own
+    // flag (`--search`), never actually invoked. `isFlagValue` cannot catch this one —
+    // `--search` is not one of pwsh's own program-bearing words, so it only guards the
+    // exact-flag-collision shape, not an arbitrary unrelated flag's value. Tolerating
+    // an unknown word on the way to `-EncodedCommand` for ANY position `pwsh` is found
+    // at, not just position 0, would read this as a real invocation and decode a
+    // payload that was never handed to pwsh at all.
+    const command = `customtool --search pwsh -ExecutionPolicy Bypass -EncodedCommand ${encode('sudo id')}`;
+    expect(classifyCommand(command).class).toBe('safe');
+  });
+});
