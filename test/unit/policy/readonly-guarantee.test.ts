@@ -170,3 +170,230 @@ describe('the approval gate sees elevation wherever it is', () => {
     expect(engine.evaluate('env sudo id', adminDev, 'run-command').decision).toBe('require-approval');
   });
 });
+
+/**
+ * A reader with an execution flag is not a reader.
+ *
+ * `sort --compress-program=X` makes GNU sort exec X for every temporary file it
+ * spills — measured against coreutils 9.11, an attacker-named script ran 14,224
+ * times for one 200k-line input. `sort` is in `READ_ONLY_ALLOWLIST`, so the whole
+ * command classified `read-only` and a `readOnly` viewer was allowed to run it
+ * through `read-command`, while running the same program directly was denied.
+ *
+ * `DISQUALIFYING_ARGS` is the mechanism for exactly this and already held `find`'s
+ * `-exec` family; `sort` was simply missing from it. Driven through the engine
+ * rather than the classifier, because the thing that was wrong was what a viewer
+ * was permitted to do.
+ */
+describe('a reader that can be told to execute is not read-only', () => {
+  const engine = new PolicyEngine(DEFAULT_RULES);
+  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor, 'read-command');
+
+  it.each([
+    ['joined by =', 'sort --compress-program=/srv/payload.sh /etc/hostname'],
+    ['separate word', 'sort --compress-program /srv/payload.sh /etc/hostname'],
+  ])('refuses sort --compress-program (%s)', (_label, command) => {
+    // Class as well as decision: for a readOnly profile every class but
+    // `read-only` denies identically, so the decision alone cannot say whether
+    // the flag was noticed or the profile simply refused everything.
+    expect(decide(command).commandClass, command).toBe('destructive');
+    expect(decide(command).decision, command).toBe('deny');
+  });
+
+  it('still allows the sorting a viewer actually does', () => {
+    // The last two carry the word the rule matches on, in an operand rather than
+    // as the flag. Without them a rule as loose as /compress/ passes every case
+    // here — measured, it did.
+    for (const command of ['sort -u /var/log/app.log', 'sort -k2 -n /etc/passwd',
+                           'sort --reverse /tmp/x', 'sort /etc/hostname',
+                           'sort /var/log/compress-stats.log',
+                           'sort --key=2 /tmp/compressed-sizes.txt']) {
+      expect(decide(command).decision, command).toBe('allow');
+    }
+  });
+
+  /**
+   * `sort -o FILE` / `--output=FILE` creates and truncates FILE — a write, not
+   * a read — and short options cluster, so `-o` need not lead: `sort -nro out
+   * in` writes `out` exactly as `sort -o out in` does. Measured on HEAD before
+   * this fix: every one of these classified `read-only`, which a `readOnly`
+   * viewer is allowed to run through `read-command`.
+   */
+  it.each([
+    ['long form, joined', 'sort --output=/root/.ssh/authorized_keys /tmp/key.pub'],
+    ['long form, separate word', 'sort --output /root/.ssh/authorized_keys /tmp/key.pub'],
+    ['bare -o', 'sort -o /root/.ssh/authorized_keys /tmp/key.pub'],
+    ['-o clustered behind other short flags', 'sort -nro /root/.ssh/authorized_keys /tmp/key.pub'],
+    ['-o attached to its value with no space', 'sort -o/root/.ssh/authorized_keys /tmp/key.pub'],
+  ])('refuses sort -o / --output (%s)', (_label, command) => {
+    expect(decide(command).commandClass, command).toBe('destructive');
+    expect(decide(command).decision, command).toBe('deny');
+  });
+
+  it('does not treat an unrelated short-flag cluster as -o', () => {
+    // `-t` takes a value (the field separator) and consumes the rest of an
+    // attached word, so the `o` in `-tofile` is `-t`'s value text, not an
+    // invocation of `-o`. A cluster rule loose enough to fire on any `o`
+    // anywhere in a dash word would refuse this too — measured, a first draft
+    // did.
+    for (const command of ['sort -tofile /etc/passwd', 'sort -t: -k2,2n /etc/passwd']) {
+      expect(decide(command).decision, command).toBe('allow');
+    }
+  });
+});
+
+/**
+ * `hasDisqualifyingArgs` used `parseSegments`, which steps over a privilege
+ * prefix (`sudo`, `su`, …) before reading the command word, but not an exec
+ * wrapper (`env`, `nohup`, `timeout`, …). `sort` and `find` are both
+ * allowlisted readers with a disqualifying-flag rule; behind a wrapper the
+ * rule keyed on the wrapper's own name instead — never in `DISQUALIFYING_ARGS`
+ * — and the write flag went unnoticed.
+ *
+ * Measured: `env sort --compress-program=/srv/payload.sh /etc/hostname` and
+ * `env find /tmp -delete` both classified `safe`. Pre-existing (the mechanism
+ * this fixes already worked for a bare `sort`/`find`, just not behind a
+ * wrapper), and it affects `find -delete` identically to `sort
+ * --compress-program`, which is why both are covered here rather than only
+ * the one named in the finding.
+ */
+/**
+ * R2 + R3 (targeted round, 2026-09-24): the previous fix closed the exact
+ * spellings `-o`, `--output` and `--compress-program` and left the class
+ * open. GNU sort's own option grammar has two escapes past a fixed spelling:
+ *
+ *  - A short-option cluster is scanned left to right, and any of sort's own
+ *    *argument-less* short flags may sit ahead of `-o` without consuming it
+ *    (`sort -mo out in` writes `out` exactly as `sort -o out in` does). `-m`
+ *    (merge) was missing from that set — measured on HEAD, `sort -mo
+ *    /root/.ssh/authorized_keys /tmp/k` classified `read-only`.
+ *  - `getopt_long` resolves a `--` word to the option whose name it is an
+ *    unambiguous prefix of: `--o`, `--ou`, `--out`, `--outp`, `--outpu`,
+ *    `--output` — and the same for `--compress-program`, starting at `--co`
+ *    (`--c` alone is ambiguous with `--check` and sort refuses to run).
+ *
+ * Every short flag and every long-option prefix below is derived from
+ * `sort --help` (coreutils 9.11) and was measured directly against
+ * `ssh-mcp-ssh-admin-1` in this fork's docker-compose stack before being
+ * pinned here — a generated sweep over the grammar, not the four spellings
+ * the last two rounds each patched one at a time.
+ */
+describe('sort: the write CLASS, not four spellings of it', () => {
+  const engine = new PolicyEngine(DEFAULT_RULES);
+  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor, 'read-command');
+  const target = '/root/.ssh/authorized_keys';
+
+  // Every argument-less short flag GNU sort accepts ahead of `-o` in a
+  // cluster. `m` (merge) is the one this pins that the previous fix missed.
+  const ARGLESS_SHORT_FLAGS = [
+    'b', 'c', 'C', 'd', 'f', 'g', 'h', 'i', 'M', 'm', 'n', 'R', 'r', 's', 'u', 'V', 'z',
+  ];
+
+  it.each(ARGLESS_SHORT_FLAGS.map((flag): [string, string] => [
+    `-${flag}o`, `sort -${flag}o ${target} /tmp/k`,
+  ]))('denies every argument-less short flag clustered ahead of -o: %s', (_label, command) => {
+    expect(decide(command).commandClass, command).toBe('destructive');
+    expect(decide(command).decision, command).toBe('deny');
+  });
+
+  it.each([
+    ['-rso (reverse + stable, real combinable flags)', `sort -rso ${target} /tmp/k`],
+    ['-bfio (blanks + case + nonprinting)', `sort -bfio ${target} /tmp/k`],
+    ['-rmo (reverse + merge — the flag this round adds)', `sort -rmo ${target} /tmp/k`],
+    ['-o attached to its value with no space, behind a cluster', `sort -rmo${target} /tmp/k`],
+  ])('denies a multi-flag cluster ahead of -o: %s', (_label, command) => {
+    expect(decide(command).commandClass, command).toBe('destructive');
+    expect(decide(command).decision, command).toBe('deny');
+  });
+
+  // Every getopt_long prefix of --output, joined and as a separate word.
+  const OUTPUT_PREFIXES = ['o', 'ou', 'out', 'outp', 'outpu', 'output'];
+  it.each(OUTPUT_PREFIXES.flatMap((p): Array<[string, string]> => [
+    [`--${p}=… (joined)`, `sort --${p}=${target} /tmp/k`],
+    [`--${p} … (separate word)`, `sort --${p} ${target} /tmp/k`],
+  ]))('denies every unambiguous prefix of --output: %s', (_label, command) => {
+    expect(decide(command).commandClass, command).toBe('destructive');
+    expect(decide(command).decision, command).toBe('deny');
+  });
+
+  // Every getopt_long prefix of --compress-program that names no other sort
+  // long option — `--co` through the full spelling. `--c` alone is excluded
+  // on purpose; see the negative case below.
+  const COMPRESS_PROGRAM = 'compress-program';
+  const COMPRESS_PREFIXES = Array.from(
+    { length: COMPRESS_PROGRAM.length - 1 },
+    (_, i) => COMPRESS_PROGRAM.slice(0, i + 2),
+  );
+  it.each(COMPRESS_PREFIXES.flatMap((p): Array<[string, string]> => [
+    [`--${p}=… (joined)`, `sort --${p}=/tmp/payload.sh /tmp/k`],
+    [`--${p} … (separate word)`, `sort --${p} /tmp/payload.sh /tmp/k`],
+  ]))('denies every unambiguous prefix of --compress-program: %s', (_label, command) => {
+    expect(decide(command).commandClass, command).toBe('destructive');
+    expect(decide(command).decision, command).toBe('deny');
+  });
+
+  it('does not treat sort\'s own value-taking short flags as reaching -o in a cluster', () => {
+    // -k, -S and -T are value-taking and consume the rest of a clustered word
+    // as their OWN argument, so the `o` after one of them is that argument's
+    // text, not `-o` invoked. Measured against real sort: each of these exits
+    // 2 (an invalid key/buffer-size/directory argument) and writes nothing.
+    for (const command of ['sort -ko /tmp/k', 'sort -So /tmp/k', 'sort -To /tmp/k']) {
+      expect(decide(command).decision, command).toBe('allow');
+    }
+  });
+
+  it('does not treat an ambiguous long-option prefix as a write', () => {
+    // `--c` alone matches both --check and --compress-program; getopt_long
+    // refuses to run rather than guess, so sort never spills, never execs and
+    // never writes. Measured: `sort --c=x k` exits 2 with no file created.
+    expect(decide('sort --c=/tmp/payload.sh /tmp/k').decision).toBe('allow');
+    expect(decide('sort --c /tmp/payload.sh /tmp/k').decision).toBe('allow');
+  });
+
+  it('does not treat a word that merely starts the same letters as a match', () => {
+    // Neither is a prefix of any sort long option, so getopt_long would say
+    // "unrecognized option" and sort would not run at all.
+    expect(decide('sort --ox=/tmp/x /tmp/k').decision).toBe('allow');
+    expect(decide('sort --cx=/tmp/x /tmp/k').decision).toBe('allow');
+  });
+});
+
+describe('a disqualifying flag is still noticed behind an exec wrapper', () => {
+  const engine = new PolicyEngine(DEFAULT_RULES);
+  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor, 'read-command');
+
+  it.each([
+    ['env, sort --compress-program', 'env sort --compress-program=/srv/payload.sh /etc/hostname'],
+    ['env, sort -o', 'env sort -o /root/.ssh/authorized_keys /tmp/key.pub'],
+    ['nohup, sort -o', 'nohup sort -o /root/.ssh/authorized_keys /tmp/key.pub'],
+    ['env, find -delete', 'env find /tmp -delete'],
+  ])('refuses %s', (_label, command) => {
+    expect(decide(command).commandClass, command).toBe('destructive');
+    expect(decide(command).decision, command).toBe('deny');
+  });
+
+  it('refuses find -exec behind a wrapper too, raised further still by the elevation it carries', () => {
+    // `sudo id` inside `-exec` is also picked up by the unrelated, unconditional
+    // elevation scan (nestedCommands' FIND_EXEC_FLAGS extraction), which ranks
+    // above `destructive` — so this lands on `privileged`, not `destructive`.
+    // Either way a `readOnly` profile denies it; what this pins is that the
+    // wrapper no longer hides the disqualifying `-exec` from
+    // `hasDisqualifyingArgs` specifically.
+    const result = decide('timeout 5 find / -name x -exec sudo id +');
+    expect(result.commandClass).toBe('privileged');
+    expect(result.decision).toBe('deny');
+  });
+
+  it('does not escalate a harmless wrapped command for a profile that already holds safe', () => {
+    // A `readOnly` profile can never confirm this: `env`/`nohup` are exec
+    // wrappers, never readers, so a wrapped command is never classified
+    // `read-only` regardless of what it wraps (documented above
+    // READ_ONLY_ALLOWLIST) — `env sort /etc/hostname` denies for that reason
+    // alone, with or without this fix. The fix's precision — that it does not
+    // newly flag a wrapped command with no disqualifying flag — is checked
+    // against a profile that already holds `safe` outright.
+    for (const command of ['env sort /etc/hostname', 'nohup find /etc -name "*.conf"']) {
+      expect(engine.evaluate(command, adminProd, 'run-command').decision, command).toBe('allow');
+    }
+  });
+});

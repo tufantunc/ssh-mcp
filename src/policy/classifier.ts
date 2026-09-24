@@ -20,18 +20,103 @@ import { AWK_NAMES, readAwkInvocation, type AwkFindings } from './awk.js';
  */
 const SHELL_CONTROL_CHARS = /[;&|<>`$(){}\n\r]/;
 
-const READ_ONLY_ALLOWLIST = new Set([
-  'ls', 'cat', 'grep', 'find', 'stat', 'df', 'du', 'head', 'tail', 'wc',
-  'ps', 'uname', 'uptime', 'hostname', 'id', 'who', 'whoami', 'date',
-  'printenv', 'pwd', 'echo', 'printf', 'test', 'true', 'false',
-  'which', 'whereis', 'file', 'readlink', 'realpath', 'basename', 'dirname',
-  'seq', 'sort', 'uniq', 'cut', 'tr', 'diff', 'comm',
-  'systemctl status', 'journalctl', 'docker ps', 'docker logs', 'docker inspect',
-  'docker stats', 'docker images', 'free', 'top', 'htop', 'iostat', 'vmstat',
-  'netstat', 'ss', 'ifconfig', 'ip addr', 'ip route', 'arp', 'dig', 'nslookup',
-  'host', 'ping', 'traceroute', 'git status', 'git log',
-  'git diff', 'git branch', 'git show', 'git remote',
-]);
+/**
+ * The binaries this classifier will vouch for, and what it vouches for about them.
+ *
+ * Two questions, kept apart because one Set answering both is how #217 turned the
+ * interpreter carrier scan off for two verbs by adding them to a list about
+ * classes:
+ *
+ *   readOnly         does this binary only read?  -> decides the class
+ *   operandsAreData  can its operands hide a command?  -> decides whether the
+ *                    carrier scan runs
+ *
+ * Both are `true` for every entry today. The value is not the contents but that
+ * the type will not let the next person add a name without answering both.
+ *
+ * Two mechanisms answer the second question outside this table and are not
+ * affected by it — `DISQUALIFYING_ARGS` and `FIND_EXEC_FLAGS` — which is why
+ * `find` can carry `operandsAreData: true` while `find … -exec sudo id +` is
+ * still `privileged`.
+ *
+ * The two-word entries are looked up only for the class: `operandsAreData` reads
+ * a single word, so those rows never reach the second question.
+ */
+const READERS: Record<string, { readOnly: boolean; operandsAreData: boolean }> = {
+  "arp":              { readOnly: true, operandsAreData: true },
+  "basename":         { readOnly: true, operandsAreData: true },
+  "cat":              { readOnly: true, operandsAreData: true },
+  "comm":             { readOnly: true, operandsAreData: true },
+  "cut":              { readOnly: true, operandsAreData: true },
+  "date":             { readOnly: true, operandsAreData: true },
+  "df":               { readOnly: true, operandsAreData: true },
+  "diff":             { readOnly: true, operandsAreData: true },
+  "dig":              { readOnly: true, operandsAreData: true },
+  "dirname":          { readOnly: true, operandsAreData: true },
+  "docker images":    { readOnly: true, operandsAreData: true },  // two-word: class only
+  "docker inspect":   { readOnly: true, operandsAreData: true },  // two-word: class only
+  "docker logs":      { readOnly: true, operandsAreData: true },  // two-word: class only
+  "docker ps":        { readOnly: true, operandsAreData: true },  // two-word: class only
+  "docker stats":     { readOnly: true, operandsAreData: true },  // two-word: class only
+  "du":               { readOnly: true, operandsAreData: true },
+  "echo":             { readOnly: true, operandsAreData: true },
+  "false":            { readOnly: true, operandsAreData: true },
+  "file":             { readOnly: true, operandsAreData: true },
+  "find":             { readOnly: true, operandsAreData: true },
+  "free":             { readOnly: true, operandsAreData: true },
+  "git branch":       { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git diff":         { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git log":          { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git remote":       { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git show":         { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git status":       { readOnly: true, operandsAreData: true },  // two-word: class only
+  "grep":             { readOnly: true, operandsAreData: true },
+  "head":             { readOnly: true, operandsAreData: true },
+  "host":             { readOnly: true, operandsAreData: true },
+  "hostname":         { readOnly: true, operandsAreData: true },
+  "htop":             { readOnly: true, operandsAreData: true },
+  "id":               { readOnly: true, operandsAreData: true },
+  "ifconfig":         { readOnly: true, operandsAreData: true },
+  "iostat":           { readOnly: true, operandsAreData: true },
+  "ip addr":          { readOnly: true, operandsAreData: true },  // two-word: class only
+  "ip route":         { readOnly: true, operandsAreData: true },  // two-word: class only
+  "journalctl":       { readOnly: true, operandsAreData: true },
+  "ls":               { readOnly: true, operandsAreData: true },
+  "netstat":          { readOnly: true, operandsAreData: true },
+  "nslookup":         { readOnly: true, operandsAreData: true },
+  "ping":             { readOnly: true, operandsAreData: true },
+  "printenv":         { readOnly: true, operandsAreData: true },
+  "printf":           { readOnly: true, operandsAreData: true },
+  "ps":               { readOnly: true, operandsAreData: true },
+  "pwd":              { readOnly: true, operandsAreData: true },
+  "readlink":         { readOnly: true, operandsAreData: true },
+  "realpath":         { readOnly: true, operandsAreData: true },
+  "seq":              { readOnly: true, operandsAreData: true },
+  "sort":             { readOnly: true, operandsAreData: true },
+  "ss":               { readOnly: true, operandsAreData: true },
+  "stat":             { readOnly: true, operandsAreData: true },
+  "systemctl status": { readOnly: true, operandsAreData: true },  // two-word: class only
+  "tail":             { readOnly: true, operandsAreData: true },
+  "test":             { readOnly: true, operandsAreData: true },
+  "top":              { readOnly: true, operandsAreData: true },
+  "tr":               { readOnly: true, operandsAreData: true },
+  "traceroute":       { readOnly: true, operandsAreData: true },
+  "true":             { readOnly: true, operandsAreData: true },
+  "uname":            { readOnly: true, operandsAreData: true },
+  "uniq":             { readOnly: true, operandsAreData: true },
+  "uptime":           { readOnly: true, operandsAreData: true },
+  "vmstat":           { readOnly: true, operandsAreData: true },
+  "wc":               { readOnly: true, operandsAreData: true },
+  "whereis":          { readOnly: true, operandsAreData: true },
+  "which":            { readOnly: true, operandsAreData: true },
+  "who":              { readOnly: true, operandsAreData: true },
+  "whoami":           { readOnly: true, operandsAreData: true },
+};
+
+/** The class half of READERS, as the shape its consumers already expect. */
+const READ_ONLY_ALLOWLIST = new Set(
+  Object.entries(READERS).filter(([, e]) => e.readOnly).map(([name]) => name),
+);
 // Deliberately NOT read-only: `env`, because it is an exec wrapper. `env <cmd>`
 // runs <cmd>, so allowlisting the name `env` vouched for a command the
 // classifier never looked at — `env sudo rm -f /etc/passwd` classified
@@ -205,29 +290,142 @@ const CLASS_RANK: Record<CommandClass, number> = {
  */
 // Null-prototype for the reason `mergePolicyRules` spells out (#172): this is indexed by
 // a command word, which is a free string, so on a plain object `INTERPRETERS['toString']`
-// resolves to a function and reading `.flags` off it throws inside the policy gate.
-const INTERPRETERS: Record<string, { flags: string[]; readable: boolean }> = Object.assign(
-  Object.create(null) as Record<string, { flags: string[]; readable: boolean }>,
+// resolves to a function and reading `.programBearingWords` off it throws inside the
+// policy gate.
+/** One entry of the interpreter table — named so the lookup helper below can share it. */
+interface InterpreterSpec {
+  programBearingWords: string[];
+  readable: boolean;
+}
+
+const INTERPRETERS: Record<string, InterpreterSpec> = Object.assign(
+  Object.create(null) as Record<string, InterpreterSpec>,
   {
-  sh: { flags: ['-c'], readable: true },
-  bash: { flags: ['-c'], readable: true },
-  dash: { flags: ['-c'], readable: true },
-  zsh: { flags: ['-c'], readable: true },
-  ksh: { flags: ['-c'], readable: true },
-  ash: { flags: ['-c'], readable: true },
-  python: { flags: ['-c'], readable: false },
-  python2: { flags: ['-c'], readable: false },
-  python3: { flags: ['-c'], readable: false },
-  perl: { flags: ['-e', '-E'], readable: false },
-  ruby: { flags: ['-e'], readable: false },
+  sh: { programBearingWords: ['-c'], readable: true },
+  bash: { programBearingWords: ['-c'], readable: true },
+  dash: { programBearingWords: ['-c'], readable: true },
+  zsh: { programBearingWords: ['-c'], readable: true },
+  ksh: { programBearingWords: ['-c'], readable: true },
+  ash: { programBearingWords: ['-c'], readable: true },
+  python: { programBearingWords: ['-c'], readable: false },
+  python2: { programBearingWords: ['-c'], readable: false },
+  python3: { programBearingWords: ['-c'], readable: false },
+  perl: { programBearingWords: ['-e', '-E'], readable: false },
+  ruby: { programBearingWords: ['-e'], readable: false },
   // `-p`/`--print` evaluate exactly as `-e` does and then print the result.
-  node: { flags: ['-e', '--eval', '-p', '--print'], readable: false },
-  php: { flags: ['-r'], readable: false },
+  node: { programBearingWords: ['-e', '--eval', '-p', '--print'], readable: false },
+  php: { programBearingWords: ['-r'], readable: false },
+  // Measured on 2.11.0: each of these classified `safe` while the identical
+  // attack through python3 -c classified `destructive` (GHSA-qmx6-47vm-3vf7).
+  // `readable: false` throughout, matching python/perl/node: the program is not
+  // shell text, so its presence is what counts rather than its content.
+  osascript: { programBearingWords: ['-e'], readable: false },
+  lua: { programBearingWords: ['-e'], readable: false },
+  Rscript: { programBearingWords: ['-e'], readable: false },
+  bun: { programBearingWords: ['-e'], readable: false },
+  // No program-bearing flag: real tclsh takes a script FILE as its positional
+  // argument or reads one from stdin, unlike sh/bash/python/pwsh, none of
+  // which have a `-c` of its own. An empty list still marks tclsh as an
+  // unreadable interpreter for `readsProgramFromStdin` (`echo … | tclsh`),
+  // which is the genuine carrier; it is simply never handed a program inline
+  // on its own command line, so there is no flag to name here.
+  tclsh: { programBearingWords: [], readable: false },
+  // `eval` is a subcommand, not a flag — the field is named for what it holds.
+  deno: { programBearingWords: ['eval'], readable: false },
+  pwsh: { programBearingWords: ['-c', '-Command', '-e', '-EncodedCommand'], readable: false },
+  powershell: { programBearingWords: ['-c', '-Command', '-e', '-EncodedCommand'], readable: false },
   },
 );
 
+/**
+ * Every `INTERPRETERS` entry, keyed by its name lower-cased.
+ *
+ * A second index rather than lower-casing the lookup key against `INTERPRETERS`
+ * directly, because that table's own keys are not uniformly lower-case —
+ * `Rscript` is not `rscript` — so folding only the *input* would still miss it.
+ * Built once at module load: the table is fixed, so there is nothing to keep in
+ * sync.
+ */
+const INTERPRETERS_BY_LOWERCASE_NAME: Record<string, InterpreterSpec> = Object.assign(
+  Object.create(null) as Record<string, InterpreterSpec>,
+  Object.fromEntries(Object.entries(INTERPRETERS).map(([name, spec]) => [name.toLowerCase(), spec])),
+);
+
+/** A Windows executable suffix this table's keys never carry. */
+const WINDOWS_EXE_SUFFIX = /\.(exe|cmd|bat)$/i;
+
+/**
+ * Resolve an interpreter table entry for a command word already stripped of
+ * its path (`stripPath(unquote(word))`, as every call site already computes
+ * it for the exact-match case below).
+ *
+ * The table's keys are exact, case-sensitive, extension-free spellings, so a
+ * direct lookup is tried first and is the whole cost for the common case —
+ * `sh`, `python3`, the bare lowercase `pwsh`. The fallback strips a trailing
+ * `.exe`/`.cmd`/`.bat` and folds case, which is what a Windows target's own
+ * shell hands back for the *same* binary: `powershell.exe`, `PWSH.EXE` and
+ * `PowerShell` all name the interpreter this table already lists under
+ * `powershell`/`pwsh`.
+ *
+ * Applied to every entry, not only pwsh/powershell. The measured bug is
+ * about those two, but the gap is not specific to them: a target running
+ * `python.exe` or `Node.EXE` carries the identical mismatch, and scoping the
+ * fix to two names would leave the rest of the table exactly as blind as it
+ * was. This is the binary-*name* question, answered once — it does not touch
+ * flag matching, which stays case-sensitive per interpreter (`perl -E` and
+ * `perl -e` are still two different flags) via the existing, separate
+ * `caseInsensitive` parameter threaded through `programAfterFlag` and
+ * friends.
+ */
+function resolveInterpreter(word: string): InterpreterSpec | undefined {
+  const exact = INTERPRETERS[word];
+  if (exact !== undefined) return exact;
+  return INTERPRETERS_BY_LOWERCASE_NAME[word.replace(WINDOWS_EXE_SUFFIX, '').toLowerCase()];
+}
+
 /** `find … -exec <cmd> +` runs cmd. */
 const FIND_EXEC_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
+
+/**
+ * GNU sort's own long-option table, spelled in full — every entry `sort
+ * --help` lists (coreutils 9.11, `docker exec ssh-mcp-ssh-admin-1 sort
+ * --help`). Used only to compute which prefixes of `--output` and
+ * `--compress-program` `getopt_long` treats as unambiguous.
+ *
+ * `getopt_long` resolves a `--` word to the option whose name it is an
+ * unambiguous prefix of: a prefix shared with another option name is
+ * refused outright ("option '--c' is ambiguous; possibilities: '--check'
+ * '--compress-program'") rather than run, so it must not be treated as a
+ * write. Measured against the binary: `sort --c=x k` exits 2 with no file
+ * created; `sort --co=x k` — the second letter is where `--check` and
+ * `--compress-program` diverge — runs.
+ */
+const SORT_LONG_OPTIONS = [
+  'ignore-leading-blanks', 'dictionary-order', 'ignore-case',
+  'general-numeric-sort', 'ignore-nonprinting', 'month-sort',
+  'human-numeric-sort', 'numeric-sort', 'random-sort', 'random-source',
+  'reverse', 'sort', 'version-sort', 'batch-size', 'check',
+  'compress-program', 'debug', 'files0-from', 'key', 'merge', 'output',
+  'stable', 'buffer-size', 'field-separator', 'temporary-directory',
+  'parallel', 'unique', 'zero-terminated', 'help', 'version',
+];
+
+/**
+ * The regex-alternation source matching any prefix of `full` that names
+ * exactly one entry of `SORT_LONG_OPTIONS` — every prefix `getopt_long`
+ * would accept for it, from the shortest unambiguous one up to `full`
+ * itself — each optionally followed by `=value`.
+ */
+function unambiguousLongOptionSource(full: string): string {
+  const prefixes: string[] = [];
+  for (let len = 1; len <= full.length; len++) {
+    const prefix = full.slice(0, len);
+    if (SORT_LONG_OPTIONS.filter((opt) => opt.startsWith(prefix)).length === 1) {
+      prefixes.push(prefix);
+    }
+  }
+  return `--(?:${prefixes.join('|')})(?:=|$)`;
+}
 
 /**
  * How deep a substitution may nest before we stop reading and refuse to guess.
@@ -414,8 +612,22 @@ function matchesEitherForm(command: string, test: (form: string) => boolean): bo
  * Four carriers, all of which a remote shell expands and runs:
  *   `$(...)`, backticks, process substitution `<(...)` / `>(...)`, and a shell
  *   given `-c`.
+ *
+ * @param speculativeOperands Whether the catch-all below — any multi-word,
+ *   non-flag operand of a segment no more specific reader claimed — should be
+ *   pushed. That catch-all is a guess about a binary this file does not
+ *   recognise; the four carriers above are not guesses, the shell really does
+ *   run what they hold, and are pushed regardless of this flag. Defaults to
+ *   `true` for `classifyCommand`'s own recursion, where a guess may raise a
+ *   command's *class* and leave role, tier and approval to weigh in.
+ *   `findForbiddenMatch` passes `false`: its recursion feeds
+ *   `FORBIDDEN_RULES`, the one unconditional denylist, and a guess must not
+ *   be able to produce a refusal nobody can override (the maintainer's
+ *   ruling — see the block comment above `findForbiddenMatch`). `$()`,
+ *   backticks and `sh -c` are certain carriers and keep reaching the
+ *   denylist either way.
  */
-export function nestedCommands(command: string): string[] {
+export function nestedCommands(command: string, speculativeOperands = true): string[] {
   const found: string[] = [];
 
   // `$(...)`, `<(...)`, `>(...)` — scanned rather than matched, because a regex
@@ -476,11 +688,82 @@ export function nestedCommands(command: string): string[] {
     for (const inner of awk?.pipedInto ?? []) found.push(inner);
 
     if (!operandsAreData(words)) {
+      // Which operand *indices* an interpreter actually consumed as a program —
+      // not whether the segment's head happens to be a name in the table, and not
+      // a single segment-wide flag either. A set of indices rather than a boolean:
+      // `unknownbin sh -c true 'sudo id'` has `sh -c` consume `true` (harmless,
+      // pushed below) and leave `'sudo id'` untouched, and a boolean here defused
+      // the catch-all for that second operand too — measured, it classified
+      // `safe`. Only the specific word an interpreter actually read should be
+      // excluded from the catch-all; every other operand in the segment is still
+      // this binary's own, unclaimed by anything more specific.
+      //
+      // A binary being recognised is also not the same as this segment's
+      // invocation of it being one the loop could parse:
+      // `pwsh -ExecutionPolicy Bypass -Command 'sudo id'` has a recognised head
+      // and a program on the line, but `-ExecutionPolicy` takes a value
+      // (`Bypass`) that isn't itself a flag, and `programAfterFlag` gives up
+      // rather than guess past it. Gating the catch-all below on "head is in the
+      // table" excluded exactly the binaries this file just learned, and for
+      // precisely the invocations its own flag-walk cannot follow — a net
+      // regression, not a wash.
+      const consumedOperands = new Set<number>();
       for (let i = 0; i < words.length; i++) {
-        const spec = INTERPRETERS[stripPath(unquote(words[i]))];
-        if (spec === undefined || isFlagValue(words, i, spec.flags)) continue;
-        const program = programAfterFlag(words, i, spec.flags);
-        if (program !== null) found.push(program);
+        const spec = resolveInterpreter(stripPath(unquote(words[i])));
+        // pwsh/powershell's own parameter binder resolves `-ENC`/`-Enc`/`-enc` to the
+        // same parameter; every other interpreter's flags are exact letters (`-E` and
+        // `-e` are different flags to perl). `-EncodedCommand` only ever appears on
+        // the two entries whose own parameter binder works this way, so its presence
+        // is the signal for which interpreter this is, not a hardcoded name check.
+        const caseInsensitive = spec?.programBearingWords.includes('-EncodedCommand') ?? false;
+        if (spec === undefined || isFlagValue(words, i, spec.programBearingWords, caseInsensitive)) continue;
+        // Same signal, second job: pwsh/powershell's argument parser also does not stop
+        // at an unrecognised option's bare value (`-ExecutionPolicy Bypass`) the way a
+        // POSIX interpreter stops at its first positional argument. See
+        // `programAfterFlag`'s `tolerateUnknownWordsAtHead` for why this is scoped to
+        // `i === 0` there rather than here.
+        const result = programAfterFlag(words, i, spec.programBearingWords, caseInsensitive, caseInsensitive);
+        if (result !== null) {
+          consumedOperands.add(result.index);
+          found.push(result.program);
+          // An encoded program is opaque to every text scan until it is decoded. Gated on
+          // the word `programAfterFlag` actually matched — the table's own canonical
+          // spelling, so every case-folded or clustered form of `-EncodedCommand`/`-e`
+          // reaches this the same way a literal `-EncodedCommand` does — not a scan of
+          // the whole segment for one long spelling.
+          if (caseInsensitive && (result.flag === '-EncodedCommand' || result.flag === '-e')) {
+            const decoded = decodedPowerShellCommand(result.program);
+            if (decoded !== null) found.push(decoded);
+          }
+        }
+      }
+
+      // An operand of a binary nothing more specific has read is classified as a
+      // command in its own right, rather than scanned as text.
+      //
+      // The gate is the awk reader's own result, and now which specific operands
+      // an interpreter actually consumed, rather than a list of names: a name
+      // list here would be the defect this change exists to fix
+      // (GHSA-qmx6-47vm-3vf7), and "the head is a name in the table" turned out
+      // to be one too — it answers a different question than "did this
+      // invocation's program-bearing word actually resolve". `awk` is already
+      // null for every non-awk segment.
+      //
+      // Whitespace is what separates an operand worth classifying from one that is
+      // not: a single token is a path, a flag value or a subcommand, while a
+      // multi-word operand has the shape of a command. Flags are skipped.
+      //
+      // Deliberately NOT a text scan for `sudo`. That version asserted elevations
+      // the awk reader and the variable-command-word logic refuse to assert — both
+      // cap at `destructive` on purpose — and it out-ranked the nested
+      // classification that names the elevated binary, reporting `awk` where `id`
+      // was correct.
+      if (speculativeOperands && awk === null) {
+        for (let i = 1; i < words.length; i++) {
+          if (consumedOperands.has(i)) continue;
+          if (words[i].startsWith('-')) continue;
+          if (/\s/.test(words[i])) found.push(words[i]);
+        }
       }
     }
 
@@ -552,7 +835,60 @@ const EXEC_WRAPPERS = new Set([
 // Null-prototype for the same reason as INTERPRETERS: indexed by the command word.
 const DISQUALIFYING_ARGS: Record<string, RegExp> = Object.assign(
   Object.create(null) as Record<string, RegExp>,
-  { find: /^-(exec|execdir|ok|okdir|delete|fprintf?|fls)$/ },
+  {
+    find: /^-(exec|execdir|ok|okdir|delete|fprintf?|fls)$/,
+    // GNU sort execs this for every temporary file it spills, so a reader
+    // becomes a launcher. Measured against coreutils 9.11: an attacker-named
+    // script ran 14,224 times for one 200k-line input, and the whole command
+    // classified `read-only` — which a `readOnly` viewer is allowed to run,
+    // while running that same program directly is denied.
+    //
+    // `-o FILE` / `--output=FILE` is the same shape of bug with a plainer
+    // payoff: it creates and truncates FILE, which is a write a `readOnly`
+    // profile must never reach through a command classified `read-only`.
+    // Measured on HEAD before this rule: `sort -o /root/.ssh/authorized_keys
+    // /tmp/key.pub` classified `read-only`.
+    //
+    // Targeted round (2026-09-24, R2+R3): the version above closed the exact
+    // spellings `-o`, `--output` and `--compress-program` and left the CLASS
+    // open — GNU sort's own option grammar has two escapes past a fixed
+    // spelling, both measured against the real binary:
+    //
+    //  - A short-option cluster is scanned left to right, and any of sort's
+    //    own *argument-less* short flags may sit ahead of `-o` without
+    //    consuming it: `sort -mo out in` writes `out` exactly as `sort -o out
+    //    in` does. `-m` (merge) is itself argument-less, and its absence from
+    //    the char class below is exactly what let `sort -mo …` through as
+    //    `read-only`.
+    //  - `getopt_long` resolves a `--` word by unambiguous-prefix matching:
+    //    `--o`, `--ou`, `--out`, `--outp`, `--outpu` all mean `--output`
+    //    (nothing else starts with `o`), and `--co` through
+    //    `--compress-progra` all mean `--compress-program` (`--c` alone is
+    //    ambiguous with `--check` and sort refuses to run at all —
+    //    `unambiguousLongOptionSource` excludes it for exactly that reason,
+    //    computed from sort's own option table rather than hand-picked).
+    //
+    // The cluster branch is still deliberately narrower than "any `o` in a
+    // dash word": `-[bcCdfghiMmnRrsuVz]*o` only allows GNU sort's own
+    // argument-less short flags ahead of the `o`, so it stops at the first
+    // flag that takes a value of its own. Without that, `-tofile` — `-t`
+    // (field separator) with its value attached, not `-o` — would be
+    // misread as a write. `-t`, `-k`, `-S` and `-T` are exactly the short
+    // flags this excludes, because each consumes the rest of a clustered
+    // word as its own argument, so a following `o` is that argument's text,
+    // not `-o` invoked.
+    //
+    // `find`'s entry above does not get the same prefix-abbreviation
+    // treatment: `find` parses its predicates itself rather than through
+    // `getopt_long`, and accepts no abbreviated spelling of `-exec` — `find .
+    // -exe` is "unknown predicate `-exe`", measured. There is no class to
+    // close there.
+    sort: new RegExp(
+      `^(?:${unambiguousLongOptionSource('compress-program')}`
+      + `|${unambiguousLongOptionSource('output')}`
+      + '|-[bcCdfghiMmnRrsuVz]*o)',
+    ),
+  },
 );
 
 /** A leading `NAME=value`, which a shell treats as an assignment, not a command. */
@@ -715,11 +1051,25 @@ function elevatedBinaryOf(command: string): string | null {
  */
 
 
-/** An allowlisted binary carrying a flag that makes it write or execute. */
+/**
+ * An allowlisted binary carrying a flag that makes it write or execute.
+ *
+ * Keyed on `effectiveCommandIndex`, not `parseSegments`. `parseSegments`
+ * (`parseWords`) only steps over a privilege prefix (`sudo`, `su`, …), not an
+ * exec wrapper (`env`, `nohup`, `timeout`, …), so `env sort
+ * --compress-program=X` read `head` as `"env"` — not in `DISQUALIFYING_ARGS`
+ * — and the flag went unnoticed. `effectiveCommandIndex` already reads past
+ * both, which is what `operandsAreData` and `readsProgramFromStdin` use it
+ * for. Deliberately not fixed by changing `parseWords` itself:
+ * `invokedWords` also reads it, and widening what counts as "the command"
+ * there is a different, larger change this fix does not take on.
+ */
 function hasDisqualifyingArgs(command: string): boolean {
-  return parseSegments(command).some(({ head, args }) => {
-    const rule = DISQUALIFYING_ARGS[head];
-    return rule !== undefined && args.some((arg) => rule.test(arg));
+  return tokenizeSegments(command).some((words) => {
+    const idx = effectiveCommandIndex(words);
+    if (idx === -1) return false;
+    const rule = DISQUALIFYING_ARGS[stripPath(words[idx])];
+    return rule !== undefined && words.slice(idx + 1).some((arg) => rule.test(arg));
   });
 }
 
@@ -827,8 +1177,20 @@ export function findForbiddenMatch(command: string, depth = 0): string | null {
   // They still classified `destructive`, which on the `prod` tier degrades an
   // absolute `deny` into `require-approval`: a rule that answers "never" became
   // one a human can click through.
+  //
+  // `speculativeOperands: false` — the maintainer's ruling. `nestedCommands`'
+  // catch-all is a guess about an unrecognised binary's operands, and this loop
+  // feeds the one unconditional rule in the policy: a guess may raise a
+  // command's class, which role, tier and approval still get to weigh in on,
+  // but it must not manufacture a refusal nobody can override. Measured before
+  // this parameter existed: `git commit -m 'reboot the worker pool'` was a hard
+  // deny on an admin profile with `approvalPolicy: 'auto'`, because the catch-all
+  // read the quoted commit message as an operand starting with a forbidden word.
+  // `$()`, backticks and `sh -c` are certain carriers, not guesses — the shell
+  // really does run what they hold — and are unaffected: they are pushed by
+  // `nestedCommands` regardless of this flag.
   if (depth >= MAX_NESTING_DEPTH) return null;
-  for (const inner of nestedCommands(command)) {
+  for (const inner of nestedCommands(command, false)) {
     const match = findForbiddenMatch(inner, depth + 1);
     if (match !== null) return match;
   }
@@ -940,7 +1302,8 @@ function effectiveCommandIndex(words: string[]): number {
  */
 function operandsAreData(words: string[]): boolean {
   const idx = effectiveCommandIndex(words);
-  return idx !== -1 && READ_ONLY_ALLOWLIST.has(stripPath(unquote(words[idx])));
+  if (idx === -1) return false;
+  return READERS[stripPath(unquote(words[idx]))]?.operandsAreData === true;
 }
 
 /**
@@ -972,10 +1335,47 @@ function skippableBetweenFlags(word: string): boolean {
   return word === '' || word.startsWith('-');
 }
 
-function isFlagValue(words: string[], i: number, flags: string[]): boolean {
+/**
+ * Whether `word` is a spelling of `flag`, honouring case-insensitivity when asked.
+ *
+ * Scoped per call, never globally: pwsh/powershell's own parameter binder resolves
+ * `-ENC`, `-Enc` and `-enc` to the same parameter, but `-E` and `-e` are two different
+ * flags to perl. Every caller here is told explicitly, per invocation, whether the
+ * interpreter it is matching against is one of the case-insensitive ones — folding case
+ * is never the default.
+ */
+function sameFlag(word: string, flag: string, caseInsensitive: boolean): boolean {
+  return caseInsensitive ? word.toLowerCase() === flag.toLowerCase() : word === flag;
+}
+
+function isFlagValue(words: string[], i: number, flags: string[], caseInsensitive = false): boolean {
   if (i === 0) return false;
   const previous = words[i - 1];
-  return previous.length > 1 && previous.startsWith('-') && flags.includes(previous);
+  if (!(previous.length > 1 && previous.startsWith('-'))) return false;
+  return flags.some((f) => sameFlag(previous, f, caseInsensitive));
+}
+
+/**
+ * A program an interpreter was handed on its command line, and the word that carried it.
+ */
+interface FlaggedProgram {
+  program: string;
+  /**
+   * The canonical entry of `flags` that matched — the spelling in the table, not
+   * necessarily the literal word on the command line. `-EC` case-insensitively matches
+   * `-e`, and this reports `-e`, so a caller comparing against the table's own spellings
+   * (deciding whether to decode, say) never has to re-derive which flag a case-folded or
+   * clustered word stood for.
+   */
+  flag: string;
+  /**
+   * The index into `words` of the word that carried `program` — the whole word, whether
+   * the program is that word verbatim or embedded in it (`-csudo id` attaches the program
+   * to the flag's own word, so `index` names that word, not a later one). A caller tracking
+   * which operands an interpreter actually consumed, rather than merely "some interpreter
+   * consumed something in this segment", needs the position, not just the text.
+   */
+  index: number;
 }
 
 /**
@@ -983,44 +1383,146 @@ function isFlagValue(words: string[], i: number, flags: string[]): boolean {
  *
  * Only flags may sit between the interpreter and its flag; anything else means this was
  * not that kind of invocation, which is what keeps `python3 script.py` — a program this
- * cannot read either, but one every deployment runs — out of the gate.
+ * cannot read either, but one every deployment runs — out of the gate. That rule holds
+ * for every interpreter here except pwsh/powershell (see `tolerateUnknownWordsAtHead`):
+ * real POSIX interpreters stop parsing their own options at the first positional
+ * argument — `python3 script.py -c 'evil'` hands `-c evil` to the script as `argv`, not
+ * to python — so treating a bare word as "not this kind of invocation" is correct for
+ * them, not merely convenient.
+ *
+ * Returns which of `flags` matched alongside the program, not just the program text, so
+ * a caller can tell `-EncodedCommand` from its `-e` abbreviation apart from every other
+ * program-bearing word — decoding is specific to that one flag, and both spellings reach
+ * here as an ordinary match.
+ *
+ * @param tolerateUnknownWordsAtHead pwsh/powershell's own argument parser walks the
+ *   whole command line looking for named parameters it recognises and does not stop at
+ *   an unrecognised one's value (`-ExecutionPolicy Bypass`) the way a POSIX interpreter
+ *   stops at its first positional argument. Only takes effect when `from` is the
+ *   segment's *effective* command word — `effectiveCommandIndex(words)`, which reads
+ *   past a privilege prefix or an exec wrapper (`env`, `nohup`, `timeout`, …), not merely
+ *   position 0. `from === 0` missed exactly the shape those wrappers exist to describe:
+ *   `env pwsh -ExecutionPolicy Bypass -EncodedCommand …` put `pwsh` at index 1, the
+ *   tolerance never engaged, and the interpreter loop's own flag-walk gave up at
+ *   `Bypass` before ever reaching `-EncodedCommand` — classified `safe`. Still unambiguous
+ *   about *which* word is being invoked, not a value or a search term this file has no
+ *   business reinterpreting (`grep -e perl -e python` never reaches here with this set,
+ *   because `perl` is not the segment's effective command word and isn't pwsh-family
+ *   regardless; nor is `customtool --search pwsh …`, where `customtool` is). Structural,
+ *   not a list of pwsh's value-taking flags: this file does not need to know
+ *   `-ExecutionPolicy` exists to stop being confused by it.
  */
-function programAfterFlag(words: string[], from: number, flags: string[]): string | null {
+function programAfterFlag(
+  words: string[], from: number, flags: string[], caseInsensitive = false,
+  tolerateUnknownWordsAtHead = false,
+): FlaggedProgram | null {
+  const tolerateUnknownWords = tolerateUnknownWordsAtHead && from === effectiveCommandIndex(words);
   for (let j = from + 1; j < words.length; j++) {
     const word = words[j];
-    if (flags.includes(word)) return words[j + 1] ?? null;
+    const exact = flags.find((f) => sameFlag(word, f, caseInsensitive));
+    if (exact !== undefined) {
+      // A subcommand — a program-bearing word that is not itself a `-` flag, such as
+      // `deno`'s `eval` — may still have its own options before the code: `deno eval
+      // --unstable <code>` is one invocation, not two. A real flag like `-c` or
+      // `-Command` never has anything of its own between it and the program, so this
+      // only widens the subcommand case.
+      let k = j + 1;
+      if (!exact.startsWith('-')) {
+        while (k < words.length && skippableBetweenFlags(words[k])) k++;
+      }
+      const program = words[k];
+      return program === undefined ? null : { program, flag: exact, index: k };
+    }
+    // Deliberately case-SENSITIVE even for pwsh/powershell: this branch exists for a
+    // value glued directly onto a short flag with no separating space (`-csudo id`).
+    // Folding case here as well made `-ExecutionPolicy` — a real pwsh option this file
+    // does not otherwise track — case-insensitively start with `-e` and get read as
+    // `-e` plus an attached `xecutionPolicy`, which swallowed `-ExecutionPolicy Bypass
+    // -Command 'sudo id'` into `destructive` and, worse, made `foundProgram` true so
+    // the catch-all below never ran. Every case-insensitive spelling the table needs
+    // to accept (`-enc`, `-ec`, `-EC`, `-ENC`, `-E`, `-EncodedCOMMAND`, `-COMMAND`,
+    // `-C`, …) is already reached through the exact match above or the cluster match
+    // below, so this branch does not need to fold case to cover them.
     const attached = flags.find((f) => word.startsWith(f) && word.length > f.length);
     if (attached !== undefined) {
       const rest = word.slice(attached.length);
       // `sh -c'sudo id'` tokenises to `-csudo id`, so the program is attached. `bash -cx`
       // is a flag cluster and the program is the next word. A space, or the `=` of
       // `--eval=…`, is what tells them apart: a cluster is letters only.
-      if (/\s/.test(rest) || rest.startsWith('=')) return rest.replace(/^=/, '');
-      return words[j + 1] ?? null;
+      if (/\s/.test(rest) || rest.startsWith('=')) {
+        return { program: rest.replace(/^=/, ''), flag: attached, index: j };
+      }
+      const program = words[j + 1];
+      return program === undefined ? null : { program, flag: attached, index: j + 1 };
     }
     // The program flag need not lead the cluster: `bash -xc 'sudo id'` runs exactly what
     // `bash -cx 'sudo id'` runs, and a prefix test saw the second and missed the first.
-    if (clusterCarriesFlag(word, flags)) return words[j + 1] ?? null;
-    if (!skippableBetweenFlags(word)) return null;
+    const clusterFlag = clusterCarriesFlag(word, flags, caseInsensitive);
+    if (clusterFlag !== null) {
+      const program = words[j + 1];
+      return program === undefined ? null : { program, flag: clusterFlag, index: j + 1 };
+    }
+    if (!skippableBetweenFlags(word) && !tolerateUnknownWords) return null;
   }
   return null;
 }
 
+/** How much base64 is worth decoding before the answer stops changing. */
+const MAX_ENCODED_CHARS = 64 * 1024;
+
 /**
- * What follows a short flag inside a single-dash cluster, or null if it holds none.
+ * The command inside `-EncodedCommand`, or null.
+ *
+ * PowerShell encodes UTF-16LE, so decoding as utf8 yields text with a NUL between
+ * every character and no pattern matches it. `Buffer.from(x, 'base64')` never
+ * throws — it drops characters outside the alphabet — so malformed input produces
+ * a wrong answer rather than an exception, and the caller must treat null and
+ * nonsense alike: the flag alone has already made the command `destructive`.
+ *
+ * Reads a bounded, 4-aligned PREFIX rather than refusing outright past the limit. A
+ * refusal is a downgrade path: it turns "pad the payload past 64 KiB" into a way to
+ * trade `privileged` for `destructive`, which is strictly better for whoever is padding
+ * it. 4-aligned because base64 decodes in groups of four characters to three bytes;
+ * truncating mid-group corrupts the last partial character instead of just dropping
+ * trailing content the decode was never going to reach anyway.
+ */
+function decodedPowerShellCommand(operand: string): string | null {
+  const prefix = operand.length > MAX_ENCODED_CHARS
+    ? operand.slice(0, MAX_ENCODED_CHARS - (MAX_ENCODED_CHARS % 4))
+    : operand;
+  const decoded = Buffer.from(prefix, 'base64').toString('utf16le');
+  return decoded.includes('�') || decoded.trim() === '' ? null : decoded;
+}
+
+/**
+ * What follows a short flag inside a single-dash cluster, or the `flags` entry it
+ * carries, or null if it carries none.
  *
  * Clusters only — a run of single letters after one dash. Long flags and attached values
- * are handled before this is reached.
+ * are handled before this is reached. Returns the canonical flag rather than a boolean
+ * for the same reason `programAfterFlag` does: a caller deciding whether to decode
+ * compares against the table's own spellings, not against whatever letters happened to
+ * be clustered together.
  */
-function clusterCarriesFlag(word: string, flags: string[]): boolean {
+function clusterCarriesFlag(word: string, flags: string[], caseInsensitive = false): string | null {
   // Three letters at most. `/^-[A-Za-z]+$/` alone also matches every single-dash long
   // option, and `find`'s predicates are full of them: `-type` contains perl's `-e`, so
   // `find . -name perl -type f` read as a carrier and asked for approval.
-  if (!/^-[A-Za-z]{2,3}$/.test(word)) return false;
-  const body = word.slice(1);
+  if (!/^-[A-Za-z]{2,3}$/.test(word)) return null;
+  const body = caseInsensitive ? word.slice(1).toLowerCase() : word.slice(1);
+  const shortFlags = flags.filter((flag) => flag.length === 2);
   // A cluster is letters only, so whatever follows the program flag is more flags — the
   // program itself is always the next word.
-  return flags.some((flag) => flag.length === 2 && body.includes(flag[1]));
+  //
+  // Scanned by the BODY's own character order, not the table's order: `-ec` must
+  // resolve to `-e` (so a caller deciding whether to decode sees `-e`), not to `-c`
+  // just because `-c` happens to sit first in pwsh's `programBearingWords`. The first
+  // letter in the cluster is the one the invocation leads with.
+  for (const letter of body) {
+    const match = shortFlags.find((flag) => (caseInsensitive ? flag[1].toLowerCase() : flag[1]) === letter);
+    if (match !== undefined) return match;
+  }
+  return null;
 }
 
 /** Spellings of "the program is on standard input" that look like a file operand. */
@@ -1040,9 +1542,9 @@ function readsProgramFromStdin(words: string[]): boolean {
   const bin = stripPath(words[idx]);
   // Interpreters only. awk's one program-from-stdin form is `awk -f -`, already gated as a
   // file flag; every other piped awk reads data, not a program.
-  const spec = INTERPRETERS[bin];
+  const spec = resolveInterpreter(bin);
   if (spec === undefined) return false;
-  const flags = spec.flags;
+  const flags = spec.programBearingWords;
   let sawStdinFlag = false;
   for (let j = idx + 1; j < words.length; j++) {
     const word = words[j];
@@ -1130,10 +1632,14 @@ function hasUnreadableProgram(command: string): boolean {
 
     if (!operandsAreData(words)) {
       for (let j = 0; j < words.length; j++) {
-        const spec = INTERPRETERS[stripPath(unquote(words[j]))];
+        const spec = resolveInterpreter(stripPath(unquote(words[j])));
         if (spec === undefined || spec.readable) continue;
-        if (isFlagValue(words, j, spec.flags)) continue;
-        if (programAfterFlag(words, j, spec.flags) !== null) return true;
+        // Same case-insensitivity as `nestedCommands`'s interpreter loop, and for the
+        // same reason: pwsh/powershell's own parameter binder does not distinguish
+        // `-EC` from `-ec`, so neither should this.
+        const caseInsensitive = spec.programBearingWords.includes('-EncodedCommand');
+        if (isFlagValue(words, j, spec.programBearingWords, caseInsensitive)) continue;
+        if (programAfterFlag(words, j, spec.programBearingWords, caseInsensitive, caseInsensitive) !== null) return true;
       }
     }
 
@@ -1299,4 +1805,4 @@ function classifyOuter(trimmed: string): ParsedCommand {
   return { binary, fullCommand, class: 'safe' as CommandClass };
 }
 
-export { READ_ONLY_ALLOWLIST, READ_ONLY_SYNTHETIC, isDestructive };
+export { READ_ONLY_ALLOWLIST, READERS, READ_ONLY_SYNTHETIC, isDestructive };
