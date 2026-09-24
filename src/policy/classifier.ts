@@ -482,6 +482,29 @@ export function nestedCommands(command: string): string[] {
         const program = programAfterFlag(words, i, spec.flags);
         if (program !== null) found.push(program);
       }
+
+      // An operand of a binary nothing more specific has read is classified as a
+      // command in its own right, rather than scanned as text.
+      //
+      // The gate is the awk reader's own result rather than a list of names: a
+      // name list here would be the defect this change exists to fix
+      // (GHSA-qmx6-47vm-3vf7). `awk` is already null for every non-awk segment.
+      //
+      // Whitespace is what separates an operand worth classifying from one that is
+      // not: a single token is a path, a flag value or a subcommand, while a
+      // multi-word operand has the shape of a command. Flags are skipped.
+      //
+      // Deliberately NOT a text scan for `sudo`. That version asserted elevations
+      // the awk reader and the variable-command-word logic refuse to assert — both
+      // cap at `destructive` on purpose — and it out-ranked the nested
+      // classification that names the elevated binary, reporting `awk` where `id`
+      // was correct.
+      if (awk === null && INTERPRETERS[stripPath(unquote(words[0] ?? ''))] === undefined) {
+        for (let i = 1; i < words.length; i++) {
+          if (words[i].startsWith('-')) continue;
+          if (/\s/.test(words[i])) found.push(words[i]);
+        }
+      }
     }
 
     // `-exec` is a flag rather than a command word, so this one is still a scan.
