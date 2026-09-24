@@ -190,12 +190,75 @@ describe('interpreters that take a program on the command line', () => {
     // Decoding is attacker-controlled work done before the policy decision. The
     // bound is a growth ratio, not a wall clock: this repo's CI runs under
     // coverage and an absolute bound once failed at 3677ms.
-    const small = encode('Get-Process '.repeat(100));
-    const large = encode('Get-Process '.repeat(10_000));
+    //
+    // Both sizes are kept under MAX_ENCODED_CHARS (64 KiB of base64) on purpose. The
+    // guard now reads a bounded prefix instead of refusing outright past the limit
+    // (fix round 1: a refusal was a downgrade path, not merely untested), so an input
+    // that crosses the limit is clamped to the same decode cost regardless of how much
+    // further it grows — that would make this test measure the clamp, not the decode.
+    // Below the limit, every extra character is still decoded, so the ratio this test
+    // checks is the one decoding itself is responsible for.
+    const small = encode('Get-Process '.repeat(18));
+    const large = encode('Get-Process '.repeat(1_800));
     const time = (c: string) => { const t = performance.now(); classifyCommand(c); return performance.now() - t; };
     time(`pwsh -EncodedCommand ${small}`); // warm
     const ratioSmall = time(`pwsh -EncodedCommand ${small}`);
     const ratioLarge = time(`pwsh -EncodedCommand ${large}`);
     expect(ratioLarge).toBeLessThan(Math.max(ratioSmall * 200, 50));
+  });
+});
+
+describe('fix round 1: the catch-all must not switch off for the binaries it now recognises', () => {
+  // Task 1's block only ran when the segment's head was NOT in INTERPRETERS. Adding
+  // pwsh, osascript, deno etc. to the table excluded them from that catch-all, and the
+  // interpreter loop that is supposed to cover them instead calls `programAfterFlag`,
+  // which gives up the moment a non-flag word (an option's own value, or an option that
+  // takes no program-bearing meaning) sits between the binary and its program-bearing
+  // word. These are ordinary spellings, not contrived ones.
+  it.each([
+    ['an option that takes a value', `pwsh -ExecutionPolicy Bypass -Command 'sudo id'`],
+    ['another option that takes a value', `pwsh -WindowStyle Hidden -Command 'sudo id'`],
+    ['osascript -l', `osascript -l JavaScript -e 'do shell script "sudo id"'`],
+    ['deno run', `deno run 'sudo id'`],
+    ['deno eval with its own option before the code', `deno eval --unstable 'sudo id'`],
+  ])('still finds the elevation when %s sits between the binary and its program flag', (_label, command) => {
+    expect(classifyCommand(command).class, command).toBe('privileged');
+  });
+});
+
+describe('fix round 1: MAX_ENCODED_CHARS must not be a downgrade path', () => {
+  it('does not downgrade class by padding an encoded command past the decode limit', () => {
+    // Returning null above the limit meant padding the payload traded `privileged` for
+    // `destructive` — a strictly weaker answer available to anyone who can pad a string.
+    // A bounded prefix keeps the elevation near the front of the payload visible no
+    // matter how much an attacker appends after it.
+    const padded = encode(`sudo id # ${'A'.repeat(25_000)}`);
+    expect(classifyCommand(`pwsh -EncodedCommand ${padded}`).class).toBe('privileged');
+  });
+});
+
+describe('fix round 1: pwsh/powershell flag matching is case-insensitive, nothing else is', () => {
+  it.each([
+    '-EncodedCommand', '-encodedcommand', '-enc', '-ec', '-eC', '-e',
+    '-ENC', '-EC', '-E', '-EncodedCOMMAND',
+  ])('treats %s as -EncodedCommand regardless of case', (flag) => {
+    expect(classifyCommand(`pwsh ${flag} ${encode('sudo id')}`).class, flag).toBe('privileged');
+  });
+
+  it.each(['-Command', '-command', '-c', '-COMMAND', '-C'])(
+    'treats %s as -Command regardless of case',
+    (flag) => {
+      expect(classifyCommand(`pwsh ${flag} 'sudo id'`).class, flag).toBe('privileged');
+    },
+  );
+
+  it('leaves every other interpreter case-sensitive', () => {
+    // `-E` and `-e` are two different flags to perl (`-E` enables modern features,
+    // `-e` runs inline code); folding case here would conflate them for every
+    // interpreter, not just the one family whose own parameter binder is
+    // case-insensitive. Single-word operands so Task 1's catch-all cannot also
+    // explain a `destructive`/`privileged` result — only the flag match itself can.
+    expect(classifyCommand(`python3 -C somefile.py`).class).toBe('safe');
+    expect(classifyCommand(`ruby -E somefile.rb`).class).toBe('safe');
   });
 });

@@ -575,22 +575,36 @@ export function nestedCommands(command: string): string[] {
     for (const inner of awk?.pipedInto ?? []) found.push(inner);
 
     if (!operandsAreData(words)) {
+      // Whether the loop below actually found a program anywhere in this segment —
+      // not whether the segment's head happens to be a name in the table. A binary
+      // being recognised is not the same as this segment's invocation of it being
+      // one the loop could parse: `pwsh -ExecutionPolicy Bypass -Command 'sudo id'`
+      // has a recognised head and a program on the line, but `-ExecutionPolicy`
+      // takes a value (`Bypass`) that isn't itself a flag, and `programAfterFlag`
+      // gives up rather than guess past it. Gating the catch-all below on "head is
+      // in the table" excluded exactly the binaries this file just learned, and for
+      // precisely the invocations its own flag-walk cannot follow — a net
+      // regression, not a wash.
+      let foundProgram = false;
       for (let i = 0; i < words.length; i++) {
         const spec = INTERPRETERS[stripPath(unquote(words[i]))];
-        if (spec === undefined || isFlagValue(words, i, spec.programBearingWords)) continue;
-        const result = programAfterFlag(words, i, spec.programBearingWords);
+        // pwsh/powershell's own parameter binder resolves `-ENC`/`-Enc`/`-enc` to the
+        // same parameter; every other interpreter's flags are exact letters (`-E` and
+        // `-e` are different flags to perl). `-EncodedCommand` only ever appears on
+        // the two entries whose own parameter binder works this way, so its presence
+        // is the signal for which interpreter this is, not a hardcoded name check.
+        const caseInsensitive = spec?.programBearingWords.includes('-EncodedCommand') ?? false;
+        if (spec === undefined || isFlagValue(words, i, spec.programBearingWords, caseInsensitive)) continue;
+        const result = programAfterFlag(words, i, spec.programBearingWords, caseInsensitive);
         if (result !== null) {
+          foundProgram = true;
           found.push(result.program);
           // An encoded program is opaque to every text scan until it is decoded. Gated on
-          // the word `programAfterFlag` actually matched, not a scan of the whole segment
-          // for the long spelling: `-EncodedCommand` and its `-e` abbreviation both reach
-          // here as `result.flag`, and `spec.programBearingWords.includes('-EncodedCommand')`
-          // keeps this specific to pwsh/powershell — every other interpreter's `-e` (perl,
-          // ruby, node, osascript, lua, bun) has no such flag in its own table entry.
-          if (
-            spec.programBearingWords.includes('-EncodedCommand') &&
-            (result.flag === '-EncodedCommand' || result.flag === '-e')
-          ) {
+          // the word `programAfterFlag` actually matched — the table's own canonical
+          // spelling, so every case-folded or clustered form of `-EncodedCommand`/`-e`
+          // reaches this the same way a literal `-EncodedCommand` does — not a scan of
+          // the whole segment for one long spelling.
+          if (caseInsensitive && (result.flag === '-EncodedCommand' || result.flag === '-e')) {
             const decoded = decodedPowerShellCommand(result.program);
             if (decoded !== null) found.push(decoded);
           }
@@ -600,9 +614,12 @@ export function nestedCommands(command: string): string[] {
       // An operand of a binary nothing more specific has read is classified as a
       // command in its own right, rather than scanned as text.
       //
-      // The gate is the awk reader's own result rather than a list of names: a
-      // name list here would be the defect this change exists to fix
-      // (GHSA-qmx6-47vm-3vf7). `awk` is already null for every non-awk segment.
+      // The gate is the awk reader's own result, and now this segment's own loop
+      // result, rather than a list of names: a name list here would be the defect
+      // this change exists to fix (GHSA-qmx6-47vm-3vf7), and "the head is a name in
+      // the table" turned out to be one too — it answers a different question than
+      // "did this invocation's program-bearing word actually resolve". `awk` is
+      // already null for every non-awk segment.
       //
       // Whitespace is what separates an operand worth classifying from one that is
       // not: a single token is a path, a flag value or a subcommand, while a
@@ -613,7 +630,7 @@ export function nestedCommands(command: string): string[] {
       // cap at `destructive` on purpose — and it out-ranked the nested
       // classification that names the elevated binary, reporting `awk` where `id`
       // was correct.
-      if (awk === null && INTERPRETERS[stripPath(unquote(words[0] ?? ''))] === undefined) {
+      if (awk === null && !foundProgram) {
         for (let i = 1; i < words.length; i++) {
           if (words[i].startsWith('-')) continue;
           if (/\s/.test(words[i])) found.push(words[i]);
@@ -1121,10 +1138,24 @@ function skippableBetweenFlags(word: string): boolean {
   return word === '' || word.startsWith('-');
 }
 
-function isFlagValue(words: string[], i: number, flags: string[]): boolean {
+/**
+ * Whether `word` is a spelling of `flag`, honouring case-insensitivity when asked.
+ *
+ * Scoped per call, never globally: pwsh/powershell's own parameter binder resolves
+ * `-ENC`, `-Enc` and `-enc` to the same parameter, but `-E` and `-e` are two different
+ * flags to perl. Every caller here is told explicitly, per invocation, whether the
+ * interpreter it is matching against is one of the case-insensitive ones — folding case
+ * is never the default.
+ */
+function sameFlag(word: string, flag: string, caseInsensitive: boolean): boolean {
+  return caseInsensitive ? word.toLowerCase() === flag.toLowerCase() : word === flag;
+}
+
+function isFlagValue(words: string[], i: number, flags: string[], caseInsensitive = false): boolean {
   if (i === 0) return false;
   const previous = words[i - 1];
-  return previous.length > 1 && previous.startsWith('-') && flags.includes(previous);
+  if (!(previous.length > 1 && previous.startsWith('-'))) return false;
+  return flags.some((f) => sameFlag(previous, f, caseInsensitive));
 }
 
 /**
@@ -1132,7 +1163,13 @@ function isFlagValue(words: string[], i: number, flags: string[]): boolean {
  */
 interface FlaggedProgram {
   program: string;
-  /** The exact word from `flags` that matched — never the cluster or attached form. */
+  /**
+   * The canonical entry of `flags` that matched — the spelling in the table, not
+   * necessarily the literal word on the command line. `-EC` case-insensitively matches
+   * `-e`, and this reports `-e`, so a caller comparing against the table's own spellings
+   * (deciding whether to decode, say) never has to re-derive which flag a case-folded or
+   * clustered word stood for.
+   */
   flag: string;
 }
 
@@ -1148,13 +1185,35 @@ interface FlaggedProgram {
  * program-bearing word — decoding is specific to that one flag, and both spellings reach
  * here as an ordinary match.
  */
-function programAfterFlag(words: string[], from: number, flags: string[]): FlaggedProgram | null {
+function programAfterFlag(
+  words: string[], from: number, flags: string[], caseInsensitive = false,
+): FlaggedProgram | null {
   for (let j = from + 1; j < words.length; j++) {
     const word = words[j];
-    if (flags.includes(word)) {
-      const program = words[j + 1];
-      return program === undefined ? null : { program, flag: word };
+    const exact = flags.find((f) => sameFlag(word, f, caseInsensitive));
+    if (exact !== undefined) {
+      // A subcommand — a program-bearing word that is not itself a `-` flag, such as
+      // `deno`'s `eval` — may still have its own options before the code: `deno eval
+      // --unstable <code>` is one invocation, not two. A real flag like `-c` or
+      // `-Command` never has anything of its own between it and the program, so this
+      // only widens the subcommand case.
+      let k = j + 1;
+      if (!exact.startsWith('-')) {
+        while (k < words.length && skippableBetweenFlags(words[k])) k++;
+      }
+      const program = words[k];
+      return program === undefined ? null : { program, flag: exact };
     }
+    // Deliberately case-SENSITIVE even for pwsh/powershell: this branch exists for a
+    // value glued directly onto a short flag with no separating space (`-csudo id`).
+    // Folding case here as well made `-ExecutionPolicy` — a real pwsh option this file
+    // does not otherwise track — case-insensitively start with `-e` and get read as
+    // `-e` plus an attached `xecutionPolicy`, which swallowed `-ExecutionPolicy Bypass
+    // -Command 'sudo id'` into `destructive` and, worse, made `foundProgram` true so
+    // the catch-all below never ran. Every case-insensitive spelling the table needs
+    // to accept (`-enc`, `-ec`, `-EC`, `-ENC`, `-E`, `-EncodedCOMMAND`, `-COMMAND`,
+    // `-C`, …) is already reached through the exact match above or the cluster match
+    // below, so this branch does not need to fold case to cover them.
     const attached = flags.find((f) => word.startsWith(f) && word.length > f.length);
     if (attached !== undefined) {
       const rest = word.slice(attached.length);
@@ -1167,12 +1226,10 @@ function programAfterFlag(words: string[], from: number, flags: string[]): Flagg
     }
     // The program flag need not lead the cluster: `bash -xc 'sudo id'` runs exactly what
     // `bash -cx 'sudo id'` runs, and a prefix test saw the second and missed the first.
-    if (clusterCarriesFlag(word, flags)) {
+    const clusterFlag = clusterCarriesFlag(word, flags, caseInsensitive);
+    if (clusterFlag !== null) {
       const program = words[j + 1];
-      // The cluster itself is reported as `flag`: it is not one exact program-bearing
-      // word, so it cannot be mistaken for `-EncodedCommand` or `-e` by a caller that
-      // compares against those literal spellings.
-      return program === undefined ? null : { program, flag: word };
+      return program === undefined ? null : { program, flag: clusterFlag };
     }
     if (!skippableBetweenFlags(word)) return null;
   }
@@ -1190,28 +1247,51 @@ const MAX_ENCODED_CHARS = 64 * 1024;
  * throws — it drops characters outside the alphabet — so malformed input produces
  * a wrong answer rather than an exception, and the caller must treat null and
  * nonsense alike: the flag alone has already made the command `destructive`.
+ *
+ * Reads a bounded, 4-aligned PREFIX rather than refusing outright past the limit. A
+ * refusal is a downgrade path: it turns "pad the payload past 64 KiB" into a way to
+ * trade `privileged` for `destructive`, which is strictly better for whoever is padding
+ * it. 4-aligned because base64 decodes in groups of four characters to three bytes;
+ * truncating mid-group corrupts the last partial character instead of just dropping
+ * trailing content the decode was never going to reach anyway.
  */
 function decodedPowerShellCommand(operand: string): string | null {
-  if (operand.length > MAX_ENCODED_CHARS) return null;
-  const decoded = Buffer.from(operand, 'base64').toString('utf16le');
+  const prefix = operand.length > MAX_ENCODED_CHARS
+    ? operand.slice(0, MAX_ENCODED_CHARS - (MAX_ENCODED_CHARS % 4))
+    : operand;
+  const decoded = Buffer.from(prefix, 'base64').toString('utf16le');
   return decoded.includes('�') || decoded.trim() === '' ? null : decoded;
 }
 
 /**
- * What follows a short flag inside a single-dash cluster, or null if it holds none.
+ * What follows a short flag inside a single-dash cluster, or the `flags` entry it
+ * carries, or null if it carries none.
  *
  * Clusters only — a run of single letters after one dash. Long flags and attached values
- * are handled before this is reached.
+ * are handled before this is reached. Returns the canonical flag rather than a boolean
+ * for the same reason `programAfterFlag` does: a caller deciding whether to decode
+ * compares against the table's own spellings, not against whatever letters happened to
+ * be clustered together.
  */
-function clusterCarriesFlag(word: string, flags: string[]): boolean {
+function clusterCarriesFlag(word: string, flags: string[], caseInsensitive = false): string | null {
   // Three letters at most. `/^-[A-Za-z]+$/` alone also matches every single-dash long
   // option, and `find`'s predicates are full of them: `-type` contains perl's `-e`, so
   // `find . -name perl -type f` read as a carrier and asked for approval.
-  if (!/^-[A-Za-z]{2,3}$/.test(word)) return false;
-  const body = word.slice(1);
+  if (!/^-[A-Za-z]{2,3}$/.test(word)) return null;
+  const body = caseInsensitive ? word.slice(1).toLowerCase() : word.slice(1);
+  const shortFlags = flags.filter((flag) => flag.length === 2);
   // A cluster is letters only, so whatever follows the program flag is more flags — the
   // program itself is always the next word.
-  return flags.some((flag) => flag.length === 2 && body.includes(flag[1]));
+  //
+  // Scanned by the BODY's own character order, not the table's order: `-ec` must
+  // resolve to `-e` (so a caller deciding whether to decode sees `-e`), not to `-c`
+  // just because `-c` happens to sit first in pwsh's `programBearingWords`. The first
+  // letter in the cluster is the one the invocation leads with.
+  for (const letter of body) {
+    const match = shortFlags.find((flag) => (caseInsensitive ? flag[1].toLowerCase() : flag[1]) === letter);
+    if (match !== undefined) return match;
+  }
+  return null;
 }
 
 /** Spellings of "the program is on standard input" that look like a file operand. */
@@ -1323,8 +1403,12 @@ function hasUnreadableProgram(command: string): boolean {
       for (let j = 0; j < words.length; j++) {
         const spec = INTERPRETERS[stripPath(unquote(words[j]))];
         if (spec === undefined || spec.readable) continue;
-        if (isFlagValue(words, j, spec.programBearingWords)) continue;
-        if (programAfterFlag(words, j, spec.programBearingWords) !== null) return true;
+        // Same case-insensitivity as `nestedCommands`'s interpreter loop, and for the
+        // same reason: pwsh/powershell's own parameter binder does not distinguish
+        // `-EC` from `-ec`, so neither should this.
+        const caseInsensitive = spec.programBearingWords.includes('-EncodedCommand');
+        if (isFlagValue(words, j, spec.programBearingWords, caseInsensitive)) continue;
+        if (programAfterFlag(words, j, spec.programBearingWords, caseInsensitive) !== null) return true;
       }
     }
 
