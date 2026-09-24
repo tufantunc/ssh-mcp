@@ -10,17 +10,16 @@ branch: feat/llm-command-review
 ## Problem
 
 The existing authorization path applies deterministic classification, role policy,
-external policy and human approval, but it cannot explain operational risks that depend
-on the meaning and composition of an otherwise permitted command. Operators therefore
-either allow such commands without contextual assistance or prompt for every command and
-review the raw text unaided.
+external policy and human approval, but frequent prompts make routine remote operations
+expensive. Operators need a contextual reviewer to make most bounded decisions itself,
+while deterministic permissions continue to cap what any reviewer may authorize.
 
 ## Proposed outcome
 
-Operators can optionally enable a contextual reviewer for non-read-only operations. Its
-assessment is visible in the approval and audit paths, can require a human decision where
-the deterministic policy would otherwise allow execution, and can never weaken an
-existing restriction.
+Operators can optionally enable a contextual reviewer for non-read-only operations. Inside
+the envelope allowed by deterministic policy it may approve routine operations, deny risky
+ones, or escalate uncertain cases. Human review is reserved for escalation and explicitly
+human-only classes. Configured production freeze windows remain hard denials.
 
 ## Affected users and systems
 
@@ -31,7 +30,9 @@ existing restriction.
 ## Constraints
 
 - Deterministic denials remain final and are evaluated before contextual review.
-- Reviewer failure cannot silently restore automatic execution.
+- Reviewer failure escalates rather than silently restoring automatic execution.
+- Deterministic policy identifies the maximum authority and reviewer-bypassable soft
+  approvals; privileged operations remain human-only.
 - Command secrets must be redacted before leaving the ssh-mcp process.
 - Read-only operations and the non-refusable session-release path retain their current behavior.
 - Existing deployments remain unchanged unless the reviewer is explicitly enabled.
@@ -39,11 +40,11 @@ existing restriction.
 
 ## Out of scope
 
-- Allowing contextual review to override a denial or directly authorize a command.
-- Letting contextual review hard-deny an operation in the first release.
+- Allowing contextual review to override a deterministic denial.
+- Allowing contextual review to authorize privileged operations.
 - Reviewing read-only operations, command output, uploaded content or user intent.
 - Reviewer caching, retries, shadow mode, model tools or service-to-service authentication.
-- Replacing the existing classifier, role policy, OPA integration or human approval.
+- Replacing the existing classifier, role policy or OPA integration.
 
 ## Open questions
 
