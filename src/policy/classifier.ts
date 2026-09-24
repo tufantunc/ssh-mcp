@@ -292,8 +292,14 @@ const CLASS_RANK: Record<CommandClass, number> = {
 // a command word, which is a free string, so on a plain object `INTERPRETERS['toString']`
 // resolves to a function and reading `.programBearingWords` off it throws inside the
 // policy gate.
-const INTERPRETERS: Record<string, { programBearingWords: string[]; readable: boolean }> = Object.assign(
-  Object.create(null) as Record<string, { programBearingWords: string[]; readable: boolean }>,
+/** One entry of the interpreter table — named so the lookup helper below can share it. */
+interface InterpreterSpec {
+  programBearingWords: string[];
+  readable: boolean;
+}
+
+const INTERPRETERS: Record<string, InterpreterSpec> = Object.assign(
+  Object.create(null) as Record<string, InterpreterSpec>,
   {
   sh: { programBearingWords: ['-c'], readable: true },
   bash: { programBearingWords: ['-c'], readable: true },
@@ -324,6 +330,52 @@ const INTERPRETERS: Record<string, { programBearingWords: string[]; readable: bo
   powershell: { programBearingWords: ['-c', '-Command', '-e', '-EncodedCommand'], readable: false },
   },
 );
+
+/**
+ * Every `INTERPRETERS` entry, keyed by its name lower-cased.
+ *
+ * A second index rather than lower-casing the lookup key against `INTERPRETERS`
+ * directly, because that table's own keys are not uniformly lower-case —
+ * `Rscript` is not `rscript` — so folding only the *input* would still miss it.
+ * Built once at module load: the table is fixed, so there is nothing to keep in
+ * sync.
+ */
+const INTERPRETERS_BY_LOWERCASE_NAME: Record<string, InterpreterSpec> = Object.assign(
+  Object.create(null) as Record<string, InterpreterSpec>,
+  Object.fromEntries(Object.entries(INTERPRETERS).map(([name, spec]) => [name.toLowerCase(), spec])),
+);
+
+/** A Windows executable suffix this table's keys never carry. */
+const WINDOWS_EXE_SUFFIX = /\.(exe|cmd|bat)$/i;
+
+/**
+ * Resolve an interpreter table entry for a command word already stripped of
+ * its path (`stripPath(unquote(word))`, as every call site already computes
+ * it for the exact-match case below).
+ *
+ * The table's keys are exact, case-sensitive, extension-free spellings, so a
+ * direct lookup is tried first and is the whole cost for the common case —
+ * `sh`, `python3`, the bare lowercase `pwsh`. The fallback strips a trailing
+ * `.exe`/`.cmd`/`.bat` and folds case, which is what a Windows target's own
+ * shell hands back for the *same* binary: `powershell.exe`, `PWSH.EXE` and
+ * `PowerShell` all name the interpreter this table already lists under
+ * `powershell`/`pwsh`.
+ *
+ * Applied to every entry, not only pwsh/powershell. The measured bug is
+ * about those two, but the gap is not specific to them: a target running
+ * `python.exe` or `Node.EXE` carries the identical mismatch, and scoping the
+ * fix to two names would leave the rest of the table exactly as blind as it
+ * was. This is the binary-*name* question, answered once — it does not touch
+ * flag matching, which stays case-sensitive per interpreter (`perl -E` and
+ * `perl -e` are still two different flags) via the existing, separate
+ * `caseInsensitive` parameter threaded through `programAfterFlag` and
+ * friends.
+ */
+function resolveInterpreter(word: string): InterpreterSpec | undefined {
+  const exact = INTERPRETERS[word];
+  if (exact !== undefined) return exact;
+  return INTERPRETERS_BY_LOWERCASE_NAME[word.replace(WINDOWS_EXE_SUFFIX, '').toLowerCase()];
+}
 
 /** `find … -exec <cmd> +` runs cmd. */
 const FIND_EXEC_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
@@ -587,7 +639,7 @@ export function nestedCommands(command: string): string[] {
       // regression, not a wash.
       let foundProgram = false;
       for (let i = 0; i < words.length; i++) {
-        const spec = INTERPRETERS[stripPath(unquote(words[i]))];
+        const spec = resolveInterpreter(stripPath(unquote(words[i])));
         // pwsh/powershell's own parameter binder resolves `-ENC`/`-Enc`/`-enc` to the
         // same parameter; every other interpreter's flags are exact letters (`-E` and
         // `-e` are different flags to perl). `-EncodedCommand` only ever appears on
@@ -1352,7 +1404,7 @@ function readsProgramFromStdin(words: string[]): boolean {
   const bin = stripPath(words[idx]);
   // Interpreters only. awk's one program-from-stdin form is `awk -f -`, already gated as a
   // file flag; every other piped awk reads data, not a program.
-  const spec = INTERPRETERS[bin];
+  const spec = resolveInterpreter(bin);
   if (spec === undefined) return false;
   const flags = spec.programBearingWords;
   let sawStdinFlag = false;
@@ -1442,7 +1494,7 @@ function hasUnreadableProgram(command: string): boolean {
 
     if (!operandsAreData(words)) {
       for (let j = 0; j < words.length; j++) {
-        const spec = INTERPRETERS[stripPath(unquote(words[j]))];
+        const spec = resolveInterpreter(stripPath(unquote(words[j])));
         if (spec === undefined || spec.readable) continue;
         // Same case-insensitivity as `nestedCommands`'s interpreter loop, and for the
         // same reason: pwsh/powershell's own parameter binder does not distinguish

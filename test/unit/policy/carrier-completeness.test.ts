@@ -263,6 +263,57 @@ describe('fix round 1: pwsh/powershell flag matching is case-insensitive, nothin
   });
 });
 
+describe('fix round 3: powershell.exe / pwsh.exe / PowerShell all resolve to the table entry', () => {
+  // The three INTERPRETERS lookup sites key on `stripPath(unquote(word))`, which
+  // removes a directory but not a `.exe` suffix, and compare case-sensitively.
+  // Only the bare lowercase `powershell` spelling reached the table before this
+  // fix — every one of these classified `safe`, carrying an undecoded `sudo id`.
+  it.each([
+    ['powershell.exe', `powershell.exe -EncodedCommand ${encode('sudo id')}`],
+    ['pwsh.exe', `pwsh.exe -EncodedCommand ${encode('sudo id')}`],
+    ['PowerShell (capitalised, no extension)', `PowerShell -EncodedCommand ${encode('sudo id')}`],
+    ['PowerShell.exe (capitalised with extension)', `PowerShell.exe -EncodedCommand ${encode('sudo id')}`],
+    ['PWSH.EXE (all caps)', `PWSH.EXE -EncodedCommand ${encode('sudo id')}`],
+    ['pwsh.cmd', `pwsh.cmd -EncodedCommand ${encode('sudo id')}`],
+    // A POSIX-style path, not a Windows one: this tokeniser treats a
+    // backslash as a shell escape (see `tokenizeSegmentsDetailed`), which is
+    // the right reading for the remote shells this file already assumes
+    // throughout — a Windows path separator is a different, undocumented
+    // gap this fix does not take on.
+    ['a path plus the .exe spelling', `/usr/local/bin/pwsh.EXE -EncodedCommand ${encode('sudo id')}`],
+  ])('decodes -EncodedCommand for %s', (_label, command) => {
+    expect(classifyCommand(command).class, command).toBe('privileged');
+  });
+
+  it('still treats an unrecognised .exe as an unrecognised binary, not an interpreter', () => {
+    // The fallback must not turn every `.exe` word into an interpreter lookup —
+    // only a name the table already knows once the suffix and case are folded.
+    expect(classifyCommand(`notepad.exe -EncodedCommand ${encode('sudo id')}`).class).toBe('safe');
+  });
+
+  it('folds .exe and case for every table entry, not only pwsh/powershell', () => {
+    // The measured bug names pwsh/powershell, but the lookup site takes a
+    // command word from an SSH session, and the target can just as well be a
+    // Windows host running `python.exe` or `Node.EXE` as one running
+    // `pwsh.exe` — every interpreter here can appear the same way. Scoping
+    // the fallback to two names would leave the identical gap open for the
+    // rest of the table, so this pins that the fold is general: it is the
+    // binary-name question, decided once, not a pwsh-specific carve-out.
+    expect(classifyCommand(`Python3.EXE -c "import os; os.system('sudo id')"`).class).toBe('destructive');
+  });
+
+  it('leaves flag matching case-sensitive for every interpreter this does not concern', () => {
+    // Folding the BINARY name is a different question from folding its
+    // FLAGS: perl's -E and -e are two different flags, and that distinction
+    // is untouched by this fix. Both these interpreters resolve by an exact,
+    // case-sensitive table lookup already (no suffix, no case to fold), so
+    // if this fix had widened flag matching instead of binary-name matching,
+    // it would have shown up here.
+    expect(classifyCommand(`python3 -C somefile.py`).class).toBe('safe');
+    expect(classifyCommand(`ruby -E somefile.rb`).class).toBe('safe');
+  });
+});
+
 describe('fix round 2: an unrecognised pwsh option with a value must not hide -EncodedCommand', () => {
   // `-ExecutionPolicy` is skipped as an unrecognised flag, but its *value* `Bypass` is a
   // bare word — not a flag, not skippable — so `programAfterFlag` gave up right there and
