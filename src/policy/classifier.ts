@@ -641,17 +641,26 @@ export function nestedCommands(command: string, speculativeOperands = true): str
     for (const inner of awk?.pipedInto ?? []) found.push(inner);
 
     if (!operandsAreData(words)) {
-      // Whether the loop below actually found a program anywhere in this segment —
-      // not whether the segment's head happens to be a name in the table. A binary
-      // being recognised is not the same as this segment's invocation of it being
-      // one the loop could parse: `pwsh -ExecutionPolicy Bypass -Command 'sudo id'`
-      // has a recognised head and a program on the line, but `-ExecutionPolicy`
-      // takes a value (`Bypass`) that isn't itself a flag, and `programAfterFlag`
-      // gives up rather than guess past it. Gating the catch-all below on "head is
-      // in the table" excluded exactly the binaries this file just learned, and for
+      // Which operand *indices* an interpreter actually consumed as a program —
+      // not whether the segment's head happens to be a name in the table, and not
+      // a single segment-wide flag either. A set of indices rather than a boolean:
+      // `unknownbin sh -c true 'sudo id'` has `sh -c` consume `true` (harmless,
+      // pushed below) and leave `'sudo id'` untouched, and a boolean here defused
+      // the catch-all for that second operand too — measured, it classified
+      // `safe`. Only the specific word an interpreter actually read should be
+      // excluded from the catch-all; every other operand in the segment is still
+      // this binary's own, unclaimed by anything more specific.
+      //
+      // A binary being recognised is also not the same as this segment's
+      // invocation of it being one the loop could parse:
+      // `pwsh -ExecutionPolicy Bypass -Command 'sudo id'` has a recognised head
+      // and a program on the line, but `-ExecutionPolicy` takes a value
+      // (`Bypass`) that isn't itself a flag, and `programAfterFlag` gives up
+      // rather than guess past it. Gating the catch-all below on "head is in the
+      // table" excluded exactly the binaries this file just learned, and for
       // precisely the invocations its own flag-walk cannot follow — a net
       // regression, not a wash.
-      let foundProgram = false;
+      const consumedOperands = new Set<number>();
       for (let i = 0; i < words.length; i++) {
         const spec = resolveInterpreter(stripPath(unquote(words[i])));
         // pwsh/powershell's own parameter binder resolves `-ENC`/`-Enc`/`-enc` to the
@@ -668,7 +677,7 @@ export function nestedCommands(command: string, speculativeOperands = true): str
         // `i === 0` there rather than here.
         const result = programAfterFlag(words, i, spec.programBearingWords, caseInsensitive, caseInsensitive);
         if (result !== null) {
-          foundProgram = true;
+          consumedOperands.add(result.index);
           found.push(result.program);
           // An encoded program is opaque to every text scan until it is decoded. Gated on
           // the word `programAfterFlag` actually matched — the table's own canonical
@@ -685,12 +694,13 @@ export function nestedCommands(command: string, speculativeOperands = true): str
       // An operand of a binary nothing more specific has read is classified as a
       // command in its own right, rather than scanned as text.
       //
-      // The gate is the awk reader's own result, and now this segment's own loop
-      // result, rather than a list of names: a name list here would be the defect
-      // this change exists to fix (GHSA-qmx6-47vm-3vf7), and "the head is a name in
-      // the table" turned out to be one too — it answers a different question than
-      // "did this invocation's program-bearing word actually resolve". `awk` is
-      // already null for every non-awk segment.
+      // The gate is the awk reader's own result, and now which specific operands
+      // an interpreter actually consumed, rather than a list of names: a name
+      // list here would be the defect this change exists to fix
+      // (GHSA-qmx6-47vm-3vf7), and "the head is a name in the table" turned out
+      // to be one too — it answers a different question than "did this
+      // invocation's program-bearing word actually resolve". `awk` is already
+      // null for every non-awk segment.
       //
       // Whitespace is what separates an operand worth classifying from one that is
       // not: a single token is a path, a flag value or a subcommand, while a
@@ -701,8 +711,9 @@ export function nestedCommands(command: string, speculativeOperands = true): str
       // cap at `destructive` on purpose — and it out-ranked the nested
       // classification that names the elevated binary, reporting `awk` where `id`
       // was correct.
-      if (speculativeOperands && awk === null && !foundProgram) {
+      if (speculativeOperands && awk === null) {
         for (let i = 1; i < words.length; i++) {
+          if (consumedOperands.has(i)) continue;
           if (words[i].startsWith('-')) continue;
           if (/\s/.test(words[i])) found.push(words[i]);
         }
@@ -1272,6 +1283,14 @@ interface FlaggedProgram {
    * clustered word stood for.
    */
   flag: string;
+  /**
+   * The index into `words` of the word that carried `program` — the whole word, whether
+   * the program is that word verbatim or embedded in it (`-csudo id` attaches the program
+   * to the flag's own word, so `index` names that word, not a later one). A caller tracking
+   * which operands an interpreter actually consumed, rather than merely "some interpreter
+   * consumed something in this segment", needs the position, not just the text.
+   */
+  index: number;
 }
 
 /**
@@ -1321,7 +1340,7 @@ function programAfterFlag(
         while (k < words.length && skippableBetweenFlags(words[k])) k++;
       }
       const program = words[k];
-      return program === undefined ? null : { program, flag: exact };
+      return program === undefined ? null : { program, flag: exact, index: k };
     }
     // Deliberately case-SENSITIVE even for pwsh/powershell: this branch exists for a
     // value glued directly onto a short flag with no separating space (`-csudo id`).
@@ -1339,16 +1358,18 @@ function programAfterFlag(
       // `sh -c'sudo id'` tokenises to `-csudo id`, so the program is attached. `bash -cx`
       // is a flag cluster and the program is the next word. A space, or the `=` of
       // `--eval=…`, is what tells them apart: a cluster is letters only.
-      if (/\s/.test(rest) || rest.startsWith('=')) return { program: rest.replace(/^=/, ''), flag: attached };
+      if (/\s/.test(rest) || rest.startsWith('=')) {
+        return { program: rest.replace(/^=/, ''), flag: attached, index: j };
+      }
       const program = words[j + 1];
-      return program === undefined ? null : { program, flag: attached };
+      return program === undefined ? null : { program, flag: attached, index: j + 1 };
     }
     // The program flag need not lead the cluster: `bash -xc 'sudo id'` runs exactly what
     // `bash -cx 'sudo id'` runs, and a prefix test saw the second and missed the first.
     const clusterFlag = clusterCarriesFlag(word, flags, caseInsensitive);
     if (clusterFlag !== null) {
       const program = words[j + 1];
-      return program === undefined ? null : { program, flag: clusterFlag };
+      return program === undefined ? null : { program, flag: clusterFlag, index: j + 1 };
     }
     if (!skippableBetweenFlags(word) && !tolerateUnknownWords) return null;
   }

@@ -447,3 +447,34 @@ describe('the catch-all cannot feed the unconditional denylist', () => {
     expect(findForbiddenMatch('echo `shutdown -h now`')).not.toBeNull();
   });
 });
+
+/**
+ * `foundProgram` used to be one boolean per segment: the moment ANY word in the
+ * segment resolved to an interpreter's program, the catch-all was skipped for
+ * every OTHER operand in that segment too — including ones the interpreter
+ * never touched. An unrecognised binary's own operand, sitting right next to a
+ * harmless `sh -c true`, was defused by it.
+ *
+ * Measured before this fix: `unknownbin 'sudo id'` classified `privileged` —
+ * the catch-all working as designed — but `unknownbin sh -c true 'sudo id'`
+ * classified `safe`: `sh -c` consumed `true` as its program (itself harmless
+ * and pushed), which set the segment-wide flag and silenced the catch-all
+ * before it ever looked at `'sudo id'`.
+ */
+describe('the catch-all is not defused for the whole segment by one benign interpreter call', () => {
+  it('a speculative operand is caught on its own', () => {
+    expect(classifyCommand("unknownbin 'sudo id'").class).toBe('privileged');
+  });
+
+  it('a benign sh -c earlier in the same segment must not silence a later operand', () => {
+    expect(classifyCommand("unknownbin sh -c true 'sudo id'").class).toBe('privileged');
+  });
+
+  it('still does not double-count the operand an interpreter actually consumed', () => {
+    // `sh -c` here really does consume `'sudo id'` as its program — that is a
+    // certain carrier, pushed unconditionally by the interpreter loop, not the
+    // catch-all. The class must still land on `privileged`; this is a sanity
+    // check that the fix does not depend on double-pushing the same text.
+    expect(classifyCommand("unknownbin sh -c 'sudo id'").class).toBe('privileged');
+  });
+});
