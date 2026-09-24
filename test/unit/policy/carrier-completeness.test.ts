@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { PolicyEngine, DEFAULT_RULES } from '../../../src/policy/engine.js';
-import { classifyCommand, READ_ONLY_ALLOWLIST, READERS } from '../../../src/policy/classifier.js';
+import {
+  classifyCommand, READ_ONLY_ALLOWLIST, READERS, nestedCommands, findForbiddenMatch,
+} from '../../../src/policy/classifier.js';
 import type { Profile } from '../../../src/types.js';
 
 /**
@@ -367,5 +369,81 @@ describe('fix round 2: an unrecognised pwsh option with a value must not hide -E
     // payload that was never handed to pwsh at all.
     const command = `customtool --search pwsh -ExecutionPolicy Bypass -EncodedCommand ${encode('sudo id')}`;
     expect(classifyCommand(command).class).toBe('safe');
+  });
+});
+
+/**
+ * The maintainer's ruling: the catch-all's speculative operands must not feed
+ * FORBIDDEN_RULES' unconditional denylist. `findForbiddenMatch` recurses into
+ * `nestedCommands`, and `FORBIDDEN_RULES` is forbidden regardless of role, tier
+ * or approval — but the catch-all is a guess about an unrecognised binary's
+ * operands, and a guess may raise a command's *class* (which role, tier and
+ * approval still get to weigh in on) but must not produce a refusal nobody can
+ * override. `$()`, backticks and `sh -c` are certain carriers — the shell really
+ * will run what they hold — and keep their recursion into the denylist.
+ *
+ * Measured before this fix: `git commit -m 'reboot the worker pool'` was a hard
+ * deny (ruleId `denylist`) on an admin/dev profile with `approvalPolicy: 'auto'`
+ * — a role and tier that holds `privileged` outright and a policy that prompts
+ * for nothing, denied anyway, because the quoted commit message happened to
+ * start with a forbidden word.
+ */
+describe('the catch-all cannot feed the unconditional denylist', () => {
+  const adminAutoDev = {
+    name: 'dev-admin', host: 'h', port: 22, user: 'deploy', auth: 'agent', tty: false,
+    timeout: 60_000, maxChars: 5000, maxOutputBytes: 1_048_576, group: 'dev',
+    role: 'admin', readOnly: false, approvalPolicy: 'auto', cert: false,
+    announceAgent: true, sessionMaxPerConnection: 5, sessionIdleTimeoutMs: 600_000,
+    sessionBackgroundMaxMs: 3_600_000, commandQuotaPerDay: 0,
+    transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,
+  } as unknown as Profile;
+  const engineForRuling = new PolicyEngine(DEFAULT_RULES);
+  const decideAsAdmin = (command: string) => engineForRuling.evaluate(command, adminAutoDev, 'run-command');
+
+  it('no longer hard-denies a speculative catch-all match', () => {
+    const result = decideAsAdmin("git commit -m 'reboot the worker pool'");
+    expect(result.ruleId).not.toBe('denylist');
+    expect(result.commandClass).toBe('destructive');
+    // admin/dev holds destructive outright and approvalPolicy is auto, so
+    // nothing here should even prompt — the point is not merely "not an
+    // absolute deny", it is "treated as the ordinary destructive command
+    // this profile is already trusted with".
+    expect(result.decision).toBe('allow');
+  });
+
+  it.each([
+    ["a $() substitution", 'echo $(shutdown -h now)'],
+    ['a backtick substitution', 'echo `shutdown -h now`'],
+    ['sh -c', "sh -c 'shutdown -h now'"],
+    ['pwsh -EncodedCommand', `pwsh -EncodedCommand ${encode('shutdown -h now')}`],
+  ])('certain carriers still reach the denylist: %s', (_label, command) => {
+    const result = decideAsAdmin(command);
+    expect(result.ruleId, command).toBe('denylist');
+    expect(result.decision, command).toBe('deny');
+  });
+
+  it('a speculative-only carrier is raised to destructive, not refused outright', () => {
+    const result = decideAsAdmin("whatever 'shutdown -h now'");
+    expect(result.ruleId).not.toBe('denylist');
+    expect(result.commandClass).toBe('destructive');
+    expect(result.decision).toBe('allow');
+  });
+
+  it('nestedCommands drops the speculative operand when told this is for the denylist', () => {
+    // The mechanism directly: the catch-all's push is what speculativeOperands
+    // gates, and findForbiddenMatch is the caller that must pass false.
+    expect(nestedCommands("whatever 'shutdown -h now'", true)).toContain('shutdown -h now');
+    expect(nestedCommands("whatever 'shutdown -h now'", false)).not.toContain('shutdown -h now');
+  });
+
+  it('findForbiddenMatch itself no longer matches the speculative-only shape', () => {
+    expect(findForbiddenMatch("whatever 'shutdown -h now'")).toBeNull();
+    expect(findForbiddenMatch("git commit -m 'reboot the worker pool'")).toBeNull();
+  });
+
+  it('findForbiddenMatch still matches every certain carrier', () => {
+    expect(findForbiddenMatch("sh -c 'shutdown -h now'")).not.toBeNull();
+    expect(findForbiddenMatch('echo $(shutdown -h now)')).not.toBeNull();
+    expect(findForbiddenMatch('echo `shutdown -h now`')).not.toBeNull();
   });
 });

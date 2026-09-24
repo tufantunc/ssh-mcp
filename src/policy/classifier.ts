@@ -565,8 +565,22 @@ function matchesEitherForm(command: string, test: (form: string) => boolean): bo
  * Four carriers, all of which a remote shell expands and runs:
  *   `$(...)`, backticks, process substitution `<(...)` / `>(...)`, and a shell
  *   given `-c`.
+ *
+ * @param speculativeOperands Whether the catch-all below — any multi-word,
+ *   non-flag operand of a segment no more specific reader claimed — should be
+ *   pushed. That catch-all is a guess about a binary this file does not
+ *   recognise; the four carriers above are not guesses, the shell really does
+ *   run what they hold, and are pushed regardless of this flag. Defaults to
+ *   `true` for `classifyCommand`'s own recursion, where a guess may raise a
+ *   command's *class* and leave role, tier and approval to weigh in.
+ *   `findForbiddenMatch` passes `false`: its recursion feeds
+ *   `FORBIDDEN_RULES`, the one unconditional denylist, and a guess must not
+ *   be able to produce a refusal nobody can override (the maintainer's
+ *   ruling — see the block comment above `findForbiddenMatch`). `$()`,
+ *   backticks and `sh -c` are certain carriers and keep reaching the
+ *   denylist either way.
  */
-export function nestedCommands(command: string): string[] {
+export function nestedCommands(command: string, speculativeOperands = true): string[] {
   const found: string[] = [];
 
   // `$(...)`, `<(...)`, `>(...)` — scanned rather than matched, because a regex
@@ -687,7 +701,7 @@ export function nestedCommands(command: string): string[] {
       // cap at `destructive` on purpose — and it out-ranked the nested
       // classification that names the elevated binary, reporting `awk` where `id`
       // was correct.
-      if (awk === null && !foundProgram) {
+      if (speculativeOperands && awk === null && !foundProgram) {
         for (let i = 1; i < words.length; i++) {
           if (words[i].startsWith('-')) continue;
           if (/\s/.test(words[i])) found.push(words[i]);
@@ -1067,8 +1081,20 @@ export function findForbiddenMatch(command: string, depth = 0): string | null {
   // They still classified `destructive`, which on the `prod` tier degrades an
   // absolute `deny` into `require-approval`: a rule that answers "never" became
   // one a human can click through.
+  //
+  // `speculativeOperands: false` — the maintainer's ruling. `nestedCommands`'
+  // catch-all is a guess about an unrecognised binary's operands, and this loop
+  // feeds the one unconditional rule in the policy: a guess may raise a
+  // command's class, which role, tier and approval still get to weigh in on,
+  // but it must not manufacture a refusal nobody can override. Measured before
+  // this parameter existed: `git commit -m 'reboot the worker pool'` was a hard
+  // deny on an admin profile with `approvalPolicy: 'auto'`, because the catch-all
+  // read the quoted commit message as an operand starting with a forbidden word.
+  // `$()`, backticks and `sh -c` are certain carriers, not guesses — the shell
+  // really does run what they hold — and are unaffected: they are pushed by
+  // `nestedCommands` regardless of this flag.
   if (depth >= MAX_NESTING_DEPTH) return null;
-  for (const inner of nestedCommands(command)) {
+  for (const inner of nestedCommands(command, false)) {
     const match = findForbiddenMatch(inner, depth + 1);
     if (match !== null) return match;
   }
