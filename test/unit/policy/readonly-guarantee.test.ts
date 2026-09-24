@@ -211,4 +211,33 @@ describe('a reader that can be told to execute is not read-only', () => {
       expect(decide(command).decision, command).toBe('allow');
     }
   });
+
+  /**
+   * `sort -o FILE` / `--output=FILE` creates and truncates FILE — a write, not
+   * a read — and short options cluster, so `-o` need not lead: `sort -nro out
+   * in` writes `out` exactly as `sort -o out in` does. Measured on HEAD before
+   * this fix: every one of these classified `read-only`, which a `readOnly`
+   * viewer is allowed to run through `read-command`.
+   */
+  it.each([
+    ['long form, joined', 'sort --output=/root/.ssh/authorized_keys /tmp/key.pub'],
+    ['long form, separate word', 'sort --output /root/.ssh/authorized_keys /tmp/key.pub'],
+    ['bare -o', 'sort -o /root/.ssh/authorized_keys /tmp/key.pub'],
+    ['-o clustered behind other short flags', 'sort -nro /root/.ssh/authorized_keys /tmp/key.pub'],
+    ['-o attached to its value with no space', 'sort -o/root/.ssh/authorized_keys /tmp/key.pub'],
+  ])('refuses sort -o / --output (%s)', (_label, command) => {
+    expect(decide(command).commandClass, command).toBe('destructive');
+    expect(decide(command).decision, command).toBe('deny');
+  });
+
+  it('does not treat an unrelated short-flag cluster as -o', () => {
+    // `-t` takes a value (the field separator) and consumes the rest of an
+    // attached word, so the `o` in `-tofile` is `-t`'s value text, not an
+    // invocation of `-o`. A cluster rule loose enough to fire on any `o`
+    // anywhere in a dash word would refuse this too — measured, a first draft
+    // did.
+    for (const command of ['sort -tofile /etc/passwd', 'sort -t: -k2,2n /etc/passwd']) {
+      expect(decide(command).decision, command).toBe('allow');
+    }
+  });
 });

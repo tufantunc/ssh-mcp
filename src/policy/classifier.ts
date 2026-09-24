@@ -719,9 +719,27 @@ const DISQUALIFYING_ARGS: Record<string, RegExp> = Object.assign(
     // classified `read-only` — which a `readOnly` viewer is allowed to run,
     // while running that same program directly is denied.
     //
-    // Both spellings: `--compress-program=X` is one argument, `--compress-program X`
-    // is two and the flag stands alone.
-    sort: /^--compress-program(=|$)/,
+    // `-o FILE` / `--output=FILE` is the same shape of bug with a plainer
+    // payoff: it creates and truncates FILE, which is a write a `readOnly`
+    // profile must never reach through a command classified `read-only`.
+    // Measured on HEAD before this rule: `sort -o /root/.ssh/authorized_keys
+    // /tmp/key.pub` classified `read-only`.
+    //
+    // Three spellings, joined by the same alternation as `--compress-program`:
+    // `--output=X` (one argument), `--output X` (two, flag alone), and the
+    // short form, which GNU getopt lets cluster behind other single-letter
+    // flags (`sort -nro out in` writes `out` exactly as `sort -o out in`
+    // does) or attach its value directly (`-oFILE`).
+    //
+    // The cluster branch is deliberately narrower than "any `o` in a dash
+    // word": `-[bcCdfghiMnRrsuVz]*o` only allows GNU sort's own *argument-less*
+    // short flags ahead of the `o`, so it stops at the first flag that takes a
+    // value of its own. Without that, `-tofile` — `-t` (field separator) with
+    // its value attached, not `-o` — would be misread as a write. `-t`, `-k`,
+    // `-S` and `-T` are exactly the short flags this excludes, because each
+    // consumes the rest of a clustered word as its own argument, so a
+    // following `o` is that argument's text, not `-o` invoked.
+    sort: /^(--compress-program(=|$)|--output(=|$)|-[bcCdfghiMnRrsuVz]*o)/,
   },
 );
 
