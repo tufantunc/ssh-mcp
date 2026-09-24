@@ -85,6 +85,36 @@ describe('contextual reviewer in the tool pipeline', () => {
     expect(h.approvalMessages()[0]).toContain('unavailable (timeout)');
   });
 
+  it('does not call the reviewer after the command quota is exhausted', async () => {
+    const r = reviewer();
+    h = await createHarness({ commandQuotaPerDay: 1 }, { reviewer: r });
+
+    await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/first' } });
+    const blocked = await h.client.callTool({
+      name: 'run-command', arguments: { command: 'touch /tmp/second' },
+    });
+
+    expect(r.review).toHaveBeenCalledOnce();
+    expect(blocked.isError).toBe(true);
+    expect(h.execCalls).toHaveLength(1);
+  });
+
+  it('releases reserved quota when the human declines an escalation', async () => {
+    const r = reviewer({ verdict: 'escalate', risk: 'medium' });
+    h = await createHarness({ commandQuotaPerDay: 1 }, { reviewer: r });
+    h.setApproval(false);
+
+    await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/declined' } });
+    h.setApproval(true);
+    const accepted = await h.client.callTool({
+      name: 'run-command', arguments: { command: 'touch /tmp/accepted' },
+    });
+
+    expect(accepted.isError).toBeFalsy();
+    expect(r.review).toHaveBeenCalledTimes(2);
+    expect(h.execCalls).toHaveLength(1);
+  });
+
   it.each([
     ['escalate', 'medium'],
     ['deny', 'high'],

@@ -34,6 +34,22 @@ describe('CommandQuota', () => {
     expect(q.consume('b', 1).allowed).toBe(true);
   });
 
+  it('holds capacity for an in-flight command until it commits or releases', () => {
+    const q = new CommandQuota();
+    const first = q.reserve('dev', 1);
+
+    expect(first.allowed).toBe(true);
+    expect(q.reserve('dev', 1).allowed).toBe(false);
+    expect(q.used('dev')).toBe(0);
+
+    q.release(first.reservation);
+    const replacement = q.reserve('dev', 1);
+    expect(replacement.allowed).toBe(true);
+    q.commit(replacement.reservation);
+    expect(q.used('dev')).toBe(1);
+    expect(q.reserve('dev', 1).allowed).toBe(false);
+  });
+
   // A refusal that consumed budget would keep pushing the window forward, so a
   // blocked agent could never recover.
   it('does not consume budget on refusal', () => {

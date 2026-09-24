@@ -6,7 +6,7 @@ import type { AuditStore } from '../audit/store.js';
 import { sanitizeCommand } from '../guard/sanitizer.js';
 import { requestApproval } from '../guard/elicitation.js';
 import { commandOutput, type ToolResult } from './results.js';
-import { CommandQuota } from '../policy/quota.js';
+import { CommandQuota, type QuotaReservation } from '../policy/quota.js';
 import type { LocalPathContext } from './local-path.js';
 import { ApprovalGrants } from '../guard/approval-grants.js';
 import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass } from '../types.js';
@@ -92,6 +92,7 @@ export function createPipeline({ server, registry, policy, audit, reviewer, appr
     toolName: string,
   ) {
     const span = tracer.startSpan('policy.evaluate');
+    let quotaReservation: QuotaReservation | undefined;
     span.setAttribute('tool.name', toolName);
     span.setAttribute('ssh.profile', profileName);
     try {
@@ -107,6 +108,19 @@ export function createPipeline({ server, registry, policy, audit, reviewer, appr
           evaluation,
         );
       }
+
+      const budget = quota.reserve(conn.profile.name, conn.profile.commandQuotaPerDay);
+      if (!budget.allowed) {
+        const retry = budget.retryAt
+          ? `Next slot frees at ${budget.retryAt.toISOString()}.`
+          : 'Retry after an in-flight command finishes.';
+        throw new PolicyRefusedError(
+          `QUOTA_EXCEEDED: profile "${conn.profile.name}" has used or reserved its ` +
+          `${conn.profile.commandQuotaPerDay} commands for the last 24h. ${retry}`,
+          { ...evaluation, decision: 'deny', ruleId: 'command-quota' },
+        );
+      }
+      quotaReservation = budget.reservation;
 
       let review: ReviewResult | undefined;
       let requiresFreshApproval = false;
@@ -154,7 +168,7 @@ export function createPipeline({ server, registry, policy, audit, reviewer, appr
           );
         }
         if (merged.approver) {
-          return { conn, evaluation, review, approver: merged.approver };
+          return { conn, evaluation, review, approver: merged.approver, quotaReservation };
         }
       }
 
@@ -162,7 +176,7 @@ export function createPipeline({ server, registry, policy, audit, reviewer, appr
         // A live grant from an earlier explicit approval of this exact command.
         if (!requiresFreshApproval && grants.has(conn.profile.name, command, evaluation.commandClass)) {
           span.setAttribute('policy.grant', 'reused');
-          return { conn, evaluation, review, approver: 'jit-grant' };
+          return { conn, evaluation, review, approver: 'jit-grant', quotaReservation };
         }
 
         const approval = await requestApproval(server, command, conn.profile.name, evaluation, review);
@@ -181,10 +195,13 @@ export function createPipeline({ server, registry, policy, audit, reviewer, appr
         if (!requiresFreshApproval) {
           grants.record(conn.profile.name, command, evaluation.commandClass);
         }
-        return { conn, evaluation, review, approver: approval.approver };
+        return { conn, evaluation, review, approver: approval.approver, quotaReservation };
       }
 
-      return { conn, evaluation, review, approver: undefined };
+      return { conn, evaluation, review, approver: undefined, quotaReservation };
+    } catch (err) {
+      quota.release(quotaReservation);
+      throw err;
     } finally {
       span.end();
     }
@@ -347,6 +364,7 @@ export function createPipeline({ server, registry, policy, audit, reviewer, appr
     // a server that has no config at all, used to leave none. The unconfigured refusal
     // reaches this the same way a bad command does.
     const state: AuditState = { command };
+    let quotaReservation: QuotaReservation | undefined;
     try {
       profileName = defaultProfileName(opts.profile);
       const profile = registry.getProfile(profileName);
@@ -360,7 +378,9 @@ export function createPipeline({ server, registry, policy, audit, reviewer, appr
         state.command = effective;
       }
 
-      const { conn, evaluation, review, approver } = await checkPolicyAndApprove(effective, profileName, opts.toolName);
+      const checked = await checkPolicyAndApprove(effective, profileName, opts.toolName);
+      const { conn, evaluation, review, approver } = checked;
+      quotaReservation = checked.quotaReservation;
       state.evaluation = evaluation;
       state.review = review;
 
@@ -368,17 +388,10 @@ export function createPipeline({ server, registry, policy, audit, reviewer, appr
         throw new Error(`${opts.toolName} only accepts ${opts.enforceClass} commands, got: ${evaluation.commandClass}`);
       }
 
-      // Counted after the policy allowed it and before it runs: a denied
-      // command should not burn quota, and an allowed one should be counted
-      // even if it later fails on the host — the work was still spent.
-      const budget = quota.consume(profileName, profile.commandQuotaPerDay);
-      if (!budget.allowed) {
-        throw new PolicyRefusedError(
-          `QUOTA_EXCEEDED: profile "${profileName}" has used its ${profile.commandQuotaPerDay} commands ` +
-          `for the last 24h. Next slot frees at ${budget.retryAt?.toISOString()}.`,
-          { ...evaluation, decision: 'deny', ruleId: 'command-quota' },
-        );
-      }
+      // The slot was reserved before reviewer/approval work so exhausted or
+      // concurrent requests cannot keep spending model calls. Commit only now:
+      // policy/approval refusals still spend nothing, while remote failures do.
+      quota.commit(quotaReservation);
 
       const approved = effective;
       const refineCommand = (refined: string) => {
@@ -399,6 +412,7 @@ export function createPipeline({ server, registry, policy, audit, reviewer, appr
       await auditResult(ctx, profileName, state.command, evaluation, audited, approver, review);
       return output;
     } catch (err: any) {
+      quota.release(quotaReservation);
       await auditFailure(ctx, profileName, state, opts.failureClass, err);
       throw err;
     }
