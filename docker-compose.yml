@@ -89,16 +89,51 @@ services:
     # background session now waits for its kill ladder, and the 10s default left the
     # container SIGKILLed mid-teardown.
     stop_grace_period: 20s
-    build: .
+    build:
+      context: .
+      target: ssh-mcp
     profiles: ["app"]
     stdin_open: true
     environment:
       - SSH_MCP_PASSWORD=${SSH_MCP_PASSWORD}
       - SSH_MCP_SUDO_PASSWORD=${SSH_MCP_SUDO_PASSWORD}
+      - SSH_MCP_REVIEWER_URL=${SSH_MCP_REVIEWER_URL:-}
     volumes:
       - ./config.local.toml:/home/appuser/.config/ssh-mcp/config.toml:ro
       - ~/.ssh:/home/appuser/.ssh:ro
       - ssh-mcp-audit:/home/appuser/.local/share/ssh-mcp
+    networks:
+      - default
+      - reviewer-control
+
+  llm-reviewer:
+    build:
+      context: .
+      target: reviewer
+    profiles: ["reviewer"]
+    environment:
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_TIMEOUT_MS=${LLM_TIMEOUT_MS:-25000}
+      - REVIEWER_PORT=8080
+    expose:
+      - "8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    networks:
+      - reviewer-control
 
 volumes:
   ssh-mcp-audit:
+
+networks:
+  reviewer-control:
+    driver: bridge

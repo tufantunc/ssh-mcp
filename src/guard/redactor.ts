@@ -62,16 +62,21 @@ export function redactRecord<T extends Record<string, unknown>>(
   obj: T,
   opts: RedactOptions = {},
 ): T {
+  const redactValue = (value: unknown): unknown => {
+    if (typeof value === 'string') return redactText(value, opts);
+    if (Array.isArray(value)) return value.map(redactValue);
+    if (value && typeof value === 'object') {
+      return redactRecord(value as Record<string, unknown>, opts);
+    }
+    return value;
+  };
+
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(obj)) {
     if (SENSITIVE_FIELDS.has(key) || /(?<![^a-z])(token|secret|key|password)$/i.test(key)) {
       result[key] = '[REDACTED]';
-    } else if (typeof value === 'string') {
-      result[key] = redactText(value, opts);
-    } else if (value && typeof value === 'object' && !Array.isArray(value)) {
-      result[key] = redactRecord(value as Record<string, unknown>, opts);
     } else {
-      result[key] = value;
+      result[key] = redactValue(value);
     }
   }
   return result as T;

@@ -493,6 +493,24 @@ never-allowed list rather than replacing it:
 denylist = ["^terraform\\s+destroy"]
 ```
 
+Production operation freezes are deterministic policy too. This example denies
+every non-read-only operation on profiles tagged `group = "prod"` during the
+configured local window, before OPA or the LLM reviewer is called:
+
+```toml
+[[policy.freezeWindows]]
+groups = ["prod"]
+timezone = "Asia/Shanghai"
+weekdays = [1, 2, 3, 4, 5]  # Monday=1, Sunday=7
+start = "09:00"
+end = "15:30"
+```
+
+Windows may cross midnight. ssh-mcp deliberately has no built-in exchange
+calendar, holiday list or assumed trading hours; configure the actual safety
+window for the venue. Read-only operations remain available. A group name that
+matches no profile, an invalid IANA timezone or an invalid time fails startup.
+
 Because role and tier names are free strings, nothing in the merge itself can
 tell a new custom role from a misspelling of an existing one. A cross-check at
 startup does, and these all fail there rather than at the point of use:
@@ -650,6 +668,56 @@ deny if {
 }
 ```
 
+### Contextual LLM Command Review
+
+An optional reviewer can resolve contextual safety decisions after local policy and OPA:
+
+```bash
+ssh-mcp --reviewerUrl=http://127.0.0.1:8080 --reviewerTimeoutMs=30000
+```
+
+Review is disabled when neither `--reviewerUrl` nor `SSH_MCP_REVIEWER_URL` is
+set; the CLI value takes precedence. Local policy and OPA remain the enforcement
+point: their denials are final and are never sent to the reviewer. Read-only
+operations and `close-session` also skip review. For other operations, `low`
+is paired with `approve`, `high` with `deny`, and uncertain cases use
+`escalate` with `medium` or `unknown`. Approve can discharge an `ask-all` or
+`ask-destructive` soft approval and records `approver: "llm-reviewer"`; deny
+refuses without prompting; escalate requests fresh human approval. Privileged
+operations remain human-only even when the model approves. An invalid response,
+timeout or outage is treated as escalation, and escalated approval cannot reuse
+a JIT grant. Without a reviewer URL, existing approval behavior is unchanged.
+
+Before transmission, commands are scanned for known secrets and high-entropy
+values. The request contains only the schema version, tool, command class,
+profile tier, read-only state and redacted command. It does not contain host
+addresses, SSH users, stdin, command output or file contents. Model summaries
+and findings are strictly bounded and redacted again before appearing in an
+approval prompt or audit record.
+
+The independent sidecar accepts `GET /healthz` and `POST /v1/review`. It requires
+`LLM_BASE_URL` and `LLM_MODEL`; `LLM_API_KEY` is optional. `LLM_TIMEOUT_MS`
+defaults to 25000 and must be lower than ssh-mcp's reviewer timeout. It uses the
+OpenAI-compatible `chat/completions` JSON interface with no tools, no retry and
+temperature zero. The response is strict schema-versioned JSON containing
+`verdict`, `risk`, bounded summary/findings, model and reviewer policy version;
+contradictory verdict/risk pairs are rejected. No model is selected by default.
+
+With Compose, the reviewer has no host port and receives no SSH, configuration,
+audit or Docker-socket mount:
+
+```bash
+export SSH_MCP_REVIEWER_URL=http://llm-reviewer:8080
+export LLM_BASE_URL=http://host.docker.internal:11434/v1  # Ollama example
+export LLM_MODEL=your-reviewed-model
+docker compose --profile app --profile reviewer up --build
+```
+
+For vLLM, point `LLM_BASE_URL` at its `/v1` endpoint. For a cloud
+OpenAI-compatible service, use its `/v1` URL and set `LLM_API_KEY` in the
+reviewer environment. To turn review off, omit the `reviewer` profile and unset
+`SSH_MCP_REVIEWER_URL`.
+
 ---
 
 ## Security
@@ -787,8 +855,11 @@ disabling the check; only `0` turns it off.
 ## Docker
 
 ```bash
-# Build
-docker build -t ssh-mcp .
+# Build the enforcement server (the default final target)
+docker build --target ssh-mcp -t ssh-mcp .
+
+# Build the isolated reviewer when needed
+docker build --target reviewer -t ssh-mcp-reviewer .
 
 # Run (config file + env vars for credentials)
 docker run -i \
@@ -841,6 +912,8 @@ Secrets are **never** passed as CLI arguments.
 | `--opaUrl` | — | OPA sidecar URL for external policy |
 | `--opaFailClosed` | false | Refuse every command while OPA is unreachable, instead of falling back to local policy |
 | `--opaTimeoutMs` | 10000 | How long to wait for the OPA sidecar. Lower makes the fail-open cheaper to reach; higher makes an outage slower to notice |
+| `--reviewerUrl` | — (disabled) | HTTP(S) base URL for the contextual reviewer; `SSH_MCP_REVIEWER_URL` is the environment fallback |
+| `--reviewerTimeoutMs` | 30000 | Reviewer request timeout in ms (`1000..120000`) |
 | `--commandQuota` | 0 (off) | Max commands per rolling 24h per profile |
 | `--approvalGrantTtl` | 0 (off) | Auto-approve an identical command for this many ms after approval |
 | `--auditEntropyScan` | false | Enable entropy-based secret scanning in audit |

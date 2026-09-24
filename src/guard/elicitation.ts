@@ -1,6 +1,7 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PolicyEvaluation } from '../types.js';
+import type { ReviewResult } from '../reviewer/types.js';
 
 export interface ApprovalResult {
   approved: boolean;
@@ -45,8 +46,18 @@ export async function requestApproval(
   command: string,
   profileName: string,
   evaluation: PolicyEvaluation,
+  review?: ReviewResult,
 ): Promise<ApprovalResult> {
-  const message = `Confirm ${evaluation.commandClass} command on "${profileName}":\n\n${command}`;
+  const reviewText = review
+    ? review.status === 'unavailable'
+      ? `\n\nContextual reviewer: unavailable (${review.unavailableCode ?? 'unknown'}). ` +
+        'Manual approval is required.'
+      : `\n\nContextual reviewer: ${review.verdict} (${review.risk} risk).\n${review.summary}` +
+        review.findings.map((finding) =>
+          `\n- [${finding.severity}] ${finding.category}: ${finding.message}`,
+        ).join('')
+    : '';
+  const message = `Confirm ${evaluation.commandClass} command on "${profileName}":\n\n${command}${reviewText}`;
 
   try {
     const result = await server.server.elicitInput(

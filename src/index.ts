@@ -19,8 +19,11 @@ import {
   parseFailureLimit,
   parseOpaUrl,
   parseOpaTimeout,
+  parseReviewerUrl,
+  parseReviewerTimeout,
   resolveHostKeyMode,
 } from './cli.js';
+import { HttpCommandReviewer } from './reviewer/http-client.js';
 
 async function main() {
   const argv = parseArgv();
@@ -54,6 +57,7 @@ async function main() {
   const registry = new ConnectionRegistry(config, hostKeyMode);
   const policy = new PolicyEngine(resolvePolicyRules(config.profiles, config.policy));
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);
+  let reviewer: HttpCommandReviewer | undefined;
 
   if ('opaUrl' in argv) {
     // Presence, not truthiness — the trap `flagEnabled` was written for. A
@@ -69,6 +73,22 @@ async function main() {
     throw new OperatorError('--opaFailClosed does nothing without --opaUrl.');
   }
 
+  const reviewerUrlRaw = 'reviewerUrl' in argv
+    ? argv.reviewerUrl
+    : process.env.SSH_MCP_REVIEWER_URL;
+  if (reviewerUrlRaw) {
+    reviewer = new HttpCommandReviewer(
+      parseReviewerUrl(reviewerUrlRaw),
+      parseReviewerTimeout(argv.reviewerTimeoutMs),
+    );
+    console.error('Contextual command reviewer enabled');
+  } else if ('reviewerUrl' in argv) {
+    // A present but empty flag is a typo, unlike an absent/empty optional env var.
+    parseReviewerUrl(reviewerUrlRaw);
+  } else if ('reviewerTimeoutMs' in argv) {
+    throw new OperatorError('--reviewerTimeoutMs does nothing without --reviewerUrl or SSH_MCP_REVIEWER_URL.');
+  }
+
   // An McpServer binds to a single transport, so HTTP needs one per session.
   const createMcpServer = (): McpServer => {
     // capabilities moved from serverInfo to ServerOptions in SDK 1.30.
@@ -79,6 +99,7 @@ async function main() {
     registerTools(server, registry, policy, audit, {
       approvalGrantTtlMs: config.defaults.approvalGrantTtlMs,
       localPath,
+      reviewer,
     });
     registerResources(server, registry);
     return server;

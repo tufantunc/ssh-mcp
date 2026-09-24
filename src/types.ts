@@ -83,6 +83,17 @@ export interface PolicyConfig {
    * defaults do not set.
    */
   denylist?: string[];
+  /** Deterministic weekly periods in which non-read-only operations are refused. */
+  freezeWindows?: FreezeWindow[];
+}
+
+export interface FreezeWindow {
+  groups: string[];
+  timezone: string;
+  /** ISO weekdays: Monday = 1, Sunday = 7. */
+  weekdays: number[];
+  start: string;
+  end: string;
 }
 
 export interface AppConfig {
@@ -202,6 +213,23 @@ export interface AuditRecord {
   durationMs?: number;
   approver?: string;
   error?: string;
+  review?: ReviewAudit;
+}
+
+export interface ReviewAudit {
+  status: 'completed' | 'unavailable';
+  verdict: 'approve' | 'deny' | 'escalate';
+  risk: 'low' | 'medium' | 'high' | 'unknown';
+  summary: string;
+  findings: Array<{
+    category: string;
+    severity: 'low' | 'medium' | 'high';
+    message: string;
+  }>;
+  model?: string;
+  policyVersion: string;
+  durationMs: number;
+  unavailableCode?: string;
 }
 
 // ─── Tool Types ─────────────────────────────────────────────────────────────

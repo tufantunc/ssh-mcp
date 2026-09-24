@@ -102,6 +102,32 @@ describe('audit hash chain', () => {
     }
   });
 
+  it('includes nested review metadata in the chain', async () => {
+    const store = new AuditStore(logPath, false, true);
+    await store.record({
+      ...base,
+      command: 'touch /tmp/reviewed',
+      commandClass: 'safe',
+      decision: 'require-approval',
+      review: {
+        status: 'completed',
+        verdict: 'escalate',
+        risk: 'medium',
+        summary: 'Writes remote state.',
+        findings: [],
+        model: 'fake-model',
+        policyVersion: '2',
+        durationMs: 4,
+      },
+    });
+    await store.close();
+
+    const [entry] = await lines();
+    const { prevHash, selfHash, ...body } = entry;
+    expect(body.review).toMatchObject({ risk: 'medium', model: 'fake-model' });
+    expect(createHash('sha256').update(JSON.stringify(body) + prevHash).digest('hex')).toBe(selfHash);
+  });
+
   it('detects an edited entry', async () => {
     const store = new AuditStore(logPath, false, true);
     await write(store, 'ls -la');

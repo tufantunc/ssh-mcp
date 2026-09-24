@@ -25,7 +25,27 @@ COPY tsconfig.json ./
 COPY src/ ./src/
 RUN npm run build
 
-FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS reviewer
+WORKDIR /app
+
+RUN groupadd -r -g 65532 appgroup && useradd -r -u 65532 -g appgroup appuser
+
+COPY --from=builder /app/build/reviewer ./build/reviewer
+COPY --from=builder /app/node_modules/zod ./node_modules/zod
+COPY --from=builder /app/package.json ./package.json
+
+RUN chown -R appuser:appgroup /app
+
+USER appuser
+
+ENV NODE_ENV=production
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD node -e "fetch('http://127.0.0.1:'+(process.env.REVIEWER_PORT||8080)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" || exit 1
+
+ENTRYPOINT ["node", "build/reviewer/sidecar.js"]
+
+FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS runtime-base
 WORKDIR /app
 
 RUN groupadd -r -g 65532 appgroup && useradd -r -u 65532 -g appgroup appuser
@@ -33,6 +53,17 @@ RUN groupadd -r -g 65532 appgroup && useradd -r -u 65532 -g appgroup appuser
 COPY --from=builder /app/build ./build
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
+
+RUN chown -R appuser:appgroup /app
+
+USER appuser
+
+ENV NODE_ENV=production
+
+FROM runtime-base AS ssh-mcp
+
+USER root
+
 # From the build context, not the builder stage: the builder copies only
 # package*.json, tsconfig.json and src/, so this path never existed there. The
 # earlier `npm ci` failure had been masking it.
@@ -44,14 +75,13 @@ COPY config.default.toml ./config.default.toml
 # start, with no way to chmod a directory baked into the image (#138 review).
 RUN mkdir -p /home/appuser/.config/ssh-mcp && \
     chmod 700 /home/appuser/.config /home/appuser/.config/ssh-mcp && \
-    chown -R appuser:appgroup /home/appuser /app
+    chown -R appuser:appgroup /home/appuser
 
 USER appuser
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD node -e "process.exit(0)" || exit 1
 
-ENV NODE_ENV=production
 ENV SSH_MCP_DISABLE_MAIN=0
 
 ENTRYPOINT ["node", "build/index.js"]

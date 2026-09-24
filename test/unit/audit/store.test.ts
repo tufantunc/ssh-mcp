@@ -57,6 +57,40 @@ describe('AuditStore', () => {
     expect(content).toContain('[REDACTED:aws-access-key');
   });
 
+  it('redacts model output before writing review metadata', async () => {
+    const logPath = join(tempDir, 'audit.log');
+    const store = new AuditStore(logPath);
+    await store.record({
+      mcpRequestId: 1,
+      profile: 'dev',
+      user: 'test',
+      command: 'touch /tmp/example',
+      commandClass: 'safe',
+      binary: 'touch',
+      decision: 'require-approval',
+      review: {
+        status: 'completed',
+        verdict: 'deny',
+        risk: 'high',
+        summary: 'Credential AKIAIOSFODNN7EXAMPLE may be exposed',
+        findings: [{
+          category: 'credential',
+          severity: 'high',
+          message: 'Token sk-abcdefghijklmnopqrstuvwxyz1234567890',
+        }],
+        model: 'fake-model',
+        policyVersion: '2',
+        durationMs: 12,
+      },
+    });
+
+    const content = await readFile(logPath, 'utf8');
+    expect(content).not.toContain('AKIAIOSFODNN7EXAMPLE');
+    expect(content).not.toContain('sk-abcdefghijklmnopqrstuvwxyz1234567890');
+    expect(content).toContain('[REDACTED:aws-access-key');
+    expect(content).toContain('[REDACTED:entropy');
+  });
+
   // Drives rotation through the store with a small threshold instead of
   // writing a real 101MB file behind its back. The old shape both cost ~200MB
   // of I/O per run and only worked because the store re-stat()ed the file on

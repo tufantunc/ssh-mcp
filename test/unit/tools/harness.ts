@@ -58,6 +58,8 @@ export interface Harness {
   setApproval(approve: boolean): void;
   /** How many times the client was actually prompted. */
   approvalPrompts(): number;
+  /** Exact elicitation messages sent to the client. */
+  approvalMessages(): string[];
   /**
    * What `closeSession` reports; override per test.
    *
@@ -79,6 +81,7 @@ export async function createHarness(
   let approve = true;
   let closeOutcome: CloseOutcome = 'closed';
   let approvalPrompts = 0;
+  const approvalMessages: string[] = [];
   let execResult: Partial<CommandResult> = {};
 
   const makeResult = (command: string): CommandResult => ({
@@ -145,8 +148,9 @@ export async function createHarness(
     { capabilities: { elicitation: {} } },
   );
   // Stand in for the human at the approval prompt.
-  client.setRequestHandler(ElicitRequestSchema, async () => {
+  client.setRequestHandler(ElicitRequestSchema, async (request) => {
     approvalPrompts++;
+    approvalMessages.push(request.params.message);
     return approve ? { action: 'accept', content: { confirm: true } } : { action: 'decline' };
   });
 
@@ -161,6 +165,7 @@ export async function createHarness(
     setApproval(value) { approve = value; },
     setCloseOutcome(outcome) { closeOutcome = outcome; },
     approvalPrompts: () => approvalPrompts,
+    approvalMessages: () => [...approvalMessages],
     async close() { await client.close(); await server.close(); },
   };
 }

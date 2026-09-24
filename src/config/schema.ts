@@ -4,6 +4,31 @@ const authMethodSchema = z.enum(['agent', 'key', 'password', 'keychain']);
 const approvalModeSchema = z.enum(['auto', 'ask-destructive', 'ask-all', 'deny']);
 const commandClassSchema = z.enum(['read-only', 'safe', 'destructive', 'privileged']);
 
+const timeOfDaySchema = z.string().regex(/^\d{2}:\d{2}$/, 'Expected HH:MM')
+  .refine((value) => {
+    const [hours, minutes] = value.split(':').map(Number);
+    return hours <= 23 && minutes <= 59;
+  }, 'Expected a valid 24-hour time');
+
+const timeZoneSchema = z.string().min(1).refine((value) => {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date(0));
+    return true;
+  } catch {
+    return false;
+  }
+}, 'Expected an IANA timezone');
+
+const freezeWindowSchema = z.object({
+  groups: z.array(z.string().min(1)).min(1),
+  timezone: timeZoneSchema,
+  weekdays: z.array(z.number().int().min(1).max(7)).min(1),
+  start: timeOfDaySchema,
+  end: timeOfDaySchema,
+}).strict().refine((window) => window.start !== window.end, {
+  message: 'Freeze window start and end must differ',
+});
+
 /**
  * Role and tier names, which are free strings so operators can define their own.
  *
@@ -223,6 +248,7 @@ export const policySchema = z.object({
     ))
     .optional(),
   denylist: z.array(z.string()).optional(),
+  freezeWindows: z.array(freezeWindowSchema).optional(),
 }).strict();
 
 // .strict() on the root as well: without it an unknown section (a typo, or a

@@ -19,6 +19,12 @@ commandMaxOutputBytes = 1048576   # 1MB output cap per command
 connectionIdleReapMs = 900000     # 15min -> close idle connection
 approvalMode = "ask-destructive"  # auto | ask-destructive | ask-all | deny
 
+# Contextual LLM review is intentionally process-level rather than profile-level.
+# Enable it with --reviewerUrl or SSH_MCP_REVIEWER_URL; leaving both unset keeps
+# it disabled. Inside deterministic permissions, it may approve routine work,
+# deny unsafe work, or escalate ambiguity to a fresh human approval. Privileged
+# commands remain human-only.
+
 # Streaming SFTP file tools (sftp-list, sftp-upload-file, sftp-download-file).
 #
 # transferRoot is the consent: it is the only directory those tools may read
@@ -108,3 +114,15 @@ approvalPolicy = "auto"
 #
 # [policy]
 # denylist = ["^terraform\\s+destroy"]
+#
+# Optional deterministic freeze windows. Every non-read-only operation on the
+# listed groups is denied before OPA or LLM review. Weekdays are ISO values
+# (Monday=1, Sunday=7); overnight windows are supported. No market schedule is
+# built in: configure the actual trading/maintenance window for your venue.
+#
+# [[policy.freezeWindows]]
+# groups = ["prod"]
+# timezone = "Asia/Shanghai"
+# weekdays = [1, 2, 3, 4, 5]
+# start = "09:00"
+# end = "15:30"

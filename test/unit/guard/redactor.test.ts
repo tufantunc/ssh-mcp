@@ -89,6 +89,14 @@ describe('redactRecord', () => {
     expect(result.config.port).toBe(22);
   });
 
+  it('redacts strings and sensitive fields inside nested arrays', () => {
+    const result = redactRecord({
+      findings: [{ message: 'Found AKIAIOSFODNN7EXAMPLE', apiKey: 'do-not-log' }],
+    });
+    expect(result.findings[0].message).toContain('[REDACTED:aws-access-key');
+    expect(result.findings[0].apiKey).toBe('[REDACTED]');
+  });
+
   it('redacts fields matching token/secret/key pattern', () => {
     const result = redactRecord({
       apiToken: 'xyz',

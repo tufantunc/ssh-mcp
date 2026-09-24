@@ -4,7 +4,7 @@ import { homedir, platform } from 'os';
 import { join, dirname } from 'path';
 import { randomUUID, createHash } from 'crypto';
 import type { AuditRecord } from '../types.js';
-import { redactText } from '../guard/redactor.js';
+import { redactRecord, redactText } from '../guard/redactor.js';
 import { tracer } from '../observability/tracer.js';
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
@@ -72,8 +72,16 @@ export class AuditStore {
 
       const redactedCommand = redactText(record.command, { entropyScan: this.entropyScan });
       const redactedError = record.error ? redactText(record.error, { entropyScan: this.entropyScan }) : undefined;
+      const redactedReview = record.review
+        ? redactRecord(record.review as unknown as Record<string, unknown>, { entropyScan: true })
+        : undefined;
 
-      let lineObj: Record<string, unknown> = { ...record, command: redactedCommand, error: redactedError };
+      let lineObj: Record<string, unknown> = {
+        ...record,
+        command: redactedCommand,
+        error: redactedError,
+        review: redactedReview,
+      };
 
       if (this.tamperEvident) {
         if (!this.lastHash) {

@@ -41,6 +41,12 @@
           "description": "Password the sudo tool escalates with, when the policy in force allows the privileged class.",
           "isSecret": true,
           "isRequired": false
+        },
+        {
+          "name": "SSH_MCP_REVIEWER_URL",
+          "description": "Optional HTTP(S) base URL for the contextual command reviewer sidecar. When unset, review is disabled.",
+          "isSecret": false,
+          "isRequired": false
         }
       ]
     }

@@ -4,6 +4,7 @@ import type {
   PolicyEvaluation,
   Profile,
   ApprovalMode,
+  FreezeWindow,
 } from '../types.js';
 import { classifyCommand, findForbiddenMatch } from './classifier.js';
 import { OperatorError } from '../errors.js';
@@ -16,6 +17,7 @@ export interface PolicyRules {
    * classifier.ts and is always applied on top of these — not repeated here.
    */
   denylist?: string[];
+  freezeWindows?: FreezeWindow[];
 }
 
 /**
@@ -33,6 +35,58 @@ const DEFAULT_OPA_TIMEOUT_MS = 10_000;
 
 /** Tiers, most restrictive first. Unknown/unset tiers resolve to the first. */
 export const HOST_GROUPS = ['prod', 'staging', 'dev'] as const;
+
+const ISO_WEEKDAY: Record<string, number> = {
+  Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7,
+};
+
+function timeMinutes(value: string): number | undefined {
+  const match = /^(\d{2}):(\d{2})$/.exec(value);
+  if (!match) return undefined;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return undefined;
+  return hours * 60 + minutes;
+}
+
+function validateFreezeWindow(window: FreezeWindow): void {
+  if (window.groups.length === 0 || window.weekdays.length === 0 ||
+      window.weekdays.some((day) => !Number.isInteger(day) || day < 1 || day > 7)) {
+    throw new OperatorError('Freeze windows require at least one group and ISO weekday (1-7)');
+  }
+  const start = timeMinutes(window.start);
+  const end = timeMinutes(window.end);
+  if (start === undefined || end === undefined || start === end) {
+    throw new OperatorError('Freeze window start/end must be distinct HH:MM values');
+  }
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: window.timezone }).format(new Date(0));
+  } catch {
+    throw new OperatorError(`Invalid freeze window timezone ${JSON.stringify(window.timezone)}`);
+  }
+}
+
+function isInsideFreezeWindow(at: Date, window: FreezeWindow): boolean {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: window.timezone,
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(at);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value;
+  const weekday = ISO_WEEKDAY[part('weekday') ?? ''];
+  const minutes = Number(part('hour')) * 60 + Number(part('minute'));
+  const start = timeMinutes(window.start)!;
+  const end = timeMinutes(window.end)!;
+
+  if (start < end) {
+    return window.weekdays.includes(weekday) && minutes >= start && minutes < end;
+  }
+  const previousWeekday = weekday === 1 ? 7 : weekday - 1;
+  return (window.weekdays.includes(weekday) && minutes >= start) ||
+    (window.weekdays.includes(previousWeekday) && minutes < end);
+}
 
 export const DEFAULT_RULES: PolicyRules = {
   // Null-prototype for the reason spelled out at `mergePolicyRules`: a role name is
@@ -82,7 +136,7 @@ export function mergePolicyRules(
   base: PolicyRules,
   override?: PolicyConfig,
 ): PolicyRules {
-  if (!override?.roleBindings && !override?.denylist) return base;
+  if (!override?.roleBindings && !override?.denylist && !override?.freezeWindows) return base;
 
   // Copy every tier map: assigning base's objects straight through would let a
   // later merge mutate DEFAULT_RULES, which is a module-level singleton.
@@ -116,6 +170,7 @@ export function mergePolicyRules(
   return {
     roleBindings,
     denylist: override.denylist ?? base.denylist,
+    freezeWindows: override.freezeWindows ?? base.freezeWindows,
   };
 }
 
@@ -194,6 +249,7 @@ export function findPolicyProblems(
   }
 
   const rolesInUse = [...new Set(profiles.map((p) => p.role))];
+  const groupsInUse = [...new Set(profiles.map(resolveProfileGroup))];
   for (const [role, tiers] of Object.entries(override?.roleBindings ?? {})) {
     if (!rolesInUse.includes(role)) {
       problems.push(
@@ -208,6 +264,16 @@ export function findPolicyProblems(
         `[policy.roleBindings.${role}]: key "${tier}" matches no profile's group and is not a built-in ` +
         `tier (${HOST_GROUPS.join(', ')}), so it changes nothing. Set group = "${tier}" on a profile, ` +
         `or remove the key.`,
+      );
+    }
+  }
+
+  for (const [index, window] of (override?.freezeWindows ?? []).entries()) {
+    for (const group of window.groups) {
+      if (groupsInUse.includes(group)) continue;
+      problems.push(
+        `[policy.freezeWindows.${index}]: group "${group}" matches no profile. ` +
+        `Groups in use: ${groupsInUse.join(', ')}.`,
       );
     }
   }
@@ -249,7 +315,10 @@ export class PolicyEngine {
   /** The operator's patterns, compiled once. The built-ins live in classifier.ts. */
   private readonly userPatterns: RegExp[];
 
-  constructor(private rules: PolicyRules = DEFAULT_RULES) {
+  constructor(
+    private rules: PolicyRules = DEFAULT_RULES,
+    private readonly now: () => Date = () => new Date(),
+  ) {
     // Compile eagerly: a deny rule that silently degrades (the old code fell
     // back to substring-matching the command against the regex *source*) is
     // worse than a startup failure, because nothing surfaces the degradation.
@@ -262,6 +331,7 @@ export class PolicyEngine {
         );
       }
     });
+    for (const window of rules.freezeWindows ?? []) validateFreezeWindow(window);
   }
 
   setOpaUrl(url: string | null, failClosed = false, timeoutMs = DEFAULT_OPA_TIMEOUT_MS): void {
@@ -291,6 +361,20 @@ export class PolicyEngine {
         binary: parsed.binary,
         ruleId: 'denylist',
         reason: denied,
+      };
+    }
+
+    const freezeWindow = parsed.class === 'read-only'
+      ? undefined
+      : this.activeFreezeWindow(profile);
+    if (freezeWindow) {
+      return {
+        decision: 'deny',
+        commandClass: parsed.class,
+        binary: parsed.binary,
+        ruleId: 'freeze-window',
+        reason: `Host group "${resolveProfileGroup(profile)}" is frozen by the ` +
+          `${freezeWindow.timezone} ${freezeWindow.start}-${freezeWindow.end} operation window`,
       };
     }
 
@@ -517,6 +601,12 @@ export class PolicyEngine {
     // `??` rather than `||`: an empty class list is a deliberate lockdown, and
     // whether it survives should not rest on `[]` being truthy.
     return roleBinding[resolveProfileGroup(profile)] ?? ['read-only'];
+  }
+
+  private activeFreezeWindow(profile: Profile): FreezeWindow | undefined {
+    const group = resolveProfileGroup(profile);
+    return (this.rules.freezeWindows ?? []).find((window) =>
+      window.groups.includes(group) && isInsideFreezeWindow(this.now(), window));
   }
 
   /**

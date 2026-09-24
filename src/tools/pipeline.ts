@@ -10,6 +10,9 @@ import { CommandQuota } from '../policy/quota.js';
 import type { LocalPathContext } from './local-path.js';
 import { ApprovalGrants } from '../guard/approval-grants.js';
 import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass } from '../types.js';
+import { resolveProfileGroup } from '../policy/engine.js';
+import { mergeReview } from '../reviewer/decision.js';
+import type { CommandReviewer, ReviewResult } from '../reviewer/types.js';
 
 /**
  * What we know about a request while it is being processed, so a failure can be
@@ -25,6 +28,7 @@ export interface AuditState {
   command: string;
   /** Set once the policy engine actually produced a decision. */
   evaluation?: PolicyEvaluation;
+  review?: ReviewResult;
 }
 
 /** Policy never ran — the input was rejected at the boundary. */
@@ -37,7 +41,11 @@ function rejectedEvaluation(commandClass: CommandClass): PolicyEvaluation {
  * the real rule and class instead of a synthetic placeholder.
  */
 export class PolicyRefusedError extends Error {
-  constructor(message: string, readonly evaluation: PolicyEvaluation) {
+  constructor(
+    message: string,
+    readonly evaluation: PolicyEvaluation,
+    readonly review?: ReviewResult,
+  ) {
     super(message);
     this.name = 'PolicyRefusedError';
   }
@@ -50,6 +58,8 @@ export interface ToolDeps {
   registry: ConnectionRegistry;
   policy: PolicyEngine;
   audit: AuditStore;
+  /** Optional contextual reviewer. Absent means the feature is disabled. */
+  reviewer?: CommandReviewer;
   /**
    * Where the streaming SFTP file tools may touch local disk, and which
    * directories they must stay clear of.
@@ -69,7 +79,7 @@ export interface ToolDeps {
  * and audit store. Tool groups receive the result and never touch those four
  * directly, so there is exactly one path from caller input to a remote command.
  */
-export function createPipeline({ server, registry, policy, audit, approvalGrantTtlMs = 0 }: ToolDeps) {
+export function createPipeline({ server, registry, policy, audit, reviewer, approvalGrantTtlMs = 0 }: ToolDeps) {
   const quota = new CommandQuota();
   const grants = new ApprovalGrants(approvalGrantTtlMs);
   async function resolveConn(profileName?: string) {
@@ -86,7 +96,7 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     span.setAttribute('ssh.profile', profileName);
     try {
       const conn = await resolveConn(profileName);
-      const evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName);
+      let evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName);
       span.setAttribute('policy.decision', evaluation.decision);
       span.setAttribute('command.class', evaluation.commandClass);
       span.setAttribute('command.binary', evaluation.binary);
@@ -98,14 +108,64 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
         );
       }
 
+      let review: ReviewResult | undefined;
+      let requiresFreshApproval = false;
+      if (reviewer && evaluation.commandClass !== 'read-only') {
+        const reviewSpan = tracer.startSpan('reviewer.review');
+        const reviewStartedAt = Date.now();
+        try {
+          review = await reviewer.review({
+            command,
+            tool: toolName,
+            commandClass: evaluation.commandClass,
+            tier: resolveProfileGroup(conn.profile),
+            readOnly: conn.profile.readOnly,
+          });
+        } catch {
+          // The interface promises a result, but an injected implementation must not be
+          // able to throw past the safety gate and restore automatic execution.
+          review = {
+            status: 'unavailable',
+            verdict: 'escalate',
+            risk: 'unknown',
+            summary: 'Contextual reviewer unavailable; manual approval is required.',
+            findings: [],
+            policyVersion: 'unknown',
+            durationMs: Date.now() - reviewStartedAt,
+            unavailableCode: 'reviewer-threw',
+          };
+        } finally {
+          if (review) {
+            reviewSpan.setAttribute('review.status', review.status);
+            reviewSpan.setAttribute('review.risk', review.risk);
+            reviewSpan.setAttribute('review.duration_ms', review.durationMs);
+          }
+          reviewSpan.end();
+        }
+        const merged = mergeReview(evaluation, review);
+        evaluation = merged.evaluation;
+        requiresFreshApproval = merged.requiresFreshApproval;
+        span.setAttribute('policy.decision', evaluation.decision);
+        if (evaluation.decision === 'deny') {
+          throw new PolicyRefusedError(
+            `POLICY_DENIED: ${evaluation.reason || 'Command not allowed'}`,
+            evaluation,
+            review,
+          );
+        }
+        if (merged.approver) {
+          return { conn, evaluation, review, approver: merged.approver };
+        }
+      }
+
       if (evaluation.decision === 'require-approval') {
         // A live grant from an earlier explicit approval of this exact command.
-        if (grants.has(conn.profile.name, command, evaluation.commandClass)) {
+        if (!requiresFreshApproval && grants.has(conn.profile.name, command, evaluation.commandClass)) {
           span.setAttribute('policy.grant', 'reused');
-          return { conn, evaluation, approver: 'jit-grant' };
+          return { conn, evaluation, review, approver: 'jit-grant' };
         }
 
-        const approval = await requestApproval(server, command, conn.profile.name, evaluation);
+        const approval = await requestApproval(server, command, conn.profile.name, evaluation, review);
         if (!approval.approved) {
           // Two different failures used to share one message. "User did not
           // approve" is true when the user declined and a lie when the client
@@ -115,13 +175,16 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
               ? `APPROVAL_UNAVAILABLE: ${approval.unavailable}`
               : 'APPROVAL_DENIED: User did not approve this command',
             evaluation,
+            review,
           );
         }
-        grants.record(conn.profile.name, command, evaluation.commandClass);
-        return { conn, evaluation, approver: approval.approver };
+        if (!requiresFreshApproval) {
+          grants.record(conn.profile.name, command, evaluation.commandClass);
+        }
+        return { conn, evaluation, review, approver: approval.approver };
       }
 
-      return { conn, evaluation, approver: undefined };
+      return { conn, evaluation, review, approver: undefined };
     } finally {
       span.end();
     }
@@ -134,6 +197,7 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     evaluation: PolicyEvaluation,
     result: CommandResult | { error: string },
     approver?: string,
+    review?: ReviewResult,
   ) {
     await audit.record({
       mcpRequestId: ctx.requestId,
@@ -153,6 +217,7 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
       durationMs: 'durationMs' in result ? result.durationMs : undefined,
       error: 'error' in result ? result.error : undefined,
       approver,
+      review,
     });
   }
 
@@ -180,7 +245,7 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     try {
       await auditResult(ctx, profileName, state.command, evaluation, {
         error: err?.message ?? String(err),
-      });
+      }, undefined, err instanceof PolicyRefusedError ? err.review : state.review);
     } catch (auditErr) {
       console.error('Audit write failed while recording a tool failure:', auditErr);
     }
@@ -295,8 +360,9 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
         state.command = effective;
       }
 
-      const { conn, evaluation, approver } = await checkPolicyAndApprove(effective, profileName, opts.toolName);
+      const { conn, evaluation, review, approver } = await checkPolicyAndApprove(effective, profileName, opts.toolName);
       state.evaluation = evaluation;
+      state.review = review;
 
       if (opts.enforceClass && evaluation.commandClass !== opts.enforceClass) {
         throw new Error(`${opts.toolName} only accepts ${opts.enforceClass} commands, got: ${evaluation.commandClass}`);
@@ -330,7 +396,7 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
       // `state.command`, not `effective`: identical unless the handler refined
       // it, and the refinement is exactly what the success record should carry.
       // The failure path below already reads `state`, so the two agree.
-      await auditResult(ctx, profileName, state.command, evaluation, audited, approver);
+      await auditResult(ctx, profileName, state.command, evaluation, audited, approver, review);
       return output;
     } catch (err: any) {
       await auditFailure(ctx, profileName, state, opts.failureClass, err);

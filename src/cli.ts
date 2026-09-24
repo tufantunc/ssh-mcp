@@ -192,6 +192,45 @@ export function parseOpaUrl(raw: string | null | undefined): string {
   return (parsed.origin + parsed.pathname).replace(/\/$/, '');
 }
 
+/** Validate the optional contextual reviewer endpoint at startup. */
+export function parseReviewerUrl(raw: string | null | undefined): string {
+  if (!raw) {
+    throw new OperatorError(
+      '--reviewerUrl needs a URL, as --reviewerUrl=http://llm-reviewer:8080.',
+    );
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new OperatorError(
+      `--reviewerUrl=${raw} is not a URL. Include the scheme, as ` +
+      '--reviewerUrl=http://llm-reviewer:8080.',
+    );
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new OperatorError(`--reviewerUrl must be http or https, got ${parsed.protocol}`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new OperatorError(
+      '--reviewerUrl must not embed credentials. Keep the sidecar on a private network.',
+    );
+  }
+  return (parsed.origin + parsed.pathname).replace(/\/$/, '');
+}
+
+/** How long one optional contextual review may delay a non-read-only operation. */
+export function parseReviewerTimeout(raw: string | null | undefined): number {
+  if (raw === undefined) return 30_000;
+  const value = raw === null ? NaN : Number(raw.trim());
+  if (!Number.isSafeInteger(value) || value < 1_000 || value > 120_000) {
+    throw new OperatorError(
+      `--reviewerTimeoutMs must be a whole number of milliseconds between 1000 and 120000, got ${JSON.stringify(raw)}.`,
+    );
+  }
+  return value;
+}
+
 /**
  * `strict` was previously unreachable: nothing but test code could select it,
  * yet host-key.ts pointed users at a `--acceptNewHostKey` flag that never
