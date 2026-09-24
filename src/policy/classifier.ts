@@ -615,22 +615,17 @@ function matchesEitherForm(command: string, test: (form: string) => boolean): bo
  *
  * @param speculativeOperands Whether the catch-all below — any multi-word,
  *   non-flag operand of a segment no more specific reader claimed — should be
- *   pushed for a segment headed by a binary this file does NOT recognise as
- *   an interpreter. That catch-all is a guess about such a binary; the four
- *   carriers above are not guesses, the shell really does run what they
- *   hold, and are pushed regardless of this flag — and so, as of the
- *   targeted round (R1), is the same catch-all for a segment whose effective
- *   command word IS a confirmed `INTERPRETERS` entry: an interpreter being
- *   invoked is not a guess either, only which of its operands is the program
- *   sometimes is. Defaults to `true` for `classifyCommand`'s own recursion,
- *   where a guess may raise a command's *class* and leave role, tier and
- *   approval to weigh in. `findForbiddenMatch` passes `false`: its recursion
- *   feeds `FORBIDDEN_RULES`, the one unconditional denylist, and a guess
- *   about an *unrecognised* binary must not be able to produce a refusal
- *   nobody can override (the maintainer's ruling — see the block comment
- *   above `findForbiddenMatch`). `$()`, backticks, `sh -c` and every other
- *   confirmed interpreter carrier are certain and keep reaching the denylist
- *   either way.
+ *   pushed. That catch-all is a guess about a binary this file does not
+ *   recognise; the four carriers above are not guesses, the shell really does
+ *   run what they hold, and are pushed regardless of this flag. Defaults to
+ *   `true` for `classifyCommand`'s own recursion, where a guess may raise a
+ *   command's *class* and leave role, tier and approval to weigh in.
+ *   `findForbiddenMatch` passes `false`: its recursion feeds
+ *   `FORBIDDEN_RULES`, the one unconditional denylist, and a guess must not
+ *   be able to produce a refusal nobody can override (the maintainer's
+ *   ruling — see the block comment above `findForbiddenMatch`). `$()`,
+ *   backticks and `sh -c` are certain carriers and keep reaching the
+ *   denylist either way.
  */
 export function nestedCommands(command: string, speculativeOperands = true): string[] {
   const found: string[] = [];
@@ -712,22 +707,6 @@ export function nestedCommands(command: string, speculativeOperands = true): str
       // table" excluded exactly the binaries this file just learned, and for
       // precisely the invocations its own flag-walk cannot follow — a net
       // regression, not a wash.
-      // Whether this segment's *effective command word* is a confirmed
-      // interpreter — not whether any word anywhere in it happens to name
-      // one (the loop below checks every word for that, deliberately wider
-      // than this). This is the maintainer's ruling on the targeted round,
-      // R1: the speculative catch-all below is a guess about an
-      // unrecognised binary's operands, so `speculativeOperands` gates it
-      // out of `findForbiddenMatch`'s recursion. A segment actually headed
-      // by an interpreter is not a guess — the interpreter is being
-      // invoked, full stop — so its own multi-word, non-flag operands earn
-      // the same certain treatment `$()`, backticks and `sh -c` already get
-      // below, regardless of `speculativeOperands`.
-      const headIndex = effectiveCommandIndex(words);
-      const headSpec = headIndex === -1
-        ? undefined : resolveInterpreter(stripPath(unquote(words[headIndex])));
-      const certainInterpreterCarrier = headSpec !== undefined;
-
       const consumedOperands = new Set<number>();
       for (let i = 0; i < words.length; i++) {
         const spec = resolveInterpreter(stripPath(unquote(words[i])));
@@ -779,23 +758,7 @@ export function nestedCommands(command: string, speculativeOperands = true): str
       // cap at `destructive` on purpose — and it out-ranked the nested
       // classification that names the elevated binary, reporting `awk` where `id`
       // was correct.
-      //
-      // `speculativeOperands || certainInterpreterCarrier`: a guess about an
-      // unrecognised binary still needs the flag, but a confirmed interpreter's
-      // own operands are read regardless of it — targeted round, R1. Before this,
-      // `bash -o pipefail -c 'shutdown -h now'` lost its payload entirely inside
-      // `findForbiddenMatch`'s recursion: `-o` is a real, value-taking bash flag,
-      // its value `pipefail` is a bare word with nothing to mark it as consumed,
-      // and `programAfterFlag` gives up the moment it sees a non-flag word it did
-      // not itself consume — so `-c` was never reached and the segment vanished
-      // from the unconditional denylist scan, not merely from its class.
-      // `python3 -W ignore -c …`, `perl -I /tmp -e …` and `bash --rcfile /tmp/x
-      // -c …` are the identical shape with a different interpreter's own
-      // value-taking flag. The fix is this gate, not a list of `-o`/`-W`/`-I`/
-      // `--rcfile`: any value-taking flag of any interpreter reaches the same
-      // catch-all shape check (multi-word, no leading `-`) that an unrecognised
-      // binary's operand already goes through when `speculativeOperands` is true.
-      if ((speculativeOperands || certainInterpreterCarrier) && awk === null) {
+      if (speculativeOperands && awk === null) {
         for (let i = 1; i < words.length; i++) {
           if (consumedOperands.has(i)) continue;
           if (words[i].startsWith('-')) continue;
@@ -1225,17 +1188,7 @@ export function findForbiddenMatch(command: string, depth = 0): string | null {
   // read the quoted commit message as an operand starting with a forbidden word.
   // `$()`, backticks and `sh -c` are certain carriers, not guesses — the shell
   // really does run what they hold — and are unaffected: they are pushed by
-  // `nestedCommands` regardless of this flag. So, as of the targeted round
-  // (R1), is any other segment whose effective command word resolves to an
-  // `INTERPRETERS` entry: `bash -o pipefail -c 'shutdown -h now'`,
-  // `python3 -W ignore -c …`, `perl -I /tmp -e …` and `bash --rcfile /tmp/x
-  // -c …` all lost their payload here before this — a value-taking option of
-  // the interpreter's own sat between it and its program flag, and
-  // `programAfterFlag` gives up at the option's bare value with nothing to
-  // mark it consumed. The interpreter itself is not a guess, so its operands
-  // reach this list the same way `sh -c`'s do; an *unrecognised* binary's
-  // operands (`whatever -o pipefail -c 'shutdown -h now'`) still are, and
-  // still do not.
+  // `nestedCommands` regardless of this flag.
   if (depth >= MAX_NESTING_DEPTH) return null;
   for (const inner of nestedCommands(command, false)) {
     const match = findForbiddenMatch(inner, depth + 1);

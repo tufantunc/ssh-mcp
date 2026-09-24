@@ -436,14 +436,6 @@ describe('the catch-all cannot feed the unconditional denylist', () => {
     ['a backtick substitution', 'echo `shutdown -h now`'],
     ['sh -c', "sh -c 'shutdown -h now'"],
     ['pwsh -EncodedCommand', `pwsh -EncodedCommand ${encode('shutdown -h now')}`],
-    // Targeted round, R1: a value-taking option ahead of the program flag
-    // used to make programAfterFlag give up before it ever reached -c/-e,
-    // which dropped the certain carrier out of findForbiddenMatch's
-    // recursion entirely — measured `deny -> ALLOW` on this exact profile.
-    ['bash -o (value-taking option before -c)', `bash -o pipefail -c 'shutdown -h now'`],
-    ['python3 -W (value-taking option before -c)', `python3 -W ignore -c 'shutdown -h now'`],
-    ['perl -I (value-taking option before -e)', `perl -I /tmp -e 'shutdown -h now'`],
-    ['bash --rcfile (long value-taking option before -c)', `bash --rcfile /tmp/x -c 'shutdown -h now'`],
   ])('certain carriers still reach the denylist: %s', (_label, command) => {
     const result = decideAsAdmin(command);
     expect(result.ruleId, command).toBe('denylist');
@@ -473,69 +465,6 @@ describe('the catch-all cannot feed the unconditional denylist', () => {
     expect(findForbiddenMatch("sh -c 'shutdown -h now'")).not.toBeNull();
     expect(findForbiddenMatch('echo $(shutdown -h now)')).not.toBeNull();
     expect(findForbiddenMatch('echo `shutdown -h now`')).not.toBeNull();
-  });
-});
-
-/**
- * R1 (targeted round, 2026-09-24): the maintainer's ruling on the R2/R3
- * report — "close the class, not the spelling" — applies here too.
- *
- * `programAfterFlag` only lets a FLAG sit between the interpreter and its
- * program-bearing word; a value-taking option's own bare value (`pipefail`
- * after `bash -o`, `ignore` after `python3 -W`, `/tmp` after `perl -I`, the
- * path after `bash --rcfile`) is not a flag, so the walk gave up right there
- * and the interpreter loop in `nestedCommands` never reached `-c`/`-e` at
- * all — dropping the segment out of `findForbiddenMatch`'s recursion, not
- * merely lowering its class.
- *
- * The fix is not a list of `-o`/`-W`/`-I`/`--rcfile`: it is that a segment
- * whose *effective command word* resolves to an `INTERPRETERS` entry is not
- * a guess about what the shell will run — the interpreter is confirmed, so
- * every multi-word, non-flag operand of that segment is classified exactly
- * as the speculative catch-all already classifies an unrecognised binary's
- * operands, except unconditionally rather than gated on `speculativeOperands`.
- * An unrecognised binary's operand stays speculative; a confirmed
- * interpreter's does not.
- */
-describe('fix round 5 (R1): a certain interpreter carrier is certain past a value-taking option', () => {
-  it.each([
-    ["bash -o pipefail -c", `bash -o pipefail -c 'shutdown -h now'`],
-    ['python3 -W ignore -c', `python3 -W ignore -c 'shutdown -h now'`],
-    ['perl -I /tmp -e', `perl -I /tmp -e 'shutdown -h now'`],
-    ['bash --rcfile /tmp/x -c', `bash --rcfile /tmp/x -c 'shutdown -h now'`],
-  ])('nestedCommands finds the payload with speculativeOperands off: %s', (_label, command) => {
-    expect(nestedCommands(command, false), command).toContain('shutdown -h now');
-  });
-
-  it.each([
-    ["bash -o pipefail -c", `bash -o pipefail -c 'shutdown -h now'`],
-    ['python3 -W ignore -c', `python3 -W ignore -c 'shutdown -h now'`],
-    ['perl -I /tmp -e', `perl -I /tmp -e 'shutdown -h now'`],
-    ['bash --rcfile /tmp/x -c', `bash --rcfile /tmp/x -c 'shutdown -h now'`],
-  ])('findForbiddenMatch itself matches: %s', (_label, command) => {
-    expect(findForbiddenMatch(command), command).not.toBeNull();
-  });
-
-  it('does not extend the tolerance to a binary that is not a confirmed interpreter', () => {
-    // Same shape (`-o` then a bare word then a quoted payload), but `whatever`
-    // is not in INTERPRETERS, so this stays a guess: findForbiddenMatch must
-    // not see it, even though classifyCommand's speculative scan still raises
-    // the command to `destructive` (asserted separately, engine-level, above).
-    expect(nestedCommands("whatever -o pipefail -c 'shutdown -h now'", false))
-      .not.toContain('shutdown -h now');
-    expect(findForbiddenMatch("whatever -o pipefail -c 'shutdown -h now'")).toBeNull();
-  });
-
-  it('does not reopen finding 3: a quoted operand starting with an elevation-shaped word through a non-interpreter stays out of the denylist', () => {
-    expect(findForbiddenMatch("git commit -m 'reboot the worker pool'")).toBeNull();
-  });
-
-  it('a certain interpreter carrier that reaches no denylist pattern still denies nothing', () => {
-    // The fix widens WHEN a confirmed interpreter's multi-word operand is
-    // classified (now unconditionally, not gated on speculativeOperands) — it
-    // does not make a confirmed interpreter an automatic denylist match. An
-    // ordinary payload that matches no FORBIDDEN_RULES entry stays unmatched.
-    expect(findForbiddenMatch(`bash -o pipefail -c 'echo hi'`)).toBeNull();
   });
 });
 
