@@ -116,17 +116,47 @@ The name is the point. An exemption named `operandsAreData` is what made the
 conflation invisible; a name that states the claim makes adding to the wrong one
 read as wrong.
 
-**Membership:** all 68 of today's entries except `find`, whose `-exec` takes a
-command. That lets the `FIND_EXEC` scan stop being a special case: the reason it
-must run is now stated in the set it is absent from.
+**Membership: all 68 entries, unchanged.** The split is about which question each
+set answers, not about moving anyone between them.
 
-**Measured.** With `find` excluded, an eight-command corpus behaves correctly —
-`find / -name perl`, `find . -iname python3`, `find . -name ruby -o -name node`
-and `find /var/log -name 'php' -newer /tmp/x` all stay `read-only` (the existing
-`isFlagValue` guard, written for `grep -e perl -e python`, handles an interpreter
-name as a `-name` argument), while `find / -name x -exec sudo id +` stays
-`privileged` and `find . -name '*.py' -exec python3 -c 'import os' +` becomes
-`destructive`. Full unit + property suite green across two runs (1064 passed).
+Excluding `find` was the obvious move and was measured to buy nothing. Three
+mechanisms answer "can this binary's operands hide a command", and only the first
+is gated by the exemption:
+
+| mechanism | gated by the exemption? |
+|---|---|
+| the interpreter carrier scan | yes |
+| `DISQUALIFYING_ARGS` | no — runs unconditionally |
+| `FIND_EXEC_FLAGS` | no — runs unconditionally |
+
+With `find` still exempt, `find … -exec sudo id +` is `privileged`,
+`find … -exec python3 -c … +` is `destructive`, and
+`find … -exec lua -e … +` is `destructive` — all three via `DISQUALIFYING_ARGS`,
+which fires on `-exec` whatever the gate says. The special case is already doing
+the job the exclusion would have done.
+
+That is worth writing down rather than quietly dropping: the exclusion was in an
+earlier draft of this spec, justified by reasoning about what *should* follow from
+the rename, and the measurement contradicted it.
+
+**An audit of the 68 was part of this work and found a separate bug.**
+`sort --compress-program=X` makes GNU sort exec X for every temporary file it
+spills — measured against coreutils 9.11, an attacker-named script ran 14,224
+times for one 200k-line input. It classified `read-only`, so a `readOnly` viewer
+could run an arbitrary program through `read-command` while running that same
+program directly was refused. That is a lower-privileged reach than this
+advisory's bypass, which needs `operator` or `admin`.
+
+It is **not** part of this advisory and gets no advisory of its own, by the
+maintainer's decision. It is fixed separately on branch
+`fix/sort-compress-program` in this fork — one entry in `DISQUALIFYING_ARGS`,
+the table that already held `find`'s `-exec` family — and ships in the same
+release as this work.
+
+The rest of the sweep: `git -c core.pager=X log` executes X but classifies
+`safe`, so it does not reach a viewer and sits in this advisory's bucket rather
+than a new one; every other execution-adjacent flag among the 68
+(`--ext-diff`, `--format`, `--printf`, `-m`, `-M`) runs nothing.
 
 **A attaches here, not to the read-only set.** `grep 'sudo' auth.log` stays quiet
 because grep's operands are data — not because grep is a reader. Right reason.
@@ -181,10 +211,20 @@ New file `test/unit/policy/carrier-completeness.test.ts`.
    `docker run -e FOO=bar img`, `terraform apply`, `grep 'sudo' auth.log`,
    `find / -name perl` must each keep today's class. This is the constraint made
    executable.
-3. **The split, pinned.** `find` is in `READ_ONLY_ALLOWLIST` and not in
-   `OPERANDS_NEVER_COMMANDS`, plus the behavioural pair
-   `find … -exec sudo id +` → `privileged`. A test, not a comment, carries #217's
-   lesson forward.
+3. **The split is a naming change, and the spec says so rather than dressing it
+   as a guarantee.** With identical membership there is no test that can tell the
+   two sets apart by content, and writing one that appears to would be the same
+   error this repo keeps finding. What the split buys is that the next person
+   adding a reader has to decide the second question explicitly, because the name
+   asks it. The behaviour it protects is already pinned by the existing
+   carrier-scan case in `readonly-guarantee.test.ts`
+   (`sftp:list /tmp sh -c 'sudo id'` → `privileged`), which is the regression
+   #217's review found.
+
+   One thing worth measuring during implementation: swap which set
+   `operandsAreData` reads and see whether anything fails. If nothing does, the
+   split is inert today — still worth having for the reason above, but the spec
+   should not claim more than that.
 4. **Base64.** Elevation payload → `privileged`; benign payload → `destructive`;
    **malformed base64 → `destructive`, not a throw.** The decoder reads an
    attacker-controlled string.
