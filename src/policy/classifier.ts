@@ -1313,19 +1313,25 @@ interface FlaggedProgram {
  * @param tolerateUnknownWordsAtHead pwsh/powershell's own argument parser walks the
  *   whole command line looking for named parameters it recognises and does not stop at
  *   an unrecognised one's value (`-ExecutionPolicy Bypass`) the way a POSIX interpreter
- *   stops at its first positional argument. Only takes effect when `from === 0` — the
- *   interpreter is the segment's own head, so it is unambiguously the thing being
- *   invoked, not a value or a search term this file has no business reinterpreting
- *   (`grep -e perl -e python` never reaches here with this set, because `perl` is not
- *   the segment's head and isn't pwsh-family regardless). Structural, not a list of
- *   pwsh's value-taking flags: this file does not need to know `-ExecutionPolicy` exists
- *   to stop being confused by it.
+ *   stops at its first positional argument. Only takes effect when `from` is the
+ *   segment's *effective* command word — `effectiveCommandIndex(words)`, which reads
+ *   past a privilege prefix or an exec wrapper (`env`, `nohup`, `timeout`, …), not merely
+ *   position 0. `from === 0` missed exactly the shape those wrappers exist to describe:
+ *   `env pwsh -ExecutionPolicy Bypass -EncodedCommand …` put `pwsh` at index 1, the
+ *   tolerance never engaged, and the interpreter loop's own flag-walk gave up at
+ *   `Bypass` before ever reaching `-EncodedCommand` — classified `safe`. Still unambiguous
+ *   about *which* word is being invoked, not a value or a search term this file has no
+ *   business reinterpreting (`grep -e perl -e python` never reaches here with this set,
+ *   because `perl` is not the segment's effective command word and isn't pwsh-family
+ *   regardless; nor is `customtool --search pwsh …`, where `customtool` is). Structural,
+ *   not a list of pwsh's value-taking flags: this file does not need to know
+ *   `-ExecutionPolicy` exists to stop being confused by it.
  */
 function programAfterFlag(
   words: string[], from: number, flags: string[], caseInsensitive = false,
   tolerateUnknownWordsAtHead = false,
 ): FlaggedProgram | null {
-  const tolerateUnknownWords = tolerateUnknownWordsAtHead && from === 0;
+  const tolerateUnknownWords = tolerateUnknownWordsAtHead && from === effectiveCommandIndex(words);
   for (let j = from + 1; j < words.length; j++) {
     const word = words[j];
     const exact = flags.find((f) => sameFlag(word, f, caseInsensitive));

@@ -478,3 +478,43 @@ describe('the catch-all is not defused for the whole segment by one benign inter
     expect(classifyCommand("unknownbin sh -c 'sudo id'").class).toBe('privileged');
   });
 });
+
+/**
+ * `programAfterFlag`'s `tolerateUnknownWordsAtHead` — the pwsh/powershell
+ * tolerance for an unrecognised option's bare value (`-ExecutionPolicy
+ * Bypass`) sitting between the interpreter and `-EncodedCommand` — only took
+ * effect at `from === 0`. That is the position of the interpreter itself only
+ * when nothing precedes it; behind any exec wrapper (`env`, `nohup`, `nice`,
+ * `timeout`, `xargs`, …) the interpreter sits at position 1 or later, and the
+ * tolerance never engaged.
+ *
+ * Measured: `env pwsh -ExecutionPolicy Bypass -EncodedCommand <b64 of sudo
+ * id>` classified `safe` — the exact shape #266's fix closed for a bare
+ * `pwsh`, still open one wrapper away.
+ */
+describe('fix round 4: the pwsh tolerance reaches past an exec wrapper, not just position 0', () => {
+  it.each([
+    ['env', `env pwsh -ExecutionPolicy Bypass -EncodedCommand ${encode('sudo id')}`],
+    ['nohup', `nohup pwsh -ExecutionPolicy Bypass -EncodedCommand ${encode('sudo id')}`],
+    ['timeout 5', `timeout 5 pwsh -ExecutionPolicy Bypass -EncodedCommand ${encode('sudo id')}`],
+    ['env, powershell spelling', `env powershell -WindowStyle Hidden -EncodedCommand ${encode('sudo id')}`],
+  ])('finds -EncodedCommand behind %s', (_label, command) => {
+    expect(classifyCommand(command).class, command).toBe('privileged');
+  });
+
+  it('does not reopen mention-vs-invocation: pwsh as an unrelated flag value stays safe', () => {
+    // The exact shape `from === 0` used to protect, now protected by
+    // `from === effectiveCommandIndex(words)` instead: `pwsh` here is a VALUE
+    // of `customtool`'s own `--search` flag, never actually invoked, and
+    // `customtool` — not `pwsh` — is the effective command word.
+    const command = `customtool --search pwsh -ExecutionPolicy Bypass -EncodedCommand ${encode('sudo id')}`;
+    expect(classifyCommand(command).class).toBe('safe');
+  });
+
+  it('does not widen an unrelated wrapper: nsenter -m sh -c is unaffected', () => {
+    // sh is not pwsh-family (no -EncodedCommand in its programBearingWords), so
+    // tolerateUnknownWordsAtHead is false for it regardless of position; this
+    // shape was never broken and must not become newly sensitive to this fix.
+    expect(classifyCommand(`nsenter -t 1 -m sh -c 'sudo id'`).class).toBe('privileged');
+  });
+});
