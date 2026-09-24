@@ -116,9 +116,15 @@ describe('the two questions the read-only allowlist used to answer', () => {
     // The point of the table. A name cannot be added for its class without
     // stating whether its operands can hide a command — TypeScript requires the
     // field, and this asserts nobody has defaulted it away.
+    //
+    // Asserts the VALUES, not just their type. `expect(typeof entry.readOnly)
+    // .toBe('boolean')` is true whether `readOnly` is `true` or `false`, so
+    // flipping `find.operandsAreData`, `stat.readOnly` or
+    // `journalctl.operandsAreData` to `false` passed it — measured. Every entry
+    // is `{ readOnly: true, operandsAreData: true }` today, so that is the
+    // literal shape each one must equal.
     for (const [name, entry] of Object.entries(READERS)) {
-      expect(typeof entry.readOnly, name).toBe('boolean');
-      expect(typeof entry.operandsAreData, name).toBe('boolean');
+      expect(entry, name).toEqual({ readOnly: true, operandsAreData: true });
     }
     expect(Object.keys(READERS).length).toBe(68);
   });
