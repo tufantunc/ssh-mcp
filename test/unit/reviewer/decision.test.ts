@@ -49,11 +49,13 @@ describe('mergeReview bounded autonomy', () => {
   );
 
   it.each(['allow', 'require-approval'] as const)(
-    'deny resolves an agent-reviewable %s decision without a human prompt',
+    'deny escalates an agent-reviewable %s decision to fresh human approval',
     (decision) => {
       const merged = mergeReview(evaluation(decision), review('deny', 'high'));
-      expect(merged.evaluation).toMatchObject({ decision: 'deny', ruleId: 'llm-reviewer-deny' });
-      expect(merged.requiresFreshApproval).toBe(false);
+      expect(merged.evaluation).toMatchObject({
+        decision: 'require-approval', ruleId: 'llm-reviewer-deny-escalate',
+      });
+      expect(merged.requiresFreshApproval).toBe(true);
     },
   );
 

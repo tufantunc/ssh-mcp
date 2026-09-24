@@ -24,11 +24,11 @@ export function mergeReview(
     return {
       evaluation: {
         ...evaluation,
-        decision: 'deny',
-        ruleId: 'llm-reviewer-deny',
-        reason: 'Contextual reviewer denied this operation',
+        decision: 'require-approval',
+        ruleId: 'llm-reviewer-deny-escalate',
+        reason: 'Contextual reviewer recommends denial; fresh human approval required',
       },
-      requiresFreshApproval: false,
+      requiresFreshApproval: true,
     };
   }
 

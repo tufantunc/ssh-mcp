@@ -37,6 +37,16 @@ describe('contextual reviewer in the tool pipeline', () => {
     expect(h.execCalls).toHaveLength(0);
   });
 
+  it('does not let reviewer or human approval bypass an RBAC denial', async () => {
+    const r = reviewer();
+    h = await createHarness({ role: 'viewer', group: 'prod' }, { reviewer: r });
+    await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/x' } });
+    expect(r.review).not.toHaveBeenCalled();
+    expect(h.approvalPrompts()).toBe(0);
+    expect(h.execCalls).toHaveLength(0);
+    expect(h.auditRecords.at(-1)).toMatchObject({ decision: 'deny', ruleId: 'role-binding' });
+  });
+
   it('lets an LLM approval discharge the soft approval gate', async () => {
     const r = reviewer();
     h = await createHarness({ approvalPolicy: 'ask-all' }, { reviewer: r });
@@ -75,22 +85,39 @@ describe('contextual reviewer in the tool pipeline', () => {
     expect(h.approvalMessages()[0]).toContain('unavailable (timeout)');
   });
 
-  it('does not reuse JIT grants for reviewer-triggered approval', async () => {
-    const r = reviewer({ verdict: 'escalate', risk: 'medium' });
+  it.each([
+    ['escalate', 'medium'],
+    ['deny', 'high'],
+  ] as const)('does not reuse JIT grants for reviewer %s approval', async (verdict, risk) => {
+    const r = reviewer({ verdict, risk });
     h = await createHarness({}, { reviewer: r, approvalGrantTtlMs: 60_000 });
     await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/x' } });
     await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/x' } });
     expect(h.approvalPrompts()).toBe(2);
   });
 
-  it('lets an LLM denial refuse without a human prompt or execution', async () => {
+  it('sends an LLM denial to a fresh human approval that can override it', async () => {
     const r = reviewer({ verdict: 'deny', risk: 'high', summary: 'Unsafe target scope.' });
     h = await createHarness({}, { reviewer: r });
     await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/x' } });
-    expect(h.approvalPrompts()).toBe(0);
+    expect(h.approvalPrompts()).toBe(1);
+    expect(h.approvalMessages()[0]).toContain('deny (high risk)');
+    expect(h.execCalls).toHaveLength(1);
+    expect(h.auditRecords.at(-1)).toMatchObject({
+      decision: 'require-approval', ruleId: 'llm-reviewer-deny-escalate', approver: 'mcp-client',
+      review: { verdict: 'deny', risk: 'high' },
+    });
+  });
+
+  it('does not execute an LLM denial when the human declines it', async () => {
+    const r = reviewer({ verdict: 'deny', risk: 'high', summary: 'Unsafe target scope.' });
+    h = await createHarness({}, { reviewer: r });
+    h.setApproval(false);
+    await h.client.callTool({ name: 'run-command', arguments: { command: 'touch /tmp/x' } });
+    expect(h.approvalPrompts()).toBe(1);
     expect(h.execCalls).toHaveLength(0);
     expect(h.auditRecords.at(-1)).toMatchObject({
-      decision: 'deny', ruleId: 'llm-reviewer-deny',
+      decision: 'require-approval', ruleId: 'llm-reviewer-deny-escalate',
       review: { verdict: 'deny', risk: 'high' },
     });
   });

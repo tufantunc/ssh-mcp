@@ -684,8 +684,9 @@ operations and `close-session` also skip review. For other operations, `low`
 is paired with `approve`, `high` with `deny`, and uncertain cases use
 `escalate` with `medium` or `unknown`. Approve can discharge an `ask-all` or
 `ask-destructive` soft approval and records `approver: "llm-reviewer"`; deny
-refuses without prompting; escalate requests fresh human approval. Privileged
-operations remain human-only even when the model approves. An invalid response,
+recommends rejection and requests fresh human approval; escalate also requests
+fresh human approval. No LLM verdict is a final refusal. Privileged operations
+remain human-only even when the model approves. An invalid response,
 timeout or outage is treated as escalation, and escalated approval cannot reuse
 a JIT grant. Without a reviewer URL, existing approval behavior is unchanged.
 
