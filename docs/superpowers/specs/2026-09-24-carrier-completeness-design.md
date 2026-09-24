@@ -2,9 +2,9 @@
 
 **Status:** design approved in chat, spec awaiting review
 **Advisory:** GHSA-qmx6-47vm-3vf7 (accepted, draft) — reported by @MartOcd1709
-**Embargo:** this document describes an unpatched vulnerability. It lives in the
-private fork and must not reach the public repository before the advisory is
-published.
+**History:** written under embargo in the temporary private fork for this
+advisory, and published here with the fix. It records what was measured and what
+was decided, including the design that was tried and discarded.
 
 ## The problem, as measured
 
