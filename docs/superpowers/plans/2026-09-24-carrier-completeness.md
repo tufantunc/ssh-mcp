@@ -37,23 +37,23 @@ to keep true.
 
 Five input classes the spec implies that no task's happy path exercises, most likely to bite first:
 
-1. **A word that merely contains an elevation name.** `/home/su/notes`, `sudoku.txt`, `/etc/subuid`, `/var/su-backup`. An unanchored `\bsu\b` matches `/su/` because slashes are non-word characters. Today all of these are `read-only`. Test added to Task 1.
+1. **The recursion got wider.** Every multi-word operand of every unrecognised binary is now classified as a command, so `classifyCommand` recurses where it used to stop. `MAX_NESTING_DEPTH` bounds the depth but not the breadth: a command with many long multi-word operands, or nested substitutions inside them, is work performed before the policy decision on attacker-controlled input. Cost test added to Task 1, as a growth ratio — this repo's CI runs under coverage and an absolute bound once failed at 3677ms.
 2. **A path-prefixed or quoted carrier.** `/usr/bin/osascript -e …`, `"osascript" -e …`. `stripPath`/`unquote` exist for this and the new entries must go through them like the old ones. Test added to Task 3.
 3. **Base64 that is well-formed but decodes to nothing useful.** `Buffer.from(x, 'base64')` never throws — it silently drops invalid characters — so the failure mode is a wrong answer, not an exception. Test added to Task 3.
 4. **A very large `-EncodedCommand` operand.** Decoding is attacker-controlled work performed before the policy decision. Test added to Task 3.
-5. **Elevation reached only through a substitution inside an unknown carrier.** `osascript -e "$(printf 'sudo id')"`. `nestedCommands` already pulls substitutions out; this pins that A and the existing scan compose rather than one shadowing the other. Test added to Task 1.
+5. **An operand carrying a shell separator.** `whatever-tool 'echo a; sudo id'` — the operand is one word to the tokeniser and two commands to a shell. Pushing it as a nested command is what makes the second half visible. Test added to Task 1.
 
 ---
 
-### Task 1: Elevation detection stops depending on position
+### Task 1: An unrecognised binary's operands are classified as commands
 
 **Files:**
-- Modify: `src/policy/classifier.ts` — add `carriesElevation()` next to `isDestructive()` (around line 869), call it from `classifyOuter()` (around line 1267)
+- Modify: `src/policy/classifier.ts` — inside `nestedCommands()`, in the existing `if (!operandsAreData(words))` block, after the interpreter loop (around line 484)
 - Test: `test/unit/policy/carrier-completeness.test.ts` (create)
 
 **Interfaces:**
-- Consumes: `matchesEitherForm(command, test)` (line 399), `operandsAreData(words)` (line 941), `tokenizeSegmentsDetailed(command)` returning `{ words: string[]; sep: string }[]`
-- Produces: `carriesElevation(command: string): boolean` — used by nothing else; Task 3 relies on `classifyOuter` returning `privileged` for a decoded payload that elevates.
+- Consumes: `awkFindings(words)` (already called earlier in the same block, result in `awk`), `INTERPRETERS`, `stripPath`, `unquote`
+- Produces: nothing new is exported. Task 3 relies on this block still being reached after it renames `spec.flags` to `spec.programBearingWords`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -67,13 +67,14 @@ import type { Profile } from '../../../src/types.js';
 
 /**
  * GHSA-qmx6-47vm-3vf7: a binary the classifier does not recognise laundered an
- * elevated command into `safe`, the class that raises no prompt and is granted to
- * operator and admin on every tier.
+ * elevated command into `safe`, the class that raises no prompt.
  *
- * Driven through the engine, not `classifyCommand` alone: what was wrong is what
- * the engine then permitted. Class is asserted alongside the decision because on
- * this profile every class above `safe` denies identically, so the decision cannot
- * say which mechanism fired.
+ * The fix does not scan text for `sudo`. An earlier design did, and it asserted
+ * elevations the existing readers deliberately refuse to assert — awk's runtime
+ * concatenation and `$S` both cap at `destructive` on purpose — and it beat the
+ * nested classification that names the elevated binary correctly. Instead, the
+ * operands of a segment no more specific reader claimed become nested commands,
+ * and the existing anchored check finds the elevation on a command it leads.
  */
 const operatorProd = {
   name: 'prod-web', host: 'h', port: 22, user: 'deploy', auth: 'agent', tty: false,
@@ -87,47 +88,79 @@ const operatorProd = {
 const engine = new PolicyEngine(DEFAULT_RULES);
 const decide = (command: string) => engine.evaluate(command, operatorProd, 'run-command');
 
-describe('elevation is found wherever a shell would act on it', () => {
+describe('an unrecognised binary cannot hide a command in its operands', () => {
   it.each([
     ['osascript', `osascript -e 'do shell script "sudo id"'`],
-    ['lua', `lua -e 'os.execute("sudo id")'`],
-    ['Rscript', `Rscript -e 'system("sudo id")'`],
-    ['bun', `bun -e 'require("child_process").execSync("sudo id")'`],
-    ['tclsh', `tclsh -c 'exec sudo id'`],
     ['an unknown binary', `whatever-tool -e 'sudo id'`],
+    ['an unknown binary, no flag', `whatever-tool 'sudo id'`],
   ])('refuses elevation carried by %s', (_label, command) => {
     expect(decide(command).commandClass, command).toBe('privileged');
     expect(decide(command).decision, command).toBe('deny');
   });
 
-  it('finds elevation reached only through a substitution inside an unknown carrier', () => {
-    // nestedCommands already pulls `$(...)` out. This pins that the new scan and
-    // the existing one compose rather than one shadowing the other.
-    const command = `whatever-tool -e "$(printf 'sudo id')"`;
-    expect(decide(command).commandClass).toBe('privileged');
+  it('names the binary that would run as root, not the carrier', () => {
+    // The reason this is a nested classification rather than a text scan: the
+    // existing anchored check runs on a command the elevation actually leads, so
+    // it can say which binary root would execute. A text scan can only name the
+    // outer word, and four awk tests caught exactly that.
+    expect(classifyCommand(`osascript -e 'do shell script "sudo id"'`).binary).toBe('id');
   });
 
-  it('leaves a word that merely contains an elevation name alone', () => {
-    // An unanchored \bsu\b matches `/su/` — slashes are non-word characters. These
-    // are all `read-only` today and a false positive here is a refused log read.
-    for (const command of ['ls /home/su/notes', 'cat sudoku.txt', 'echo substitute',
-                           'ls -la /var/su-backup', 'cat /etc/subuid']) {
-      expect(classifyCommand(command).class, command).toBe('read-only');
-    }
+  it('finds elevation reached only through a substitution', () => {
+    expect(decide(`whatever-tool -e "$(printf 'sudo id')"`).commandClass).toBe('privileged');
+  });
+
+  it('leaves the deliberate caps alone', () => {
+    // Both are documented decisions this fix must not override: awk assembles the
+    // command at run time, and `$S` cannot be resolved, so neither is a confirmed
+    // elevation. `destructive` asks for approval; `privileged` would refuse.
+    expect(classifyCommand(`awk 'BEGIN{"sudo" " id" | getline v}'`).class).toBe('destructive');
+    expect(classifyCommand('S=sudo; $S id').class).toBe('destructive');
   });
 
   it('leaves the commands an operator runs all day alone', () => {
-    // The friction constraint, executable. Each must keep the class it has today.
     for (const [command, expected] of [
       ['kubectl get pods', 'safe'],
       ['make deploy', 'safe'],
       ['docker run -e FOO=bar img', 'safe'],
       ['terraform apply', 'safe'],
-      ['grep \'sudo\' /var/log/auth.log', 'read-only'],
+      ["grep 'sudo' /var/log/auth.log", 'read-only'],
       ['find / -name perl', 'read-only'],
+      ['echo "sudo id"', 'read-only'],
     ] as const) {
       expect(classifyCommand(command).class, command).toBe(expected);
     }
+  });
+
+  it('sees both halves of an operand that carries a separator', () => {
+    // One word to the tokeniser, two commands to a shell. Pushing it as a nested
+    // command is what makes the second half visible at all.
+    expect(classifyCommand(`whatever-tool 'echo a; sudo id'`).class).toBe('privileged');
+  });
+
+  it('stays cheap on many long multi-word operands', () => {
+    // The recursion is wider now: every multi-word operand of an unrecognised
+    // binary is classified. The bound is a growth ratio rather than a wall clock —
+    // CI runs under coverage, and an absolute bound here once failed at 3677ms.
+    const operand = (n: number) => `'${'word '.repeat(n)}'`;
+    const small = `whatever-tool ${Array.from({ length: 10 }, () => operand(10)).join(' ')}`;
+    const large = `whatever-tool ${Array.from({ length: 100 }, () => operand(100)).join(' ')}`;
+    const time = (c: string) => { const t = performance.now(); classifyCommand(c); return performance.now() - t; };
+    time(small);
+    const a = time(small);
+    const b = time(large);
+    // 100x the operands at 10x the length is 1000x the input; anything near linear
+    // is fine and anything quadratic is not.
+    expect(b).toBeLessThan(Math.max(a * 3000, 100));
+  });
+
+  it('costs an operand whose first word is an elevation name', () => {
+    // The accepted cost, pinned so it is a decision rather than a surprise: an
+    // operand that begins with `sudo ` has the shape of a command, which is why it
+    // is caught. The elevation name has to lead — these two are unaffected.
+    expect(classifyCommand('git commit -m "sudo fix"').class).toBe('privileged');
+    expect(classifyCommand('git commit -m "fix the sudo thing"').class).toBe('safe');
+    expect(classifyCommand('curl -H "X: sudo y" http://h').class).toBe('safe');
   });
 });
 ```
@@ -135,66 +168,44 @@ describe('elevation is found wherever a shell would act on it', () => {
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `npx vitest run test/unit/policy/carrier-completeness.test.ts`
-Expected: the six `it.each` cases and the substitution case FAIL (each reports `safe`, not `privileged`). The two "leaves alone" cases PASS — they are the guard rails, and they must pass before and after.
+Expected: the three carrier cases, the binary case, the substitution case and the first line of the cost case FAIL (each reports `safe`). The "deliberate caps", "runs all day" and the last two cost lines PASS — they are the guard rails and must pass before and after.
 
-- [ ] **Step 3: Add the detector**
+- [ ] **Step 3: Write the implementation**
 
-In `src/policy/classifier.ts`, immediately after `isDestructive()` (which ends around line 869) and before `const LEADING_PRIVILEGE_PREFIXES`:
-
-```ts
-/**
- * Elevation anywhere in a segment, not only at its command word.
- *
- * `LEADING_PRIVILEGE_PREFIXES` is `^`-anchored, so it only ever sees the command
- * word. `DESTRUCTIVE_PATTERNS` is not, which is why `echo "rm -rf /"` has always
- * been `destructive` while `echo "sudo id"` was `read-only`. A carrier nobody
- * listed — `osascript -e 'do shell script "sudo id"'` — fell in that gap
- * (GHSA-qmx6-47vm-3vf7). This is the unanchored counterpart the destructive side
- * already had.
- *
- * Per segment, and skipped for a segment whose operands are data, so a reader
- * searching a log for the word keeps working: `grep 'sudo' /var/log/auth.log`.
- *
- * The leading `[^\w-]` matters. `\bsu\b` alone matches `/home/su/notes`, because
- * a slash is a non-word character; requiring a non-word, non-hyphen character
- * before the name still matches `"sudo id"` and `;sudo` while leaving a path
- * segment named `su` alone. `-` is excluded so `--sudo-like` does not read as
- * elevation, and the trailing lookahead is `\s|$` rather than `\s` so a segment
- * ending in the word still matches. Measured against eight cases in both
- * directions: `"sudo id"`, a leading `sudo`, a trailing `sudo`, `/home/su/notes`,
- * `sudoku.txt`, `/etc/subuid`, `/var/su-backup`, `substitute`.
- */
-const CARRIED_PRIVILEGE = /(?:^|[^\w-])(?:sudo|doas|pkexec|su)(?=\s|$)/;
-
-function carriesElevation(command: string): boolean {
-  return tokenizeSegmentsDetailed(command).some(({ words }) => {
-    if (operandsAreData(words)) return false;
-    return matchesEitherForm(words.join(' '), (form) => CARRIED_PRIVILEGE.test(form));
-  });
-}
-```
-
-In `classifyOuter()`, after the existing anchored check (around line 1267) and before the `hasUnreadableProgram` line:
+In `src/policy/classifier.ts`, inside `nestedCommands()`, in the existing `if (!operandsAreData(words))` block, immediately after the interpreter `for` loop closes:
 
 ```ts
-  const elevated = elevatedBinaryOf(trimmed);
-  if (elevated !== null) {
-    return { binary: elevated, fullCommand, class: 'privileged' as CommandClass };
-  }
-
-  // The same question, asked of the whole segment rather than its command word.
-  if (carriesElevation(trimmed)) {
-    return { binary, fullCommand, class: 'privileged' as CommandClass };
-  }
+      // An operand of a binary nothing more specific has read is classified as a
+      // command in its own right, rather than scanned as text.
+      //
+      // The gate is the awk reader's own result rather than a list of names: a
+      // name list here would be the defect this change exists to fix
+      // (GHSA-qmx6-47vm-3vf7). `awk` is already null for every non-awk segment.
+      //
+      // Whitespace is what separates an operand worth classifying from one that is
+      // not: a single token is a path, a flag value or a subcommand, while a
+      // multi-word operand has the shape of a command. Flags are skipped.
+      //
+      // Deliberately NOT a text scan for `sudo`. That version asserted elevations
+      // the awk reader and the variable-command-word logic refuse to assert — both
+      // cap at `destructive` on purpose — and it out-ranked the nested
+      // classification that names the elevated binary, reporting `awk` where `id`
+      // was correct.
+      if (awk === null && INTERPRETERS[stripPath(unquote(words[0] ?? ''))] === undefined) {
+        for (let i = 1; i < words.length; i++) {
+          if (words[i].startsWith('-')) continue;
+          if (/\s/.test(words[i])) found.push(words[i]);
+        }
+      }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `npx vitest run test/unit/policy/carrier-completeness.test.ts`
 Expected: PASS.
 
-Then run the whole suite: `npx vitest run test/unit test/property`
-Expected: 1067 passed (the count after the `sort` fix). **If anything else fails, do not adjust the failing test — stop and report it.** A pre-existing test failing here is the friction constraint telling you A is too broad.
+Then: `npx vitest run test/unit test/property`
+Expected: all pass. **If a pre-existing test fails, do not adjust it — stop and report.** That is how the first design was caught.
 
 - [ ] **Step 5: Mutate to verify the tests are load-bearing**
 
@@ -202,20 +213,20 @@ Run each, record the result, restore between:
 
 | mutation | expected |
 |---|---|
-| delete the `carriesElevation` call from `classifyOuter` | the six carrier cases fail |
-| `CARRIED_PRIVILEGE` → `/(?:^|[^\w-])(?:sudo|doas|pkexec|su)\b/` (drop the lookahead) | the "merely contains" case fails on `/home/su/notes` |
-| drop the `operandsAreData` guard from `carriesElevation` | the friction case fails on `grep 'sudo' …` |
-
-If any mutation leaves the suite green, the corresponding test does not test what its name says — fix the test, not the mutation.
+| delete the whole new block | the three carrier cases, the binary case and the substitution case fail |
+| drop `awk === null` from the gate | the "deliberate caps" case fails on the awk line |
+| drop the `INTERPRETERS[...] === undefined` half of the gate | nothing should fail yet — Task 3 adds the entries that make it matter. Record that it does not, rather than assuming it does. |
+| drop the `startsWith('-')` skip | record what fails; if nothing does, say so |
+| push every operand, not only multi-word ones | the "runs all day" case fails |
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/policy/classifier.ts test/unit/policy/carrier-completeness.test.ts
-git commit -m "fix(policy): find elevation wherever a shell would act on it"
+git commit -m "fix(policy): classify what an unrecognised binary was handed"
 ```
 
-The message must record the three mutations and their results.
+The message records the mutation table and its results.
 
 ---
 

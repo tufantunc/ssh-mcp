@@ -62,32 +62,66 @@ This advisory is that fix failing on a carrier nobody listed.
 
 ## Design
 
-### A. Elevation detection becomes structure-independent
+### A. An unrecognised binary's operands are classified, not scanned
 
-The asymmetry is exact and visible in the source:
+**This replaces an earlier version of A that was measured wrong.** The first design
+added an unanchored text scan for `sudo`/`doas`/`pkexec`/`su`, mirroring what
+`isDestructive` does for destructive patterns. Implementing it broke eight existing
+tests, and the failures were the design telling us something:
+
+- `awk 'BEGIN{"sudo" " id" | getline v}'` is deliberately capped at `destructive`,
+  because awk assembles the command at run time and this classifier refuses to
+  assert an elevation it cannot confirm.
+- `S=sudo; $S id` is deliberately capped at `destructive` — "it requires approval
+  instead of refusing outright, which keeps `$HOME/bin/tool` usable for a role that
+  holds `destructive` on the tier."
+
+A free-text scan cannot tell *elevation is confirmed here* from *the word sudo
+appears in a fragment*, so it made both claims. Worse, it competed with the nested
+classification that is more precise and beat it: four tests kept the right class and
+reported `awk` as the elevated binary instead of `id`.
+
+**The shape that works does not produce a class at all.** When a segment's binary is
+one no more specific reader has claimed, its operands are pushed into
+`nestedCommands` and classified as commands in their own right. The elevation is then
+found by the *existing anchored* check, on a command it actually leads — so the caps
+are untouched, the binary is attributed correctly, and the new path feeds the
+machinery instead of racing it.
 
 ```
-DESTRUCTIVE_PATTERNS          unanchored  -> scans the whole text
-LEADING_PRIVILEGE_PREFIXES    /^\s*sudo\b/ -> matches only at the command word
+osascript -e 'do shell script "sudo id"'
+  -> operand `do shell script "sudo id"` is not data and osascript is not a known
+     interpreter, so it is pushed as a nested command
+  -> nested `sudo id` reaches elevatedBinaryOf
+  -> privileged, binary `id`
 ```
 
-Which is why `echo "rm -rf /srv"` is `destructive` and `echo "sudo id"` is
-`read-only`.
+Two details decide it:
 
-Add the unanchored counterpart the destructive side already has (`isDestructive`
-→ `matchesEitherForm`). It runs in `classifyOuter` **after** the anchored
-`elevatedBinaryOf` check fails, and is subject to the operand exemption below.
+- **What counts as "no more specific reader claimed it".** Not a list of names — the
+  awk reader's own result. `awkFindings(words)` has already run at that point in
+  `nestedCommands`; the gate is `awk === null && INTERPRETERS[head] === undefined`.
+  A name list here would be the same defect this advisory is about.
+- **What counts as an operand worth classifying.** One that contains whitespace. A
+  single token is a path, a flag value or a subcommand; a multi-word operand is the
+  shape of a command. Flags (`-…`) are skipped.
 
-This closes seven carrier forms without naming any of them.
+**Measured.** Whole suite green except the cases that need C. Catches
+`osascript -e 'do shell script "sudo id"'` and `whatever-tool -e 'sudo id'` as
+`privileged` with binary `id`. Leaves `kubectl get pods`, `make deploy`,
+`docker run -e FOO=bar img`, `grep 'sudo' auth.log` and `echo "sudo id"` exactly as
+they are.
 
-**Accepted cost.** A command in neither allowlist whose text contains `sudo`,
-`doas`, `su` or `pkexec` rises to `privileged`. This is the same trade the
-project already ships for destructive patterns: `grep 'rm -rf /' /var/log/syslog`
-— a pure read — classifies `destructive` today. The tolerance is not new; it is
-being applied consistently.
+**Accepted cost.** An operand whose *first word* is an elevation name classifies
+`privileged`: `git commit -m "sudo fix"` is refused where it was allowed. That is the
+shape of a command, which is why it is caught. Measured to be narrow —
+`git commit -m "fix the sudo thing"` and `curl -H "X: sudo y" http://h` are
+unaffected, because the elevation name has to lead.
 
-**Not closed by A.** `-EncodedCommand`, because the payload is base64. Closed by
-C instead.
+**Not closed by A.** A payload written in another language:
+`lua -e 'os.execute("sudo id")'` pushes `os.execute("sudo id")`, whose command word is
+`os.execute("sudo`, and classifies `safe`. That is C's half, and it is why both are
+needed.
 
 ### B. The dual-purpose Set is split
 
