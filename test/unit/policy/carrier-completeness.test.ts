@@ -145,13 +145,27 @@ describe('interpreters that take a program on the command line', () => {
     ['lua', `lua -e 'os.execute("systemctl stop nginx")'`],
     ['Rscript', `Rscript -e 'system("systemctl stop nginx")'`],
     ['bun', `bun -e 'require("child_process").execSync("systemctl stop nginx")'`],
-    ['tclsh', `tclsh -c 'exec systemctl stop nginx'`],
     ['deno eval', `deno eval 'new Deno.Command("systemctl").outputSync()'`],
     ['pwsh -Command', `pwsh -Command 'Stop-Service nginx'`],
   ])('treats a program handed to %s as unreadable', (_label, command) => {
     // No elevation in these payloads, so Task 1's scan does not reach them. This
     // is the half that needs the name.
     expect(classifyCommand(command).class, command).toBe('destructive');
+  });
+
+  it('tclsh has no -c flag — real tclsh reads a program from a file or from stdin', () => {
+    // Real tclsh takes a script FILE as its positional argument, or reads one
+    // from stdin; it has no `-c` that hands it a program inline the way
+    // sh/bash/python/pwsh do. `tclsh -c 'exec systemctl stop nginx'` is a
+    // fictional invocation shape — real tclsh treats `-c` as an unrecognised
+    // option, not a program flag — so `tclsh` here reads as a plain,
+    // unrecognised interpreter invocation with no program on its command
+    // line, same as `tclsh script.tcl` would.
+    expect(classifyCommand(`tclsh -c 'exec systemctl stop nginx'`).class).toBe('safe');
+  });
+
+  it('the genuine tclsh carrier is the pipe: reads a program from stdin', () => {
+    expect(classifyCommand(`echo 'exec sudo id' | tclsh`).class).toBe('destructive');
   });
 
   it('reads a carrier through a path and through quotes', () => {

@@ -323,7 +323,13 @@ const INTERPRETERS: Record<string, InterpreterSpec> = Object.assign(
   lua: { programBearingWords: ['-e'], readable: false },
   Rscript: { programBearingWords: ['-e'], readable: false },
   bun: { programBearingWords: ['-e'], readable: false },
-  tclsh: { programBearingWords: ['-c'], readable: false },
+  // No program-bearing flag: real tclsh takes a script FILE as its positional
+  // argument or reads one from stdin, unlike sh/bash/python/pwsh, none of
+  // which have a `-c` of its own. An empty list still marks tclsh as an
+  // unreadable interpreter for `readsProgramFromStdin` (`echo … | tclsh`),
+  // which is the genuine carrier; it is simply never handed a program inline
+  // on its own command line, so there is no flag to name here.
+  tclsh: { programBearingWords: [], readable: false },
   // `eval` is a subcommand, not a flag — the field is named for what it holds.
   deno: { programBearingWords: ['eval'], readable: false },
   pwsh: { programBearingWords: ['-c', '-Command', '-e', '-EncodedCommand'], readable: false },
