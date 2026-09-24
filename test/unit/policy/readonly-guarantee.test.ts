@@ -241,3 +241,58 @@ describe('a reader that can be told to execute is not read-only', () => {
     }
   });
 });
+
+/**
+ * `hasDisqualifyingArgs` used `parseSegments`, which steps over a privilege
+ * prefix (`sudo`, `su`, …) before reading the command word, but not an exec
+ * wrapper (`env`, `nohup`, `timeout`, …). `sort` and `find` are both
+ * allowlisted readers with a disqualifying-flag rule; behind a wrapper the
+ * rule keyed on the wrapper's own name instead — never in `DISQUALIFYING_ARGS`
+ * — and the write flag went unnoticed.
+ *
+ * Measured: `env sort --compress-program=/srv/payload.sh /etc/hostname` and
+ * `env find /tmp -delete` both classified `safe`. Pre-existing (the mechanism
+ * this fixes already worked for a bare `sort`/`find`, just not behind a
+ * wrapper), and it affects `find -delete` identically to `sort
+ * --compress-program`, which is why both are covered here rather than only
+ * the one named in the finding.
+ */
+describe('a disqualifying flag is still noticed behind an exec wrapper', () => {
+  const engine = new PolicyEngine(DEFAULT_RULES);
+  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor, 'read-command');
+
+  it.each([
+    ['env, sort --compress-program', 'env sort --compress-program=/srv/payload.sh /etc/hostname'],
+    ['env, sort -o', 'env sort -o /root/.ssh/authorized_keys /tmp/key.pub'],
+    ['nohup, sort -o', 'nohup sort -o /root/.ssh/authorized_keys /tmp/key.pub'],
+    ['env, find -delete', 'env find /tmp -delete'],
+  ])('refuses %s', (_label, command) => {
+    expect(decide(command).commandClass, command).toBe('destructive');
+    expect(decide(command).decision, command).toBe('deny');
+  });
+
+  it('refuses find -exec behind a wrapper too, raised further still by the elevation it carries', () => {
+    // `sudo id` inside `-exec` is also picked up by the unrelated, unconditional
+    // elevation scan (nestedCommands' FIND_EXEC_FLAGS extraction), which ranks
+    // above `destructive` — so this lands on `privileged`, not `destructive`.
+    // Either way a `readOnly` profile denies it; what this pins is that the
+    // wrapper no longer hides the disqualifying `-exec` from
+    // `hasDisqualifyingArgs` specifically.
+    const result = decide('timeout 5 find / -name x -exec sudo id +');
+    expect(result.commandClass).toBe('privileged');
+    expect(result.decision).toBe('deny');
+  });
+
+  it('does not escalate a harmless wrapped command for a profile that already holds safe', () => {
+    // A `readOnly` profile can never confirm this: `env`/`nohup` are exec
+    // wrappers, never readers, so a wrapped command is never classified
+    // `read-only` regardless of what it wraps (documented above
+    // READ_ONLY_ALLOWLIST) — `env sort /etc/hostname` denies for that reason
+    // alone, with or without this fix. The fix's precision — that it does not
+    // newly flag a wrapped command with no disqualifying flag — is checked
+    // against a profile that already holds `safe` outright.
+    for (const command of ['env sort /etc/hostname', 'nohup find /etc -name "*.conf"']) {
+      expect(engine.evaluate(command, adminProd, 'run-command').decision, command).toBe('allow');
+    }
+  });
+});

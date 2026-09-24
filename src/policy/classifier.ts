@@ -980,11 +980,25 @@ function elevatedBinaryOf(command: string): string | null {
  */
 
 
-/** An allowlisted binary carrying a flag that makes it write or execute. */
+/**
+ * An allowlisted binary carrying a flag that makes it write or execute.
+ *
+ * Keyed on `effectiveCommandIndex`, not `parseSegments`. `parseSegments`
+ * (`parseWords`) only steps over a privilege prefix (`sudo`, `su`, …), not an
+ * exec wrapper (`env`, `nohup`, `timeout`, …), so `env sort
+ * --compress-program=X` read `head` as `"env"` — not in `DISQUALIFYING_ARGS`
+ * — and the flag went unnoticed. `effectiveCommandIndex` already reads past
+ * both, which is what `operandsAreData` and `readsProgramFromStdin` use it
+ * for. Deliberately not fixed by changing `parseWords` itself:
+ * `invokedWords` also reads it, and widening what counts as "the command"
+ * there is a different, larger change this fix does not take on.
+ */
 function hasDisqualifyingArgs(command: string): boolean {
-  return parseSegments(command).some(({ head, args }) => {
-    const rule = DISQUALIFYING_ARGS[head];
-    return rule !== undefined && args.some((arg) => rule.test(arg));
+  return tokenizeSegments(command).some((words) => {
+    const idx = effectiveCommandIndex(words);
+    if (idx === -1) return false;
+    const rule = DISQUALIFYING_ARGS[stripPath(words[idx])];
+    return rule !== undefined && words.slice(idx + 1).some((arg) => rule.test(arg));
   });
 }
 
