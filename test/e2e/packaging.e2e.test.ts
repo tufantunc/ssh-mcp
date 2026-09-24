@@ -114,7 +114,7 @@ describe.skipIf(!serverBuilt)('E2E — packaging', () => {
     const report = err.stderr.slice(err.stderr.indexOf('Invalid --group=production'));
     expect(report).not.toBe('');
     expect(report.trimEnd()).toBe(
-      'Invalid --group=production. Expected one of: prod, staging, dev.',
+      'Invalid --group=production. Expected one of: prod, staging, dev, test.',
     );
     expect(err.stderr).not.toContain('Fatal error:');
     // The distinction reportFatal draws is only machine-readable through this.

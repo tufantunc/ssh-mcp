@@ -34,7 +34,7 @@ export interface PolicyRules {
 const DEFAULT_OPA_TIMEOUT_MS = 10_000;
 
 /** Tiers, most restrictive first. Unknown/unset tiers resolve to the first. */
-export const HOST_GROUPS = ['prod', 'staging', 'dev'] as const;
+export const HOST_GROUPS = ['prod', 'staging', 'dev', 'test'] as const;
 
 const ISO_WEEKDAY: Record<string, number> = {
   Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7,
@@ -98,16 +98,19 @@ export const DEFAULT_RULES: PolicyRules = {
       prod: ['read-only'],
       staging: ['read-only'],
       dev: ['read-only', 'safe'],
+      test: ['read-only', 'safe'],
     },
     operator: {
       prod: ['read-only', 'safe'],
       staging: ['read-only', 'safe', 'destructive'],
       dev: ['read-only', 'safe', 'destructive'],
+      test: ['read-only', 'safe', 'destructive'],
     },
     admin: {
       prod: ['read-only', 'safe', 'destructive'],
       staging: ['read-only', 'safe', 'destructive', 'privileged'],
       dev: ['read-only', 'safe', 'destructive', 'privileged'],
+      test: ['read-only', 'safe', 'destructive', 'privileged'],
     },
   }),
 };

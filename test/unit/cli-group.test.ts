@@ -33,6 +33,6 @@ describe('resolveHostGroup', () => {
 
   it('names the valid values in the error, so the fix needs no docs lookup', () => {
     expect(() => resolveHostGroup({ group: 'production' }))
-      .toThrow(/Expected one of: prod, staging, dev/);
+      .toThrow(/Expected one of: prod, staging, dev, test/);
   });
 });

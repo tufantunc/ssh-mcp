@@ -308,7 +308,7 @@ auth = "agent"                      # agent | key | password | keychain
 keyRef = "~/.ssh/id_ed25519"        # for auth=key
 keychainEntry = "ssh-mcp/prod"      # for auth=keychain (requires @napi-rs/keyring)
 via = "bastion"                     # ProxyJump — route through bastion profile
-group = "prod"                      # Policy tier: prod | staging | dev, or your own (see [policy])
+group = "prod"                      # Policy tier: prod | staging | dev | test, or custom
 workdir = "/var/www"
 trustedHostKey = "SHA256:..."       # Pin host key (optional)
 tty = false
@@ -431,15 +431,16 @@ The certificate file is auto-detected using OpenSSH convention (`keyRef` + `-cer
 
 ### Roles
 
-| Role | Dev | Staging | Prod |
-|------|-----|---------|------|
-| **viewer** | read-only | read-only | read-only |
-| **operator** | read-only, safe, destructive | read-only, safe, destructive | read-only, safe |
-| **admin** | all | all | read-only, safe, destructive |
+| Role | Dev | Test | Staging | Prod |
+|------|-----|------|---------|------|
+| **viewer** | read-only, safe | read-only, safe | read-only | read-only |
+| **operator** | read-only, safe, destructive | read-only, safe, destructive | read-only, safe, destructive | read-only, safe |
+| **admin** | all | all | all | read-only, safe, destructive |
 
 Which column applies comes from the profile's `group`. Set it explicitly —
 without it the tier is guessed from the profile name (`prod`/`staging`/`dev`,
-`local`, `test`, `sandbox`), and **an unrecognised name resolves to `prod`**,
+`local`, `test`, `sandbox`; the latter names infer `dev`), and **an
+unrecognised name resolves to `prod`**,
 the strictest tier. A production host named `web-01` is therefore treated as
 production rather than silently getting dev permissions.
 
@@ -470,7 +471,7 @@ prod = ["read-only", "safe", "destructive", "privileged"]
 ```
 
 The merge is at role *and* tier depth. That block changes `admin` on `prod` and
-nothing else: `admin` on `staging` and `dev` keep their defaults, and `viewer`
+nothing else: `admin` on `staging`, `dev` and `test` keep their defaults, and `viewer`
 and `operator` are untouched. Roles and tiers the defaults have never heard of
 are added rather than rejected, which is what makes a custom `group` resolve to
 real bindings instead of falling back to the strictest tier:
@@ -890,7 +891,7 @@ Secrets are **never** passed as CLI arguments.
 | `--port` | 22 | Quick start: SSH port |
 | `--key` | — | Quick start: Path to private key |
 | `--workdir` | — | Quick start: Working directory for commands and sessions |
-| `--group` | prod | Quick start: Policy tier — `prod`, `staging` or `dev` |
+| `--group` | prod | Quick start: Policy tier — `prod`, `staging`, `dev` or `test` |
 | `--timeout` | 60000 | Command timeout in ms |
 | `--maxChars` | 5000 | Max command length (`none` or `0` disables the limit; in a config file the same setting is `commandMaxChars = 0`) |
 | `--sessionMax` | 5 | Max concurrent sessions per connection |

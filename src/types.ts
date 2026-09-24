@@ -12,7 +12,7 @@ export interface Profile {
   keyRef?: string;
   keychainEntry?: string;
   via?: string;
-  /** Explicit policy tier (prod | staging | dev | custom). */
+  /** Explicit policy tier (prod | staging | dev | test | custom). */
   group?: string;
   workdir?: string;
   trustedHostKey?: string;

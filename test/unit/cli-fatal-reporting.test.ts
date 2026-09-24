@@ -30,9 +30,9 @@ describe('reportFatal', () => {
   const exitCode = (error: unknown): number => reportFatal(error, () => {});
 
   it('prints an operator error as its message alone', () => {
-    const calls = capture(new OperatorError('Invalid --group=production. Expected one of: prod, staging, dev.'));
+    const calls = capture(new OperatorError('Invalid --group=production. Expected one of: prod, staging, dev, test.'));
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toEqual(['Invalid --group=production. Expected one of: prod, staging, dev.']);
+    expect(calls[0]).toEqual(['Invalid --group=production. Expected one of: prod, staging, dev, test.']);
   });
 
   it('passes no Error object, so nothing can render a stack', () => {

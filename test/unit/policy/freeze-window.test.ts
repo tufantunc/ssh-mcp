@@ -30,8 +30,11 @@ describe('deterministic operation freeze windows', () => {
   });
 
   it('does not freeze dev/test-tier operations with a prod window', () => {
-    const dev = { ...profile, name: 'test-box', group: 'dev' };
-    expect(engine('2026-09-23T02:00:00Z').evaluate('touch /tmp/x', dev, 'run-command').decision).toBe('allow');
+    for (const group of ['dev', 'test']) {
+      const nonProd = { ...profile, name: `${group}-box`, group };
+      expect(engine('2026-09-23T02:00:00Z')
+        .evaluate('touch /tmp/x', nonProd, 'run-command').decision).toBe('allow');
+    }
   });
 
   it('supports a cross-midnight window using the start-day weekday', () => {
