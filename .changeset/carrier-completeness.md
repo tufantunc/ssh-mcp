@@ -10,6 +10,12 @@ The interpreter table also gains `osascript`, `lua`, `Rscript`, `bun`, `tclsh`, 
 
 `tclsh` carries no `-c` entry: a differential fuzz run against this branch found that `tclsh -c 'exec systemctl stop nginx'` had been classifying `destructive` on the strength of a `-c` flag real `tclsh` does not have — it takes a script file or reads one from stdin, the same as every other interpreter in the table without an inline-program flag. That invocation now classifies `safe`, correctly: `tclsh` is still a recognised, unreadable interpreter, so `echo … | tclsh` (the genuine carrier, a program on stdin) still classifies `destructive`.
 
-A command whose effective command word resolves to this table is also now a *certain* carrier for the one unconditional denylist (`shutdown`, `reboot`, `halt`, `poweroff`, `eval`, and the never-allowed patterns), not merely for its class. Previously, a value-taking option of the interpreter's own — `bash -o pipefail -c '…'`, `python3 -W ignore -c '…'`, `perl -I /tmp -e '…'`, `bash --rcfile /tmp/x -c '…'` — sat between the interpreter and its program flag and made the payload invisible to that denylist scan specifically, even though the command still classified `destructive` through the ordinary path. Those forms now deny outright, like the canonical `sh -c '…'` spelling already did. This does not widen the denylist to unrecognised binaries: `whatever -o pipefail -c 'shutdown -h now'` still only reaches `destructive`, not an unconditional deny — the class it already had before this change.
+One gap this does not close, so you know where the edge is: an interpreter's own
+value-taking option can still sit between it and its program flag —
+`bash -o pipefail -c 'shutdown -h now'`, `python3 -W ignore -c '…'` — and that payload
+reaches the unconditional denylist scan only for the canonical `sh -c '…'` spelling. Such a
+command still classifies `destructive`, so it is refused for any role that does not hold
+that class and prompts for one that does; what it does not get is the never-allowed
+treatment. This is unchanged from previous releases.
 
 Reported by @MartOcd1709.
