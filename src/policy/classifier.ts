@@ -20,18 +20,103 @@ import { AWK_NAMES, readAwkInvocation, type AwkFindings } from './awk.js';
  */
 const SHELL_CONTROL_CHARS = /[;&|<>`$(){}\n\r]/;
 
-const READ_ONLY_ALLOWLIST = new Set([
-  'ls', 'cat', 'grep', 'find', 'stat', 'df', 'du', 'head', 'tail', 'wc',
-  'ps', 'uname', 'uptime', 'hostname', 'id', 'who', 'whoami', 'date',
-  'printenv', 'pwd', 'echo', 'printf', 'test', 'true', 'false',
-  'which', 'whereis', 'file', 'readlink', 'realpath', 'basename', 'dirname',
-  'seq', 'sort', 'uniq', 'cut', 'tr', 'diff', 'comm',
-  'systemctl status', 'journalctl', 'docker ps', 'docker logs', 'docker inspect',
-  'docker stats', 'docker images', 'free', 'top', 'htop', 'iostat', 'vmstat',
-  'netstat', 'ss', 'ifconfig', 'ip addr', 'ip route', 'arp', 'dig', 'nslookup',
-  'host', 'ping', 'traceroute', 'git status', 'git log',
-  'git diff', 'git branch', 'git show', 'git remote',
-]);
+/**
+ * The binaries this classifier will vouch for, and what it vouches for about them.
+ *
+ * Two questions, kept apart because one Set answering both is how #217 turned the
+ * interpreter carrier scan off for two verbs by adding them to a list about
+ * classes:
+ *
+ *   readOnly         does this binary only read?  -> decides the class
+ *   operandsAreData  can its operands hide a command?  -> decides whether the
+ *                    carrier scan runs
+ *
+ * Both are `true` for every entry today. The value is not the contents but that
+ * the type will not let the next person add a name without answering both.
+ *
+ * Two mechanisms answer the second question outside this table and are not
+ * affected by it — `DISQUALIFYING_ARGS` and `FIND_EXEC_FLAGS` — which is why
+ * `find` can carry `operandsAreData: true` while `find … -exec sudo id +` is
+ * still `privileged`.
+ *
+ * The two-word entries are looked up only for the class: `operandsAreData` reads
+ * a single word, so those rows never reach the second question.
+ */
+const READERS: Record<string, { readOnly: boolean; operandsAreData: boolean }> = {
+  "arp":              { readOnly: true, operandsAreData: true },
+  "basename":         { readOnly: true, operandsAreData: true },
+  "cat":              { readOnly: true, operandsAreData: true },
+  "comm":             { readOnly: true, operandsAreData: true },
+  "cut":              { readOnly: true, operandsAreData: true },
+  "date":             { readOnly: true, operandsAreData: true },
+  "df":               { readOnly: true, operandsAreData: true },
+  "diff":             { readOnly: true, operandsAreData: true },
+  "dig":              { readOnly: true, operandsAreData: true },
+  "dirname":          { readOnly: true, operandsAreData: true },
+  "docker images":    { readOnly: true, operandsAreData: true },  // two-word: class only
+  "docker inspect":   { readOnly: true, operandsAreData: true },  // two-word: class only
+  "docker logs":      { readOnly: true, operandsAreData: true },  // two-word: class only
+  "docker ps":        { readOnly: true, operandsAreData: true },  // two-word: class only
+  "docker stats":     { readOnly: true, operandsAreData: true },  // two-word: class only
+  "du":               { readOnly: true, operandsAreData: true },
+  "echo":             { readOnly: true, operandsAreData: true },
+  "false":            { readOnly: true, operandsAreData: true },
+  "file":             { readOnly: true, operandsAreData: true },
+  "find":             { readOnly: true, operandsAreData: true },
+  "free":             { readOnly: true, operandsAreData: true },
+  "git branch":       { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git diff":         { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git log":          { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git remote":       { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git show":         { readOnly: true, operandsAreData: true },  // two-word: class only
+  "git status":       { readOnly: true, operandsAreData: true },  // two-word: class only
+  "grep":             { readOnly: true, operandsAreData: true },
+  "head":             { readOnly: true, operandsAreData: true },
+  "host":             { readOnly: true, operandsAreData: true },
+  "hostname":         { readOnly: true, operandsAreData: true },
+  "htop":             { readOnly: true, operandsAreData: true },
+  "id":               { readOnly: true, operandsAreData: true },
+  "ifconfig":         { readOnly: true, operandsAreData: true },
+  "iostat":           { readOnly: true, operandsAreData: true },
+  "ip addr":          { readOnly: true, operandsAreData: true },  // two-word: class only
+  "ip route":         { readOnly: true, operandsAreData: true },  // two-word: class only
+  "journalctl":       { readOnly: true, operandsAreData: true },
+  "ls":               { readOnly: true, operandsAreData: true },
+  "netstat":          { readOnly: true, operandsAreData: true },
+  "nslookup":         { readOnly: true, operandsAreData: true },
+  "ping":             { readOnly: true, operandsAreData: true },
+  "printenv":         { readOnly: true, operandsAreData: true },
+  "printf":           { readOnly: true, operandsAreData: true },
+  "ps":               { readOnly: true, operandsAreData: true },
+  "pwd":              { readOnly: true, operandsAreData: true },
+  "readlink":         { readOnly: true, operandsAreData: true },
+  "realpath":         { readOnly: true, operandsAreData: true },
+  "seq":              { readOnly: true, operandsAreData: true },
+  "sort":             { readOnly: true, operandsAreData: true },
+  "ss":               { readOnly: true, operandsAreData: true },
+  "stat":             { readOnly: true, operandsAreData: true },
+  "systemctl status": { readOnly: true, operandsAreData: true },  // two-word: class only
+  "tail":             { readOnly: true, operandsAreData: true },
+  "test":             { readOnly: true, operandsAreData: true },
+  "top":              { readOnly: true, operandsAreData: true },
+  "tr":               { readOnly: true, operandsAreData: true },
+  "traceroute":       { readOnly: true, operandsAreData: true },
+  "true":             { readOnly: true, operandsAreData: true },
+  "uname":            { readOnly: true, operandsAreData: true },
+  "uniq":             { readOnly: true, operandsAreData: true },
+  "uptime":           { readOnly: true, operandsAreData: true },
+  "vmstat":           { readOnly: true, operandsAreData: true },
+  "wc":               { readOnly: true, operandsAreData: true },
+  "whereis":          { readOnly: true, operandsAreData: true },
+  "which":            { readOnly: true, operandsAreData: true },
+  "who":              { readOnly: true, operandsAreData: true },
+  "whoami":           { readOnly: true, operandsAreData: true },
+};
+
+/** The class half of READERS, as the shape its consumers already expect. */
+const READ_ONLY_ALLOWLIST = new Set(
+  Object.entries(READERS).filter(([, e]) => e.readOnly).map(([name]) => name),
+);
 // Deliberately NOT read-only: `env`, because it is an exec wrapper. `env <cmd>`
 // runs <cmd>, so allowlisting the name `env` vouched for a command the
 // classifier never looked at — `env sudo rm -f /etc/passwd` classified
@@ -974,7 +1059,8 @@ function effectiveCommandIndex(words: string[]): number {
  */
 function operandsAreData(words: string[]): boolean {
   const idx = effectiveCommandIndex(words);
-  return idx !== -1 && READ_ONLY_ALLOWLIST.has(stripPath(unquote(words[idx])));
+  if (idx === -1) return false;
+  return READERS[stripPath(unquote(words[idx]))]?.operandsAreData === true;
 }
 
 /**
@@ -1333,4 +1419,4 @@ function classifyOuter(trimmed: string): ParsedCommand {
   return { binary, fullCommand, class: 'safe' as CommandClass };
 }
 
-export { READ_ONLY_ALLOWLIST, READ_ONLY_SYNTHETIC, isDestructive };
+export { READ_ONLY_ALLOWLIST, READERS, READ_ONLY_SYNTHETIC, isDestructive };

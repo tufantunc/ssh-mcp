@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { PolicyEngine, DEFAULT_RULES } from '../../../src/policy/engine.js';
-import { classifyCommand } from '../../../src/policy/classifier.js';
+import { classifyCommand, READ_ONLY_ALLOWLIST, READERS } from '../../../src/policy/classifier.js';
 import type { Profile } from '../../../src/types.js';
 
 /**
@@ -99,5 +99,31 @@ describe('an unrecognised binary cannot hide a command in its operands', () => {
     expect(classifyCommand('git commit -m "sudo fix"').class).toBe('privileged');
     expect(classifyCommand('git commit -m "fix the sudo thing"').class).toBe('safe');
     expect(classifyCommand('curl -H "X: sudo y" http://h').class).toBe('safe');
+  });
+});
+
+describe('the two questions the read-only allowlist used to answer', () => {
+  it('keeps the carrier scan running for a reader that is not exempt', () => {
+    // The regression #217's review found: one Set read by two mechanisms, so
+    // adding a name for its class silently switched the carrier scan off for it.
+    // This is the behaviour the table protects.
+    expect(classifyCommand(`sftp:list /tmp sh -c 'sudo id'`).class).toBe('privileged');
+  });
+
+  it('makes every reader answer both questions', () => {
+    // The point of the table. A name cannot be added for its class without
+    // stating whether its operands can hide a command — TypeScript requires the
+    // field, and this asserts nobody has defaulted it away.
+    for (const [name, entry] of Object.entries(READERS)) {
+      expect(typeof entry.readOnly, name).toBe('boolean');
+      expect(typeof entry.operandsAreData, name).toBe('boolean');
+    }
+    expect(Object.keys(READERS).length).toBe(68);
+  });
+
+  it('derives the class allowlist from the table rather than repeating it', () => {
+    // If these ever diverge, one of the two questions has been answered twice.
+    expect(READ_ONLY_ALLOWLIST.size)
+      .toBe(Object.values(READERS).filter((e) => e.readOnly).length);
   });
 });
