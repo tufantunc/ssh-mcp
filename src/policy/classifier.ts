@@ -387,6 +387,47 @@ function resolveInterpreter(word: string): InterpreterSpec | undefined {
 const FIND_EXEC_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
 
 /**
+ * GNU sort's own long-option table, spelled in full — every entry `sort
+ * --help` lists (coreutils 9.11, `docker exec ssh-mcp-ssh-admin-1 sort
+ * --help`). Used only to compute which prefixes of `--output` and
+ * `--compress-program` `getopt_long` treats as unambiguous.
+ *
+ * `getopt_long` resolves a `--` word to the option whose name it is an
+ * unambiguous prefix of: a prefix shared with another option name is
+ * refused outright ("option '--c' is ambiguous; possibilities: '--check'
+ * '--compress-program'") rather than run, so it must not be treated as a
+ * write. Measured against the binary: `sort --c=x k` exits 2 with no file
+ * created; `sort --co=x k` — the second letter is where `--check` and
+ * `--compress-program` diverge — runs.
+ */
+const SORT_LONG_OPTIONS = [
+  'ignore-leading-blanks', 'dictionary-order', 'ignore-case',
+  'general-numeric-sort', 'ignore-nonprinting', 'month-sort',
+  'human-numeric-sort', 'numeric-sort', 'random-sort', 'random-source',
+  'reverse', 'sort', 'version-sort', 'batch-size', 'check',
+  'compress-program', 'debug', 'files0-from', 'key', 'merge', 'output',
+  'stable', 'buffer-size', 'field-separator', 'temporary-directory',
+  'parallel', 'unique', 'zero-terminated', 'help', 'version',
+];
+
+/**
+ * The regex-alternation source matching any prefix of `full` that names
+ * exactly one entry of `SORT_LONG_OPTIONS` — every prefix `getopt_long`
+ * would accept for it, from the shortest unambiguous one up to `full`
+ * itself — each optionally followed by `=value`.
+ */
+function unambiguousLongOptionSource(full: string): string {
+  const prefixes: string[] = [];
+  for (let len = 1; len <= full.length; len++) {
+    const prefix = full.slice(0, len);
+    if (SORT_LONG_OPTIONS.filter((opt) => opt.startsWith(prefix)).length === 1) {
+      prefixes.push(prefix);
+    }
+  }
+  return `--(?:${prefixes.join('|')})(?:=|$)`;
+}
+
+/**
  * How deep a substitution may nest before we stop reading and refuse to guess.
  *
  * Reached only by input no operator writes — the tests use two hundred levels. The
@@ -808,21 +849,45 @@ const DISQUALIFYING_ARGS: Record<string, RegExp> = Object.assign(
     // Measured on HEAD before this rule: `sort -o /root/.ssh/authorized_keys
     // /tmp/key.pub` classified `read-only`.
     //
-    // Three spellings, joined by the same alternation as `--compress-program`:
-    // `--output=X` (one argument), `--output X` (two, flag alone), and the
-    // short form, which GNU getopt lets cluster behind other single-letter
-    // flags (`sort -nro out in` writes `out` exactly as `sort -o out in`
-    // does) or attach its value directly (`-oFILE`).
+    // Targeted round (2026-09-24, R2+R3): the version above closed the exact
+    // spellings `-o`, `--output` and `--compress-program` and left the CLASS
+    // open — GNU sort's own option grammar has two escapes past a fixed
+    // spelling, both measured against the real binary:
     //
-    // The cluster branch is deliberately narrower than "any `o` in a dash
-    // word": `-[bcCdfghiMnRrsuVz]*o` only allows GNU sort's own *argument-less*
-    // short flags ahead of the `o`, so it stops at the first flag that takes a
-    // value of its own. Without that, `-tofile` — `-t` (field separator) with
-    // its value attached, not `-o` — would be misread as a write. `-t`, `-k`,
-    // `-S` and `-T` are exactly the short flags this excludes, because each
-    // consumes the rest of a clustered word as its own argument, so a
-    // following `o` is that argument's text, not `-o` invoked.
-    sort: /^(--compress-program(=|$)|--output(=|$)|-[bcCdfghiMnRrsuVz]*o)/,
+    //  - A short-option cluster is scanned left to right, and any of sort's
+    //    own *argument-less* short flags may sit ahead of `-o` without
+    //    consuming it: `sort -mo out in` writes `out` exactly as `sort -o out
+    //    in` does. `-m` (merge) is itself argument-less, and its absence from
+    //    the char class below is exactly what let `sort -mo …` through as
+    //    `read-only`.
+    //  - `getopt_long` resolves a `--` word by unambiguous-prefix matching:
+    //    `--o`, `--ou`, `--out`, `--outp`, `--outpu` all mean `--output`
+    //    (nothing else starts with `o`), and `--co` through
+    //    `--compress-progra` all mean `--compress-program` (`--c` alone is
+    //    ambiguous with `--check` and sort refuses to run at all —
+    //    `unambiguousLongOptionSource` excludes it for exactly that reason,
+    //    computed from sort's own option table rather than hand-picked).
+    //
+    // The cluster branch is still deliberately narrower than "any `o` in a
+    // dash word": `-[bcCdfghiMmnRrsuVz]*o` only allows GNU sort's own
+    // argument-less short flags ahead of the `o`, so it stops at the first
+    // flag that takes a value of its own. Without that, `-tofile` — `-t`
+    // (field separator) with its value attached, not `-o` — would be
+    // misread as a write. `-t`, `-k`, `-S` and `-T` are exactly the short
+    // flags this excludes, because each consumes the rest of a clustered
+    // word as its own argument, so a following `o` is that argument's text,
+    // not `-o` invoked.
+    //
+    // `find`'s entry above does not get the same prefix-abbreviation
+    // treatment: `find` parses its predicates itself rather than through
+    // `getopt_long`, and accepts no abbreviated spelling of `-exec` — `find .
+    // -exe` is "unknown predicate `-exe`", measured. There is no class to
+    // close there.
+    sort: new RegExp(
+      `^(?:${unambiguousLongOptionSource('compress-program')}`
+      + `|${unambiguousLongOptionSource('output')}`
+      + '|-[bcCdfghiMmnRrsuVz]*o)',
+    ),
   },
 );
 
