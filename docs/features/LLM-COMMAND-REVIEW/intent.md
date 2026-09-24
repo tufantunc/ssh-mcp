@@ -17,9 +17,9 @@ while deterministic permissions continue to cap what any reviewer may authorize.
 ## Proposed outcome
 
 Operators can optionally enable a contextual reviewer for non-read-only operations. Inside
-the envelope allowed by deterministic policy it may approve routine operations, deny risky
-ones, or escalate uncertain cases. Human review is reserved for escalation and explicitly
-human-only classes. Configured production freeze windows remain hard denials.
+the envelope allowed by deterministic policy it may approve routine operations or send
+risky and uncertain cases to a person. A reviewer `deny` is advice to reject and escalate,
+not a final refusal. Configured production freeze windows remain hard denials.
 
 ## Affected users and systems
 
@@ -30,6 +30,8 @@ human-only classes. Configured production freeze windows remain hard denials.
 ## Constraints
 
 - Deterministic denials remain final and are evaluated before contextual review.
+- No reviewer verdict can create a final denial; `deny`, `escalate` and reviewer failure
+  all require fresh human review.
 - Reviewer failure escalates rather than silently restoring automatic execution.
 - Deterministic policy identifies the maximum authority and reviewer-bypassable soft
   approvals; privileged operations remain human-only.

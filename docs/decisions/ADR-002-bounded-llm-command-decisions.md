@@ -18,7 +18,8 @@ permissions bound the consequences of a mistaken approval.
 - Non-read-only operations inside that envelope are agent-reviewable unless their command
   class is privileged, which remains human-only.
 - A completed review returns `approve`, `deny` or `escalate`. Approve discharges a soft
-  approval, deny refuses without prompting, and escalate requests fresh human approval.
+  approval. Deny means "recommend rejection and escalate"; both deny and escalate request
+  fresh human approval. The reviewer cannot create a final refusal.
 - Reviewer failure is equivalent to escalate. Human-only and escalated approvals do not
   reuse JIT grants.
 - Reviewer autonomy is disabled when no reviewer URL is configured, preserving existing
@@ -27,8 +28,8 @@ permissions bound the consequences of a mistaken approval.
 ## Consequences
 
 - Routine operations can complete without human prompts even under `ask-all`.
-- A false model denial affects availability; a false approval is bounded by deterministic
-  policy and operating-system permissions.
+- A false model denial adds a human prompt rather than blocking work; a false approval is
+  bounded by deterministic policy and operating-system permissions.
 - Privileged and policy-exception work still requires a person.
 - Model verdict, risk and identity remain audited and versioned.
 - Operators must configure their own production freeze schedule; ssh-mcp does not assume a
@@ -39,6 +40,8 @@ permissions bound the consequences of a mistaken approval.
 - **Keep monotonic escalation only:** cannot meet the automation objective.
 - **Let the model override every approval:** gives probabilistic output authority over
   privileged operations.
+- **Let reviewer deny be final:** saves a prompt for clearly unsafe work, but gives a
+  probabilistic model an unnecessary availability veto and no appeal path.
 - **Make risk alone the authorization contract:** obscures whether the model intended to
   approve, refuse or ask for help.
 - **Ship built-in trading hours:** incorrect across exchanges, products, holidays and night
