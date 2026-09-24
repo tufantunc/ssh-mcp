@@ -170,3 +170,45 @@ describe('the approval gate sees elevation wherever it is', () => {
     expect(engine.evaluate('env sudo id', adminDev, 'run-command').decision).toBe('require-approval');
   });
 });
+
+/**
+ * A reader with an execution flag is not a reader.
+ *
+ * `sort --compress-program=X` makes GNU sort exec X for every temporary file it
+ * spills — measured against coreutils 9.11, an attacker-named script ran 14,224
+ * times for one 200k-line input. `sort` is in `READ_ONLY_ALLOWLIST`, so the whole
+ * command classified `read-only` and a `readOnly` viewer was allowed to run it
+ * through `read-command`, while running the same program directly was denied.
+ *
+ * `DISQUALIFYING_ARGS` is the mechanism for exactly this and already held `find`'s
+ * `-exec` family; `sort` was simply missing from it. Driven through the engine
+ * rather than the classifier, because the thing that was wrong was what a viewer
+ * was permitted to do.
+ */
+describe('a reader that can be told to execute is not read-only', () => {
+  const engine = new PolicyEngine(DEFAULT_RULES);
+  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor, 'read-command');
+
+  it.each([
+    ['joined by =', 'sort --compress-program=/srv/payload.sh /etc/hostname'],
+    ['separate word', 'sort --compress-program /srv/payload.sh /etc/hostname'],
+  ])('refuses sort --compress-program (%s)', (_label, command) => {
+    // Class as well as decision: for a readOnly profile every class but
+    // `read-only` denies identically, so the decision alone cannot say whether
+    // the flag was noticed or the profile simply refused everything.
+    expect(decide(command).commandClass, command).toBe('destructive');
+    expect(decide(command).decision, command).toBe('deny');
+  });
+
+  it('still allows the sorting a viewer actually does', () => {
+    // The last two carry the word the rule matches on, in an operand rather than
+    // as the flag. Without them a rule as loose as /compress/ passes every case
+    // here — measured, it did.
+    for (const command of ['sort -u /var/log/app.log', 'sort -k2 -n /etc/passwd',
+                           'sort --reverse /tmp/x', 'sort /etc/hostname',
+                           'sort /var/log/compress-stats.log',
+                           'sort --key=2 /tmp/compressed-sizes.txt']) {
+      expect(decide(command).decision, command).toBe('allow');
+    }
+  });
+});

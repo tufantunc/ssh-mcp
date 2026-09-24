@@ -552,7 +552,18 @@ const EXEC_WRAPPERS = new Set([
 // Null-prototype for the same reason as INTERPRETERS: indexed by the command word.
 const DISQUALIFYING_ARGS: Record<string, RegExp> = Object.assign(
   Object.create(null) as Record<string, RegExp>,
-  { find: /^-(exec|execdir|ok|okdir|delete|fprintf?|fls)$/ },
+  {
+    find: /^-(exec|execdir|ok|okdir|delete|fprintf?|fls)$/,
+    // GNU sort execs this for every temporary file it spills, so a reader
+    // becomes a launcher. Measured against coreutils 9.11: an attacker-named
+    // script ran 14,224 times for one 200k-line input, and the whole command
+    // classified `read-only` — which a `readOnly` viewer is allowed to run,
+    // while running that same program directly is denied.
+    //
+    // Both spellings: `--compress-program=X` is one argument, `--compress-program X`
+    // is two and the flag stands alone.
+    sort: /^--compress-program(=|$)/,
+  },
 );
 
 /** A leading `NAME=value`, which a shell treats as an assignment, not a command. */
