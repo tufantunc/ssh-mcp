@@ -7,6 +7,7 @@ import { sanitizeCommand } from '../guard/sanitizer.js';
 import { requestApproval } from '../guard/elicitation.js';
 import { commandOutput, type ToolResult } from './results.js';
 import { CommandQuota } from '../policy/quota.js';
+import { formatReadOnlyRejection } from '../policy/classifier.js';
 import type { LocalPathContext } from './local-path.js';
 import { ApprovalGrants } from '../guard/approval-grants.js';
 import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass } from '../types.js';
@@ -299,7 +300,17 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
       state.evaluation = evaluation;
 
       if (opts.enforceClass && evaluation.commandClass !== opts.enforceClass) {
-        throw new Error(`${opts.toolName} only accepts ${opts.enforceClass} commands, got: ${evaluation.commandClass}`);
+        // A command that fell to `safe` because a reader's grammar rejected one
+        // of its argv words is one spelling away from the class this tool
+        // demands — say which word, or the caller only learns that the tool
+        // refused it, not why the reader that ran the exact same binary
+        // would not have.
+        const rejectionSuffix = evaluation.readOnlyRejection
+          ? ` ${formatReadOnlyRejection(evaluation.readOnlyRejection)}`
+          : '';
+        throw new Error(
+          `${opts.toolName} only accepts ${opts.enforceClass} commands, got: ${evaluation.commandClass}${rejectionSuffix}`,
+        );
       }
 
       // Counted after the policy allowed it and before it runs: a denied

@@ -526,10 +526,27 @@ never widen. Widening happens here or not at all.
 
 Every command is classified before execution:
 
-- **read-only**: Allowlisted commands (`ls`, `cat`, `grep`, `df`, `stat`, `systemctl status`, ...)
+- **read-only**: Allowlisted commands (`ls`, `cat`, `grep`, `df`, `stat`, `systemctl status`, ...),
+  and only when every argument is provably data under a grammar declared for that binary — see
+  below
 - **safe**: Non-destructive mutations (`npm install`, `git pull`, ...)
 - **destructive**: mutations that need approval (`rm -rf /tmp/build`, ...)
 - **privileged**: `sudo`, `su`, `doas`, `pkexec`
+
+**`read-only` is granted by argument grammar, not by binary name alone.** An allowlisted
+binary's argument list is checked word by word against a grammar declared for it
+(`src/policy/reader-grammar.ts`); an option the grammar does not list, an abbreviation of one
+it does, a short-option cluster with an unlisted letter, an argument carrying an unquoted
+shell glob (`*`, `?`, `[`), or an operand shaped like something
+the binary would write to, all fall the whole command to `safe` instead. This is what a
+`readOnly` profile is confined to, what `viewer` holds on prod and staging (on dev the viewer
+holds `safe` too), and what `read-command`
+requires — all of these refuse `safe` except the viewer on dev, so a command that used to
+run under the old, name-only
+rule can now be refused. The refusal names the rejected word (for example, `` `journalctl` is
+read-only only with the options and operands its grammar lists; `--foo` is not accepted
+there. ``), so the caller can see which spelling of the same command still works. See
+[SECURITY.md](./SECURITY.md) for the residual risks this leaves open.
 
 A separate **forbidden** list is never allowed, whatever the role or approval
 policy: `rm -rf /`, `mkfs`, `dd of=/dev/`, `shutdown`, `curl|sh`, fork bombs,

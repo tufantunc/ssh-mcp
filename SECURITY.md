@@ -207,6 +207,50 @@ Treat the ability to open an interactive session as the privilege it is:
 - A `readOnly` profile is unaffected: it holds `read-only` only, so it cannot set the alias
   in the first place.
 
+### `read-only` is granted by grammar, not by binary name
+
+A command classifies `read-only` only when every argument after the command word is
+provably data under a grammar declared for that binary (`src/policy/classifier.ts`
+`READERS`, `src/policy/reader-grammar.ts`) — not merely because the first word is on the
+allowlist. An option the grammar does not list, an abbreviation of one it does list, a
+short-option cluster containing an unlisted letter, an argument carrying an unquoted shell
+glob (`*`, `?`, `[`), or an operand shaped like something the
+binary would write to, all fall the whole command to `safe` instead of `read-only`.
+
+`read-only` is the class a `readOnly` profile is confined to, the class `viewer` holds on
+prod and staging (on dev the viewer holds `safe` too), and the class `read-command`
+requires; all of these refuse `safe` except the viewer on dev. So a command
+that used to run under the old, name-only rule can now be refused under the same profile,
+role or tool. The refusal names the rejected word, so the caller sees which spelling of the
+same command would still qualify, rather than concluding the binary is forbidden outright.
+
+`DISQUALIFYING_ARGS` is unaffected by this and still runs first: it can still raise a
+command above `safe` for every role, including `operator` and `admin`, regardless of what
+the reader's grammar accepts. The grammar only ever decides between `read-only` and `safe`.
+
+**Residual risks, recorded rather than closed:**
+
+- **DNS/ICMP egress.** `dig`, `nslookup`, `host`, `ping` and `traceroute` can leak small
+  amounts of data through the queries and probes they send. None of them can modify the
+  host, so they stay `read-only`; tighten them via profile policy (denylist, or omit the
+  role) if egress matters.
+- **UNC path operands on Windows.** An operand shaped like a UNC path (`\\host\share\x`)
+  passed to a reader such as `cat` or `sort` makes the Windows host authenticate to the
+  named SMB server, which can leak an NTLM credential. The host itself is not changed, so
+  this falls outside the `read-only` contract — that contract is about writes, not about an
+  outbound authentication attempt.
+- **`git status` may write to `.git/index`.** It can opportunistically refresh cached stat
+  data there when it is stale; it writes no tracked content, ref or config. A host that
+  wants to disable even that can set `GIT_OPTIONAL_LOCKS=0`.
+- **Glob characters beyond `*`, `?` and `[`.** The unquoted-glob check covers the
+  characters every POSIX shell expands. A remote login shell that is zsh with the
+  non-default `extendedglob` option set also treats `^`, `#` and `~` as glob operators, and
+  those are not checked. Keep `extendedglob` off for the account this server logs in as.
+- **The `'any'` grammar entries are unverified claims, not proofs.** No test can show a
+  binary has no write mode at all. The mitigation is that every `'any'` entry in `READERS`
+  carries a source comment naming what was checked and what was found, and an entry with no
+  such claim accepts no arguments.
+
 ## Safe Deployment Guidelines
 
 1. **Never run as root.** Create a dedicated low-privilege service account.

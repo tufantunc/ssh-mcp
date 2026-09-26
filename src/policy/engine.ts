@@ -1,11 +1,12 @@
 import type {
   CommandClass,
+  ParsedCommand,
   PolicyConfig,
   PolicyEvaluation,
   Profile,
   ApprovalMode,
 } from '../types.js';
-import { classifyCommand, findForbiddenMatch } from './classifier.js';
+import { classifyCommand, findForbiddenMatch, formatReadOnlyRejection } from './classifier.js';
 import { OperatorError } from '../errors.js';
 
 export interface PolicyRules {
@@ -282,6 +283,11 @@ export class PolicyEngine {
     const parsed = classifyCommand(command);
     const allowedClasses = this.getAllowedClasses(profile);
     const classAllowed = allowedClasses.includes(parsed.class);
+    // Copied onto every branch below rather than just the role-binding one:
+    // `read-command`'s `enforceClass` check reads it off an `allow` decision,
+    // since a grammar-rejected reader is allowed as `safe` for most roles and
+    // only refused one layer up, in the tool itself.
+    const readOnlyRejection = parsed.readOnlyRejection;
 
     const denied = this.findDenyMatch(command);
     if (denied) {
@@ -291,6 +297,7 @@ export class PolicyEngine {
         binary: parsed.binary,
         ruleId: 'denylist',
         reason: denied,
+        readOnlyRejection,
       };
     }
 
@@ -305,7 +312,8 @@ export class PolicyEngine {
         commandClass: parsed.class,
         binary: parsed.binary,
         ruleId: 'role-binding',
-        reason: this.explainRoleDenial(profile, parsed.class),
+        reason: this.explainRoleDenial(profile, parsed),
+        readOnlyRejection,
       };
     }
 
@@ -319,6 +327,7 @@ export class PolicyEngine {
           binary: parsed.binary,
           ruleId: 'approval-policy',
           reason: `Profile "${profile.name}" denies ${parsed.class} commands (approvalPolicy = "deny")`,
+          readOnlyRejection,
         };
       }
       return {
@@ -327,6 +336,7 @@ export class PolicyEngine {
         binary: parsed.binary,
         ruleId: 'approval-policy',
         reason: `Profile "${profile.name}" requires approval for ${parsed.class} commands`,
+        readOnlyRejection,
       };
     }
 
@@ -335,6 +345,7 @@ export class PolicyEngine {
       commandClass: parsed.class,
       binary: parsed.binary,
       ruleId: 'default',
+      readOnlyRejection,
     };
   }
 
@@ -466,31 +477,42 @@ export class PolicyEngine {
    * guessed from its name, so the reason is something the operator never wrote
    * down anywhere and cannot see.
    */
-  private explainRoleDenial(profile: Profile, commandClass: CommandClass): string {
+  private explainRoleDenial(profile: Profile, parsed: ParsedCommand): string {
+    const commandClass = parsed.class;
+    let reason: string;
+
     if (profile.readOnly) {
-      return `Profile "${profile.name}" is read-only, so "${commandClass}" commands are refused. ` +
+      reason = `Profile "${profile.name}" is read-only, so "${commandClass}" commands are refused. ` +
         `Clear readOnly on the profile to allow them.`;
+    } else {
+      const group = resolveProfileGroup(profile);
+      const inferred = !profile.group;
+      const allowed = this.getAllowedClasses(profile).join(', ');
+
+      reason =
+        `Role "${profile.role}" on host group "${group}" cannot run "${commandClass}" commands ` +
+        `(allowed: ${allowed}).`;
+
+      if (inferred) {
+        // Not "defaulted to the most restrictive tier": the name is matched
+        // against prod/staging/dev first, so a profile called "staging-web" lands
+        // on staging and the old wording described a fallback that did not
+        // happen. What the operator needs to know is that nothing they wrote
+        // chose this tier.
+        reason +=
+          ` No group is set for profile "${profile.name}", so the tier was inferred from its name as "${group}".` +
+          ` Set group explicitly on the profile, or pass --group, if that is not where this host belongs.`;
+      } else {
+        reason += ` Change the profile's group, or grant the class to this role in the policy's roleBindings.`;
+      }
     }
 
-    const group = resolveProfileGroup(profile);
-    const inferred = !profile.group;
-    const allowed = this.getAllowedClasses(profile).join(', ');
-
-    let reason =
-      `Role "${profile.role}" on host group "${group}" cannot run "${commandClass}" commands ` +
-      `(allowed: ${allowed}).`;
-
-    if (inferred) {
-      // Not "defaulted to the most restrictive tier": the name is matched
-      // against prod/staging/dev first, so a profile called "staging-web" lands
-      // on staging and the old wording described a fallback that did not
-      // happen. What the operator needs to know is that nothing they wrote
-      // chose this tier.
-      reason +=
-        ` No group is set for profile "${profile.name}", so the tier was inferred from its name as "${group}".` +
-        ` Set group explicitly on the profile, or pass --group, if that is not where this host belongs.`;
-    } else {
-      reason += ` Change the profile's group, or grant the class to this role in the policy's roleBindings.`;
+    // A `safe` command refused here is often not a hard "no" — it is one
+    // argv word away from `read-only`, and without this the reader concludes
+    // the binary is forbidden outright and never learns which spelling would
+    // have worked.
+    if (parsed.readOnlyRejection) {
+      reason += ` ${formatReadOnlyRejection(parsed.readOnlyRejection)}`;
     }
 
     return reason;

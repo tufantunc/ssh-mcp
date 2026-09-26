@@ -121,10 +121,15 @@ describe('the two questions the read-only allowlist used to answer', () => {
     // .toBe('boolean')` is true whether `readOnly` is `true` or `false`, so
     // flipping `find.operandsAreData`, `stat.readOnly` or
     // `journalctl.operandsAreData` to `false` passed it — measured. Every entry
-    // is `{ readOnly: true, operandsAreData: true }` today, so that is the
-    // literal shape each one must equal.
+    // is `{ readOnly: true, operandsAreData: true }` today, checked field by
+    // field rather than with `toEqual` on the whole entry: Task 3 gave every
+    // entry a third required field, `grammar` (an `ArgGrammar`, checked by its
+    // own table test in proven-read.test.ts), and a whole-object `toEqual`
+    // against a two-key literal would fail on that field's addition alone,
+    // which is a shape change this test was never meant to police.
     for (const [name, entry] of Object.entries(READERS)) {
-      expect(entry, name).toEqual({ readOnly: true, operandsAreData: true });
+      expect(entry.readOnly, name).toBe(true);
+      expect(entry.operandsAreData, name).toBe(true);
     }
     expect(Object.keys(READERS).length).toBe(68);
   });

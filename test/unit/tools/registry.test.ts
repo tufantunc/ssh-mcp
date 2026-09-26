@@ -67,6 +67,19 @@ describe('read-command — enforceClass', () => {
     expect(res.isError).toBe(true);
     expect(h.execCalls).toHaveLength(0);
   });
+
+  // Task 5: a reader whose grammar rejected one of its argv words falls to
+  // `safe`, one class short of what this tool demands. The refusal should say
+  // which word cost it read-only status, not just that it was not read-only.
+  it('refuses a grammar-rejected reader and names the binary and the word', async () => {
+    h = await createHarness();
+    const res = await call('read-command', { command: 'journalctl --foo' });
+    expect(res.isError).toBe(true);
+    expect(h.execCalls).toHaveLength(0);
+    const text = textOf(res);
+    expect(text).toContain('journalctl');
+    expect(text).toContain('--foo');
+  });
 });
 
 describe('run-command — approval gate', () => {

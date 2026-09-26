@@ -159,6 +159,17 @@ export interface ParsedCommand {
   binary: string;
   fullCommand: string;
   class: CommandClass;
+  /**
+   * Set only when `class` is the outer `safe` produced by a reader's grammar
+   * rejecting one of its argv words — never when a nested or synthetic class
+   * raised the result above `safe`, and never when the command was not a
+   * reader at all. `binary` is the `READERS` key that matched (which, for a
+   * two-word entry, is the two-word prefix); `word` is the argv word (or, for
+   * an operand-count/`each` violation, the offending operand; for a value
+   * flag left with nothing to consume, the flag itself) the grammar would not
+   * accept. See `classifyCommand` in `policy/classifier.ts`.
+   */
+  readOnlyRejection?: { binary: string; word: string };
 }
 
 // ─── Policy Types ───────────────────────────────────────────────────────────
@@ -171,6 +182,8 @@ export interface PolicyEvaluation {
   binary: string;
   ruleId?: string;
   reason?: string;
+  /** Copied from the parsed command's `readOnlyRejection`; see `ParsedCommand`. */
+  readOnlyRejection?: { binary: string; word: string };
 }
 
 // ─── Credential Types ───────────────────────────────────────────────────────

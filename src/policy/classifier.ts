@@ -1,5 +1,6 @@
 import type { CommandClass, ParsedCommand } from '../types.js';
 import { AWK_NAMES, readAwkInvocation, type AwkFindings } from './awk.js';
+import { matchesGrammar, type ArgGrammar } from './reader-grammar.js';
 
 /**
  * Anything through which the shell can start a second command.
@@ -21,18 +22,94 @@ import { AWK_NAMES, readAwkInvocation, type AwkFindings } from './awk.js';
 const SHELL_CONTROL_CHARS = /[;&|<>`$(){}\n\r]/;
 
 /**
+ * The first word in `command` carrying an unquoted, unescaped shell glob
+ * character — `*`, `?` or `[` — or null when no word does.
+ *
+ * A glob character is not a shell control character (it starts no command),
+ * so `SHELL_CONTROL_CHARS` rightly ignores it — but the host shell expands
+ * it before the binary sees argv, and the grammar matcher reads dequoted
+ * words, where `find -name '*.conf'` and `find -name *.conf` have become the
+ * same string. They are not the same command: the quoted word is one operand
+ * of data, the unquoted one expands to every matching filename and turns one
+ * counted operand into several real ones (`uniq /root/.ssh/id_ed25519*`
+ * counted one operand; measured on debian:12, the expansion made the `.pub`
+ * uniq's OUTFILE and it was overwritten with the private key). This scan
+ * keeps the tokeniser's own quote and escape state, so the judgement happens
+ * at the one layer that can still tell the two apart.
+ *
+ * Deliberately word-scoped and whole-command: a glob inside `$()` or
+ * backticks never reaches this helper's caller (those carry
+ * SHELL_CONTROL_CHARS and return early), and a glob in the command word
+ * itself makes the allowlist lookup miss, so the caller — the allowlist
+ * branch, which only runs when the command words matched a READERS key
+ * exactly — never sees one either.
+ */
+function firstUnquotedGlobWord(command: string, honorQuotes = true): string | null {
+  let quote: string | null = null;
+  let escaped = false;
+  let word = '';
+  let globInWord = false;
+
+  for (const ch of command) {
+    if (escaped) {
+      // A backslash-quoted glob character is data the shell passes through.
+      word += ch;
+      escaped = false;
+      continue;
+    }
+    if (quote) {
+      // Backslash is literal inside single quotes; inside double quotes it
+      // escapes — the same distinction the tokeniser makes.
+      if (ch === '\\' && quote === '"') { escaped = true; continue; }
+      if (ch === quote) quote = null;
+      else word += ch;
+      continue;
+    }
+    if (ch === '\\') { escaped = true; continue; }
+    if (honorQuotes && (ch === '"' || ch === "'")) { quote = ch; continue; }
+    if (/\s/.test(ch)) {
+      if (globInWord) return word;
+      word = '';
+      globInWord = false;
+      continue;
+    }
+    if (ch === '*' || ch === '?' || ch === '[') globInWord = true;
+    word += ch;
+  }
+
+  // A quote left open at the end is not a command a shell would run, and the
+  // tokeniser re-reads such a string with quotes demoted to text (see
+  // `tokenizeSegmentsDetailed`). Judge it the same way here: in that reading
+  // the glob character is unquoted.
+  if (honorQuotes && quote !== null) return firstUnquotedGlobWord(command, false);
+  return globInWord ? word : null;
+}
+
+/**
  * The binaries this classifier will vouch for, and what it vouches for about them.
  *
- * Two questions, kept apart because one Set answering both is how #217 turned the
- * interpreter carrier scan off for two verbs by adding them to a list about
- * classes:
+ * Three questions, kept apart because one Set answering all of them is how #217
+ * turned the interpreter carrier scan off for two verbs by adding them to a list
+ * about classes:
  *
  *   readOnly         does this binary only read?  -> decides the class
  *   operandsAreData  can its operands hide a command?  -> decides whether the
  *                    carrier scan runs
+ *   grammar          which of its argv words does `matchesGrammar` accept?  ->
+ *                    decides `read-only` versus `safe`
  *
- * Both are `true` for every entry today. The value is not the contents but that
- * the type will not let the next person add a name without answering both.
+ * `readOnly` and `operandsAreData` are `true` for every entry today. The value is
+ * not the contents but that the type will not let the next person add a name
+ * without answering all three.
+ *
+ * `grammar` decides only that one boundary, not the class outright: a command
+ * whose grammar rejects falls no lower than `safe`, and `DISQUALIFYING_ARGS`
+ * still runs before the allowlist branch, so it can still raise a rejected — or
+ * an accepted — reader past `safe` (`sort -o /tmp/x /etc/passwd` is
+ * `destructive` regardless of what `sort`'s grammar says). An `'any'` grammar
+ * accepts every word and carries an `audit` string saying why that trust is
+ * believed sound; every other entry lists the flags and operand shape its
+ * grammar accepts, and starts with none of either — see `reader-grammar.ts`.
  *
  * Two mechanisms answer the second question outside this table and are not
  * affected by it — `DISQUALIFYING_ARGS` and `FIND_EXEC_FLAGS` — which is why
@@ -40,77 +117,415 @@ const SHELL_CONTROL_CHARS = /[;&|<>`$(){}\n\r]/;
  * still `privileged`.
  *
  * The two-word entries are looked up only for the class: `operandsAreData` reads
- * a single word, so those rows never reach the second question.
+ * a single word, so those rows never reach the second question. Their `grammar`
+ * reads the words after the two-word prefix (`classifyOuter` applies the offset).
  */
-const READERS: Record<string, { readOnly: boolean; operandsAreData: boolean }> = {
-  "arp":              { readOnly: true, operandsAreData: true },
-  "basename":         { readOnly: true, operandsAreData: true },
-  "cat":              { readOnly: true, operandsAreData: true },
-  "comm":             { readOnly: true, operandsAreData: true },
-  "cut":              { readOnly: true, operandsAreData: true },
-  "date":             { readOnly: true, operandsAreData: true },
-  "df":               { readOnly: true, operandsAreData: true },
-  "diff":             { readOnly: true, operandsAreData: true },
-  "dig":              { readOnly: true, operandsAreData: true },
-  "dirname":          { readOnly: true, operandsAreData: true },
-  "docker images":    { readOnly: true, operandsAreData: true },  // two-word: class only
-  "docker inspect":   { readOnly: true, operandsAreData: true },  // two-word: class only
-  "docker logs":      { readOnly: true, operandsAreData: true },  // two-word: class only
-  "docker ps":        { readOnly: true, operandsAreData: true },  // two-word: class only
-  "docker stats":     { readOnly: true, operandsAreData: true },  // two-word: class only
-  "du":               { readOnly: true, operandsAreData: true },
-  "echo":             { readOnly: true, operandsAreData: true },
-  "false":            { readOnly: true, operandsAreData: true },
-  "file":             { readOnly: true, operandsAreData: true },
-  "find":             { readOnly: true, operandsAreData: true },
-  "free":             { readOnly: true, operandsAreData: true },
-  "git branch":       { readOnly: true, operandsAreData: true },  // two-word: class only
-  "git diff":         { readOnly: true, operandsAreData: true },  // two-word: class only
-  "git log":          { readOnly: true, operandsAreData: true },  // two-word: class only
-  "git remote":       { readOnly: true, operandsAreData: true },  // two-word: class only
-  "git show":         { readOnly: true, operandsAreData: true },  // two-word: class only
-  "git status":       { readOnly: true, operandsAreData: true },  // two-word: class only
-  "grep":             { readOnly: true, operandsAreData: true },
-  "head":             { readOnly: true, operandsAreData: true },
-  "host":             { readOnly: true, operandsAreData: true },
-  "hostname":         { readOnly: true, operandsAreData: true },
-  "htop":             { readOnly: true, operandsAreData: true },
-  "id":               { readOnly: true, operandsAreData: true },
-  "ifconfig":         { readOnly: true, operandsAreData: true },
-  "iostat":           { readOnly: true, operandsAreData: true },
-  "ip addr":          { readOnly: true, operandsAreData: true },  // two-word: class only
-  "ip route":         { readOnly: true, operandsAreData: true },  // two-word: class only
-  "journalctl":       { readOnly: true, operandsAreData: true },
-  "ls":               { readOnly: true, operandsAreData: true },
-  "netstat":          { readOnly: true, operandsAreData: true },
-  "nslookup":         { readOnly: true, operandsAreData: true },
-  "ping":             { readOnly: true, operandsAreData: true },
-  "printenv":         { readOnly: true, operandsAreData: true },
-  "printf":           { readOnly: true, operandsAreData: true },
-  "ps":               { readOnly: true, operandsAreData: true },
-  "pwd":              { readOnly: true, operandsAreData: true },
-  "readlink":         { readOnly: true, operandsAreData: true },
-  "realpath":         { readOnly: true, operandsAreData: true },
-  "seq":              { readOnly: true, operandsAreData: true },
-  "sort":             { readOnly: true, operandsAreData: true },
-  "ss":               { readOnly: true, operandsAreData: true },
-  "stat":             { readOnly: true, operandsAreData: true },
-  "systemctl status": { readOnly: true, operandsAreData: true },  // two-word: class only
-  "tail":             { readOnly: true, operandsAreData: true },
-  "test":             { readOnly: true, operandsAreData: true },
-  "top":              { readOnly: true, operandsAreData: true },
-  "tr":               { readOnly: true, operandsAreData: true },
-  "traceroute":       { readOnly: true, operandsAreData: true },
-  "true":             { readOnly: true, operandsAreData: true },
-  "uname":            { readOnly: true, operandsAreData: true },
-  "uniq":             { readOnly: true, operandsAreData: true },
-  "uptime":           { readOnly: true, operandsAreData: true },
-  "vmstat":           { readOnly: true, operandsAreData: true },
-  "wc":               { readOnly: true, operandsAreData: true },
-  "whereis":          { readOnly: true, operandsAreData: true },
-  "which":            { readOnly: true, operandsAreData: true },
-  "who":              { readOnly: true, operandsAreData: true },
-  "whoami":           { readOnly: true, operandsAreData: true },
+const READERS: Record<string, { readOnly: boolean; operandsAreData: boolean; grammar: ArgGrammar }> = {
+  // arp: `-a`/`-e`/`-n`/`-v` only display; `-H`/`-t` (hardware type) and `-i`
+  // (interface) filter the display, not set anything. Excludes `-d` (deletes an
+  // entry), `-s`/`-S` (adds one — BSD man synopsis) and `-f` (loads entries from
+  // a file — net-tools arp(8)). Measured: busybox --help + `arp -a`; macOS man
+  // arp read; net-tools arp(8) documented only (die.net). Windows 11 build
+  // 26200 measurement: `arp.exe` accepts the slash form (`/a` measured),
+  // `/d`/`/s` inferred (not run — a state-changing form is never executed to
+  // confirm it) as delete/add. A `/X` switch is an operand under this POSIX
+  // grammar and cannot be told apart from a path like `/etc`; `each` refuses
+  // any single-segment `/word` operand, with or without a trailing slash
+  // (see the design's Windows section) — the trailing-slash tolerance of
+  // `arp /d/`-style forms cannot be measured without running a state-changing
+  // form, so it is refused fail-closed. The cost is that a legitimate
+  // slash-form display like `arp /a` also falls to `safe`.
+  "arp":              { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-a', '-e', '-n', '-v'],
+    valueFlags: ['-H', '-t', '-i'],
+    operands: { max: 1, each: /^(?!\/[^/]*\/?$)/ } } },
+  "basename":         { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: pure string manipulation of its argument; no filesystem access at all' } },
+  "cat":              { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: "measured GNU/busybox/BSD: writes file contents to stdout; BSD's -l is a transient advisory lock on cat's own stdout fd, not a lasting write, and clears at exit" } },
+  "comm":             { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: compares two sorted files and prints the differences; no output-file operand or flag' } },
+  "cut":              { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: "measured GNU/BSD: extracts byte/field ranges to stdout; --output-delimiter only changes what's printed, not where" } },
+  // date: `-u`/`--utc`/`--universal` and `-R`/`--rfc-2822`/`--rfc-email` only
+  // change display format; `-r`/`--reference` reads a file's mtime (GNU) or an
+  // epoch value (BSD); `--rfc-3339` picks a display format; `-v` (BSD) only
+  // shows the adjusted time ("not actually set", man). `-I`/`--iso-8601` is
+  // optional-value (getopt's `::`): it IS listed, in `optionalValueFlags`, so a
+  // bare `-I`/`--iso-8601` or an attached form (`-Iseconds`, `--iso-8601=date`)
+  // stays read-only — the matcher just never consumes a following SEPARATE
+  // word as its value. A bare `+FMT` operand is accepted (`max: 1`, `each:
+  // /^\+/`); excludes `-s`/`--set` (sets the clock),
+  // `-d`/`--date` (read the same way on GNU/busybox but historically set the
+  // kernel DST flag on BSD — man HISTORY / FreeBSD "added and then removed
+  // again" — dropped because implementations disagree) and BSD-only
+  // `-D`/`-f`/`-j`/`-n`. Measured: GNU d12+trixie --help, busybox (`date -d
+  // 2020-01-01` displayed), macOS man; FreeBSD date(1) documented only.
+  "date":             { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-u', '--utc', '--universal', '-R', '--rfc-2822', '--rfc-email'],
+    valueFlags: ['-r', '--reference', '--rfc-3339', '-v'],
+    optionalValueFlags: ['-I', '--iso-8601'],
+    operands: { max: 1, each: /^\+/ } } },
+  "df":               { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/busybox/BSD: reports space usage read from mounted filesystems; --output= selects columns to print, not a file' } },
+  // diff: comparison/output-format flags only, plus value flags that read or
+  // match (`-D`/`--ifdef` merges to stdout, not a file). `-C`/`-U` ARE
+  // required-value (`valueFlags`) — GNU, BSD and busybox all take the short
+  // form with a count, attached or as a separate word; only the long
+  // spellings `--context`/`--unified`/`--color` are optional-value
+  // (`optionalValueFlags`: bare or `=value`, never a separate word). Moved
+  // here from the design round's 'any' guess: `-l`/`--paginate` pipes output
+  // through
+  // `/usr/bin/pr` — measured on debian:12, removing `/usr/bin/pr` turns it into
+  // "subsidiary program '/usr/bin/pr' not found", and it runs the absolute path
+  // regardless of PATH, so it is excluded rather than listed. Measured: GNU
+  // --help (d12 + trixie 3.10) and the -l behaviour; BSD man (also has -l);
+  // busybox --help (no -l).
+  "diff":             { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-q', '--brief', '-s', '--report-identical-files', '-c', '-u', '-e', '--ed', '-n', '--rcs',
+      '-y', '--side-by-side', '--left-column', '--suppress-common-lines', '-p', '--show-c-function',
+      '-t', '--expand-tabs', '-T', '--initial-tab', '--suppress-blank-empty', '-r', '--recursive',
+      '--no-dereference', '-N', '--new-file', '--unidirectional-new-file', '--ignore-file-name-case',
+      '--no-ignore-file-name-case', '-i', '--ignore-case', '-E', '--ignore-tab-expansion', '-b',
+      '--ignore-space-change', '-w', '--ignore-all-space', '-B', '--ignore-blank-lines', '-a', '--text',
+      '--strip-trailing-cr', '-d', '--minimal'],
+    valueFlags: ['-C', '-U', '-W', '--width', '--tabsize', '-F', '--show-function-line', '-I',
+      '--ignore-matching-lines', '-D', '--ifdef', '--label', '-x', '--exclude', '-X', '--exclude-from',
+      '-S', '--starting-file', '--from-file', '--to-file', '--line-format'],
+    optionalValueFlags: ['--context', '--unified', '--color'],
+    operands: { max: 2 } } },
+  "dig":              { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured BIND 9.10.6 (BSD): sends a DNS query and prints the answer; writes nothing locally (DNS egress tracked separately)' } },
+  "dirname":          { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: pure string manipulation of its argument; no filesystem access at all' } },
+  "docker images":    { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured docker CLI 29.7.2 --help: lists local images from the daemon; every option only changes what is listed, no state change' } },  // two-word: class only
+  "docker inspect":   { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: "measured docker CLI 29.7.2 --help: prints low-level JSON about an object; no state change" } },  // two-word: class only
+  "docker logs":      { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: "measured docker CLI 29.7.2 --help: prints a container's captured output; no state change" } },  // two-word: class only
+  "docker ps":        { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured docker CLI 29.7.2 --help: lists containers; no state change' } },  // two-word: class only
+  "docker stats":     { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured docker CLI 29.7.2 --help: streams live resource-usage numbers; no state change' } },  // two-word: class only
+  "du":               { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/busybox/BSD: walks a directory tree and reports disk usage; no write mode' } },
+  "echo":             { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: writes its arguments to stdout only; a file write needs shell redirection, which the outer gate already refuses' } },
+  "false":            { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU: exits 1 immediately; no I/O of any kind' } },
+  // file: display/format flags, plus value flags that name what to read (a list
+  // of files, a magic database, an exclusion). Excludes `-C`/`--compile`, which
+  // was **measured to write**: on the local macOS file 5.41, `file -C -m
+  // /usr/share/file/magic/magic` created `magic.mgc` (2256 bytes) in a
+  // throwaway directory. GNU is documented only (file(1), die.net 5.04: "-C …
+  // is the only option that creates a file") — GNU file is absent from every
+  // measured image (see spec Question 3). Also excludes `-z`/`-Z`
+  // (uncompress/uncompress-noreport — audit.md lists them as no-value):
+  // libmagic may run an external decompressor program when it isn't built
+  // against the matching decompression library (documented, not measured;
+  // the contract forbids executing another program), so they stay off this
+  // list even though audit.md's own per-entry table has them. No
+  // optional-value option in this set; `-p`/`--preserve-date` is excluded as
+  // unnecessary rather than unsafe.
+  "file":             { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-b', '--brief', '-c', '--checking-printout', '-i', '--mime', '--mime-type', '--mime-encoding',
+      '-k', '--keep-going', '-L', '--dereference', '-h', '--no-dereference', '-n', '--no-buffer',
+      '-r', '--raw', '-s', '--special-files', '-0', '--print0'],
+    valueFlags: ['-f', '--files-from', '-m', '--magic-file', '-M', '-e', '--exclude', '-F', '--separator'] } },
+  // find: `exact` because find parses its own predicates rather than through
+  // getopt and recognises no clustering or abbreviation — measured, `find .
+  // -exe` is "unknown predicate `-exe`". No-value predicates/operators plus
+  // value predicates that read metadata to test against; `-printf` writes to
+  // stdout, not a file (its file-writing sibling `-fprintf` is excluded, see
+  // below). Excludes the writing/executing family — `-delete`, `-exec`,
+  // `-execdir`, `-ok`, `-okdir` (also caught by DISQUALIFYING_ARGS first),
+  // `-fprint`, `-fprint0`, `-fprintf`, `-fls` (write to a file) — and a handful
+  // of read-only-but-unnecessary predicates left out rather than
+  // exhaustively listed (`-files0-from`, `-quit`, `-prune`, `-fstype`,
+  // `-newerXY`, `-regextype`, `-D`). No operand rule: start paths and `(`/`)`
+  // pass through as operands, and the Windows `find.exe` measurement in the
+  // design round found it read-only, so no `each` rule is needed here.
+  // Measured: GNU d12 --help; busybox (`find /tmp/t -name '*.conf' -type f`
+  // ran; `-ls`/`-printf` are absent from busybox find, which refuses them
+  // itself, fail-closed); BSD man.
+  "find":             { readOnly: true, operandsAreData: true, grammar: { args: 'exact',
+    flags: ['-H', '-L', '-P', '-print', '-print0', '-ls', '-not', '-a', '-and', '-o', '-or', '-true', '-false',
+      '-empty', '-xdev', '-mount', '-depth', '-daystart', '-executable', '-readable', '-writable'],
+    valueFlags: ['-name', '-iname', '-path', '-ipath', '-wholename', '-iwholename', '-regex', '-iregex',
+      '-type', '-perm', '-user', '-group', '-uid', '-gid', '-size', '-mtime', '-mmin', '-atime', '-amin',
+      '-ctime', '-cmin', '-newer', '-anewer', '-cnewer', '-links', '-inum', '-maxdepth', '-mindepth',
+      '-printf'] } },
+  "free":             { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured busybox; documented (procps free(1)): reports memory usage parsed from /proc; every option only changes units or format' } },
+  // git branch: listing/display flags plus optional-value flags kept out of
+  // valueFlags (rule 1; `--contains HEAD`'s operand is refused by `max: 0`
+  // anyway — an accepted cost). `--sort=<key>` is the one required-value flag.
+  // `max: 0` excludes the operand form: a bare `git branch NAME` CREATES a
+  // branch (measured, `refs/heads/side` was created), so no operand budget is
+  // safe to grant here. Excludes `-d`/`-D` (deletes; `git branch -D main`
+  // measured elsewhere in this advisory round), `-m`/`-M` (moves/renames —
+  // already blocked by `max: 0` since both need an operand) and
+  // `--edit-description` (opens an editor). Measured: git 2.55.0 on macOS
+  // (`git branch side` + `git for-each-ref`; `--help`).
+  "git branch":       { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-a', '--all', '-r', '--remotes', '-v', '--verbose', '-q', '--quiet', '--list', '--show-current'],
+    valueFlags: ['--sort'],
+    optionalValueFlags: ['--color', '--contains', '--merged', '--no-merged'],
+    operands: { max: 0 } } },
+  // git diff: display/format flags, plus `-M`/`--find-renames`,
+  // `-C`/`--find-copies`, `-U`/`--unified`, `--color`, `--word-diff` and
+  // `--stat` as optional-value (`optionalValueFlags`): `-U5` and `--unified=5` both stay
+  // read-only (the attached value is fine); only a following SEPARATE word is
+  // never consumed as the value, which is why the plain `-u` still exists as
+  // the no-value form. `--diff-filter`/`-S`/`-G`/`-O` all read or search, never
+  // write. No operand
+  // rule (revision/path). Excludes `--output` — **measured to write**: on a
+  // scratch checkout, `git diff --output=diffout.txt` created a 93-byte file
+  // (the design round had this only as documented). Measured: git 2.55.0.
+  "git diff":         { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-p', '-u', '--patch', '--name-only', '--name-status', '--cached', '--staged', '--raw', '-w',
+      '--ignore-all-space', '-b', '--ignore-space-change', '--summary', '--shortstat', '--exit-code',
+      '--quiet', '-R', '--no-color', '--first-parent'],
+    valueFlags: ['--diff-filter', '-S', '-G', '-O'],
+    optionalValueFlags: ['-M', '--find-renames', '-C', '--find-copies', '-U', '--unified', '--color',
+      '--word-diff', '--stat'] } },
+  // git log: display/format flags, plus optional-value flags kept out of
+  // valueFlags (rule 1). No operand rule (revision/path, including anything
+  // after `--`). Excludes `--output` — **measured to write**: `git log
+  // --output=out.txt HEAD` created a 113-byte file on a scratch checkout
+  // (`.git/index` unchanged). `numericShort: true` is required because the
+  // corpus needs `git log --oneline -20`: git's own `-<n>` revision-limit
+  // shortcut is scanned character by character by real getopt, so no
+  // `flags`/`valueFlags` entry can name the word `-20` itself — this is the
+  // matcher capability the design round's audit asked for, harmless for `git
+  // show` too. Measured: git 2.55.0 (`git log --oneline` called; index
+  // unchanged).
+  "git log":          { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['--oneline', '--graph', '--all', '-p', '-u', '--patch', '--name-only', '--name-status',
+      '--abbrev-commit', '--relative-date', '--reverse', '--topo-order', '--date-order', '--parents',
+      '--merges', '--no-merges'],
+    valueFlags: ['-n', '--max-count', '--since', '--until', '--author', '--grep', '--date', '-S', '-G',
+      '--skip'],
+    optionalValueFlags: ['--pretty', '--format', '--decorate', '--branches', '--tags', '--remotes',
+      '--stat', '-L'],
+    numericShort: true } },
+  // git remote: `-v`/`--verbose` and the two verbose-adjacent no-value flags
+  // only display. `first: ['get-url']`, `max: 2` — a bare `git remote`
+  // and `git remote -v` are both valid (0 operands). `show` was removed from
+  // `first` by the final review: `git remote show <URL>` accepts a URL
+  // (measured, git 2.55.0) and runs ssh / `git-remote-<helper>` against the
+  // caller-chosen target, so the subcommand is excluded and a viewer loses
+  // `git remote show origin` (priced cost). Excludes `add` (writes
+  // config — measured, `git remote add` wrote `[remote "origin"]` into
+  // `.git/config`), `rename`, `remove`/`rm`, `set-url`, `set-head` (all write),
+  // `prune` (deletes remote-tracking refs) and `update` (fetches — changes
+  // refs). Measured: git 2.55.0.
+  "git remote":       { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-v', '--verbose', '-n', '--push'],
+    operands: { max: 2, first: ['get-url'] } } },
+  // git show: display/format flags, plus `--pretty`, `--format`, `--decorate`
+  // and `--stat` as optional-value (`optionalValueFlags`: bare or `=value`, a
+  // following separate word is never consumed) and `--date` as the one
+  // required-value flag. No operand rule (HEAD, commit, tag, …). Excludes
+  // `--output` — same write measured for `git log`/`git diff`, same option
+  // family. `numericShort: true` for the same `-<n>` shortcut `git log` needs
+  // (`git show -3`). Measured: git 2.55.0 (the sibling `--output` write was
+  // re-measured this round).
+  "git show":         { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-s', '--no-patch', '--name-only', '--name-status', '--oneline', '--abbrev-commit', '--raw'],
+    valueFlags: ['--date'],
+    optionalValueFlags: ['--pretty', '--format', '--decorate', '--stat'],
+    numericShort: true } },
+  "git status":       { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured git 2.55.0: opportunistically refreshes cached stat data in .git/index when stale; writes no content, ref or config; host can disable via GIT_OPTIONAL_LOCKS=0' } },  // two-word: class only
+  "grep":             { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/busybox/BSD: searches input for a pattern and prints matches; no option writes a file or runs a program' } },
+  "head":             { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/busybox/BSD: prints the first lines of a file; no write mode' } },
+  "host":             { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured BIND 9.10.6 (BSD): sends a DNS query and prints the answer; writes nothing locally (DNS egress tracked separately)' } },
+  // hostname: display flags only, no value flags. `operands: { max: 0 }` — a
+  // bare `hostname NAME` SETS the hostname on every implementation (GNU --help
+  // usage line, busybox `[-sidf] [HOSTNAME | -F FILE]`, BSD man), so no operand
+  // budget above zero is safe. Excludes `-F`/`--file` (sets from a file),
+  // `-b`/`--boot` (sets a default hostname when none is configured — GNU
+  // --help) and `-y`/`--yp`/`--nis` (sets the NIS domain via an operand `max:
+  // 0` already refuses — left out as unnecessary rather than unsafe). Measured:
+  // GNU hostname 3.21/3.25 --help; busybox (`hostname -s`); macOS man (`[-f]
+  // [-s | -d]`).
+  "hostname":         { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-a', '--alias', '-A', '--all-fqdns', '-d', '--domain', '-f', '--fqdn', '--long', '-i',
+      '--ip-address', '-I', '--all-ip-addresses', '-s', '--short'],
+    operands: { max: 0 } } },
+  "htop":             { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: "documented (htop(1) + FILES section, 2.x/3.x): no CLI option writes or executes; kill/renice are interactive keys (F7/F8/F9), unreachable by a read-only caller; ~/.config/htop/htoprc is written only after an interactive Setup change on clean exit; not measured — htop is absent from every image and from macOS" } },
+  "id":               { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: "measured GNU/BSD: prints the caller's uid/gid/groups; no write mode" } },
+  // ifconfig: display flags/filters only (BSD's `-l -m -d -u -v -L -r -C`
+  // format the listing), plus a BSD output-format value flag. `operands: { max:
+  // 1 }` — a bare `ifconfig eth0` only SHOWS that interface's status; a second
+  // operand (address, `up`/`down`, `netmask`, `hw`, `mtu`, `add`/`del`,
+  // `destroy`, …) configures it and is refused. `optionsBeforeOperands:
+  // true` (final-review fix): BSD ifconfig reads options only before the
+  // interface operand, and macOS accepts the same letters after it as
+  // interface settings — `ifconfig en0 -av`/`-dad` change settings from
+  // letters this grammar lists — so an option-looking word after the operand
+  // is refused rather than read as a listed flag. Measured: busybox --help +
+  // `ifconfig -a` (usage line is `[-a] [IFACE] [ADDRESS]` — everything from
+  // ADDRESS on is a write); BSD man synopsis; net-tools ifconfig(8) documented
+  // only ("Otherwise, it configures the interface").
+  "ifconfig":         { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-a', '-s', '-l', '-m', '-d', '-u', '-v', '-L', '-r', '-C'],
+    valueFlags: ['-f'],
+    optionsBeforeOperands: true,
+    operands: { max: 1 } } },
+  "iostat":           { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured busybox; documented (sysstat iostat(1)): reports kernel I/O statistics; no write mode' } },
+  // ip addr: no options at all — a global flag like `-4`/`-6`/`-o` sits before
+  // the two-word prefix, so `ip -4 addr show` never even reaches the two-word
+  // match and is refused visibly (accepted cost). `first: ['show', 'list']`:
+  // "add"/"del"/"flush" cannot be the first operand; after `show`/`list`,
+  // operands like `dev eth0`, `to PREFIX`, `label`, `scope` are free, and a
+  // bare `ip addr` is valid (vacuous `first`). Abbreviations (`ip a`, `ip ad
+  // sh`) are documented in GNU but refused here since the grammar requires the
+  // full two words — accepted cost. Measured: busybox (`ip addr show`, `ip
+  // addr list`, bare `ip addr` all ran); GNU ip(8) documented only (man7: "show
+  // (or list)").
+  "ip addr":          { readOnly: true, operandsAreData: true, grammar: { args: 'exact', operands: { first: ['show', 'list'] } } },  // two-word: class only
+  // ip route: `first: ['show', 'list', 'get']` — `get ADDR` is a read-only
+  // query (ip-route(8): "no packets are actually sent"). Excludes `add`,
+  // `del`, `change`, `append`, `replace`, `flush`, `restore` (all write) and
+  // `save` (dumps to stdout, but its sibling `restore` writes, so the verb pair
+  // is left out entirely rather than split). Measured: busybox (`ip route
+  // list`, `ip route show` ran; `ip route get 10.0.0.1` queried without
+  // writing); GNU ip(8) + ip-route(8) documented only.
+  "ip route":         { readOnly: true, operandsAreData: true, grammar: { args: 'exact', operands: { first: ['show', 'list', 'get'] } } },  // two-word: class only
+  // journalctl: display/filter flags, plus `-n`/`--lines`, `-b`/`--boot` and
+  // `--facility` as optional-value (`optionalValueFlags`; journalctl(1): the
+  // argument may be omitted) — a bare word or an attached form (`-b1`,
+  // `--boot=2`) stays read-only, but the matcher never consumes a following
+  // SEPARATE word as the value, so `-b -1` still refuses on the unrecognised
+  // `-1` (an accepted cost, not a claim that every attached spelling is
+  // refused). No operand rule (unit names/match patterns — reads). Excludes
+  // the archive-mutating
+  // family — `--vacuum-time`/`--vacuum-size` (deletes archived journals;
+  // `--vacuum-time=1s` measured destructive elsewhere in this advisory round),
+  // `--rotate` (measured elsewhere too), `--flush`/`--sync`/`--relinquish-var`
+  // (redirect the daemon's disk writes), `--setup-keys` (generates FSS keys)
+  // and `--verify`/`--verify-key`/`--root` (left out as unnecessary). Entirely
+  // documented only — journalctl(1) (man7, systemd 262~devel) — journalctl is
+  // absent from every measured image and from macOS.
+  "journalctl":       { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-f', '--follow', '-e', '--pager-end', '-r', '--reverse', '-k', '--dmesg', '-q', '--quiet',
+      '-x', '--catalog', '-a', '--all', '-l', '--full', '-m', '--merge', '--no-pager', '--no-hostname',
+      '--no-tail', '--disk-usage', '--header', '--list-boots', '--system', '--user'],
+    valueFlags: ['-u', '--unit', '--since', '--until', '-S', '-U', '-o', '--output', '-p', '--priority',
+      '-g', '--grep', '-t', '--identifier', '-D', '--directory'],
+    optionalValueFlags: ['-n', '--lines', '-b', '--boot', '--facility'] } },
+  "ls":               { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/busybox/BSD: lists directory entries; no write mode' } },
+  // netstat: ledger correction — moved from the design round's 'any' guess to
+  // a grammar; audit.md's main table still records this entry as 'any'
+  // ("every option is display"). The corrected reasons (progress.md ledger):
+  // FreeBSD netstat(1) documents `-z` as resetting counters (documented, not
+  // measured — excluded, not listed below), and `-p` is put in `flags` rather
+  // than `valueFlags` because it takes a value on BSD/Windows but takes none
+  // on net-tools (Linux) — listing it as a required-value flag would
+  // force-consume the next word on the implementation where it takes none.
+  // `-f`/`-I` are optional-value (`optionalValueFlags`). No operand rule
+  // needed. Measured: busybox + BSD (`netstat -rn`, etc.); net-tools
+  // netstat(8) documented only for anything beyond the measured set.
+  "netstat":          { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-a', '-n', '-t', '-u', '-l', '-p', '-r', '-i', '-s', '-e', '-W', '-x', '-w', '-4', '-6',
+      '-v', '-b', '-d', '-m'],
+    optionalValueFlags: ['-f', '-I'] } },
+  "nslookup":         { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured busybox/BSD: sends a DNS query; interactive mode does nothing beyond querying, and interactive input is unreachable by design (out of scope)' } },
+  "ping":             { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured busybox; documented (BSD man): sends ICMP echo requests and prints replies; writes nothing locally (ICMP egress tracked separately)' } },
+  "printenv":         { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: prints environment variables; no write mode' } },
+  "printf":           { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: writes formatted text to stdout only; a file write needs shell redirection, which the outer gate already refuses' } },
+  "ps":               { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: "measured busybox; documented (procps ps(1): 'works by reading /proc'): lists processes; no write mode" } },
+  "pwd":              { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: prints the working directory; no write mode' } },
+  "readlink":         { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: resolves a symlink; no write mode' } },
+  "realpath":         { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: resolves a canonical path; no write mode' } },
+  "seq":              { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: prints a numeric sequence to stdout; no write mode' } },
+  // sort: display/comparison flags only, plus `--check` as optional-value
+  // (`optionalValueFlags`): a bare `--check`, or an attached
+  // `--check=diagnose-first`/`--check=silent`, both stay read-only — a
+  // following SEPARATE word is never consumed as the value, which is why the
+  // plain `-c` still exists as the no-value form. Value flags read a key
+  // spec, a field separator, a buffer size or a parallelism count. No
+  // operand-count limit (multiple input files are legitimate). Windows 11
+  // build 26200 measurement: `sort.exe /O FILE IN` writes FILE,
+  // case-insensitive (`/o`), abbreviations accepted (`/OU`, `/OUTPUT`) — `-O`
+  // is not a switch, so nothing here already excludes it. A `/X` switch is an
+  // operand under this POSIX grammar and cannot be told apart from a path
+  // like `/etc`; `each` refuses any single-segment `/word` operand, with or
+  // without a trailing slash — the trailing-slash form re-measured on the VM
+  // 2026-09-26 (build 10.0.26200.9550, confined to %TEMP%): `/O/`, `/o/`,
+  // `/OU/`, `/OUTPUT/`, `/T/`, `/A/` are all "Invalid switch" and write
+  // nothing (control `/O` writes), but the rule is shared with `arp`, whose
+  // `/d`/`/s` slash tolerance cannot be measured without running a
+  // state-changing form, so it stays fail-closed. The cost is that an
+  // operand naming a file directly under `/` (`sort /data`), or such a
+  // directory with a trailing slash (`sort /etc/`), is refused too. Excludes `-o`/`--output`
+  // (writes — this advisory's own finding), `--compress-program` (executes a
+  // program — measured 14,224 times in the same finding), `-T`/`--temporary-directory`
+  // (chooses a write location; a viewer has no use for it, decided in the
+  // friction table) and `--random-source`/`--files0-from` (read a file but are
+  // unnecessary). `DISQUALIFYING_ARGS`'s own sort rule still runs before this
+  // grammar and can still raise the class; the grammar only ever draws the
+  // read-only/safe line. Measured: GNU d12 + trixie --help; busybox --help
+  // (rejects sort's long options itself: `sort: unrecognized option:
+  // key=2`); BSD man (same option family; BSD's own `-o` never reaches this
+  // grammar since it is not listed).
+  "sort":             { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-b', '-c', '-d', '-f', '-g', '-h', '-i', '-M', '-m', '-n', '-R', '-r', '-s', '-u', '-V', '-z',
+      '--ignore-leading-blanks', '--dictionary-order', '--ignore-case', '--general-numeric-sort',
+      '--human-numeric-sort', '--ignore-nonprinting', '--month-sort', '--merge', '--numeric-sort',
+      '--random-sort', '--reverse', '--stable', '--unique', '--version-sort', '--debug',
+      '--zero-terminated'],
+    valueFlags: ['-k', '--key', '-t', '--field-separator', '-S', '--buffer-size', '--sort', '--parallel'],
+    optionalValueFlags: ['--check'],
+    operands: { each: /^(?!\/[^/]*\/?$)/ } } },
+  // ss: entirely documented only — ss(8) (man7, iproute2); ss is absent from
+  // every measured image and from macOS. Display flags only, plus value flags
+  // that name a socket family/query/filter. Excludes `-K`/`--kill` (forcibly
+  // closes sockets), `-D`/`--diag` (dumps raw TCP info to a file), `-N`/`--net`
+  // (switches network namespace via setns) and `-b`/`--bpf` (admin); a handful
+  // of display-only-but-unnecessary flags left out rather than exhaustively
+  // listed (`-E`/`-T`/`-Q`/`-S`/`-M`/`-Z`/`-z`/`--tos`/`--cgroup`/…).
+  "ss":               { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-H', '--no-header', '-O', '--oneline', '-n', '--numeric', '-r', '--resolve', '-a', '--all',
+      '-l', '--listening', '-o', '--options', '-e', '--extended', '-m', '--memory', '-p', '--processes',
+      '-i', '--info', '-s', '--summary', '-t', '--tcp', '-u', '--udp', '-d', '--dccp', '-w', '--raw',
+      '-x', '--unix', '-4', '-6', '-0', '--packet'],
+    valueFlags: ['-f', '--family', '-A', '--query', '--socket', '-F', '--filter'] } },
+  "stat":             { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/busybox/BSD: prints file or filesystem status; no write mode' } },
+  // systemctl status: ledger correction — moved from the design round's 'any'
+  // guess to a grammar; audit.md's main table still records this entry as
+  // 'any' ("only reports run state and log; subcommands that mutate state are
+  // outside the two-word match"). The corrected reason (progress.md ledger):
+  // systemctl(1) documents `-H`/`--host` as running the operation over SSH
+  // (executes another program on another host) and `-M`/`--machine` as
+  // targeting a container/VM — both excluded, not listed below. `-n`/
+  // `--lines` and `-o`/`--output` are optional-value (`optionalValueFlags`).
+  // Entirely documented only — systemctl(1) (man7, systemd 262~devel) —
+  // absent from every measured image and from macOS.
+  "systemctl status": { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-l', '--full', '--no-pager', '-a', '--all', '-q', '--quiet', '--user', '--system', '-r',
+      '--recursive', '--no-legend'],
+    optionalValueFlags: ['-n', '--lines', '-o', '--output'] } },  // two-word: class only
+  "tail":             { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/busybox/BSD: prints the last lines of a file; -f/-F only follow, they do not write' } },
+  "test":             { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: evaluates a conditional expression and sets exit status; no I/O of any kind' } },
+  "top":              { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: "measured busybox/BSD; documented (procps top(1)): no non-interactive write mode in any implementation — kill/renice/config-write keys are interactive-only, and batch mode ('top will not accept input') takes none of them" } },
+  "tr":               { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: translates or deletes characters from stdin to stdout; no write mode' } },
+  "traceroute":       { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured busybox; documented (BSD man): sends probe packets and prints the path; writes nothing locally (ICMP/UDP egress tracked separately)' } },
+  "true":             { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU: exits 0 immediately; no I/O of any kind' } },
+  "uname":            { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: prints system identification; no write mode' } },
+  // uniq: display flags only, plus `--all-repeated` kept optional-value out of
+  // valueFlags (rule 1). `operands: { max: 1 }` — INPUT only; a second operand
+  // is OUTFILE and is OVERWRITTEN (measured elsewhere in this advisory:
+  // `uniq /etc/passwd /root/.ssh/authorized_keys`; GNU's own usage line is
+  // `[INPUT [OUTPUT]]`, busybox's `[FILE [OUTFILE]]`). `optionsBeforeOperands:
+  // true` (final-review fix): macOS's optstring is `+`-prefixed (`+D::cdif:s:u`,
+  // POSIX order), so `uniq IN -c` does not read `-c` as the count flag there —
+  // it is the OUTFILE, and uniq overwrites it; GNU permutes, so the spelling
+  // is only harmless there, and the grammar must hold for every
+  // implementation. Excludes `--group` (optional-value, reads, but left out as
+  // unnecessary — not a minimal grammar addition). Measured: GNU d12 --help;
+  // busybox --help; BSD man (same option family plus `-D --all-repeated
+  // [septype]`).
+  "uniq":             { readOnly: true, operandsAreData: true, grammar: { args: 'getopt',
+    flags: ['-c', '--count', '-d', '--repeated', '-u', '--unique', '-i', '--ignore-case', '-z',
+      '--zero-terminated', '-D'],
+    valueFlags: ['-f', '--skip-fields', '-s', '--skip-chars', '-w', '--check-chars'],
+    optionalValueFlags: ['--all-repeated'],
+    optionsBeforeOperands: true,
+    operands: { max: 1 } } },
+  "uptime":           { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured busybox/BSD: prints load average and boot time; no write mode' } },
+  "vmstat":           { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: "documented (procps vmstat(8): 'requires read access to /proc'): reports virtual-memory statistics; no write mode" } },
+  "wc":               { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: counts lines, words and bytes of input; no write mode' } },
+  "whereis":          { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: searches PATH directories for binaries, sources and manuals; no write mode' } },
+  "which":            { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: locates a binary on PATH; no write mode' } },
+  "who":              { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: lists logged-in sessions from utmp; no write mode' } },
+  "whoami":           { readOnly: true, operandsAreData: true, grammar: { args: 'any', audit: 'measured GNU/BSD: prints the effective username; no write mode' } },
 };
 
 /** The class half of READERS, as the shape its consumers already expect. */
@@ -1760,11 +2175,31 @@ export function classifyCommand(command: string, depth = 0): ParsedCommand {
     if (CLASS_RANK[parsed.class] > CLASS_RANK[highest.class]) highest = parsed;
   }
 
-  return { binary: highest.binary, fullCommand: trimmed, class: highest.class };
+  // `readOnlyRejection` only ever describes the outer command's own grammar
+  // rejection, and only means anything when that is also what decided the
+  // final class. `highest === outer` (reference equality) is exactly that
+  // condition: the synthetic floor and the nested-command loop above only
+  // ever replace `highest` with something of strictly higher rank than
+  // `outer`'s, so if either one fired, `highest` is no longer `outer` and the
+  // rejection — which was never a fact about the synthetic verb or the nested
+  // command anyway — is correctly left off.
+  const result: ParsedCommand = { binary: highest.binary, fullCommand: trimmed, class: highest.class };
+  if (highest === outer && outer.readOnlyRejection) {
+    result.readOnlyRejection = outer.readOnlyRejection;
+  }
+  return result;
 }
 
+/**
+ * `classifyOuter`'s own return shape, carrying the word a reader's grammar
+ * rejected so a later stage can name it in a refusal message. `classifyCommand`
+ * copies this onto its own `ParsedCommand` result — but only when `outer` is
+ * also the winning side, see the comment above.
+ */
+type ClassifiedOuter = ParsedCommand & { readOnlyRejection?: { binary: string; word: string } };
+
 /** The class of the command itself, reading none of what it carries. */
-function classifyOuter(trimmed: string): ParsedCommand {
+function classifyOuter(trimmed: string): ClassifiedOuter {
   const binary = extractBinary(trimmed);
   const fullCommand = trimmed;
 
@@ -1793,16 +2228,84 @@ function classifyOuter(trimmed: string): ParsedCommand {
     return { binary, fullCommand, class: 'destructive' as CommandClass };
   }
 
-  const twoWordPrefix = (tokenizeSegments(fullCommand)[0] ?? []).slice(0, 2).join(' ');
+  const words = tokenizeSegments(fullCommand)[0] ?? [];
+  const twoWordPrefix = words.slice(0, 2).join(' ');
   if (READ_ONLY_ALLOWLIST.has(binary) || READ_ONLY_ALLOWLIST.has(twoWordPrefix)
     || READ_ONLY_SYNTHETIC.has(binary)) {
     if (SHELL_CONTROL_CHARS.test(trimmed)) {
       return { binary, fullCommand, class: 'safe' as CommandClass };
     }
+
+    // The SFTP verbs are synthesised by the tool layer, never typed by a caller,
+    // so there is no argv for a grammar to read — READ_ONLY_SYNTHETIC stays
+    // exactly as it was.
+    if (READ_ONLY_SYNTHETIC.has(binary)) {
+      return { binary, fullCommand, class: 'read-only' as CommandClass };
+    }
+
+    // Whichever key matched decides both which entry answers and how many
+    // leading words are the command name rather than an argument: a two-word
+    // entry's grammar reads words[2..], a one-word entry's reads words[1..].
+    const matchedTwoWord = READ_ONLY_ALLOWLIST.has(twoWordPrefix);
+    const readerName = matchedTwoWord ? twoWordPrefix : binary;
+    const entry = READERS[readerName];
+    const argWords = words.slice(matchedTwoWord ? 2 : 1);
+
+    // An unquoted glob word is not a word this grammar can vouch for: the
+    // shell replaces it with however many filenames it matches, and the
+    // grammar's operand count — the thing it was about to prove — is false
+    // before the binary runs. `'any'` entries are exempt: their claim is that
+    // no option or operand of the binary writes or executes, so extra
+    // operands from an expansion are still data.
+    if (entry.grammar.args !== 'any') {
+      const globWord = firstUnquotedGlobWord(fullCommand);
+      if (globWord !== null) {
+        return {
+          binary,
+          fullCommand,
+          class: 'safe' as CommandClass,
+          readOnlyRejection: { binary: readerName, word: globWord },
+        };
+      }
+    }
+
+    const match = matchesGrammar(argWords, entry.grammar);
+    if (!match.ok) {
+      return {
+        binary,
+        fullCommand,
+        class: 'safe' as CommandClass,
+        readOnlyRejection: { binary: readerName, word: match.word },
+      };
+    }
+
     return { binary, fullCommand, class: 'read-only' as CommandClass };
   }
 
   return { binary, fullCommand, class: 'safe' as CommandClass };
 }
 
-export { READ_ONLY_ALLOWLIST, READERS, READ_ONLY_SYNTHETIC, isDestructive };
+/**
+ * The sentence a refusal appends when it carries a `readOnlyRejection`, worded
+ * so the reason names the binary that would have qualified and the argv word
+ * that cost it: "is not accepted there" rather than "is not one of them",
+ * because most rejections are operand rules (`hostname NAME`, `sort /data`) or
+ * a listed value flag missing its value, where "is not one of them" would be
+ * false — it may be a perfectly good flag name, just not one bare or in this
+ * position. One function so the engine's role-binding denial and
+ * `read-command`'s `enforceClass` refusal never drift into two spellings of
+ * the same sentence.
+ */
+function formatReadOnlyRejection(rejection: { binary: string; word: string }): string {
+  // The rejected word can be the empty string — a quoted empty operand
+  // (`hostname ""`) — and two bare backticks would render as a blank where
+  // the word that cost the class should be. `""` is the shell's own spelling
+  // of that operand.
+  const word = rejection.word === '' ? '""' : rejection.word;
+  return `\`${rejection.binary}\` is read-only only with the options and operands its grammar lists; ` +
+    `\`${word}\` is not accepted there.`;
+}
+
+export {
+  READ_ONLY_ALLOWLIST, READERS, READ_ONLY_SYNTHETIC, isDestructive, formatReadOnlyRejection,
+};

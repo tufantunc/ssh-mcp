@@ -333,28 +333,59 @@ describe('sort: the write CLASS, not four spellings of it', () => {
   });
 
   it('does not treat sort\'s own value-taking short flags as reaching -o in a cluster', () => {
-    // -k, -S and -T are value-taking and consume the rest of a clustered word
+    // -k and -S are value-taking and consume the rest of a clustered word
     // as their OWN argument, so the `o` after one of them is that argument's
     // text, not `-o` invoked. Measured against real sort: each of these exits
-    // 2 (an invalid key/buffer-size/directory argument) and writes nothing.
-    for (const command of ['sort -ko /tmp/k', 'sort -So /tmp/k', 'sort -To /tmp/k']) {
+    // 2 (an invalid key/buffer-size argument) and writes nothing.
+    for (const command of ['sort -ko /tmp/k', 'sort -So /tmp/k']) {
       expect(decide(command).decision, command).toBe('allow');
     }
   });
 
-  it('does not treat an ambiguous long-option prefix as a write', () => {
-    // `--c` alone matches both --check and --compress-program; getopt_long
-    // refuses to run rather than guess, so sort never spills, never execs and
-    // never writes. Measured: `sort --c=x k` exits 2 with no file created.
-    expect(decide('sort --c=/tmp/payload.sh /tmp/k').decision).toBe('allow');
-    expect(decide('sort --c /tmp/payload.sh /tmp/k').decision).toBe('allow');
+  // Task 3 friction decision #21 (docs/superpowers/plans/2026-09-25-proven-read-friction.md):
+  // `-T` (temporary-directory) is excluded from the grammar on purpose — it
+  // picks a write LOCATION for sort's own spill files, which a read-only
+  // viewer has no legitimate use for. The real binary still only reads here
+  // (same value-consuming shape as -k/-S above), but the grammar cannot tell
+  // that apart from a flag a viewer might actually want, so it refuses the
+  // whole word rather than guess — the accepted cost of the fail-closed rule,
+  // not a bug. This changes what this test asserts, from the `allow` it
+  // recorded before the grammar existed to `deny`.
+  it('refuses -T (temporary-directory) as an accepted grammar cost', () => {
+    expect(decide('sort -To /tmp/k').commandClass).toBe('safe');
+    expect(decide('sort -To /tmp/k').decision).toBe('deny');
   });
 
+  // Task 3 friction decisions #22/#23: `--c` is a genuinely ambiguous
+  // abbreviation of both `--check` and `--compress-program`, so the real
+  // binary refuses to run at all (measured: exit 2, no file created) — but
+  // the grammar does not perform getopt_long's prefix-abbreviation
+  // resolution, so it cannot tell "ambiguous, refused" apart from "unknown,
+  // refused" and refuses this word outright too. Accepted refusal, not a
+  // bug; this changes what this test asserts, from `allow` to `deny`.
+  it('does not treat an ambiguous long-option prefix as a write', () => {
+    expect(decide('sort --c=/tmp/payload.sh /tmp/k').commandClass).toBe('safe');
+    expect(decide('sort --c=/tmp/payload.sh /tmp/k').decision).toBe('deny');
+    expect(decide('sort --c /tmp/payload.sh /tmp/k').commandClass).toBe('safe');
+    expect(decide('sort --c /tmp/payload.sh /tmp/k').decision).toBe('deny');
+  });
+
+  // Task 3 friction decisions #24/#25: neither `--ox` nor `--cx` is a prefix
+  // of any sort long option, so getopt_long would say "unrecognized option"
+  // and the real binary would not run at all — the grammar's refusal matches
+  // the binary's own for once. The `allow` this test recorded predates the
+  // grammar mechanism entirely: before Task 1b/2, `sort` was plain
+  // `args: 'any'`, so every argument — including these two — classified
+  // `read-only`/`allow`. Task 2's bare-only placeholder grammar then flipped
+  // every argument, this one included, to `safe`/`deny`; Task 3's real
+  // grammar keeps that same `deny` for `--ox`/`--cx` specifically, but now
+  // because the word is genuinely unrecognised, not because the placeholder
+  // rejected every argument on principle.
   it('does not treat a word that merely starts the same letters as a match', () => {
-    // Neither is a prefix of any sort long option, so getopt_long would say
-    // "unrecognized option" and sort would not run at all.
-    expect(decide('sort --ox=/tmp/x /tmp/k').decision).toBe('allow');
-    expect(decide('sort --cx=/tmp/x /tmp/k').decision).toBe('allow');
+    expect(decide('sort --ox=/tmp/x /tmp/k').commandClass).toBe('safe');
+    expect(decide('sort --ox=/tmp/x /tmp/k').decision).toBe('deny');
+    expect(decide('sort --cx=/tmp/x /tmp/k').commandClass).toBe('safe');
+    expect(decide('sort --cx=/tmp/x /tmp/k').decision).toBe('deny');
   });
 });
 
