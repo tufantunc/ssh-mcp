@@ -560,8 +560,11 @@ describe('final review: an unquoted glob word falls a grammar-checked reader to 
     expect(classifyCommand('find /var -name "*.conf" -type f').class).toBe('read-only');
   });
 
-  it('an escaped glob stays read-only', () => {
-    expect(classifyCommand('sort /var/log/\\*').class).toBe('read-only');
+  it('an escaped glob falls to safe — the windows reading sees it unquoted', () => {
+    // `\*` is escaped only to POSIX; cmd.exe reads the backslash as an ordinary
+    // path character, so the glob word is unquoted in that reading, and a grant
+    // must qualify under every reading (GHSA-972x-g47g-3922).
+    expect(classifyCommand('sort /var/log/\\*').class).toBe('safe');
   });
 
   it('an unquoted glob in a value flag\'s word is judged too', () => {

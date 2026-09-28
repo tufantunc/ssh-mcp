@@ -22,6 +22,20 @@ import { matchesGrammar, type ArgGrammar } from './reader-grammar.js';
 const SHELL_CONTROL_CHARS = /[;&|<>`$(){}\n\r]/;
 
 /**
+ * How a host shell reads a backslash.
+ *
+ * `posix`: a backslash escapes the next character — inside double quotes,
+ * only `` $ ` " \ `` or a newline. `windows`: a backslash is an ordinary
+ * character everywhere, which is cmd.exe's rule; it has no backslash escapes
+ * at the shell level at all.
+ *
+ * The classifier cannot know which shell sits at the far end of the
+ * connection, so a command containing a backslash is read under both
+ * dialects and held to the stricter reading (GHSA-972x-g47g-3922).
+ */
+type ShellDialect = 'posix' | 'windows';
+
+/**
  * The first word in `command` carrying an unquoted, unescaped shell glob
  * character — `*`, `?` or `[` — or null when no word does.
  *
@@ -44,7 +58,7 @@ const SHELL_CONTROL_CHARS = /[;&|<>`$(){}\n\r]/;
  * branch, which only runs when the command words matched a READERS key
  * exactly — never sees one either.
  */
-function firstUnquotedGlobWord(command: string, honorQuotes = true): string | null {
+function firstUnquotedGlobWord(command: string, honorQuotes = true, dialect: ShellDialect = 'posix'): string | null {
   let quote: string | null = null;
   let escaped = false;
   let word = '';
@@ -60,12 +74,12 @@ function firstUnquotedGlobWord(command: string, honorQuotes = true): string | nu
     if (quote) {
       // Backslash is literal inside single quotes; inside double quotes it
       // escapes — the same distinction the tokeniser makes.
-      if (ch === '\\' && quote === '"') { escaped = true; continue; }
+      if (dialect === 'posix' && ch === '\\' && quote === '"') { escaped = true; continue; }
       if (ch === quote) quote = null;
       else word += ch;
       continue;
     }
-    if (ch === '\\') { escaped = true; continue; }
+    if (dialect === 'posix' && ch === '\\') { escaped = true; continue; }
     if (honorQuotes && (ch === '"' || ch === "'")) { quote = ch; continue; }
     if (/\s/.test(ch)) {
       if (globInWord) return word;
@@ -81,7 +95,7 @@ function firstUnquotedGlobWord(command: string, honorQuotes = true): string | nu
   // tokeniser re-reads such a string with quotes demoted to text (see
   // `tokenizeSegmentsDetailed`). Judge it the same way here: in that reading
   // the glob character is unquoted.
-  if (honorQuotes && quote !== null) return firstUnquotedGlobWord(command, false);
+  if (honorQuotes && quote !== null) return firstUnquotedGlobWord(command, false, dialect);
   return globInWord ? word : null;
 }
 
@@ -863,9 +877,12 @@ const MAX_NESTING_DEPTH = 8;
  * Not a shell parser. Variable expansion, arithmetic and here-documents are out of scope —
  * `hasUnnameableCommand` is what refuses a command word this cannot resolve.
  */
-function tokenizeSegments(command: string): string[][] {
-  return tokenizeSegmentsDetailed(command).map((segment) => segment.words);
+function tokenizeSegments(command: string, dialect: ShellDialect = 'posix'): string[][] {
+  return tokenizeSegmentsDetailed(command, true, dialect).map((segment) => segment.words);
 }
+
+/** Inside double quotes, the characters POSIX lets a backslash escape. */
+const DOUBLE_QUOTE_ESCAPABLE = new Set(['$', '`', '"', '\\', '\n']);
 
 /**
  * The same split, keeping the separator that introduced each segment.
@@ -877,6 +894,7 @@ function tokenizeSegments(command: string): string[][] {
 function tokenizeSegmentsDetailed(
   command: string,
   honorQuotes = true,
+  dialect: ShellDialect = 'posix',
 ): Array<{ words: string[]; sep: string }> {
   const segments: Array<{ words: string[]; sep: string }> = [];
   let pending = '';
@@ -913,7 +931,8 @@ function tokenizeSegmentsDetailed(
     pending = sep;
   };
 
-  for (const ch of command) {
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
     if (escaped) {
       // A backslash quotes the next character, so `\reboot` runs reboot. Keeping the
       // character and dropping the backslash is what the shell does.
@@ -923,12 +942,22 @@ function tokenizeSegmentsDetailed(
     }
     if (quote) {
       // Backslash is literal inside single quotes; inside double quotes it escapes.
-      if (ch === '\\' && quote === '"') { escaped = true; continue; }
+      if (dialect === 'posix' && ch === '\\' && quote === '"') {
+        const next = command[i + 1];
+        // POSIX keeps `\x` before an ordinary character: only $ ` " \ and a
+        // newline are escapable, so the backslash survives into the word
+        // (GHSA-972x-g47g-3922's second finding — dropping it misread both
+        // dialects at once). At end of string there is no next character to
+        // protect, and the open quote sends the whole scan to the fallback.
+        if (next === undefined || DOUBLE_QUOTE_ESCAPABLE.has(next)) { escaped = true; continue; }
+        current += ch;
+        continue;
+      }
       if (ch === quote) quote = null;
       else current += ch;
       continue;
     }
-    if (ch === '\\') { escaped = true; continue; }
+    if (dialect === 'posix' && ch === '\\') { escaped = true; continue; }
     if (honorQuotes && (ch === '"' || ch === "'")) { quote = ch; quotedWord = true; continue; }
     if (ch === ';' || ch === '&' || ch === '|' || ch === '\n') { endSegment(ch); continue; }
     if (/\s/.test(ch)) { endWord(); continue; }
@@ -941,7 +970,7 @@ function tokenizeSegmentsDetailed(
   // sudo id` then never splits on the `;` and the elevation disappears, which measured as
   // `privileged` before this tokeniser and `safe` after. So fall back to the scan that
   // treats the quote character as ordinary text, which splits and still sees `sudo id`.
-  if (quote !== null) return tokenizeSegmentsDetailed(command, false);
+  if (quote !== null) return tokenizeSegmentsDetailed(command, false, dialect);
   return segments;
 }
 
@@ -951,21 +980,27 @@ function tokenizeSegmentsDetailed(
  * Segments are rejoined with `; ` so a pattern cannot match across two commands that the
  * shell would run separately.
  */
-let lastNormalizedInput: string | null = null;
-let lastNormalizedOutput = '';
+const normalizedCache = new Map<string, string>();
 
-function normalizeCommand(command: string): string {
+function normalizeCommand(command: string, dialect: ShellDialect): string {
   // One evaluate asks for this about nineteen times, once per regex rule, and each ask
   // re-ran the tokeniser over the whole command. The asks arrive in a row on the same
-  // input, so a one-entry cache removes almost all of it.
-  if (command === lastNormalizedInput) return lastNormalizedOutput;
-  lastNormalizedInput = command;
-  lastNormalizedOutput = normalizeUncached(command);
-  return lastNormalizedOutput;
+  // input, so a small cache, evicting the oldest inserted entry, removes almost
+  // all of it. The key carries the dialect because both readings of one command
+  // are asked about in the same row.
+  const key = `${dialect}\u0000${command}`;
+  const hit = normalizedCache.get(key);
+  if (hit !== undefined) return hit;
+  const value = normalizeUncached(command, dialect);
+  normalizedCache.set(key, value);
+  if (normalizedCache.size > 8) {
+    normalizedCache.delete(normalizedCache.keys().next().value as string);
+  }
+  return value;
 }
 
-function normalizeUncached(command: string): string {
-  return tokenizeSegments(command)
+function normalizeUncached(command: string, dialect: ShellDialect): string {
+  return tokenizeSegments(command, dialect)
     .map((words) => words.map((w) => (QUOTED_CONTENT.test(w) ? PLACEHOLDER : w)).join(' '))
     .join('; ');
 }
@@ -1009,8 +1044,8 @@ const PLACEHOLDER = '\u0000';
  * inside a quoted argument into a real one — `grep -E "warn|reboot" syslog` became an
  * unconditional refusal, which is the mention-vs-invocation bug of #91 all over again.
  */
-function matchesEitherForm(command: string, test: (form: string) => boolean): boolean {
-  return test(command) || test(normalizeCommand(command));
+function matchesEitherForm(command: string, test: (form: string) => boolean, dialect: ShellDialect): boolean {
+  return test(command) || test(normalizeCommand(command, dialect));
 }
 
 /**
@@ -1042,7 +1077,7 @@ function matchesEitherForm(command: string, test: (form: string) => boolean): bo
  *   backticks and `sh -c` are certain carriers and keep reaching the
  *   denylist either way.
  */
-export function nestedCommands(command: string, speculativeOperands = true): string[] {
+export function nestedCommands(command: string, speculativeOperands = true, dialect: ShellDialect = 'posix'): string[] {
   const found: string[] = [];
 
   // `$(...)`, `<(...)`, `>(...)` — scanned rather than matched, because a regex
@@ -1081,7 +1116,7 @@ export function nestedCommands(command: string, speculativeOperands = true): str
   // scan above does not see it. Read each segment's command word rather than scanning
   // every word: matching a mention rather than an invocation is #91, and
   // `cat /usr/bin/python3` names an interpreter without running one.
-  const segments = tokenizeSegmentsDetailed(command);
+  const segments = tokenizeSegmentsDetailed(command, true, dialect);
   for (const { words } of segments) {
     // Every word, not just the command word. Stopping at the head lost the carrier behind
     // any wrapper this file does not list: `xargs -I {} sh -c 'sudo id'` stops on `{}`, and
@@ -1318,9 +1353,16 @@ const BARE_NUMERIC = /^\d+(\.\d+)?[smhd]?$/;
  * `\sudo`, `'sudo'` and `"sudo"` all execute sudo — the backslash only
  * suppresses alias expansion — but a verbatim string comparison sees three
  * different words. Without this, a one-character edit walks around the check.
+ *
+ * One surrounding quote pair, and nothing else: the scanner has already
+ * resolved escapes by the time a word reaches this, in both the
+ * quote-honouring scan and the `honorQuotes = false` fallback, so a second
+ * pass here could only remove backslashes the dialect meant to keep — the
+ * literal ones inside single quotes, and the POSIX-retained ones inside
+ * double quotes (GHSA-972x-g47g-3922).
  */
 function unquote(word: string): string {
-  return word.replace(/^(['"])(.*)\1$/, '$2').replace(/\\(.)/g, '$1');
+  return word.replace(/^(['"])(.*)\1$/, '$2');
 }
 
 /**
@@ -1334,10 +1376,10 @@ const PREFIX_VALUE_FLAGS = new Set([
   '--other-user', '--command',
 ]);
 
-/** `/sbin/reboot` and `reboot` are the same invocation. */
+/** `/sbin/reboot`, `C:\Windows\reboot.exe` and `reboot` are the same invocation. */
 function stripPath(word: string): string {
-  const slash = word.lastIndexOf('/');
-  return slash === -1 ? word : word.slice(slash + 1);
+  const cut = Math.max(word.lastIndexOf('/'), word.lastIndexOf('\\'));
+  return cut === -1 ? word : word.slice(cut + 1);
 }
 
 /**
@@ -1355,9 +1397,9 @@ interface Segment {
   args: string[];
 }
 
-function parseSegments(command: string): Segment[] {
+function parseSegments(command: string, dialect: ShellDialect = 'posix'): Segment[] {
   const segments: Segment[] = [];
-  for (const words of tokenizeSegments(command)) {
+  for (const words of tokenizeSegments(command, dialect)) {
     const segment = parseWords(words);
     if (segment !== null) segments.push(segment);
   }
@@ -1448,8 +1490,8 @@ function elevatedBinary(words: string[]): string | null {
  * holding, and `echo hi; sudo id` recorded `binary: "echo"` against a
  * privileged decision — in the audit log, the OTel span and OPA's input (#134).
  */
-function elevatedBinaryOf(command: string): string | null {
-  for (const words of tokenizeSegments(command)) {
+function elevatedBinaryOf(command: string, dialect: ShellDialect = 'posix'): string | null {
+  for (const words of tokenizeSegments(command, dialect)) {
     const found = elevatedBinary(words);
     if (found !== null) return found;
   }
@@ -1479,8 +1521,8 @@ function elevatedBinaryOf(command: string): string | null {
  * `invokedWords` also reads it, and widening what counts as "the command"
  * there is a different, larger change this fix does not take on.
  */
-function hasDisqualifyingArgs(command: string): boolean {
-  return tokenizeSegments(command).some((words) => {
+function hasDisqualifyingArgs(command: string, dialect: ShellDialect = 'posix'): boolean {
+  return tokenizeSegments(command, dialect).some((words) => {
     const idx = effectiveCommandIndex(words);
     if (idx === -1) return false;
     const rule = DISQUALIFYING_ARGS[stripPath(words[idx])];
@@ -1488,10 +1530,10 @@ function hasDisqualifyingArgs(command: string): boolean {
   });
 }
 
-function invokedWords(command: string): string[] {
+function invokedWords(command: string, dialect: ShellDialect = 'posix'): string[] {
   const invoked: string[] = [];
 
-  for (const { head, args } of parseSegments(command)) {
+  for (const { head, args } of parseSegments(command, dialect)) {
     invoked.push(head);
 
     // `systemctl reboot` restarts the host. Reading a unit that happens to be
@@ -1517,11 +1559,11 @@ const DOWNLOADERS = new Set(['curl', 'wget']);
  * runs a shell when the download fails, which is not meaningfully safer than
  * running one when it succeeds.
  */
-function pipesDownloadIntoShell(command: string): boolean {
+function pipesDownloadIntoShell(command: string, dialect: ShellDialect = 'posix'): boolean {
   // One head per pipe stage. Splitting on every separator would make `curl -O x;
   // bash build.sh` — download, then run a local script — match a rule whose label says
   // "piping a download into a shell", on a list that cannot be switched off.
-  const segments = tokenizeSegmentsDetailed(command);
+  const segments = tokenizeSegmentsDetailed(command, true, dialect);
   const heads = segments
     .filter((segment, i) => i === 0 || segment.sep === '|')
     .map((segment) => parseWords(segment.words)?.head);
@@ -1531,8 +1573,8 @@ function pipesDownloadIntoShell(command: string): boolean {
 }
 
 /** `dd … of=/dev/sda` — writing an image straight onto a block device. */
-function writesToDevice(command: string): boolean {
-  return parseSegments(command).some(
+function writesToDevice(command: string, dialect: ShellDialect = 'posix'): boolean {
+  return parseSegments(command, dialect).some(
     ({ head, args }) => head === 'dd' && args.some((a) => a.startsWith('of=/dev/')),
   );
 }
@@ -1543,8 +1585,8 @@ function writesToDevice(command: string): boolean {
  * The last non-flag argument is the target; `chown -R app:app /srv/app` is
  * ordinary and stays allowed.
  */
-function chownsRoot(command: string): boolean {
-  return parseSegments(command).some(({ head, args }) => {
+function chownsRoot(command: string, dialect: ShellDialect = 'posix'): boolean {
+  return parseSegments(command, dialect).some(({ head, args }) => {
     if (head !== 'chown' || !args.includes('-R')) return false;
     const positional = args.filter((a) => !a.startsWith('-'));
     return positional[positional.length - 1] === '/';
@@ -1554,24 +1596,24 @@ function chownsRoot(command: string): boolean {
 /** A forbidden rule, paired with wording a refusal can quote back. */
 interface ForbiddenRule {
   label: string;
-  test: (command: string) => boolean;
+  test: (command: string, dialect: ShellDialect) => boolean;
 }
 
 const FORBIDDEN_RULES: ForbiddenRule[] = [
   ...FORBIDDEN_PATTERNS.map((re) => ({
     label: String(re),
-    test: (c: string) => matchesEitherForm(c, (form) => re.test(form)),
+    test: (c: string, dialect: ShellDialect) => matchesEitherForm(c, (form) => re.test(form), dialect),
   })),
   {
     label: 'invoking a power-state command (shutdown, reboot, halt, poweroff) or eval',
-    test: (command) => invokedWords(command).some((w) => FORBIDDEN_INVOCATIONS.has(w)),
+    test: (command, dialect) => invokedWords(command, dialect).some((w) => FORBIDDEN_INVOCATIONS.has(w)),
   },
   {
     label: 'piping a download into a shell (curl or wget into sh, bash or zsh)',
-    test: pipesDownloadIntoShell,
+    test: (c, dialect) => pipesDownloadIntoShell(c, dialect),
   },
-  { label: 'dd writing to a block device (of=/dev/…)', test: writesToDevice },
-  { label: 'a recursive chown of the filesystem root', test: chownsRoot },
+  { label: 'dd writing to a block device (of=/dev/…)', test: (c, dialect) => writesToDevice(c, dialect) },
+  { label: 'a recursive chown of the filesystem root', test: (c, dialect) => chownsRoot(c, dialect) },
 ];
 
 /**
@@ -1581,8 +1623,21 @@ const FORBIDDEN_RULES: ForbiddenRule[] = [
  * permit `sudo reboot`.
  */
 export function findForbiddenMatch(command: string, depth = 0): string | null {
+  // The engine calls this directly, so it is a decision point of its own and
+  // reads both dialects like `classifyCommand` does: a refusal under either
+  // reading is a refusal. The destructive-class consultation *inside* a
+  // dialect pass (`isDestructive`) stays in-dialect — that pass is already one
+  // reading of the whole string.
+  if (command.includes('\\')) {
+    const windows = findForbiddenMatchInDialect(command, depth, 'windows');
+    if (windows !== null) return windows;
+  }
+  return findForbiddenMatchInDialect(command, depth, 'posix');
+}
+
+function findForbiddenMatchInDialect(command: string, depth: number, dialect: ShellDialect): string | null {
   for (const rule of FORBIDDEN_RULES) {
-    if (rule.test(command)) return rule.label;
+    if (rule.test(command, dialect)) return rule.label;
   }
 
   // The same carriers the class scan reads, for the same reason. This list is the
@@ -1605,15 +1660,15 @@ export function findForbiddenMatch(command: string, depth = 0): string | null {
   // really does run what they hold — and are unaffected: they are pushed by
   // `nestedCommands` regardless of this flag.
   if (depth >= MAX_NESTING_DEPTH) return null;
-  for (const inner of nestedCommands(command, false)) {
-    const match = findForbiddenMatch(inner, depth + 1);
+  for (const inner of nestedCommands(command, false, dialect)) {
+    const match = findForbiddenMatchInDialect(inner, depth + 1, dialect);
     if (match !== null) return match;
   }
   return null;
 }
 
-export function isForbidden(command: string): boolean {
-  return findForbiddenMatch(command) !== null;
+export function isForbidden(command: string, dialect: ShellDialect = 'posix'): boolean {
+  return findForbiddenMatchInDialect(command, 0, dialect) !== null;
 }
 
 /**
@@ -1632,10 +1687,10 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
  * reading a log that mentions `reboot` is no longer classified destructive
  * either.
  */
-function isDestructive(command: string): boolean {
+function isDestructive(command: string, dialect: ShellDialect = 'posix'): boolean {
   return (
-    isForbidden(command) ||
-    matchesEitherForm(command, (form) => DESTRUCTIVE_PATTERNS.some((re) => re.test(form)))
+    isForbidden(command, dialect) ||
+    matchesEitherForm(command, (form) => DESTRUCTIVE_PATTERNS.some((re) => re.test(form)), dialect)
   );
 }
 
@@ -1646,13 +1701,13 @@ const LEADING_PRIVILEGE_PREFIXES = [
   /^\s*pkexec\b/,
 ];
 
-export function extractBinary(command: string): string {
+export function extractBinary(command: string, dialect: ShellDialect = 'posix'): string {
   // The first segment's words, so quoting is resolved — `s"u"do id` used to report
   // `s"u"do` in the audit record and the refusal message. Reading the normalised whole
   // command instead would be wrong in the other direction: it rejoins segments with
   // `; `, so `ls | grep x` would report `ls;`, and this name reaches the audit record,
   // the OTel span and OPA's input (#134). A separator is not a binary.
-  let cmd = (tokenizeSegments(command)[0] ?? []).join(' ').trim();
+  let cmd = (tokenizeSegments(command, dialect)[0] ?? []).join(' ').trim();
   for (const prefix of LEADING_PRIVILEGE_PREFIXES) {
     cmd = cmd.replace(prefix, '').trim();
   }
@@ -2021,8 +2076,8 @@ function awkFindings(words: string[]): AwkFindings | null {
  * `awk 'BEGIN{system("sudo id")}'` comes out `privileged` rather than flattened
  * to the `destructive` this function reports.
  */
-function hasDangerousAwk(command: string): boolean {
-  for (const { words } of tokenizeSegmentsDetailed(command)) {
+function hasDangerousAwk(command: string, dialect: ShellDialect = 'posix'): boolean {
+  for (const { words } of tokenizeSegmentsDetailed(command, true, dialect)) {
     const findings = awkFindings(words);
     if (findings === null) continue;
     if (findings.writesFile || findings.unreadable) return true;
@@ -2032,15 +2087,15 @@ function hasDangerousAwk(command: string): boolean {
     // prints into it, and that is assembled at run time. So it is the same
     // "we cannot tell" this module reports for `-f progfile`.
     for (const target of findings.pipedInto) {
-      const stage = tokenizeSegmentsDetailed(target)[0];
+      const stage = tokenizeSegmentsDetailed(target, true, dialect)[0];
       if (stage !== undefined && readsProgramFromStdin(stage.words)) return true;
     }
   }
   return false;
 }
 
-function hasUnreadableProgram(command: string): boolean {
-  const segments = tokenizeSegmentsDetailed(command);
+function hasUnreadableProgram(command: string, dialect: ShellDialect = 'posix'): boolean {
+  const segments = tokenizeSegmentsDetailed(command, true, dialect);
   for (let i = 0; i < segments.length; i++) {
     const { words, sep } = segments[i];
     if (sep === '|' && readsProgramFromStdin(words)) return true;
@@ -2079,8 +2134,8 @@ function hasUnreadableProgram(command: string): boolean {
  * Only the command word, never the arguments. `echo $HOME` names a command we know;
  * promoting that would put a prompt on most ordinary shell usage.
  */
-function hasUnnameableCommand(command: string): boolean {
-  for (const words of tokenizeSegments(command)) {
+function hasUnnameableCommand(command: string, dialect: ShellDialect = 'posix'): boolean {
+  for (const words of tokenizeSegments(command, dialect)) {
     const head = effectiveCommandWord(words);
     if (head !== null && /[$`]/.test(head)) return true;
   }
@@ -2130,8 +2185,8 @@ const SYNTHETIC_CLASSES: Record<string, CommandClass> = Object.assign(
 );
 
 /** The first word, tokenised — the synthetic verb when there is one. */
-function syntheticVerb(command: string): string {
-  return tokenizeSegments(command)[0]?.[0] ?? '';
+function syntheticVerb(command: string, dialect: ShellDialect = 'posix'): string {
+  return tokenizeSegments(command, dialect)[0]?.[0] ?? '';
 }
 
 /**
@@ -2146,8 +2201,20 @@ function syntheticVerb(command: string): string {
  * Taking the maximum is what makes the scan unable to lower anything.
  */
 export function classifyCommand(command: string, depth = 0): ParsedCommand {
+  // One string, two dialects, and the class is the worse of the two readings:
+  // the classifier cannot know whether the host shell reads a backslash as an
+  // escape or as a path separator, so policy must hold on whichever host
+  // receives the command (GHSA-972x-g47g-3922). A command without a backslash
+  // is byte-identical under both dialects, so it keeps the single pass.
+  if (!command.includes('\\')) return classifyCommandInDialect(command, depth, 'posix');
+  const posix = classifyCommandInDialect(command, depth, 'posix');
+  const windows = classifyCommandInDialect(command, depth, 'windows');
+  return CLASS_RANK[windows.class] > CLASS_RANK[posix.class] ? windows : posix;
+}
+
+function classifyCommandInDialect(command: string, depth: number, dialect: ShellDialect): ParsedCommand {
   const trimmed = command.trim();
-  const outer = classifyOuter(trimmed);
+  const outer = classifyOuter(trimmed, dialect);
 
   if (depth >= MAX_NESTING_DEPTH) {
     // Nesting this deep is not something an operator writes, and we have stopped
@@ -2161,14 +2228,14 @@ export function classifyCommand(command: string, depth = 0): ParsedCommand {
   // A floor, not a verdict. Returning the synthetic class outright would put it above
   // the elevation and never-allowed checks, so `sftp:upload /tmp/x; sudo id` would
   // record `destructive` where the command is `privileged`.
-  const verb = syntheticVerb(trimmed);
+  const verb = syntheticVerb(trimmed, dialect);
   const floor = SYNTHETIC_CLASSES[verb];
   if (floor !== undefined && CLASS_RANK[floor] > CLASS_RANK[highest.class]) {
     highest = { binary: verb, fullCommand: trimmed, class: floor };
   }
 
-  for (const inner of nestedCommands(trimmed)) {
-    const parsed = classifyCommand(inner, depth + 1);
+  for (const inner of nestedCommands(trimmed, true, dialect)) {
+    const parsed = classifyCommandInDialect(inner, depth + 1, dialect);
     // `binary` follows the winning side deliberately: it is what the audit record and
     // the refusal message name, and naming the outer `echo` would describe the wrong
     // process as the one that ran as root.
@@ -2199,20 +2266,20 @@ export function classifyCommand(command: string, depth = 0): ParsedCommand {
 type ClassifiedOuter = ParsedCommand & { readOnlyRejection?: { binary: string; word: string } };
 
 /** The class of the command itself, reading none of what it carries. */
-function classifyOuter(trimmed: string): ClassifiedOuter {
-  const binary = extractBinary(trimmed);
+function classifyOuter(trimmed: string, dialect: ShellDialect): ClassifiedOuter {
+  const binary = extractBinary(trimmed, dialect);
   const fullCommand = trimmed;
 
   // `binary` names the subject of the class. For everything below it is the
   // leading command; here it is the one that runs as root, which are the same
   // thing only when the prefix leads.
-  const elevated = elevatedBinaryOf(trimmed);
+  const elevated = elevatedBinaryOf(trimmed, dialect);
   if (elevated !== null) {
     return { binary: elevated, fullCommand, class: 'privileged' as CommandClass };
   }
 
-  if (hasUnreadableProgram(trimmed) || hasDangerousAwk(trimmed)
-    || isDestructive(trimmed) || hasDisqualifyingArgs(trimmed)) {
+  if (hasUnreadableProgram(trimmed, dialect) || hasDangerousAwk(trimmed, dialect)
+    || isDestructive(trimmed, dialect) || hasDisqualifyingArgs(trimmed, dialect)) {
     return { binary, fullCommand, class: 'destructive' as CommandClass };
   }
 
@@ -2224,11 +2291,11 @@ function classifyOuter(trimmed: string): ClassifiedOuter {
   // `destructive` rather than `privileged`: this is "we cannot tell", not "this is
   // root". It gates on approval instead of refusing outright, which keeps
   // `$PREFIX/bin/tool` usable for a role that holds `destructive` on the tier.
-  if (hasUnnameableCommand(trimmed)) {
+  if (hasUnnameableCommand(trimmed, dialect)) {
     return { binary, fullCommand, class: 'destructive' as CommandClass };
   }
 
-  const words = tokenizeSegments(fullCommand)[0] ?? [];
+  const words = tokenizeSegments(fullCommand, dialect)[0] ?? [];
   const twoWordPrefix = words.slice(0, 2).join(' ');
   if (READ_ONLY_ALLOWLIST.has(binary) || READ_ONLY_ALLOWLIST.has(twoWordPrefix)
     || READ_ONLY_SYNTHETIC.has(binary)) {
@@ -2258,7 +2325,7 @@ function classifyOuter(trimmed: string): ClassifiedOuter {
     // no option or operand of the binary writes or executes, so extra
     // operands from an expansion are still data.
     if (entry.grammar.args !== 'any') {
-      const globWord = firstUnquotedGlobWord(fullCommand);
+      const globWord = firstUnquotedGlobWord(fullCommand, true, dialect);
       if (globWord !== null) {
         return {
           binary,
