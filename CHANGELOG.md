@@ -2,11 +2,19 @@
 
 ## 2.14.0
 
+### Security
+
+- Fixes [GHSA-972x-g47g-3922](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-972x-g47g-3922) (high): a Windows path written with backslashes hid an interpreter from the command classifier, so the program it carried was not read.
+
 ### Minor Changes
 
 - [`2f13e7c`](https://github.com/tufantunc/ssh-mcp/commit/2f13e7c9e647730ad4a229c5702928569e1e1b1b) Thanks [@tufantunc](https://github.com/tufantunc)! - Policy: command classification reads a command under both shell dialects a target host may run — POSIX and cmd.exe — and holds it to the stricter reading when they disagree, instead of assuming the POSIX one. Path stripping now accepts backslash-separated command words, and quote removal inside double quotes follows POSIX byte for byte (a backslash before an ordinary character is kept). Commands without a backslash classify exactly as before. One deliberate change within that: a name written inside quotes with backslashes keeps its bytes now and classifies as the name a shell would actually pass in argv, where before the backslashes were silently removed.
 
 ## 2.13.0
+
+### Security
+
+- Fixes [GHSA-mwmj-jr2h-q546](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-mwmj-jr2h-q546) (high): a `readOnly` profile could change system state through commands on the read-only allowlist.
 
 ### Minor Changes
 
@@ -21,6 +29,10 @@
   **Minor**, not patch, for the reason applied since 2.8.0: a command a `readOnly` profile or a `viewer` ran successfully yesterday can be refused today.
 
 ## 2.12.0
+
+### Security
+
+- Fixes [GHSA-qmx6-47vm-3vf7](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-qmx6-47vm-3vf7) (high): a binary the classifier did not recognise could carry an elevated command through as `safe`.
 
 ### Minor Changes
 
