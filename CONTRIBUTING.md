@@ -8,8 +8,14 @@ Thank you for your interest in contributing to ssh-mcp! Your help is greatly app
 2. **Clone your fork** to your local machine.
 3. **Create a descriptive branch name** (e.g., `feature/add-ssh-support` or `bugfix/fix-connection-issue`).
 4. **Make your changes** with clear, concise commits.
-5. **Test your changes** to ensure nothing is broken.
+5. **Test your changes** to ensure nothing is broken (see [Tests](#tests)).
 6. **Push to your fork** and submit a Pull Request (PR) to the `main` branch.
+
+## Tests
+
+New functionality and bug fixes must come with automated tests that exercise them. Unit tests go under `test/unit/`; a change to how the server talks to an SSH host also needs an integration test under `test/integration/`. A fix should include a test that fails without it. A PR that adds or changes behaviour without a test will be asked for one before it is merged.
+
+Run the suite with `npm test`. The integration tests need the Docker test servers; the [Testing section of the README](README.md#testing) shows how to start them.
 
 ## Code Style
 - Follow the existing code style and conventions.
@@ -26,6 +32,7 @@ Thank you for your interest in contributing to ssh-mcp! Your help is greatly app
 
 ## Pull Requests
 - Ensure your PR is up to date with the latest `main` branch.
+- Include tests for any new or changed behaviour (see [Tests](#tests)).
 - Reference related issues in your PR description (e.g., `Closes #12`).
 - Be responsive to feedback and requested changes.
 - **Add a changeset:** Run `npm run changeset` before pushing. Select the bump type (patch/minor/major) and write a short changelog entry. This ensures your change appears in the release notes.
