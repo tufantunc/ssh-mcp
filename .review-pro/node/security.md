@@ -10,6 +10,7 @@ extends: core/skills/security/SKILL.md
 - `Object.assign` / spread into objects in a way that allows `__proto__`/`constructor.prototype` pollution.
 - Response/header injection from unescaped CRLF in `setHeader` values.
 - Insecure deserialization via `node-serialize` / `cson` / similar.
+- `execFile` or `spawn` whose program comes from input, or whose `env` is built from input (`NODE_OPTIONS`, `LD_PRELOAD`) → code execution even with an argument array and no shell.
 
 ## Stack-specific remedies
 - Never pass dynamic strings to `exec`/`eval`; use arg-array APIs and allowlists.
@@ -18,6 +19,6 @@ extends: core/skills/security/SKILL.md
 - Avoid prototype-pollutable merges; use `Object.create(null)` / maps where keys are external.
 
 ## Stack-specific severity guidance
-- Command injection / RCE via `child_process.exec` on input: Critical.
+- Command injection via `child_process.exec` on lower-trust input: Critical when reachable without authentication or through an account anyone can register, High when it needs an account the attacker must be granted.
 - Path traversal letting a user read/write outside their dir: Critical/High.
 - ReDoS on a public endpoint: High.
