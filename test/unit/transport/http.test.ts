@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import * as httpModule from 'http';
 import { clientKey } from '../../../src/transport/http.js';
 import type { Server } from 'net';
@@ -756,6 +756,16 @@ describe('AuthFailureLimiter', () => {
 describe('ClientRateLimiter', () => {
   const T0 = 1_800_000_000_000;
 
+  // Every test here runs on a frozen clock, including those that never move it: a slow
+  // run must not refill a bucket between two calls and turn an expected refusal into an
+  // admission.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('gives each client its own budget', async () => {
     const { ClientRateLimiter } = await import('../../../src/transport/http.js');
     const limiter = new ClientRateLimiter(2);
@@ -804,72 +814,47 @@ describe('ClientRateLimiter', () => {
 
   it('refills on the clock and re-arms afterwards', async () => {
     const { ClientRateLimiter } = await import('../../../src/transport/http.js');
-    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
-    try {
-      const limiter = new ClientRateLimiter(2);
-      limiter.tryConsume('a');
-      limiter.tryConsume('a');
-      expect(limiter.tryConsume('a').allowed).toBe(false);
-      vi.setSystemTime(T0 + 60_000 / 2); // one token's interval
-      expect(limiter.tryConsume('a').allowed).toBe(true);
-      expect(limiter.tryConsume('a').allowed).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
+    const limiter = new ClientRateLimiter(2);
+    limiter.tryConsume('a');
+    limiter.tryConsume('a');
+    expect(limiter.tryConsume('a').allowed).toBe(false);
+    vi.setSystemTime(T0 + 60_000 / 2); // one token's interval
+    expect(limiter.tryConsume('a').allowed).toBe(true);
+    expect(limiter.tryConsume('a').allowed).toBe(false);
   });
 
   it('reports the wait until this client\'s next token, not a whole interval', async () => {
     const { ClientRateLimiter } = await import('../../../src/transport/http.js');
-    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
-    try {
-      const limiter = new ClientRateLimiter(3); // one token per 20s
-      for (let n = 0; n < 3; n++) limiter.tryConsume('a');
-      vi.setSystemTime(T0 + 7_500);
-      expect(limiter.tryConsume('a')).toEqual({ allowed: false, retryAfterMs: 12_500 });
-    } finally {
-      vi.useRealTimers();
-    }
+    const limiter = new ClientRateLimiter(3); // one token per 20s
+    for (let n = 0; n < 3; n++) limiter.tryConsume('a');
+    vi.setSystemTime(T0 + 7_500);
+    expect(limiter.tryConsume('a')).toEqual({ allowed: false, retryAfterMs: 12_500 });
   });
 
   it('never reports a wait under a second', async () => {
     const { ClientRateLimiter } = await import('../../../src/transport/http.js');
-    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
-    try {
-      const limiter = new ClientRateLimiter(120); // one token per 500ms
-      for (let n = 0; n < 120; n++) limiter.tryConsume('a');
-      vi.setSystemTime(T0 + 499);
-      // 1ms remains. Retry-After is whole seconds, and 0 would read as "retry now".
-      expect(limiter.tryConsume('a')).toEqual({ allowed: false, retryAfterMs: 1_000 });
-    } finally {
-      vi.useRealTimers();
-    }
+    const limiter = new ClientRateLimiter(120); // one token per 500ms
+    for (let n = 0; n < 120; n++) limiter.tryConsume('a');
+    vi.setSystemTime(T0 + 499);
+    // 1ms remains. Retry-After is whole seconds, and 0 would read as "retry now".
+    expect(limiter.tryConsume('a')).toEqual({ allowed: false, retryAfterMs: 1_000 });
   });
 
   it('caps the wait at one token\'s interval when the clock steps back', async () => {
     const { ClientRateLimiter } = await import('../../../src/transport/http.js');
-    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
-    try {
-      const limiter = new ClientRateLimiter(3);
-      for (let n = 0; n < 3; n++) limiter.tryConsume('a');
-      vi.setSystemTime(T0 - 3_600_000);
-      // lastRefill is now an hour in the future; the raw difference would say 3620s.
-      expect(limiter.tryConsume('a')).toEqual({ allowed: false, retryAfterMs: 20_000 });
-    } finally {
-      vi.useRealTimers();
-    }
+    const limiter = new ClientRateLimiter(3);
+    for (let n = 0; n < 3; n++) limiter.tryConsume('a');
+    vi.setSystemTime(T0 - 3_600_000);
+    // lastRefill is now an hour in the future; the raw difference would say 3620s.
+    expect(limiter.tryConsume('a')).toEqual({ allowed: false, retryAfterMs: 20_000 });
   });
 
   it('reports whole milliseconds when the limit does not divide a minute', async () => {
     const { ClientRateLimiter } = await import('../../../src/transport/http.js');
-    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
-    try {
-      const limiter = new ClientRateLimiter(7); // one token per 8571.43ms
-      for (let n = 0; n < 7; n++) limiter.tryConsume('a');
-      // Rounded up, never down: a client told 8571 that comes back then is refused again.
-      expect(limiter.tryConsume('a')).toEqual({ allowed: false, retryAfterMs: 8_572 });
-    } finally {
-      vi.useRealTimers();
-    }
+    const limiter = new ClientRateLimiter(7); // one token per 8571.43ms
+    for (let n = 0; n < 7; n++) limiter.tryConsume('a');
+    // Rounded up, never down: a client told 8571 that comes back then is refused again.
+    expect(limiter.tryConsume('a')).toEqual({ allowed: false, retryAfterMs: 8_572 });
   });
 });
 
