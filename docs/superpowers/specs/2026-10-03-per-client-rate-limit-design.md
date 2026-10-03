@@ -79,6 +79,16 @@ one formula.
 - Choosing the fullest bucket is one helper, used by both `ClientRateLimiter` and
   `AuthFailureLimiter`, so the eviction scan exists once. What each does when the
   fullest is spent stays its own rule.
+- The helper ranks buckets by the tokens they hold **after refill**, not by the
+  stored count. #188's scan read `b.tokens` as stored, which never changes for a
+  key that stops sending, so a failure table that was saturated once stays judged
+  saturated forever. Measured on `09ecbad`: saturate 1024 keys, advance the clock
+  an hour (every bucket has refilled), and a new key still starts empty — one typo
+  and its correct token waits, where an unsaturated table allows it. Because the
+  table never has a free slot again, every later arrival takes the same path.
+  This is a correction to how #188 measures "spent", not to its rule: a table
+  whose buckets really are all spent still starts a new key empty. It is its own
+  commit, with its own test.
 
 ### Request flow
 
@@ -118,6 +128,10 @@ warned about — moving the request limiter above auth — is not reintroduced.
   collapses onto the proxy's address without `--trustProxy`, as the failure budget
   does.
 - **SECURITY.md:332**: "per-client `--rateLimit` token bucket".
+- **`.review-pro/ssh-mcp/backend.md:11` and `security.md:15`** say the limiter
+  covers only `/` and not `/status`; both are rewritten to the new scope, so a
+  reviewer is not told to flag the change itself. (Content only — the files keep
+  their names.)
 - The Command Quota section's "the HTTP rate limiter caps request rate" stays: it
   is still true per client, and the paragraph's point (rate is not total work) is
   unchanged.
@@ -128,8 +142,9 @@ warned about — moving the request limiter above auth — is not reintroduced.
 be refused. Per-client buckets give most deployments more capacity, not less, but
 `/status` and authenticated 404s now spend the budget — a monitor polling
 `/status`, or an MCP client plus `/status` traffic above N from one address, now
-receives 429 where it received 200. The changeset says so, and says that behind a
-proxy without `--trustProxy` the budget is still shared.
+receives 429 where it received 200. The changeset says so, says that behind a
+proxy without `--trustProxy` the budget is still shared, and names the
+refill-aware eviction scan as a fix to the failed-auth budget.
 
 ## Testing
 
@@ -149,6 +164,8 @@ ratio of `60 / N`, never by waiting.
   clock by a fraction of `60 / N`, assert the remaining whole seconds; assert the
   floor of 1.
 - **`id: null`** in the request 429 body.
+- **A once-saturated failure table recovers.** Saturate, advance the fake clock an
+  hour, a new key fails once and is still allowed. Fails on today's code.
 - **`ClientRateLimiter`** directly: the cap holds at 1024; eviction removes the
   fullest bucket, not the oldest; in a table where every bucket is spent a new key
   is still served; a spent bucket refills on the fake clock.
@@ -163,6 +180,7 @@ the PR, and its result goes in the PR description.
 
 ## Out of scope
 
-- Any change to `--authFailureLimit`'s limits, keying or saturation rule.
+- Any change to `--authFailureLimit`'s limits, keying or saturation rule (the
+  refill-aware scan above corrects how saturation is measured, not the rule).
 - More than one trusted proxy hop.
 - A process-wide ceiling on top of the per-client buckets.
