@@ -92,18 +92,6 @@ function consume(bucket: Bucket, maxTokens: number): { allowed: boolean; retryAf
   return { allowed: false, retryAfterMs: nextTokenWaitMs(bucket, maxTokens) };
 }
 
-class RateLimiter {
-  private bucket: Bucket;
-
-  constructor(private maxTokens: number) {
-    this.bucket = { tokens: maxTokens, lastRefill: Date.now() };
-  }
-
-  tryConsume(): { allowed: boolean; retryAfterMs: number } {
-    return consume(this.bucket, this.maxTokens);
-  }
-}
-
 /**
  * A request bucket per client, so `--rateLimit` means N requests per minute *per caller*.
  *
@@ -291,6 +279,11 @@ export interface HttpTransportOpts {
   host?: string;
   bearerToken?: string;
   registry: ConnectionRegistry;
+  /**
+   * Authenticated requests allowed per client per minute, on every route but
+   * `GET /health`. 0 or unset disables the limit. Clients are keyed as for
+   * `authFailureLimit`.
+   */
   rateLimit?: number;
   /**
    * Failed bearer-auth attempts allowed per client per minute. Defaults to
@@ -346,25 +339,27 @@ export async function startHttpServer(
     : null;
 
   // Said once, when it turns out to matter. Behind a proxy with `--trustProxy` off, every
-  // client is keyed on the proxy's socket address and so shares one budget — which means
-  // ten failures from anyone locks out everyone. The README tells operators to terminate
-  // TLS at a proxy, so this is the configuration it recommends, and the collapse is
-  // invisible until a legitimate client is refused.
+  // client is keyed on the proxy's socket address and so shares one failure budget and one
+  // request budget — ten failures from anyone locks out everyone, and one busy client
+  // starves the rest. The README tells operators to terminate TLS at a proxy, so this is
+  // the configuration it recommends, and the collapse is invisible until a legitimate
+  // client is refused.
   let warnedSharedBudget = false;
   const warnSharedBudget = () => {
     if (warnedSharedBudget) return;
     warnedSharedBudget = true;
     console.error(
       'POLICY WARNING: X-Forwarded-For is present but not being used to tell clients ' +
-      'apart, so every client shares one failed-auth budget and one failing client can ' +
-      'lock out the rest. Either --trustProxy is off, or the peer is not a trusted proxy ' +
-      '(bare --trustProxy trusts a loopback peer; name others with --trustedProxies), or ' +
-      'the rightmost entry is not an address this server can read.',
+      'apart, so every client is charged to one key: one failed-auth budget and one ' +
+      'request budget between them, for whichever of the two is on, and one client can ' +
+      'lock out or starve the rest. Either --trustProxy is off, or the peer is not a ' +
+      'trusted proxy (bare --trustProxy trusts a loopback peer; name others with ' +
+      '--trustedProxies), or the rightmost entry is not an address this server can read.',
     );
   };
 
   const rateLimiter = opts.rateLimit && opts.rateLimit > 0
-    ? new RateLimiter(opts.rateLimit)
+    ? new ClientRateLimiter(opts.rateLimit)
     : null;
 
   // DNS rebinding: a page the user visits can make their browser POST to a
@@ -434,13 +429,15 @@ export async function startHttpServer(
       // nothing: the comparison would still happen and a correct token would still be
       // served, so the status code would still tell an attacker which guess was right.
       let key = '';
-      if (authFailureLimiter) {
+      if (authFailureLimiter || rateLimiter) {
         const resolved = clientKey(req, opts.trustProxy === true, opts.trustedProxies);
         key = resolved.key;
         // Warned in both directions. Without `--trustProxy` a proxied deployment shares
         // one budget; *with* it, an entry that could not be read leaves the same collapse
         // in place, and that case used to be the silent one — the operator had set the
         // flag and had no way to know it was not taking effect.
+        // Resolved for either limiter: with only `--rateLimit` on, skipping this charged
+        // every client to one key and kept the warning silent.
         if (resolved.forwardedIgnored || (opts.trustProxy !== true && req.headers['x-forwarded-for'])) {
           warnSharedBudget();
         }
@@ -487,24 +484,30 @@ export async function startHttpServer(
         }));
         return;
       }
-    }
 
-    if (rateLimiter && url.pathname === '/' && (req.method === 'POST' || req.method === 'GET' || req.method === 'DELETE')) {
-      const { allowed, retryAfterMs } = rateLimiter.tryConsume();
-      if (!allowed) {
-        const retryAfterSec = Math.ceil(retryAfterMs / 1000);
-        res.writeHead(429, {
-          'Content-Type': 'application/json',
-          'Retry-After': String(retryAfterSec),
-        });
-        res.end(JSON.stringify({
-          jsonrpc: '2.0',
-          error: {
-            code: -32604,
-            message: `Rate limit exceeded. Retry after ${retryAfterSec}s.`,
-          },
-        }));
-        return;
+      // Charged after the token check, never before: a request bucket is per client, but
+      // unauthenticated traffic reaching it could still spend a victim's budget under a
+      // spoofable key, and its 429 would answer a guess without evaluating it. Every
+      // authenticated route spends from it, `/status` and 404s included: `/status` was
+      // unlimited, so a token holder could poll it without bound.
+      if (rateLimiter) {
+        const { allowed, retryAfterMs } = rateLimiter.tryConsume(key);
+        if (!allowed) {
+          const retryAfterSec = Math.ceil(retryAfterMs / 1000);
+          res.writeHead(429, {
+            'Content-Type': 'application/json',
+            'Retry-After': String(retryAfterSec),
+          });
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            error: {
+              code: -32604,
+              message: `Rate limit exceeded. Retry after ${retryAfterSec}s.`,
+            },
+            id: null,
+          }));
+          return;
+        }
       }
     }
 
@@ -618,7 +621,7 @@ export async function startHttpServer(
       console.error(`SSH MCP Server v2 (HTTP) listening on http://${host}:${port}`);
       console.error('Endpoints: POST / (MCP), GET /status, GET /health');
       if (rateLimiter) {
-        console.error(`Rate limit: ${opts.rateLimit} req/min`);
+        console.error(`Rate limit: ${opts.rateLimit} req/min per client`);
       }
       if (authFailureLimiter) {
         console.error(`Auth failure limit: ${authFailureLimit}/min per client`);

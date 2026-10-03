@@ -39,7 +39,11 @@ function startTestServer(): Promise<Server> {
         port: HTTP_PORT,
         host: HTTP_HOST,
         bearerToken: BEARER,
-        rateLimit: 3,
+        // Off on this server, for the reason the failure budget is: every request in this
+        // file comes from 127.0.0.1, and `/status`, 404s and the auth cases now spend the
+        // request budget too, so a shared limit would couple unrelated tests. The limiter
+        // is measured on its own servers below.
+        rateLimit: 0,
         // Off on this server. The auth block below makes three failed attempts, and every
         // request in this file comes from 127.0.0.1, so one shared failure budget would
         // couple them: add a fourth 401 case and "accepts request with correct token"
@@ -186,24 +190,6 @@ describe('HTTP transport — sessions', () => {
   });
 });
 
-describe('HTTP transport — rate limiting', () => {
-  it('returns 429 after exceeding rate limit on MCP route', async () => {
-    const headers = { authorization: `Bearer ${BEARER}`, 'content-type': 'application/json' };
-    const results: number[] = [];
-    for (let i = 0; i < 10; i++) {
-      const res = await httpRequest('POST', '/', headers, JSON.stringify({ jsonrpc: '2.0', id: i, method: 'ping' }));
-      results.push(res.status);
-    }
-    // Rate limit is 3/min and the bucket is shared with earlier tests in this
-    // file, so assert the shape rather than an exact split: throttling kicks in
-    // and, once it does, it stays on for the rest of the burst.
-    const firstThrottled = results.indexOf(429);
-    expect(firstThrottled).toBeGreaterThanOrEqual(0);
-    expect(results.slice(firstThrottled).every((s) => s === 429)).toBe(true);
-    expect(results.filter((s) => s === 429).length).toBeGreaterThanOrEqual(7);
-  });
-});
-
 function bareRequest(
   port: number,
   path: string,
@@ -226,6 +212,29 @@ function bareRequest(
     );
     req.on('error', reject);
     req.end();
+  });
+}
+
+function postRequest(
+  port: number,
+  headers: Record<string, string> = {},
+  path = '/',
+): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpModule.request(
+      {
+        hostname: HTTP_HOST, port, path, method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        agent: false as const,
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode || 0, headers: res.headers, body }));
+      },
+    );
+    req.on('error', reject);
+    req.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }));
   });
 }
 
@@ -883,7 +892,7 @@ describe('HTTP transport — the two 429s are distinguishable', () => {
     expect(parsed.error.message).toMatch(/failed authentication/i);
   });
 
-  it('a failed attempt never touches the global request budget', async () => {
+  it('a failed attempt never touches the request budget', async () => {
     // The reason the request limiter was left above the auth check: that bucket is
     // global, so letting unauthenticated traffic drain it would starve every legitimate
     // client. Checked on its own server, with the failure budget deliberately left
@@ -962,5 +971,193 @@ describe('HTTP transport — the request limiter admits exactly its limit', () =
     }
     expect(statuses.filter((x) => x !== 429)).toHaveLength(3);
     expect(statuses.slice(3)).toEqual([429, 429]);
+  });
+});
+
+/**
+ * #187's second half: the request limiter was one bucket for the process, so client B was
+ * refused before it had sent anything (measured: A `400 400 400 429`, then B `429 429`).
+ * Two clients are told apart through a trusted loopback proxy, for the reason the
+ * `clientKey` block above gives: two real source addresses are platform-dependent.
+ */
+describe('HTTP transport — the request budget is per client', () => {
+  const PORT = 18413;
+  const LIMIT = 2;
+  const auth = { authorization: `Bearer ${BEARER}` };
+  const from = (xff: string) => ({ ...auth, 'x-forwarded-for': xff });
+
+  beforeAll(async () => {
+    const { startHttpServer } = await import('../../../src/transport/http.js');
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const mockRegistry = {
+      listConnections: () => [], listAllProfiles: () => [], get: () => undefined,
+      getOrCreate: async () => { throw new Error('not in test'); },
+    } as any;
+    const mcpServer = new McpServer(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    );
+    await startHttpServer(() => mcpServer, {
+      port: PORT, host: HTTP_HOST, bearerToken: BEARER,
+      rateLimit: LIMIT, trustProxy: true, registry: mockRegistry,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  it('a client that spends its budget leaves another client\'s whole', async () => {
+    const a: number[] = [];
+    for (let i = 0; i < LIMIT + 1; i++) a.push((await postRequest(PORT, from('203.0.113.1'))).status);
+    expect(a.slice(0, LIMIT).every((s) => s !== 429)).toBe(true);
+    expect(a[LIMIT]).toBe(429);
+
+    const b: number[] = [];
+    for (let i = 0; i < LIMIT + 1; i++) b.push((await postRequest(PORT, from('203.0.113.2'))).status);
+    expect(b.slice(0, LIMIT).every((s) => s !== 429)).toBe(true);
+    expect(b[LIMIT]).toBe(429);
+  });
+
+  it('charges /status and an authenticated 404, and says so in a JSON-RPC envelope', async () => {
+    // /status was unlimited: a token holder could poll it without bound.
+    expect((await bareRequest(PORT, '/status', from('198.51.100.1'))).status).toBe(200);
+    expect((await bareRequest(PORT, '/status', from('198.51.100.1'))).status).toBe(200);
+    const refused = await bareRequest(PORT, '/status', from('198.51.100.1'));
+    expect(refused.status).toBe(429);
+    const parsed = JSON.parse(refused.body);
+    expect(parsed).toEqual({
+      jsonrpc: '2.0',
+      error: { code: -32604, message: expect.stringMatching(/^Rate limit exceeded\. Retry after \d+s\.$/) },
+      id: null,
+    });
+
+    expect((await bareRequest(PORT, '/nope', from('198.51.100.2'))).status).toBe(404);
+    expect((await bareRequest(PORT, '/nope', from('198.51.100.2'))).status).toBe(404);
+    expect((await postRequest(PORT, from('198.51.100.2'))).status).toBe(429);
+  });
+
+  it('never charges or refuses the liveness probe', async () => {
+    for (let i = 0; i < LIMIT; i++) await postRequest(PORT, from('198.51.100.3'));
+    expect((await postRequest(PORT, from('198.51.100.3'))).status).toBe(429);
+    // Same address, budget spent, no token: /health answers.
+    expect((await bareRequest(PORT, '/health', { 'x-forwarded-for': '198.51.100.3' })).status).toBe(200);
+  });
+});
+
+describe('HTTP transport — the request budget without the failure budget', () => {
+  it('still tells clients apart with --authFailureLimit=0', async () => {
+    const { startHttpServer } = await import('../../../src/transport/http.js');
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const mockRegistry = {
+      listConnections: () => [], listAllProfiles: () => [], get: () => undefined,
+      getOrCreate: async () => { throw new Error('not in test'); },
+    } as any;
+    const mcpServer = new McpServer(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    );
+    const port = 18414;
+    await startHttpServer(() => mcpServer, {
+      port, host: HTTP_HOST, bearerToken: BEARER,
+      rateLimit: 1, authFailureLimit: 0, trustProxy: true, registry: mockRegistry,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // The client key used to be resolved only for the failure budget, so with it off
+    // every request was charged to one key.
+    const auth = { authorization: `Bearer ${BEARER}` };
+    expect((await postRequest(port, { ...auth, 'x-forwarded-for': '203.0.113.1' })).status).not.toBe(429);
+    expect((await postRequest(port, { ...auth, 'x-forwarded-for': '203.0.113.1' })).status).toBe(429);
+    expect((await postRequest(port, { ...auth, 'x-forwarded-for': '203.0.113.2' })).status).not.toBe(429);
+  });
+
+  it('warns that clients share a budget behind an untrusted proxy', async () => {
+    const { startHttpServer } = await import('../../../src/transport/http.js');
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const mockRegistry = {
+      listConnections: () => [], listAllProfiles: () => [], get: () => undefined,
+      getOrCreate: async () => { throw new Error('not in test'); },
+    } as any;
+    const mcpServer = new McpServer(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    );
+    const port = 18415;
+    await startHttpServer(() => mcpServer, {
+      port, host: HTTP_HOST, bearerToken: BEARER,
+      rateLimit: 5, authFailureLimit: 0, registry: mockRegistry,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await postRequest(port, { authorization: `Bearer ${BEARER}`, 'x-forwarded-for': '203.0.113.9' });
+      const warnings = spy.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('X-Forwarded-For'));
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatch(/request budget/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('HTTP transport — the two budgets stay separate', () => {
+  it('a request-limit 429 does not count as a failed authentication', async () => {
+    const { startHttpServer } = await import('../../../src/transport/http.js');
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const mockRegistry = {
+      listConnections: () => [], listAllProfiles: () => [], get: () => undefined,
+      getOrCreate: async () => { throw new Error('not in test'); },
+    } as any;
+    const mcpServer = new McpServer(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    );
+    const port = 18416;
+    await startHttpServer(() => mcpServer, {
+      port, host: HTTP_HOST, bearerToken: BEARER,
+      rateLimit: 1, authFailureLimit: 1, registry: mockRegistry,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    const auth = { authorization: `Bearer ${BEARER}` };
+    expect((await postRequest(port, auth)).status).not.toBe(429);
+    for (let i = 0; i < 3; i++) expect((await postRequest(port, auth)).status).toBe(429);
+    // The failure budget of 1 is still whole: a wrong token is evaluated and answered 401.
+    expect((await postRequest(port, { authorization: 'Bearer wrong' })).status).toBe(401);
+  });
+});
+
+describe('HTTP transport — the request 429 carries the exact wait', () => {
+  it('Retry-After counts down within a token\'s interval', async () => {
+    const { startHttpServer } = await import('../../../src/transport/http.js');
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const mockRegistry = {
+      listConnections: () => [], listAllProfiles: () => [], get: () => undefined,
+      getOrCreate: async () => { throw new Error('not in test'); },
+    } as any;
+    const mcpServer = new McpServer(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    );
+    const port = 18417;
+    await startHttpServer(() => mcpServer, {
+      port, host: HTTP_HOST, bearerToken: BEARER,
+      rateLimit: 3, authFailureLimit: 0, registry: mockRegistry,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    const T0 = 1_800_000_000_000;
+    const auth = { authorization: `Bearer ${BEARER}` };
+    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
+    try {
+      // The bucket is created by the first request, so under the fake clock.
+      for (let i = 0; i < 3; i++) await postRequest(port, auth);
+      vi.setSystemTime(T0 + 7_500);
+      const res = await postRequest(port, auth);
+      expect(res.status).toBe(429);
+      // 20s per token at 3/min, 7.5s gone: 12.5s left, rounded up. The fixed value was 20.
+      expect(res.headers['retry-after']).toBe('13');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
