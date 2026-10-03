@@ -12,7 +12,7 @@ extends: core/skills/security/SKILL.md
 - **Unbounded output** — disabling `maxOutputBytes` or `maxChars` enables memory exhaustion.
 - **`shellSingleQuote` bypass** — privileged-command uses `shellSingleQuote()` for sudo wrapper. Any change to this function must be tested against injection payloads.
 - **HTTP transport without bearer** — `startHttpServer()` must throw if `bearerToken` is missing.
-- **HTTP rate limiting bypass** — rate limiter only applies to MCP routes (`/`), not `/health` or `/status`. Verify this is intentional.
+- **HTTP rate limiting bypass** — the request limiter is per client and charged after auth on every route but `GET /health`; the failed-auth budget is checked before the token is compared. Verify neither is skipped by a new route, and that the client key is never read from `X-Forwarded-For` unless the peer is a trusted proxy.
 - **AbortSignal cancel abuse** — cancel handler sends INT→TERM→KILL to remote process. Verify the signal escalation timing is bounded.
 - **OTEL span attributes leaking secrets** — span attributes (`ssh.command`) must pass through `redactText()` before being set. Raw command in span = secret leak to tracing backend.
 - **Progress notification data leak** — `onProgress` sends last 3 lines of stdout to client. Verify no secrets in tail output.
