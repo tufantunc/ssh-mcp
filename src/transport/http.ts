@@ -459,32 +459,98 @@ export async function startHttpServer(
     transport: StreamableHTTPServerTransport;
     server: McpServer;
     lastActivity: number;
-    inFlight: number;
+    finiteInFlight: number;
+    openSseStreams: number;
     closing: boolean;
     pending: boolean;
+    releasePending: () => void;
     closePromise?: Promise<void>;
   }
+
+  interface PendingSessionReservation {
+    createdAt: number;
+    released: boolean;
+  }
+
+  interface McpSessionStats {
+    cap: number;
+    total: number;
+    pending: number;
+    finiteInFlightSessions: number;
+    finiteInFlightRequests: number;
+    openSseStreams: number;
+    evictable: number;
+    oldestActivityMs: number;
+    oldestPendingMs: number;
+  }
+
+  type SessionCloseReason = 'delete' | 'ttl' | 'lru' | 'init-abort' | 'transport-close';
 
   const sessionIdleTtlMs = opts.sessionIdleTtlMs && opts.sessionIdleTtlMs > 0
     ? opts.sessionIdleTtlMs
     : DEFAULT_SESSION_IDLE_TTL_MS;
   const sessions = new Map<string, Session>();
-  let pendingSessions = 0;
+  const pendingReservations = new Set<PendingSessionReservation>();
 
-  function detachSession(session: Session): void {
+  function reservePendingSession(): () => void {
+    const reservation = { createdAt: Date.now(), released: false };
+    pendingReservations.add(reservation);
+    return () => {
+      if (reservation.released) return;
+      reservation.released = true;
+      pendingReservations.delete(reservation);
+    };
+  }
+
+  function sessionStats(now = Date.now()): McpSessionStats {
+    let finiteInFlightSessions = 0;
+    let finiteInFlightRequests = 0;
+    let openSseStreams = 0;
+    let evictable = 0;
+    let oldestActivity = now;
+    let oldestPending = now;
+
+    for (const session of sessions.values()) {
+      if (session.finiteInFlight > 0) finiteInFlightSessions++;
+      else evictable++;
+      finiteInFlightRequests += session.finiteInFlight;
+      openSseStreams += session.openSseStreams;
+      oldestActivity = Math.min(oldestActivity, session.lastActivity);
+    }
+    for (const reservation of pendingReservations) {
+      oldestPending = Math.min(oldestPending, reservation.createdAt);
+    }
+
+    return {
+      cap: MAX_SESSIONS,
+      total: sessions.size,
+      pending: pendingReservations.size,
+      finiteInFlightSessions,
+      finiteInFlightRequests,
+      openSseStreams,
+      evictable,
+      oldestActivityMs: sessions.size > 0 ? Math.max(0, now - oldestActivity) : 0,
+      oldestPendingMs: pendingReservations.size > 0 ? Math.max(0, now - oldestPending) : 0,
+    };
+  }
+
+  function formatSessionStats(stats: McpSessionStats): string {
+    return Object.entries(stats).map(([key, value]) => `${key}=${value}`).join(' ');
+  }
+
+  function detachSession(session: Session, reason: SessionCloseReason): void {
     if (session.closing) return;
     session.closing = true;
     if (session.id && sessions.get(session.id) === session) sessions.delete(session.id);
-    if (session.pending) {
-      session.pending = false;
-      pendingSessions--;
-    }
+    session.pending = false;
+    session.releasePending();
+    console.error(`MCP session closed reason=${reason}`);
   }
 
   /** Close both owners so transport streams and resources attached to the McpServer are released. */
-  function closeSession(session: Session): Promise<void> {
+  function closeSession(session: Session, reason: SessionCloseReason): Promise<void> {
     if (!session.closePromise) {
-      detachSession(session);
+      detachSession(session, reason);
       session.closePromise = (async () => {
         await session.transport.close().catch(() => {});
         await session.server.close().catch(() => {});
@@ -496,16 +562,18 @@ export async function startHttpServer(
   function takeIdleSessions(now: number): Session[] {
     const expired: Session[] = [];
     for (const session of sessions.values()) {
-      if (session.inFlight === 0 && now - session.lastActivity >= sessionIdleTtlMs) {
-        detachSession(session);
+      if (session.finiteInFlight === 0 && now - session.lastActivity >= sessionIdleTtlMs) {
+        detachSession(session, 'ttl');
         expired.push(session);
       }
     }
     return expired;
   }
 
-  function beginRequest(session: Session, res: ServerResponse): () => void {
-    session.inFlight++;
+  function beginRequest(session: Session, req: IncomingMessage, res: ServerResponse): () => void {
+    const isSseStream = req.method === 'GET';
+    if (isSseStream) session.openSseStreams++;
+    else session.finiteInFlight++;
     session.lastActivity = Date.now();
     const initializing = session.pending;
     let completed = false;
@@ -514,9 +582,10 @@ export async function startHttpServer(
       completed = true;
       res.off('finish', onFinish);
       res.off('close', onClose);
-      session.inFlight--;
+      if (isSseStream) session.openSseStreams--;
+      else session.finiteInFlight--;
       session.lastActivity = Date.now();
-      if (session.pending || (initializing && aborted)) void closeSession(session);
+      if (session.pending || (initializing && aborted)) void closeSession(session, 'init-abort');
     };
     const onFinish = () => { complete(false); };
     const onClose = () => { complete(!res.writableFinished); };
@@ -536,8 +605,8 @@ export async function startHttpServer(
     if (sessionId) {
       const existing = sessions.get(sessionId);
       if (existing) {
-        if (existing.inFlight === 0 && Date.now() - existing.lastActivity >= sessionIdleTtlMs) {
-          await closeSession(existing);
+        if (existing.finiteInFlight === 0 && Date.now() - existing.lastActivity >= sessionIdleTtlMs) {
+          await closeSession(existing, 'ttl');
         } else {
           return existing;
         }
@@ -552,35 +621,40 @@ export async function startHttpServer(
       return null;
     }
 
-    const expired = takeIdleSessions(Date.now());
-    if (sessions.size + pendingSessions >= MAX_SESSIONS) {
+    const sessionsToClose: Array<{ session: Session; reason: SessionCloseReason }> =
+      takeIdleSessions(Date.now()).map((session) => ({ session, reason: 'ttl' }));
+    if (sessions.size + pendingReservations.size >= MAX_SESSIONS) {
       let lru: Session | undefined;
       for (const session of sessions.values()) {
-        if (session.inFlight === 0 && (!lru || session.lastActivity < lru.lastActivity)) {
+        if (session.finiteInFlight === 0 && (!lru || session.lastActivity < lru.lastActivity)) {
           lru = session;
         }
       }
       if (lru) {
-        console.error(`MCP session limit reached; evicting least-recently-active session ${lru.id}.`);
-        detachSession(lru);
-        expired.push(lru);
+        detachSession(lru, 'lru');
+        sessionsToClose.push({ session: lru, reason: 'lru' });
       }
     }
 
-    if (sessions.size + pendingSessions >= MAX_SESSIONS) {
+    if (sessions.size + pendingReservations.size >= MAX_SESSIONS) {
+      console.error(`MCP session limit reached ${formatSessionStats(sessionStats())}`);
       jsonRpcError(res, 503, -32000, `Server is at its session limit (${MAX_SESSIONS}). Close an existing session and retry.`);
       return null;
     }
 
-    pendingSessions++;
+    const releasePending = reservePendingSession();
     let clientClosed = false;
-    const markClientClosed = () => { clientClosed = true; };
+    const markClientClosed = () => {
+      clientClosed = true;
+      releasePending();
+    };
     res.once('close', markClientClosed);
 
     let mcp: McpServer | undefined;
     let session: Session | undefined;
     try {
-      await Promise.all(expired.map(closeSession));
+      await Promise.all(sessionsToClose.map(({ session: closingSession, reason }) =>
+        closeSession(closingSession, reason)));
       mcp = await createMcpServer();
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
@@ -590,34 +664,36 @@ export async function startHttpServer(
           session!.id = id;
           if (session!.pending) {
             session!.pending = false;
-            pendingSessions--;
+            session!.releasePending();
           }
-          sessions.set(id, session!);
+          if (!session!.closing) sessions.set(id, session!);
         },
-        onsessionclosed: () => { detachSession(session!); },
+        onsessionclosed: () => { detachSession(session!, 'delete'); },
       });
       session = {
         transport,
         server: mcp,
         lastActivity: Date.now(),
-        inFlight: 0,
+        finiteInFlight: 0,
+        openSseStreams: 0,
         closing: false,
         pending: true,
+        releasePending,
       };
       // Covers transport teardown that isn't a DELETE (client disconnect, error).
       transport.onclose = () => {
-        detachSession(session!);
+        detachSession(session!, 'transport-close');
       };
 
       await mcp.connect(transport);
       if (clientClosed || res.destroyed) {
-        await closeSession(session);
+        await closeSession(session, 'init-abort');
         return null;
       }
       return session;
     } catch (error) {
-      if (session) await closeSession(session);
-      else pendingSessions--;
+      if (session) await closeSession(session, 'init-abort');
+      else releasePending();
       throw error;
     } finally {
       res.off('close', markClientClosed);
@@ -632,10 +708,10 @@ export async function startHttpServer(
     const session = await resolveTransport(req, res, parsedBody);
     if (!session) return;
     if (res.destroyed) {
-      if (session.pending) await closeSession(session);
+      if (session.pending) await closeSession(session, 'init-abort');
       return;
     }
-    const finish = beginRequest(session, res);
+    const finish = beginRequest(session, req, res);
     try {
       await session.transport.handleRequest(req, res, parsedBody);
     } catch (error) {
@@ -802,6 +878,7 @@ export async function startHttpServer(
           role: p.role,
           readOnly: p.readOnly,
         })),
+        mcpSessions: sessionStats(),
       }));
       return;
     }
@@ -827,7 +904,7 @@ export async function startHttpServer(
   });
 
   httpServer.once('close', () => {
-    void Promise.all(Array.from(sessions.values(), closeSession));
+    void Promise.all(Array.from(sessions.values(), (session) => closeSession(session, 'transport-close')));
   });
 
   // Previously listen() had no error handler, so EADDRINUSE surfaced as an
