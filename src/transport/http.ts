@@ -197,7 +197,22 @@ export class AuthFailureLimiter {
 }
 
 /**
- * Which client an attempt is charged to.
+ * Which client an attempt is charged to: the address `chargedAddress` settles on, grouped
+ * into a key by `keyOf`. Grouped here, once, so no path through the header logic can hand
+ * back an ungrouped address — and trust is decided in there, on the exact peer, before any
+ * grouping happens.
+ */
+export function clientKey(
+  req: IncomingMessage,
+  trustProxy: boolean,
+  trustedProxies?: string[],
+): { key: string; forwardedIgnored: boolean } {
+  const { address, forwardedIgnored } = chargedAddress(req, trustProxy, trustedProxies);
+  return { key: keyOf(address), forwardedIgnored };
+}
+
+/**
+ * The exact address an attempt is charged to.
  *
  * The socket's remote address, which is the real client on a direct connection — how this
  * server is normally run. `X-Forwarded-For` is read only when a proxy is explicitly
@@ -215,14 +230,14 @@ export class AuthFailureLimiter {
  * chain of two would need the second-from-right, and this does not try to guess the depth.
  * Anything that is not an IP address is discarded rather than used as a map key.
  */
-export function clientKey(
+function chargedAddress(
   req: IncomingMessage,
   trustProxy: boolean,
   trustedProxies?: string[],
-): { key: string; forwardedIgnored: boolean } {
+): { address: string; forwardedIgnored: boolean } {
   const peer = canonicalAddress(req.socket.remoteAddress ?? 'unknown');
   const forwarded = req.headers['x-forwarded-for'];
-  if (!trustProxy || forwarded === undefined) return { key: peer, forwardedIgnored: false };
+  if (!trustProxy || forwarded === undefined) return { address: peer, forwardedIgnored: false };
 
   // The rightmost entry is proxy-authored only if a proxy actually appended one. Nothing
   // about the header says whether it did, so the *peer* has to be the proxy — otherwise a
@@ -230,15 +245,62 @@ export function clientKey(
   // rightmost, and it picks its own key. Both attacks this keying was fixed to stop came
   // back alive in exactly that configuration.
   if (!isTrustedPeer(peer, trustedProxies)) {
-    return { key: peer, forwardedIgnored: true };
+    return { address: peer, forwardedIgnored: true };
   }
 
   const raw = Array.isArray(forwarded) ? forwarded.join(',') : forwarded;
   const entries = raw.split(',').map((e) => e.trim()).filter(Boolean);
   const nearest = entries[entries.length - 1];
   const address = nearest === undefined ? undefined : forwardedAddress(nearest);
-  if (address === undefined) return { key: peer, forwardedIgnored: true };
-  return { key: address, forwardedIgnored: false };
+  if (address === undefined) return { address: peer, forwardedIgnored: true };
+  return { address, forwardedIgnored: false };
+}
+
+/**
+ * The key an address is charged to: an IPv4 address as itself, an IPv6 address by its /64.
+ *
+ * A subscriber is usually handed at least a /64, so the /64 is the client. Where a provider
+ * puts several customers on one /64 they share a budget, as hosts behind one IPv4 NAT do.
+ *
+ * Three IPv6 ranges are not a client's own /64 but a way of carrying an IPv4 address, and
+ * are keyed by that address: IPv4-mapped `::ffff:0:0/96` in any spelling, the NAT64
+ * well-known prefix `64:ff9b::/96` under which a translated deployment sees every IPv4
+ * client, and IPv4-compatible `::/96`. Grouped by /64 instead, each of them would put every
+ * IPv4 client on one key. A translator using a prefix of its own is not recognised, and its
+ * IPv4 clients share that prefix's /64. Loopback stays `::1`, however it is written.
+ */
+function keyOf(address: string): string {
+  if (isIP(address) !== 6) return address;
+  const g = ipv6Groups(address);
+  if (g.slice(0, 7).every((n) => n === 0) && g[7] === 1) return '::1';
+  const lowZero = g[2] === 0 && g[3] === 0 && g[4] === 0;
+  const carriesIpv4 = lowZero && (
+    (g[0] === 0 && g[1] === 0 && (g[5] === 0 || g[5] === 0xffff)) ||
+    (g[0] === 0x64 && g[1] === 0xff9b && g[5] === 0)
+  );
+  if (carriesIpv4) return `${g[6] >> 8}.${g[6] & 0xff}.${g[7] >> 8}.${g[7] & 0xff}`;
+  return `${g.slice(0, 4).map((n) => n.toString(16)).join(':')}::/64`;
+}
+
+/**
+ * An IPv6 address as its eight 16-bit groups, whatever the spelling: zone dropped, `::`
+ * expanded, a dotted IPv4 tail read as the last two groups, case and leading zeros gone by
+ * reading each group as a number. Expects an address `net.isIP` has already accepted.
+ */
+function ipv6Groups(address: string): number[] {
+  const [head, tail] = address.split('%')[0].split('::');
+  const parse = (part: string | undefined): number[] =>
+    part === undefined || part === ''
+      ? []
+      : part.split(':').flatMap((group) => {
+        if (!group.includes('.')) return [parseInt(group, 16)];
+        const [a, b, c, d] = group.split('.').map(Number);
+        return [(a << 8) | b, (c << 8) | d];
+      });
+  const headGroups = parse(head);
+  const tailGroups = parse(tail);
+  if (tail === undefined) return headGroups;
+  return [...headGroups, ...Array(8 - headGroups.length - tailGroups.length).fill(0), ...tailGroups];
 }
 
 /**
@@ -276,9 +338,17 @@ function forwardedAddress(entry: string): string | undefined {
   return isIP(candidate) === 0 ? undefined : candidate;
 }
 
-/** `::ffff:127.0.0.1` and `127.0.0.1` are the same client; key them the same way. */
+/**
+ * `::ffff:127.0.0.1` and `127.0.0.1` are the same client; key them the same way.
+ *
+ * Only that spelling, and only when what follows is IPv4: `::ffff:c000:280` stripped to
+ * `c000:280` was no address at all, and the request fell back to the proxy's key. Every
+ * other spelling of a mapped address reaches its IPv4 key through `keyOf`, by value. The
+ * case is left as it came, because this is also the peer the trust check compares with
+ * `--trustedProxies` — a zone such as `%WAN` must still match as written.
+ */
 function canonicalAddress(address: string): string {
-  return address.startsWith('::ffff:') ? address.slice(7) : address;
+  return address.startsWith('::ffff:') && isIP(address.slice(7)) === 4 ? address.slice(7) : address;
 }
 
 export interface HttpTransportOpts {
