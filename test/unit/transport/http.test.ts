@@ -518,8 +518,8 @@ describe('clientKey', () => {
   });
 
   it.each([
-    ['[2001:db8::1]:443', '2001:db8::1'],
-    ['[2001:db8::1]', '2001:db8::1'],
+    ['[2001:db8::1]:443', '2001:db8:0:0::/64'],
+    ['[2001:db8::1]', '2001:db8:0:0::/64'],
     ['198.51.100.5:51234', '198.51.100.5'],
     ['::1', '::1'],
   ])('reads %s as %s', (forwarded, expected) => {
@@ -539,6 +539,50 @@ describe('clientKey', () => {
     expect(clientKeyOf(fake(undefined), false)).toBe('unknown');
     // A trusted proxy that sent nothing useful must not produce an empty key.
     expect(clientKeyOf(fake('127.0.0.1', '   '), true)).toBe('127.0.0.1');
+  });
+
+  it('keys an IPv6 client by its /64, not its full address', () => {
+    // One subscriber is handed a whole /64, so the address within it is the client's to
+    // choose; keyed by full address, each choice was a fresh budget.
+    const a = clientKeyOf(fake('2001:db8:1:2::a'), false);
+    expect(a).toBe('2001:db8:1:2::/64');
+    expect(clientKeyOf(fake('2001:db8:1:2:ffff:ffff:ffff:fffe'), false)).toBe(a);
+    // A neighbouring /64 is a different client.
+    expect(clientKeyOf(fake('2001:db8:1:3::a'), false)).toBe('2001:db8:1:3::/64');
+    // The same through a trusted proxy.
+    expect(clientKeyOf(fake('127.0.0.1', '2001:db8:1:2::b'), true)).toBe(a);
+  });
+
+  it.each([
+    ['2001:DB8:1:2::A', '2001:db8:1:2::/64'],
+    ['2001:0db8:0001:0002:0:0:0:a', '2001:db8:1:2::/64'],
+    ['2001:db8:1:2::203.0.113.9', '2001:db8:1:2::/64'],
+    // A dotted tail stands for two groups; miscounting it shifts where `::` expands.
+    ['2001::1:2:3:4:203.0.113.9', '2001:0:1:2::/64'],
+    ['fe80::1%en0', 'fe80:0:0:0::/64'],
+    // A zone name may itself contain a dot (a VLAN interface) and must not count as one.
+    ['2001:db8::1:2:3:4:5%eth0.1', '2001:db8:0:1::/64'],
+    ['::FFFF:203.0.113.9', '203.0.113.9'],
+  ])('normalises %s to %s', (address, expected) => {
+    // Spellings of one /64 must meet on one key, or the grouping is undone by rewriting
+    // the address.
+    expect(clientKeyOf(fake(address), false)).toBe(expected);
+    expect(clientKeyOf(fake('127.0.0.1', address), true)).toBe(expected);
+  });
+
+  it('keeps loopback as itself', () => {
+    expect(clientKeyOf(fake('::1'), false)).toBe('::1');
+  });
+
+  it('still recognises a named IPv6 proxy by its full address', () => {
+    // The prefix is the *key*. Trust is decided on the exact peer, or every host in the
+    // proxy's /64 would be allowed to speak for other clients.
+    expect(clientKeyOf(fake('2001:db8:9::10', '198.51.100.42'), true, ['2001:db8:9::10']))
+      .toBe('198.51.100.42');
+    // A neighbour in the proxy's /64 is not the proxy: its header is ignored, and it is
+    // charged as itself.
+    expect(clientKey(fake('2001:db8:9::11', '198.51.100.42'), true, ['2001:db8:9::10']))
+      .toEqual({ key: '2001:db8:9:0::/64', forwardedIgnored: true });
   });
 });
 
@@ -1158,5 +1202,44 @@ describe('HTTP transport — the request 429 carries the exact wait', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * Keyed by full address, an IPv6 client choosing a new address inside its own /64 got a
+ * fresh failure budget each time. Through a trusted loopback proxy so the addresses can be
+ * chosen; `clientKey` above covers the socket path.
+ */
+describe('HTTP transport — one /64 is one client', () => {
+  const PORT = 18418;
+
+  beforeAll(async () => {
+    const { startHttpServer } = await import('../../../src/transport/http.js');
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const mockRegistry = {
+      listConnections: () => [], listAllProfiles: () => [], get: () => undefined,
+      getOrCreate: async () => { throw new Error('not in test'); },
+    } as any;
+    const mcpServer = new McpServer(
+      { name: 'test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    );
+    await startHttpServer(() => mcpServer, {
+      port: PORT, host: HTTP_HOST, bearerToken: BEARER,
+      authFailureLimit: 2, trustProxy: true, registry: mockRegistry,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+  });
+
+  const fail = (xff: string) =>
+    bareRequest(PORT, '/status', { authorization: 'Bearer wrong', 'x-forwarded-for': xff });
+
+  it('charges every address in a /64 to one failure budget', async () => {
+    expect((await fail('2001:db8:5:6::1')).status).toBe(401);
+    expect((await fail('2001:db8:5:6::2')).status).toBe(401);
+    // A third address in the same /64 finds the budget spent.
+    expect((await fail('2001:db8:5:6::3')).status).toBe(429);
+    // The next /64 over has spent nothing.
+    expect((await fail('2001:db8:5:7::1')).status).toBe(401);
   });
 });

@@ -222,7 +222,7 @@ export function clientKey(
 ): { key: string; forwardedIgnored: boolean } {
   const peer = canonicalAddress(req.socket.remoteAddress ?? 'unknown');
   const forwarded = req.headers['x-forwarded-for'];
-  if (!trustProxy || forwarded === undefined) return { key: peer, forwardedIgnored: false };
+  if (!trustProxy || forwarded === undefined) return { key: keyOf(peer), forwardedIgnored: false };
 
   // The rightmost entry is proxy-authored only if a proxy actually appended one. Nothing
   // about the header says whether it did, so the *peer* has to be the proxy — otherwise a
@@ -230,15 +230,51 @@ export function clientKey(
   // rightmost, and it picks its own key. Both attacks this keying was fixed to stop came
   // back alive in exactly that configuration.
   if (!isTrustedPeer(peer, trustedProxies)) {
-    return { key: peer, forwardedIgnored: true };
+    return { key: keyOf(peer), forwardedIgnored: true };
   }
 
   const raw = Array.isArray(forwarded) ? forwarded.join(',') : forwarded;
   const entries = raw.split(',').map((e) => e.trim()).filter(Boolean);
   const nearest = entries[entries.length - 1];
   const address = nearest === undefined ? undefined : forwardedAddress(nearest);
-  if (address === undefined) return { key: peer, forwardedIgnored: true };
-  return { key: address, forwardedIgnored: false };
+  if (address === undefined) return { key: keyOf(peer), forwardedIgnored: true };
+  return { key: keyOf(address), forwardedIgnored: false };
+}
+
+/**
+ * The budget an address is charged to: itself for IPv4, its /64 for IPv6.
+ *
+ * Applied to the returned key only. Trust is still decided on the exact peer, or every host
+ * in a proxy's /64 could speak for other clients.
+ */
+function keyOf(address: string): string {
+  if (isIP(address) !== 6 || address === '::1') return address;
+  return ipv6Prefix64(address);
+}
+
+/**
+ * The /64 an IPv6 address belongs to, spelled one way.
+ *
+ * A /64 is the smallest block a subscriber is handed, so the address inside it is the
+ * client's own to choose; keyed by full address, each choice was a fresh budget. The
+ * spelling is fixed — zone dropped, `::` expanded, a dotted IPv4 tail counted as two
+ * groups, leading zeros and case removed by reading each group as a number — so rewriting
+ * the address does not reach a new key. Only the first four groups are kept, so the tail
+ * never needs converting.
+ */
+function ipv6Prefix64(address: string): string {
+  const bare = address.split('%')[0];
+  const dotted = bare.includes('.');
+  const [head, tail] = bare.split('::');
+  const headGroups = head === '' ? [] : head.split(':');
+  const tailGroups = tail === undefined || tail === '' ? [] : tail.split(':');
+  // A dotted tail is one written group standing for two.
+  const written = headGroups.length + tailGroups.length + (dotted ? 1 : 0);
+  const groups = tail === undefined
+    ? headGroups
+    : [...headGroups, ...Array(8 - written).fill('0'), ...tailGroups];
+  const prefix = groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16));
+  return `${prefix.join(':')}::/64`;
 }
 
 /**
@@ -276,9 +312,13 @@ function forwardedAddress(entry: string): string | undefined {
   return isIP(candidate) === 0 ? undefined : candidate;
 }
 
-/** `::ffff:127.0.0.1` and `127.0.0.1` are the same client; key them the same way. */
+/**
+ * `::ffff:127.0.0.1` and `127.0.0.1` are the same client; key them the same way. Case is
+ * folded first: a forwarded `::FFFF:` spelling otherwise stayed IPv6.
+ */
 function canonicalAddress(address: string): string {
-  return address.startsWith('::ffff:') ? address.slice(7) : address;
+  const folded = address.toLowerCase();
+  return folded.startsWith('::ffff:') ? folded.slice(7) : folded;
 }
 
 export interface HttpTransportOpts {
