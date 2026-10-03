@@ -707,6 +707,20 @@ describe('AuthFailureLimiter', () => {
     for (let i = 0; i < MAX_TRACKED_CLIENTS + 10; i++) limiter.recordFailure(`filler-${i}`);
     expect(limiter.peek('victim').allowed).toBe(false);
   });
+
+  it('reports the wait until the next attempt, not a whole interval', async () => {
+    const { AuthFailureLimiter } = await import('../../../src/transport/http.js');
+    const T0 = 1_800_000_000_000;
+    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
+    try {
+      const limiter = new AuthFailureLimiter(3); // one attempt back every 20s
+      for (let n = 0; n < 3; n++) limiter.recordFailure('a');
+      vi.setSystemTime(T0 + 7_500);
+      expect(limiter.peek('a')).toEqual({ allowed: false, retryAfterMs: 12_500 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('ClientRateLimiter', () => {

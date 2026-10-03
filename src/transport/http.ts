@@ -164,11 +164,8 @@ export class AuthFailureLimiter {
   peek(key: string): { allowed: boolean; retryAfterMs: number } {
     const bucket = this.buckets.get(key);
     if (bucket === undefined) return { allowed: true, retryAfterMs: 0 };
-    const elapsed = Date.now() - bucket.lastRefill;
-    const refilled = Math.floor((elapsed / REFILL_INTERVAL_MS) * this.maxTokens);
-    const available = Math.min(this.maxTokens, bucket.tokens + Math.max(refilled, 0));
-    if (available > 0) return { allowed: true, retryAfterMs: 0 };
-    return { allowed: false, retryAfterMs: Math.ceil(REFILL_INTERVAL_MS / this.maxTokens) };
+    if (availableTokens(bucket, this.maxTokens) > 0) return { allowed: true, retryAfterMs: 0 };
+    return { allowed: false, retryAfterMs: nextTokenWaitMs(bucket, this.maxTokens) };
   }
 
   /** Charge this client for a failed attempt. */
