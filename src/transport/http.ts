@@ -43,11 +43,13 @@ function availableTokens(bucket: Bucket, maxTokens: number): number {
  * twice as long as it had to. Bounded on both sides: below at a second, because
  * `Retry-After` is whole seconds and `0` reads as "retry now"; above at one token's
  * interval, because a clock that stepped backwards puts `lastRefill` in the future, and
- * the raw difference would then advertise an arbitrarily long wait.
+ * the raw difference would then advertise an arbitrarily long wait. Rounded up to whole
+ * milliseconds: a limit that does not divide a minute gives a fractional interval, and
+ * rounding down would name a moment at which the token has not yet arrived.
  */
 function nextTokenWaitMs(bucket: Bucket, maxTokens: number): number {
   const interval = REFILL_INTERVAL_MS / maxTokens;
-  return Math.max(1000, Math.min(interval, bucket.lastRefill + interval - Date.now()));
+  return Math.max(1000, Math.ceil(Math.min(interval, bucket.lastRefill + interval - Date.now())));
 }
 
 /**

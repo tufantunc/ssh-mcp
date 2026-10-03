@@ -858,6 +858,19 @@ describe('ClientRateLimiter', () => {
       vi.useRealTimers();
     }
   });
+
+  it('reports whole milliseconds when the limit does not divide a minute', async () => {
+    const { ClientRateLimiter } = await import('../../../src/transport/http.js');
+    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
+    try {
+      const limiter = new ClientRateLimiter(7); // one token per 8571.43ms
+      for (let n = 0; n < 7; n++) limiter.tryConsume('a');
+      // Rounded up, never down: a client told 8571 that comes back then is refused again.
+      expect(limiter.tryConsume('a')).toEqual({ allowed: false, retryAfterMs: 8_572 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('HTTP transport — the two 429s are distinguishable', () => {
