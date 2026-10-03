@@ -745,8 +745,12 @@ describe('AuthFailureLimiter', () => {
       // stayed "saturated" for good: every new client started empty, and one typo made
       // its correct token wait. Measured on 09ecbad.
       vi.setSystemTime(T0 + 3_600_000);
-      limiter.recordFailure('arriving');
+      // The whole budget, not merely a second attempt: nine failures still leave room,
+      // and the tenth spends it — the same as on a table that was never saturated.
+      for (let n = 0; n < 9; n++) limiter.recordFailure('arriving');
       expect(limiter.peek('arriving').allowed).toBe(true);
+      limiter.recordFailure('arriving');
+      expect(limiter.peek('arriving').allowed).toBe(false);
     } finally {
       vi.useRealTimers();
     }
