@@ -25,6 +25,52 @@ interface Bucket {
   lastRefill: number;
 }
 
+/** Whole tokens earned since `lastRefill`. Negative when the clock stepped back; callers clamp. */
+function tokensEarned(bucket: Bucket, maxTokens: number): number {
+  return Math.floor(((Date.now() - bucket.lastRefill) / REFILL_INTERVAL_MS) * maxTokens);
+}
+
+/** Tokens the bucket would hold if refilled now, without changing it. */
+function availableTokens(bucket: Bucket, maxTokens: number): number {
+  return Math.min(maxTokens, bucket.tokens + Math.max(tokensEarned(bucket, maxTokens), 0));
+}
+
+/**
+ * How long until this bucket earns its next token, for `Retry-After`.
+ *
+ * Exact, where it used to be the fixed `REFILL_INTERVAL_MS / maxTokens`. That is how long
+ * one token takes, so a client refused halfway through the interval was told to wait
+ * twice as long as it had to. Bounded on both sides: below at a second, because
+ * `Retry-After` is whole seconds and `0` reads as "retry now"; above at one token's
+ * interval, because a clock that stepped backwards puts `lastRefill` in the future, and
+ * the raw difference would then advertise an arbitrarily long wait.
+ */
+function nextTokenWaitMs(bucket: Bucket, maxTokens: number): number {
+  const interval = REFILL_INTERVAL_MS / maxTokens;
+  return Math.max(1000, Math.min(interval, bucket.lastRefill + interval - Date.now()));
+}
+
+/**
+ * The tracked key whose bucket holds the most tokens *after refill*: the entry with the
+ * least worth remembering, so the one to evict.
+ *
+ * Refilled, not stored. A key that stops sending keeps its stored count forever, so
+ * ranking by `tokens` treated a bucket spent an hour ago as still spent. A table that
+ * was saturated once was then judged saturated for good, which was measured.
+ */
+function fullestBucket(
+  buckets: Map<string, Bucket>,
+  maxTokens: number,
+): { key: string; available: number } | undefined {
+  let fullest: { key: string; available: number } | undefined;
+  for (const [key, bucket] of buckets) {
+    const available = availableTokens(bucket, maxTokens);
+    if (fullest === undefined || available > fullest.available) fullest = { key, available };
+    if (available === maxTokens) break;
+  }
+  return fullest;
+}
+
 /**
  * One token-bucket step, shared by the two limiters so the refill arithmetic exists once.
  *
@@ -32,8 +78,7 @@ interface Bucket {
  * idle server costs nothing and there is no interval to clean up.
  */
 function consume(bucket: Bucket, maxTokens: number): { allowed: boolean; retryAfterMs: number } {
-  const elapsed = Date.now() - bucket.lastRefill;
-  const refilled = Math.floor((elapsed / REFILL_INTERVAL_MS) * maxTokens);
+  const refilled = tokensEarned(bucket, maxTokens);
   if (refilled > 0) {
     bucket.tokens = Math.min(maxTokens, bucket.tokens + refilled);
     bucket.lastRefill += Math.round((refilled / maxTokens) * REFILL_INTERVAL_MS);
@@ -44,7 +89,7 @@ function consume(bucket: Bucket, maxTokens: number): { allowed: boolean; retryAf
     return { allowed: true, retryAfterMs: 0 };
   }
 
-  return { allowed: false, retryAfterMs: Math.ceil(REFILL_INTERVAL_MS / maxTokens) };
+  return { allowed: false, retryAfterMs: nextTokenWaitMs(bucket, maxTokens) };
 }
 
 class RateLimiter {
@@ -56,6 +101,40 @@ class RateLimiter {
 
   tryConsume(): { allowed: boolean; retryAfterMs: number } {
     return consume(this.bucket, this.maxTokens);
+  }
+}
+
+/**
+ * A request bucket per client, so `--rateLimit` means N requests per minute *per caller*.
+ *
+ * It was one bucket for the process: one client spent `--rateLimit` for every other, and
+ * a client that had sent nothing was refused (#187, measured). Keyed by `clientKey()`,
+ * the same key the failure budget uses, and charged only after the token check passes,
+ * so unauthenticated traffic cannot create entries or drain anyone's budget.
+ *
+ * Bounded like `AuthFailureLimiter`, and it evicts the fullest bucket for the same reason.
+ * Where it differs: an arriving key always starts full, even when every tracked bucket is
+ * spent. Saturating this table takes 1024 addresses that hold the token, and a token
+ * holder with that many addresses already has that many budgets. The refund opens nothing
+ * new, while starting empty would refuse a legitimate client's first request because of
+ * other clients' traffic.
+ */
+export class ClientRateLimiter {
+  private buckets = new Map<string, Bucket>();
+
+  constructor(private maxTokens: number) {}
+
+  tryConsume(key: string): { allowed: boolean; retryAfterMs: number } {
+    let bucket = this.buckets.get(key);
+    if (bucket === undefined) {
+      if (this.buckets.size >= MAX_TRACKED_CLIENTS) {
+        const fullest = fullestBucket(this.buckets, this.maxTokens);
+        if (fullest !== undefined) this.buckets.delete(fullest.key);
+      }
+      bucket = { tokens: this.maxTokens, lastRefill: Date.now() };
+      this.buckets.set(key, bucket);
+    }
+    return consume(bucket, this.maxTokens);
   }
 }
 

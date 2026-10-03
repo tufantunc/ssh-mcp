@@ -709,6 +709,113 @@ describe('AuthFailureLimiter', () => {
   });
 });
 
+describe('ClientRateLimiter', () => {
+  const T0 = 1_800_000_000_000;
+
+  it('gives each client its own budget', async () => {
+    const { ClientRateLimiter } = await import('../../../src/transport/http.js');
+    const limiter = new ClientRateLimiter(2);
+    expect(limiter.tryConsume('a').allowed).toBe(true);
+    expect(limiter.tryConsume('a').allowed).toBe(true);
+    expect(limiter.tryConsume('a').allowed).toBe(false);
+    // The point of #187: one client spending its budget leaves another's whole.
+    expect(limiter.tryConsume('b').allowed).toBe(true);
+    expect(limiter.tryConsume('b').allowed).toBe(true);
+  });
+
+  it('keeps the tracked-client map bounded', async () => {
+    const { ClientRateLimiter, MAX_TRACKED_CLIENTS } = await import('../../../src/transport/http.js');
+    const limiter = new ClientRateLimiter(5) as any;
+    for (let i = 0; i < MAX_TRACKED_CLIENTS + 50; i++) limiter.tryConsume(`10.0.${i >> 8}.${i & 255}`);
+    expect(limiter.buckets.size).toBe(MAX_TRACKED_CLIENTS);
+  });
+
+  it('evicts the fullest bucket, not the oldest', async () => {
+    const { ClientRateLimiter, MAX_TRACKED_CLIENTS } = await import('../../../src/transport/http.js');
+    const limiter = new ClientRateLimiter(3) as any;
+    // The oldest entry is the spent one. Evicting by age would hand it a fresh budget.
+    for (let n = 0; n < 3; n++) limiter.tryConsume('spent');
+    for (let i = 0; i < MAX_TRACKED_CLIENTS - 2; i++) {
+      limiter.tryConsume(`filler-${i}`);
+      limiter.tryConsume(`filler-${i}`);
+    }
+    limiter.tryConsume('idle'); // 2 of 3 left: the fullest in the table
+    expect(limiter.buckets.size).toBe(MAX_TRACKED_CLIENTS);
+
+    limiter.tryConsume('arriving');
+    expect(limiter.buckets.has('idle')).toBe(false);
+    expect(limiter.buckets.has('spent')).toBe(true);
+    expect(limiter.tryConsume('spent').allowed).toBe(false);
+  });
+
+  it('serves an arriving client even when every tracked bucket is spent', async () => {
+    const { ClientRateLimiter, MAX_TRACKED_CLIENTS } = await import('../../../src/transport/http.js');
+    const limiter = new ClientRateLimiter(1);
+    for (let i = 0; i < MAX_TRACKED_CLIENTS; i++) limiter.tryConsume(`holder-${i}`);
+    // Unlike the failure budget: a request bucket exists only past the token check, so a
+    // saturated table is 1024 token holders, and refusing a newcomer's first request
+    // would punish it for their traffic.
+    expect(limiter.tryConsume('arriving').allowed).toBe(true);
+  });
+
+  it('refills on the clock and re-arms afterwards', async () => {
+    const { ClientRateLimiter } = await import('../../../src/transport/http.js');
+    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
+    try {
+      const limiter = new ClientRateLimiter(2);
+      limiter.tryConsume('a');
+      limiter.tryConsume('a');
+      expect(limiter.tryConsume('a').allowed).toBe(false);
+      vi.setSystemTime(T0 + 60_000 / 2); // one token's interval
+      expect(limiter.tryConsume('a').allowed).toBe(true);
+      expect(limiter.tryConsume('a').allowed).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports the wait until this client\'s next token, not a whole interval', async () => {
+    const { ClientRateLimiter } = await import('../../../src/transport/http.js');
+    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
+    try {
+      const limiter = new ClientRateLimiter(3); // one token per 20s
+      for (let n = 0; n < 3; n++) limiter.tryConsume('a');
+      vi.setSystemTime(T0 + 7_500);
+      expect(limiter.tryConsume('a')).toEqual({ allowed: false, retryAfterMs: 12_500 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never reports a wait under a second', async () => {
+    const { ClientRateLimiter } = await import('../../../src/transport/http.js');
+    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
+    try {
+      const limiter = new ClientRateLimiter(120); // one token per 500ms
+      for (let n = 0; n < 120; n++) limiter.tryConsume('a');
+      vi.setSystemTime(T0 + 499);
+      // 1ms remains. Retry-After is whole seconds, and 0 would read as "retry now".
+      expect(limiter.tryConsume('a')).toEqual({ allowed: false, retryAfterMs: 1_000 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps the wait at one token\'s interval when the clock steps back', async () => {
+    const { ClientRateLimiter } = await import('../../../src/transport/http.js');
+    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
+    try {
+      const limiter = new ClientRateLimiter(3);
+      for (let n = 0; n < 3; n++) limiter.tryConsume('a');
+      vi.setSystemTime(T0 - 3_600_000);
+      // lastRefill is now an hour in the future; the raw difference would say 3620s.
+      expect(limiter.tryConsume('a')).toEqual({ allowed: false, retryAfterMs: 20_000 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('HTTP transport — the two 429s are distinguishable', () => {
   const PORT = 18410;
 
