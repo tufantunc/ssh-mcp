@@ -133,8 +133,8 @@ export class ClientRateLimiter {
  * limiter was reached, so a wrong bearer token consumed nothing and guessing ran at network
  * speed with no backoff — measured as twelve 401s and zero 429s against `--rateLimit=3`.
  * Moving the request limiter above the auth check would have closed that and opened
- * something worse: the request bucket is global, so unauthenticated traffic could then
- * starve every legitimate client.
+ * something worse: its 429 would answer a guess without evaluating it, and unauthenticated
+ * traffic reaching a request bucket could spend a victim's budget under a spoofable key.
  *
  * Only failures consume a token, so a working client never builds a budget up and is never
  * throttled by its own traffic — which is what makes this safe to have on by default. It
@@ -424,10 +424,6 @@ export async function startHttpServer(
     const isHealthProbe = req.method === 'GET' && url.pathname === '/health';
 
     if (!isHealthProbe) {
-      // Checked before the token is compared, not after — so an exhausted budget answers
-      // 429 without evaluating the guess. Gating only the 401 path instead would throttle
-      // nothing: the comparison would still happen and a correct token would still be
-      // served, so the status code would still tell an attacker which guess was right.
       let key = '';
       if (authFailureLimiter || rateLimiter) {
         const resolved = clientKey(req, opts.trustProxy === true, opts.trustedProxies);
@@ -442,6 +438,10 @@ export async function startHttpServer(
           warnSharedBudget();
         }
       }
+      // Checked before the token is compared, not after — so an exhausted budget answers
+      // 429 without evaluating the guess. Gating only the 401 path instead would throttle
+      // nothing: the comparison would still happen and a correct token would still be
+      // served, so the status code would still tell an attacker which guess was right.
       if (authFailureLimiter) {
         const { allowed, retryAfterMs } = authFailureLimiter.peek(key);
         if (!allowed) {

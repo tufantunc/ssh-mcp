@@ -893,11 +893,11 @@ describe('HTTP transport — the two 429s are distinguishable', () => {
   });
 
   it('a failed attempt never touches the request budget', async () => {
-    // The reason the request limiter was left above the auth check: that bucket is
-    // global, so letting unauthenticated traffic drain it would starve every legitimate
-    // client. Checked on its own server, with the failure budget deliberately left
-    // unspent — once it is spent the auth throttle answers first, which is what the
-    // sibling test above measures.
+    // The reason the request limiter sits after the auth check: a wrong token must not
+    // spend a client's request budget, and its 429 would answer a guess without
+    // evaluating it — throttling guesses is the failure budget's job. Checked on its
+    // own server, with the failure budget deliberately left unspent — once it is spent
+    // the auth throttle answers first, which is what the sibling test above measures.
     const { startHttpServer } = await import('../../../src/transport/http.js');
     const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
     const mockRegistry = {
@@ -950,9 +950,9 @@ describe('HTTP transport — the request limiter admits exactly its limit', () =
   });
 
   it('three through, then throttled — a fresh bucket, so the boundary is exact', async () => {
-    // The pre-existing test shares a bucket with the rest of the file and so can only
-    // assert a shape. That was fine until this arithmetic became shared by both limiters:
-    // an off-by-one in `consume` admits one extra request and nothing noticed.
+    // The exact boundary, on a fresh server: the `consume` arithmetic is shared by both
+    // limiters now, so an off-by-one there admits one extra request and a shape-only
+    // assertion would not notice.
     const statuses: number[] = [];
     for (let i = 0; i < 5; i++) {
       const res = await new Promise<number>((resolve, reject) => {
@@ -1039,6 +1039,15 @@ describe('HTTP transport — the request budget is per client', () => {
     expect((await postRequest(PORT, from('198.51.100.3'))).status).toBe(429);
     // Same address, budget spent, no token: /health answers.
     expect((await bareRequest(PORT, '/health', { 'x-forwarded-for': '198.51.100.3' })).status).toBe(200);
+
+    // Not refused is only half the claim; /health must not spend either. One token left,
+    // /health polled past the limit, and the token is still there to be spent.
+    await postRequest(PORT, from('198.51.100.4'));
+    for (let i = 0; i < LIMIT + 1; i++) {
+      expect((await bareRequest(PORT, '/health', { 'x-forwarded-for': '198.51.100.4' })).status).toBe(200);
+    }
+    expect((await postRequest(PORT, from('198.51.100.4'))).status).not.toBe(429);
+    expect((await postRequest(PORT, from('198.51.100.4'))).status).toBe(429);
   });
 });
 
