@@ -15,7 +15,7 @@
 - Work only in the worktree `/Users/tufantunc/Desktop/Projects/Personal/ssh-mcp/.claude/worktrees/issue-187-auth-failure-budget`.
 - Call git as **`/usr/bin/git`**. A user hook rewrites bare `git` into `rtk git`, and the worktree guard refuses that. Keep shell commands plain and separate (no `cd … &&` chains, no `rm -rf` combined with other commands). The guard refuses compound commands it cannot verify.
 - `MAX_TRACKED_CLIENTS` stays `1024`. `REFILL_INTERVAL_MS` stays `60_000`. `DEFAULT_AUTH_FAILURE_LIMIT` stays `10`.
-- The `Retry-After` header is `Math.ceil(retryAfterMs / 1000)`, and `retryAfterMs` is never below `1000` and never above `REFILL_INTERVAL_MS / maxTokens`.
+- The `Retry-After` header is `Math.ceil(retryAfterMs / 1000)`, and `retryAfterMs` is never below `1000` and never above `REFILL_INTERVAL_MS / maxTokens`. With `maxTokens > 60` those two bounds cross — one token then takes under a second — and the floor wins: the wait reads `1000` and `Retry-After` is `1`, never `0`.
 - Both 429s keep HTTP status `429`, JSON-RPC code `-32604`, and their message text: `"Too many failed authentication attempts. Retry after ${s}s."` and `"Rate limit exceeded. Retry after ${s}s."`. The request 429 gains `id: null`.
 - `GET /health` stays unauthenticated and is never charged by either limiter.
 - **Test policy:** a test is accepted only after the production change it covers has been reverted or deleted, the test has been run and **seen to fail**, and the change has been restored. Each task lists the exact mutation to make. Record the failing output line in your report.
