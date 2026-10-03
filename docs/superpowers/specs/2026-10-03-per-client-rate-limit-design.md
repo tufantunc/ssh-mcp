@@ -172,7 +172,9 @@ ratio of `60 / N`, never by waiting.
 - **Existing tests.** The issue's required case is already present and is
   re-measured under the deletion check, not duplicated. The global "rate limiting"
   test, which asserts a shape because its bucket was shared with the rest of the
-  file, is tightened to exact counts. The shared fullest-bucket helper must leave
+  file, is removed: "the request limiter admits exactly its limit" already asserts
+  the exact boundary on a fresh server, and the shared server's limit is turned
+  off, since `/status` and 404s now spend it. The shared fullest-bucket helper must leave
   every `AuthFailureLimiter` eviction test passing unchanged.
 
 The full suite, integration included with the Docker test servers up, runs before
