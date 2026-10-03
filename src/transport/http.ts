@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http';
 import { randomUUID, timingSafeEqual } from 'crypto';
 import { isIP } from 'net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -11,6 +11,11 @@ import { OperatorError } from '../errors.js';
 const MAX_BODY_SIZE = 1_048_576; // 1MB
 /** Cap on concurrent MCP sessions, so unauthenticated-adjacent churn can't grow the map without bound. */
 const MAX_SESSIONS = 64;
+/**
+ * How long an MCP session may receive no requests before it is reclaimed. Cleanup is lazy,
+ * so an idle server costs nothing and there is no interval to clean up.
+ */
+export const DEFAULT_SESSION_IDLE_TTL_MS = 30 * 60_000;
 
 /** How many failed auth attempts one client may make per minute. 0 disables the check. */
 export const DEFAULT_AUTH_FAILURE_LIMIT = 10;
@@ -356,6 +361,8 @@ export interface HttpTransportOpts {
   host?: string;
   bearerToken?: string;
   registry: ConnectionRegistry;
+  /** MCP session idle timeout. Defaults to `DEFAULT_SESSION_IDLE_TTL_MS`. */
+  sessionIdleTtlMs?: number;
   /**
    * Authenticated requests allowed per client per minute, on every route but
    * `GET /health`. 0 or unset disables the limit. Clients are keyed as for
@@ -400,7 +407,7 @@ function jsonRpcError(res: ServerResponse, status: number, code: number, message
 export async function startHttpServer(
   createMcpServer: () => McpServer | Promise<McpServer>,
   opts: HttpTransportOpts,
-): Promise<void> {
+): Promise<Server> {
   const { port, host = '127.0.0.1', bearerToken, registry } = opts;
 
   if (!bearerToken) {
@@ -447,19 +454,94 @@ export async function startHttpServer(
     ? opts.allowedHosts
     : [`${host}:${port}`, `localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
 
-  const transports = new Map<string, StreamableHTTPServerTransport>();
+  interface Session {
+    id?: string;
+    transport: StreamableHTTPServerTransport;
+    server: McpServer;
+    lastActivity: number;
+    inFlight: number;
+    closing: boolean;
+    pending: boolean;
+    closePromise?: Promise<void>;
+  }
+
+  const sessionIdleTtlMs = opts.sessionIdleTtlMs && opts.sessionIdleTtlMs > 0
+    ? opts.sessionIdleTtlMs
+    : DEFAULT_SESSION_IDLE_TTL_MS;
+  const sessions = new Map<string, Session>();
+  let pendingSessions = 0;
+
+  function detachSession(session: Session): void {
+    if (session.closing) return;
+    session.closing = true;
+    if (session.id && sessions.get(session.id) === session) sessions.delete(session.id);
+    if (session.pending) {
+      session.pending = false;
+      pendingSessions--;
+    }
+  }
+
+  /** Close both owners so transport streams and resources attached to the McpServer are released. */
+  function closeSession(session: Session): Promise<void> {
+    if (!session.closePromise) {
+      detachSession(session);
+      session.closePromise = (async () => {
+        await session.transport.close().catch(() => {});
+        await session.server.close().catch(() => {});
+      })();
+    }
+    return session.closePromise;
+  }
+
+  function takeIdleSessions(now: number): Session[] {
+    const expired: Session[] = [];
+    for (const session of sessions.values()) {
+      if (session.inFlight === 0 && now - session.lastActivity >= sessionIdleTtlMs) {
+        detachSession(session);
+        expired.push(session);
+      }
+    }
+    return expired;
+  }
+
+  function beginRequest(session: Session, res: ServerResponse): () => void {
+    session.inFlight++;
+    session.lastActivity = Date.now();
+    const initializing = session.pending;
+    let completed = false;
+    const complete = (aborted: boolean) => {
+      if (completed) return;
+      completed = true;
+      res.off('finish', onFinish);
+      res.off('close', onClose);
+      session.inFlight--;
+      session.lastActivity = Date.now();
+      if (session.pending || (initializing && aborted)) void closeSession(session);
+    };
+    const onFinish = () => { complete(false); };
+    const onClose = () => { complete(!res.writableFinished); };
+    res.once('finish', onFinish);
+    res.once('close', onClose);
+    return () => { complete(true); };
+  }
 
   /** Route to the session's transport, or start a new session on `initialize`. */
   async function resolveTransport(
     req: IncomingMessage,
     res: ServerResponse,
     parsedBody?: unknown,
-  ): Promise<StreamableHTTPServerTransport | null> {
+  ): Promise<Session | null> {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
     if (sessionId) {
-      const existing = transports.get(sessionId);
-      if (existing) return existing;
+      const existing = sessions.get(sessionId);
+      if (existing) {
+        if (existing.inFlight === 0 && Date.now() - existing.lastActivity >= sessionIdleTtlMs) {
+          await closeSession(existing);
+        } else {
+          return existing;
+        }
+      }
       jsonRpcError(res, 404, -32001, 'Session not found or expired. Re-initialize to obtain a new session.');
       return null;
     }
@@ -470,26 +552,96 @@ export async function startHttpServer(
       return null;
     }
 
-    if (transports.size >= MAX_SESSIONS) {
+    const expired = takeIdleSessions(Date.now());
+    if (sessions.size + pendingSessions >= MAX_SESSIONS) {
+      let lru: Session | undefined;
+      for (const session of sessions.values()) {
+        if (session.inFlight === 0 && (!lru || session.lastActivity < lru.lastActivity)) {
+          lru = session;
+        }
+      }
+      if (lru) {
+        console.error(`MCP session limit reached; evicting least-recently-active session ${lru.id}.`);
+        detachSession(lru);
+        expired.push(lru);
+      }
+    }
+
+    if (sessions.size + pendingSessions >= MAX_SESSIONS) {
       jsonRpcError(res, 503, -32000, `Server is at its session limit (${MAX_SESSIONS}). Close an existing session and retry.`);
       return null;
     }
 
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      enableDnsRebindingProtection: true,
-      allowedHosts,
-      onsessioninitialized: (id) => { transports.set(id, transport); },
-      onsessionclosed: (id) => { transports.delete(id); },
-    });
-    // Covers transport teardown that isn't a DELETE (client disconnect, error).
-    transport.onclose = () => {
-      if (transport.sessionId) transports.delete(transport.sessionId);
-    };
+    pendingSessions++;
+    let clientClosed = false;
+    const markClientClosed = () => { clientClosed = true; };
+    res.once('close', markClientClosed);
 
-    const mcp = await createMcpServer();
-    await mcp.connect(transport);
-    return transport;
+    let mcp: McpServer | undefined;
+    let session: Session | undefined;
+    try {
+      await Promise.all(expired.map(closeSession));
+      mcp = await createMcpServer();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        enableDnsRebindingProtection: true,
+        allowedHosts,
+        onsessioninitialized: (id) => {
+          session!.id = id;
+          if (session!.pending) {
+            session!.pending = false;
+            pendingSessions--;
+          }
+          sessions.set(id, session!);
+        },
+        onsessionclosed: () => { detachSession(session!); },
+      });
+      session = {
+        transport,
+        server: mcp,
+        lastActivity: Date.now(),
+        inFlight: 0,
+        closing: false,
+        pending: true,
+      };
+      // Covers transport teardown that isn't a DELETE (client disconnect, error).
+      transport.onclose = () => {
+        detachSession(session!);
+      };
+
+      await mcp.connect(transport);
+      if (clientClosed || res.destroyed) {
+        await closeSession(session);
+        return null;
+      }
+      return session;
+    } catch (error) {
+      if (session) await closeSession(session);
+      else pendingSessions--;
+      throw error;
+    } finally {
+      res.off('close', markClientClosed);
+    }
+  }
+
+  async function handleMcpRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+    parsedBody?: unknown,
+  ): Promise<void> {
+    const session = await resolveTransport(req, res, parsedBody);
+    if (!session) return;
+    if (res.destroyed) {
+      if (session.pending) await closeSession(session);
+      return;
+    }
+    const finish = beginRequest(session, res);
+    try {
+      await session.transport.handleRequest(req, res, parsedBody);
+    } catch (error) {
+      finish();
+      throw error;
+    }
   }
 
   const httpServer = createServer(async (req, res) => {
@@ -627,17 +779,13 @@ export async function startHttpServer(
           jsonRpcError(res, 400, -32700, 'Parse error: invalid JSON');
           return;
         }
-        const transport = await resolveTransport(req, res, parsed);
-        if (!transport) return;
-        await transport.handleRequest(req, res, parsed);
+        await handleMcpRequest(req, res, parsed);
       });
       return;
     }
 
     if ((req.method === 'GET' || req.method === 'DELETE') && url.pathname === '/') {
-      const transport = await resolveTransport(req, res);
-      if (!transport) return;
-      await transport.handleRequest(req, res);
+      await handleMcpRequest(req, res);
       return;
     }
 
@@ -678,6 +826,10 @@ export async function startHttpServer(
     res.end(JSON.stringify({ error: 'Not found' }));
   });
 
+  httpServer.once('close', () => {
+    void Promise.all(Array.from(sessions.values(), closeSession));
+  });
+
   // Previously listen() had no error handler, so EADDRINUSE surfaced as an
   // unhandled 'error' event and a raw stack — and startHttpServer resolved
   // immediately regardless, so the caller carried on as if the server was up.
@@ -706,4 +858,5 @@ export async function startHttpServer(
       resolve();
     });
   });
+  return httpServer;
 }

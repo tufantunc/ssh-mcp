@@ -765,6 +765,7 @@ ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret --rateLimit=60
 | `--httpPort` | 3000 | HTTP listen port |
 | `--httpHost` | 127.0.0.1 | Bind address |
 | `--rateLimit` | 0 (off) | Max authenticated requests per minute, per client (0 = unlimited) |
+| `--httpSessionTtl` | 1800000 | MCP session idle timeout in ms |
 | `--authFailureLimit` | 10 | Failed bearer-auth attempts allowed per client per minute (0 = off) |
 | `--trustProxy` | false | Read the client address from `X-Forwarded-For`, but only when the peer is the proxy — bare means a loopback peer |
 | `--trustedProxies` | — | Comma-separated peer addresses allowed to send `X-Forwarded-For`. Empty means loopback only |
@@ -863,6 +864,7 @@ Secrets are **never** passed as CLI arguments.
 | `--httpHost` | 127.0.0.1 | HTTP bind address |
 | `--bearerToken` | — | Bearer token for HTTP transport auth (required for `--transport=http`) |
 | `--rateLimit` | 0 | Max authenticated requests per minute, per client (0 = unlimited) |
+| `--httpSessionTtl` | 1800000 | MCP session idle timeout in ms |
 | `--authFailureLimit` | 10 | Failed bearer-auth attempts allowed per client per minute (0 = off) |
 | `--trustProxy` | false | Read the client address from `X-Forwarded-For`, but only when the peer is the proxy — bare means a loopback peer |
 | `--trustedProxies` | — | Comma-separated peer addresses allowed to send `X-Forwarded-For`. Empty means loopback only |
