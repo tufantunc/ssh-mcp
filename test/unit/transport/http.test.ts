@@ -86,6 +86,204 @@ function httpRequest(method: string, path: string, headers: Record<string, strin
   });
 }
 
+const initializeBody = JSON.stringify({
+  jsonrpc: '2.0',
+  id: 1,
+  method: 'initialize',
+  params: {
+    protocolVersion: '2025-06-18',
+    capabilities: {},
+    clientInfo: { name: 'http-lifecycle-test', version: '1' },
+  },
+});
+
+function mcpRequest(
+  port: number,
+  method: 'GET' | 'POST' | 'DELETE',
+  sessionId?: string,
+  body?: string,
+  bearerToken = BEARER,
+): Promise<{ status: number; body: string; headers: httpModule.IncomingHttpHeaders }> {
+  return new Promise((resolve, reject) => {
+    const headers: Record<string, string | number> = {
+      authorization: `Bearer ${bearerToken}`,
+      accept: 'application/json, text/event-stream',
+    };
+    if (sessionId) headers['mcp-session-id'] = sessionId;
+    if (body !== undefined) {
+      headers['content-type'] = 'application/json';
+      headers['content-length'] = Buffer.byteLength(body);
+    }
+    const req = httpModule.request(
+      { hostname: HTTP_HOST, port, path: '/', method, headers, agent: false as const },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => resolve({ status: res.statusCode || 0, body: data, headers: res.headers }));
+      },
+    );
+    req.on('error', reject);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
+async function initializeSession(port: number): Promise<string> {
+  const res = await mcpRequest(port, 'POST', undefined, initializeBody);
+  expect(res.status).toBe(200);
+  expect(typeof res.headers['mcp-session-id']).toBe('string');
+  return res.headers['mcp-session-id'] as string;
+}
+
+const pingBody = JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' });
+
+function lifecycleRegistry(): any {
+  return {
+    listConnections: () => [],
+    listAllProfiles: () => [],
+    get: () => undefined,
+    getOrCreate: async () => { throw new Error('not in test'); },
+  };
+}
+
+interface LifecycleServerOptions {
+  sessionIdleTtlMs?: number;
+  beforeCreate?: (index: number) => Promise<void>;
+  configure?: (server: any, index: number) => void;
+}
+
+const lifecycleHttpServers: Server[] = [];
+
+afterEach(async () => {
+  while (lifecycleHttpServers.length > 0) {
+    const server = lifecycleHttpServers.pop()!;
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+        (server as any).closeAllConnections?.();
+      });
+    }
+  }
+  await new Promise<void>((resolve) => setImmediate(resolve));
+});
+
+async function startLifecycleServer(
+  port: number,
+  options: LifecycleServerOptions = {},
+): Promise<{ httpServer: Server; mcpServers: any[] }> {
+  const { startHttpServer } = await import('../../../src/transport/http.js');
+  const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+  const mcpServers: any[] = [];
+  let createCount = 0;
+  const httpServer = await startHttpServer(async () => {
+    const index = createCount++;
+    await options.beforeCreate?.(index);
+    const server = new McpServer(
+      { name: 'session-lifecycle-test', version: '0.0.0' },
+      { capabilities: { tools: {}, resources: {} } },
+    );
+    options.configure?.(server, index);
+    mcpServers.push(server);
+    return server;
+  }, {
+    port,
+    host: HTTP_HOST,
+    bearerToken: BEARER,
+    authFailureLimit: 0,
+    sessionIdleTtlMs: options.sessionIdleTtlMs,
+    registry: lifecycleRegistry(),
+  });
+  lifecycleHttpServers.push(httpServer);
+  return { httpServer, mcpServers };
+}
+
+function beginMcpPost(port: number, body: string, sessionId?: string): {
+  req: httpModule.ClientRequest;
+  response: Promise<{ status: number; body: string; headers: httpModule.IncomingHttpHeaders }>;
+  abort: () => void;
+} {
+  let req!: httpModule.ClientRequest;
+  let incoming: httpModule.IncomingMessage | undefined;
+  const response = new Promise<{ status: number; body: string; headers: httpModule.IncomingHttpHeaders }>(
+    (resolve, reject) => {
+      const headers: Record<string, string | number> = {
+        authorization: `Bearer ${BEARER}`,
+        accept: 'application/json, text/event-stream',
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      };
+      if (sessionId) headers['mcp-session-id'] = sessionId;
+      req = httpModule.request(
+        { hostname: HTTP_HOST, port, path: '/', method: 'POST', headers, agent: false as const },
+        (res) => {
+          incoming = res;
+          let data = '';
+          res.on('data', (chunk) => (data += chunk));
+          res.on('end', () => resolve({ status: res.statusCode || 0, body: data, headers: res.headers }));
+          res.on('error', reject);
+          res.on('aborted', () => reject(new Error('response aborted')));
+        },
+      );
+      req.on('error', reject);
+      req.end(body);
+    },
+  );
+  return {
+    req,
+    response,
+    abort: () => {
+      incoming?.destroy();
+      req.destroy();
+    },
+  };
+}
+
+function beginSse(port: number, sessionId: string): {
+  response: Promise<httpModule.IncomingMessage>;
+  close: () => void;
+} {
+  let req!: httpModule.ClientRequest;
+  let incoming: httpModule.IncomingMessage | undefined;
+  const response = new Promise<httpModule.IncomingMessage>((resolve, reject) => {
+    req = httpModule.request({
+      hostname: HTTP_HOST,
+      port,
+      path: '/',
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${BEARER}`,
+        accept: 'text/event-stream',
+        'mcp-session-id': sessionId,
+      },
+      agent: false,
+    }, (res) => {
+      incoming = res;
+      res.on('data', () => {});
+      res.on('error', () => {});
+      resolve(res);
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  return {
+    response,
+    close: () => {
+      incoming?.destroy();
+      req.destroy();
+    },
+  };
+}
+
+const slowCallBody = JSON.stringify({
+  jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'slow', arguments: {} },
+});
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 describe('HTTP transport — auth', () => {
   it('rejects request without bearer token', async () => {
     const res = await httpRequest('GET', '/status');
@@ -187,6 +385,452 @@ describe('HTTP transport — sessions', () => {
     );
     expect(res.status).toBe(404);
     expect(JSON.parse(res.body).error.message).toMatch(/session not found/i);
+  });
+});
+
+describe('HTTP transport — session lifecycle', () => {
+  it('expires an idle session with 404 and closes its transport and McpServer', async () => {
+    const PORT = 18413;
+    let now = 1_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const { StreamableHTTPServerTransport } = await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
+    const transportClose = vi.spyOn(StreamableHTTPServerTransport.prototype, 'close');
+    try {
+      const { mcpServers } = await startLifecycleServer(PORT, { sessionIdleTtlMs: 1_000 });
+      const sessionId = await initializeSession(PORT);
+      const serverClose = vi.spyOn(mcpServers[0], 'close');
+      transportClose.mockClear();
+
+      now += 1_001;
+      const expired = await mcpRequest(PORT, 'POST', sessionId, pingBody);
+
+      expect(expired.status).toBe(404);
+      expect(JSON.parse(expired.body).error.message).toMatch(/session not found or expired/i);
+      expect(transportClose).toHaveBeenCalledTimes(1);
+      expect(serverClose).toHaveBeenCalledTimes(1);
+    } finally {
+      transportClose.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('refreshes idle time on each completed request', async () => {
+    const PORT = 18414;
+    let now = 2_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      await startLifecycleServer(PORT, { sessionIdleTtlMs: 1_000 });
+      const sessionId = await initializeSession(PORT);
+
+      now += 600;
+      expect((await mcpRequest(PORT, 'POST', sessionId, pingBody)).status).toBe(200);
+      now += 600;
+      expect((await mcpRequest(PORT, 'POST', sessionId, pingBody)).status).toBe(200);
+      now += 1_001;
+      expect((await mcpRequest(PORT, 'POST', sessionId, pingBody)).status).toBe(404);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('evicts the least-recently-active session at the cap and admits a new one', async () => {
+    const PORT = 18415;
+    let now = 3_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await startLifecycleServer(PORT);
+      const ids: string[] = [];
+      for (let i = 0; i < 64; i++) {
+        now++;
+        ids.push(await initializeSession(PORT));
+      }
+
+      now += 100;
+      expect((await mcpRequest(PORT, 'POST', ids[0], pingBody)).status).toBe(200);
+      now++;
+      const replacement = await initializeSession(PORT);
+
+      expect(replacement).toBeTruthy();
+      expect((await mcpRequest(PORT, 'POST', ids[1], pingBody)).status).toBe(404);
+      expect((await mcpRequest(PORT, 'POST', ids[0], pingBody)).status).toBe(200);
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('reason=lru'));
+    } finally {
+      stderr.mockRestore();
+      nowSpy.mockRestore();
+    }
+  }, 15_000);
+
+  it('does not LRU-evict a slow POST while its tool call is in flight', async () => {
+    const PORT = 18417;
+    let now = 3_500_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const started = deferred();
+    const release = deferred();
+    try {
+      await startLifecycleServer(PORT, {
+        configure: (server) => server.registerTool('slow', {}, async () => {
+          started.resolve();
+          await release.promise;
+          return { content: [{ type: 'text', text: 'done' }] };
+        }),
+      });
+      const activeId = await initializeSession(PORT);
+      const slow = beginMcpPost(PORT, slowCallBody, activeId);
+      await started.promise;
+
+      const idleIds: string[] = [];
+      for (let i = 0; i < 63; i++) {
+        now++;
+        idleIds.push(await initializeSession(PORT));
+      }
+      now++;
+      expect(await initializeSession(PORT)).toBeTruthy();
+      expect((await mcpRequest(PORT, 'POST', idleIds[0], pingBody)).status).toBe(404);
+
+      release.resolve();
+      expect((await slow.response).status).toBe(200);
+      expect((await mcpRequest(PORT, 'POST', activeId, pingBody)).status).toBe(200);
+    } finally {
+      release.resolve();
+      nowSpy.mockRestore();
+    }
+  }, 15_000);
+
+  it('does not expire a slow POST at the TTL boundary and expires it after completion', async () => {
+    const PORT = 18418;
+    let now = 3_700_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const started = deferred();
+    const release = deferred();
+    try {
+      await startLifecycleServer(PORT, {
+        sessionIdleTtlMs: 1_000,
+        configure: (server) => server.registerTool('slow', {}, async () => {
+          started.resolve();
+          await release.promise;
+          return { content: [{ type: 'text', text: 'done' }] };
+        }),
+      });
+      const activeId = await initializeSession(PORT);
+      const slow = beginMcpPost(PORT, slowCallBody, activeId);
+      await started.promise;
+
+      now += 1_000;
+      expect(await initializeSession(PORT)).toBeTruthy();
+      release.resolve();
+      expect((await slow.response).status).toBe(200);
+
+      now += 1_000;
+      expect((await mcpRequest(PORT, 'POST', activeId, pingBody)).status).toBe(404);
+    } finally {
+      release.resolve();
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('counts concurrent initialization reservations against the session cap', async () => {
+    const PORT = 18419;
+    const allFactoriesEntered = deferred();
+    const releaseFactories = deferred();
+    let entered = 0;
+    await startLifecycleServer(PORT, {
+      beforeCreate: async () => {
+        entered++;
+        if (entered === 64) allFactoriesEntered.resolve();
+        await releaseFactories.promise;
+      },
+    });
+
+    const settledStatuses: number[] = [];
+    const requests = Array.from({ length: 65 }, () => {
+      const request = mcpRequest(PORT, 'POST', undefined, initializeBody);
+      void request.then((response) => settledStatuses.push(response.status));
+      return request;
+    });
+    await allFactoriesEntered.promise;
+    await vi.waitFor(() => expect(settledStatuses).toEqual([503]));
+    releaseFactories.resolve();
+
+    const responses = await Promise.all(requests);
+    expect(responses.filter((response) => response.status === 200)).toHaveLength(64);
+    expect(responses.filter((response) => response.status === 503)).toHaveLength(1);
+  }, 15_000);
+
+  it('releases an initialization reservation when its client aborts during creation', async () => {
+    const PORT = 18420;
+    const factoryEntered = deferred();
+    const releaseFactory = deferred();
+    try {
+      const { mcpServers } = await startLifecycleServer(PORT, {
+        beforeCreate: async (index) => {
+          if (index === 0) {
+            factoryEntered.resolve();
+            await releaseFactory.promise;
+          }
+        },
+      });
+      const aborted = beginMcpPost(PORT, initializeBody);
+      const abortedResponse = aborted.response.catch((error) => error);
+      await factoryEntered.promise;
+      aborted.abort();
+      await abortedResponse;
+      // Let the server observe the peer close while creation is still suspended.
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+
+      const status = await bareRequest(PORT, '/status', { authorization: `Bearer ${BEARER}` });
+      expect(JSON.parse(status.body).mcpSessions.pending).toBe(0);
+      expect(await initializeSession(PORT)).toBeTruthy();
+
+      releaseFactory.resolve();
+
+      await vi.waitFor(() => {
+        expect(mcpServers).toHaveLength(2);
+        expect(mcpServers[1].server.transport).toBeUndefined();
+      });
+    } finally {
+      releaseFactory.resolve();
+    }
+  });
+
+  it('can evict a session with an open SSE request', async () => {
+    const PORT = 18416;
+    let now = 4_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let stream: ReturnType<typeof beginSse> | undefined;
+    try {
+      await startLifecycleServer(PORT);
+      const activeId = await initializeSession(PORT);
+      stream = beginSse(PORT, activeId);
+      await stream.response;
+
+      const idleIds: string[] = [];
+      for (let i = 0; i < 63; i++) {
+        now++;
+        idleIds.push(await initializeSession(PORT));
+      }
+      now++;
+      const replacement = await initializeSession(PORT);
+
+      expect(replacement).toBeTruthy();
+      expect((await mcpRequest(PORT, 'POST', activeId, pingBody)).status).toBe(404);
+      expect((await mcpRequest(PORT, 'POST', idleIds[0], pingBody)).status).toBe(200);
+    } finally {
+      stream?.close();
+      nowSpy.mockRestore();
+    }
+  }, 15_000);
+
+  it('evicts the LRU when every session holds only an open SSE stream', async () => {
+    const PORT = 18426;
+    let now = 4_100_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const streams: ReturnType<typeof beginSse>[] = [];
+    try {
+      await startLifecycleServer(PORT);
+      const ids: string[] = [];
+      for (let i = 0; i < 64; i++) {
+        now++;
+        const id = await initializeSession(PORT);
+        ids.push(id);
+        const stream = beginSse(PORT, id);
+        streams.push(stream);
+        await stream.response;
+      }
+
+      now++;
+      expect(await initializeSession(PORT)).toBeTruthy();
+      expect((await mcpRequest(PORT, 'POST', ids[0], pingBody)).status).toBe(404);
+      expect((await mcpRequest(PORT, 'POST', ids[1], pingBody)).status).toBe(200);
+      expect(stderr).toHaveBeenCalledWith('MCP session closed reason=lru');
+    } finally {
+      for (const stream of streams) stream.close();
+      stderr.mockRestore();
+      nowSpy.mockRestore();
+    }
+  }, 20_000);
+
+  it('returns 503 with session counters when every session has a slow POST', async () => {
+    const PORT = 18427;
+    const allStarted = deferred();
+    const release = deferred();
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let started = 0;
+    const slowRequests: ReturnType<typeof beginMcpPost>[] = [];
+    try {
+      await startLifecycleServer(PORT, {
+        configure: (server) => server.registerTool('slow', {}, async () => {
+          started++;
+          if (started === 64) allStarted.resolve();
+          await release.promise;
+          return { content: [{ type: 'text', text: 'done' }] };
+        }),
+      });
+      const ids: string[] = [];
+      for (let i = 0; i < 64; i++) ids.push(await initializeSession(PORT));
+      for (const id of ids) slowRequests.push(beginMcpPost(PORT, slowCallBody, id));
+      await allStarted.promise;
+
+      const rejected = await mcpRequest(PORT, 'POST', undefined, initializeBody);
+
+      expect(rejected.status).toBe(503);
+      expect(stderr).toHaveBeenCalledWith(expect.stringMatching(
+        /^MCP session limit reached cap=64 total=64 pending=0 finiteInFlightSessions=64 finiteInFlightRequests=64 openSseStreams=0 evictable=0 oldestActivityMs=\d+ oldestPendingMs=0$/,
+      ));
+    } finally {
+      release.resolve();
+      await Promise.allSettled(slowRequests.map((request) => request.response));
+      stderr.mockRestore();
+    }
+  }, 20_000);
+
+  it('reports aggregate MCP session counters from /status', async () => {
+    const PORT = 18428;
+    let now = 4_200_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const slowStarted = deferred();
+    const releaseSlow = deferred();
+    const pendingStarted = deferred();
+    const releasePending = deferred();
+    let stream: ReturnType<typeof beginSse> | undefined;
+    let slow: ReturnType<typeof beginMcpPost> | undefined;
+    let pending: ReturnType<typeof beginMcpPost> | undefined;
+    try {
+      await startLifecycleServer(PORT, {
+        beforeCreate: async (index) => {
+          if (index === 2) {
+            pendingStarted.resolve();
+            await releasePending.promise;
+          }
+        },
+        configure: (server) => server.registerTool('slow', {}, async () => {
+          slowStarted.resolve();
+          await releaseSlow.promise;
+          return { content: [{ type: 'text', text: 'done' }] };
+        }),
+      });
+      const sseId = await initializeSession(PORT);
+      const slowId = await initializeSession(PORT);
+      stream = beginSse(PORT, sseId);
+      await stream.response;
+      slow = beginMcpPost(PORT, slowCallBody, slowId);
+      await slowStarted.promise;
+      pending = beginMcpPost(PORT, initializeBody);
+      const pendingResponse = pending.response.catch((error) => error);
+      await pendingStarted.promise;
+      now += 250;
+
+      const response = await bareRequest(PORT, '/status', { authorization: `Bearer ${BEARER}` });
+
+      expect(response.status).toBe(200);
+      expect(JSON.parse(response.body).mcpSessions).toEqual({
+        cap: 64,
+        total: 2,
+        pending: 1,
+        finiteInFlightSessions: 1,
+        finiteInFlightRequests: 1,
+        openSseStreams: 1,
+        evictable: 1,
+        oldestActivityMs: 250,
+        oldestPendingMs: 250,
+      });
+
+      pending.abort();
+      await pendingResponse;
+    } finally {
+      stream?.close();
+      pending?.abort();
+      releasePending.resolve();
+      releaseSlow.resolve();
+      if (slow) await Promise.allSettled([slow.response]);
+      nowSpy.mockRestore();
+    }
+  }, 15_000);
+
+  it('handles DELETE and its transport close callback only once', async () => {
+    const PORT = 18421;
+    const { mcpServers } = await startLifecycleServer(PORT);
+    const sessionId = await initializeSession(PORT);
+
+    expect((await mcpRequest(PORT, 'DELETE', sessionId)).status).toBe(200);
+    expect(mcpServers[0].server.transport).toBeUndefined();
+    const replacement = await initializeSession(PORT);
+    expect((await mcpRequest(PORT, 'DELETE', sessionId)).status).toBe(404);
+    expect((await mcpRequest(PORT, 'POST', replacement, pingBody)).status).toBe(200);
+  });
+
+  it('releases an in-flight POST when the client aborts', async () => {
+    const PORT = 18423;
+    let now = 4_300_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const started = deferred();
+    const release = deferred();
+    try {
+      await startLifecycleServer(PORT, {
+        sessionIdleTtlMs: 1_000,
+        configure: (server) => server.registerTool('slow', {}, async () => {
+          started.resolve();
+          await release.promise;
+          return { content: [{ type: 'text', text: 'done' }] };
+        }),
+      });
+      const sessionId = await initializeSession(PORT);
+      const slow = beginMcpPost(PORT, slowCallBody, sessionId);
+      const abortedResponse = slow.response.catch((error) => error);
+      await started.promise;
+      slow.abort();
+      await abortedResponse;
+      // The client observes its local abort before Node delivers the peer close to the server.
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+
+      now += 1_000;
+      expect(await initializeSession(PORT)).toBeTruthy();
+      expect((await mcpRequest(PORT, 'POST', sessionId, pingBody)).status).toBe(404);
+    } finally {
+      release.resolve();
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('releases an in-flight counter when a tool returns an error', async () => {
+    const PORT = 18424;
+    let now = 4_500_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      await startLifecycleServer(PORT, {
+        sessionIdleTtlMs: 1_000,
+        configure: (server) => server.registerTool('slow', {}, async () => {
+          throw new Error('expected tool failure');
+        }),
+      });
+      const sessionId = await initializeSession(PORT);
+      expect((await mcpRequest(PORT, 'POST', sessionId, slowCallBody)).status).toBe(200);
+
+      now += 1_000;
+      expect((await mcpRequest(PORT, 'POST', sessionId, pingBody)).status).toBe(404);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('does not let an unauthenticated request trigger the idle sweep', async () => {
+    const PORT = 18425;
+    let now = 4_700_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const { mcpServers } = await startLifecycleServer(PORT, { sessionIdleTtlMs: 1_000 });
+      const sessionId = await initializeSession(PORT);
+      const serverClose = vi.spyOn(mcpServers[0], 'close');
+      now += 1_000;
+
+      expect((await mcpRequest(PORT, 'POST', sessionId, pingBody, 'wrong-token')).status).toBe(401);
+      expect(serverClose).not.toHaveBeenCalled();
+      expect((await mcpRequest(PORT, 'POST', sessionId, pingBody)).status).toBe(404);
+      expect(serverClose).toHaveBeenCalledTimes(1);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });
 

@@ -96,6 +96,23 @@ export function parseFailureLimit(raw: string | null | undefined): number | unde
   return value;
 }
 
+/** `--httpSessionTtl`, refusing values that would silently disable idle eviction. */
+export function parseHttpSessionTtl(raw: string | null | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || !/^\d+$/.test(raw.trim())) {
+    throw new OperatorError(
+      `--httpSessionTtl needs a positive whole number of milliseconds, got ${JSON.stringify(raw)}.`,
+    );
+  }
+  const value = Number(raw.trim());
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new OperatorError(
+      `--httpSessionTtl must be a positive safe integer, got ${JSON.stringify(raw)}.`,
+    );
+  }
+  return value;
+}
+
 /** Far above any real budget; the point is that there is one. */
 const MAX_AUTH_FAILURE_LIMIT = 10_000;
 
