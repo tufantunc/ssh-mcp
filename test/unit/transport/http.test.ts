@@ -957,19 +957,7 @@ describe('HTTP transport — the request limiter admits exactly its limit', () =
     // assertion would not notice.
     const statuses: number[] = [];
     for (let i = 0; i < 5; i++) {
-      const res = await new Promise<number>((resolve, reject) => {
-        const req = httpModule.request(
-          {
-            hostname: HTTP_HOST, port: PORT, path: '/', method: 'POST',
-            headers: { authorization: `Bearer ${BEARER}`, 'content-type': 'application/json' },
-            agent: false as const,
-          },
-          (r) => { r.resume(); r.on('end', () => resolve(r.statusCode || 0)); },
-        );
-        req.on('error', reject);
-        req.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }));
-      });
-      statuses.push(res);
+      statuses.push((await postRequest(PORT, { authorization: `Bearer ${BEARER}` })).status);
     }
     expect(statuses.filter((x) => x !== 429)).toHaveLength(3);
     expect(statuses.slice(3)).toEqual([429, 429]);
