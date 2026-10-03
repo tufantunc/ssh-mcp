@@ -721,6 +721,27 @@ describe('AuthFailureLimiter', () => {
       vi.useRealTimers();
     }
   });
+
+  it('recovers once a saturated table has refilled', async () => {
+    const { AuthFailureLimiter, MAX_TRACKED_CLIENTS } = await import('../../../src/transport/http.js');
+    const T0 = 1_800_000_000_000;
+    vi.useFakeTimers({ toFake: ['Date'], now: T0 });
+    try {
+      const limiter = new AuthFailureLimiter(10);
+      for (let i = 0; i < MAX_TRACKED_CLIENTS; i++) {
+        for (let n = 0; n < 10; n++) limiter.recordFailure(`atk-${i}`);
+      }
+      // An hour later every one of those buckets is full again. The scan used to read the
+      // stored count, which never changes for a key that stops sending, so the table
+      // stayed "saturated" for good: every new client started empty, and one typo made
+      // its correct token wait. Measured on 09ecbad.
+      vi.setSystemTime(T0 + 3_600_000);
+      limiter.recordFailure('arriving');
+      expect(limiter.peek('arriving').allowed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('ClientRateLimiter', () => {

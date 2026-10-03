@@ -179,12 +179,8 @@ export class AuthFailureLimiter {
         // first and then handed its key a fresh budget: minting enough keys cleared a
         // lockout, which was measured end to end. A full bucket is the one with nothing
         // worth remembering.
-        let fullestKey: string | null = null;
-        let fullest = -1;
-        for (const [k, b] of this.buckets) {
-          if (b.tokens > fullest) { fullest = b.tokens; fullestKey = k; }
-        }
-        if (fullestKey !== null) this.buckets.delete(fullestKey);
+        const fullest = fullestBucket(this.buckets, this.maxTokens);
+        if (fullest !== undefined) this.buckets.delete(fullest.key);
         // Every tracked client is spent, so the table itself is the signal and a new key
         // does not get a full budget.
         //
@@ -195,8 +191,9 @@ export class AuthFailureLimiter {
         // `peek` already allows a key it has never seen, so the first attempt is free
         // either way and the second is refused either way. Measured both, identical.
         // Giving an arriving key a real budget is the refund this rule exists to stop.
-        // Saturation needs 1024 addresses that have each spent a full budget.
-        if (fullest <= 0) bucket = { tokens: 0, lastRefill: Date.now() };
+        // Saturation needs 1024 addresses that have each spent a full budget *recently*:
+        // `fullestBucket` ranks by refilled tokens, so the condition ends once they refill.
+        if (fullest === undefined || fullest.available <= 0) bucket = { tokens: 0, lastRefill: Date.now() };
       }
       this.buckets.set(key, bucket);
     }
