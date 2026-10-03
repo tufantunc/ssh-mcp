@@ -197,7 +197,22 @@ export class AuthFailureLimiter {
 }
 
 /**
- * Which client an attempt is charged to.
+ * Which client an attempt is charged to: the address `chargedAddress` settles on, grouped
+ * into a key by `keyOf`. Grouped here, once, so no path through the header logic can hand
+ * back an ungrouped address — and trust is decided in there, on the exact peer, before any
+ * grouping happens.
+ */
+export function clientKey(
+  req: IncomingMessage,
+  trustProxy: boolean,
+  trustedProxies?: string[],
+): { key: string; forwardedIgnored: boolean } {
+  const { address, forwardedIgnored } = chargedAddress(req, trustProxy, trustedProxies);
+  return { key: keyOf(address), forwardedIgnored };
+}
+
+/**
+ * The exact address an attempt is charged to.
  *
  * The socket's remote address, which is the real client on a direct connection — how this
  * server is normally run. `X-Forwarded-For` is read only when a proxy is explicitly
@@ -215,14 +230,14 @@ export class AuthFailureLimiter {
  * chain of two would need the second-from-right, and this does not try to guess the depth.
  * Anything that is not an IP address is discarded rather than used as a map key.
  */
-export function clientKey(
+function chargedAddress(
   req: IncomingMessage,
   trustProxy: boolean,
   trustedProxies?: string[],
-): { key: string; forwardedIgnored: boolean } {
+): { address: string; forwardedIgnored: boolean } {
   const peer = canonicalAddress(req.socket.remoteAddress ?? 'unknown');
   const forwarded = req.headers['x-forwarded-for'];
-  if (!trustProxy || forwarded === undefined) return { key: keyOf(peer), forwardedIgnored: false };
+  if (!trustProxy || forwarded === undefined) return { address: peer, forwardedIgnored: false };
 
   // The rightmost entry is proxy-authored only if a proxy actually appended one. Nothing
   // about the header says whether it did, so the *peer* has to be the proxy — otherwise a
@@ -230,51 +245,60 @@ export function clientKey(
   // rightmost, and it picks its own key. Both attacks this keying was fixed to stop came
   // back alive in exactly that configuration.
   if (!isTrustedPeer(peer, trustedProxies)) {
-    return { key: keyOf(peer), forwardedIgnored: true };
+    return { address: peer, forwardedIgnored: true };
   }
 
   const raw = Array.isArray(forwarded) ? forwarded.join(',') : forwarded;
   const entries = raw.split(',').map((e) => e.trim()).filter(Boolean);
   const nearest = entries[entries.length - 1];
   const address = nearest === undefined ? undefined : forwardedAddress(nearest);
-  if (address === undefined) return { key: keyOf(peer), forwardedIgnored: true };
-  return { key: keyOf(address), forwardedIgnored: false };
+  if (address === undefined) return { address: peer, forwardedIgnored: true };
+  return { address, forwardedIgnored: false };
 }
 
 /**
- * The budget an address is charged to: itself for IPv4, its /64 for IPv6.
+ * The key an address is charged to: an IPv4 address as itself, an IPv6 address by its /64.
  *
- * Applied to the returned key only. Trust is still decided on the exact peer, or every host
- * in a proxy's /64 could speak for other clients.
+ * A subscriber is usually handed at least a /64, so the /64 is the client. Where a provider
+ * puts several customers on one /64 they share a budget, as hosts behind one IPv4 NAT do.
+ *
+ * Three IPv6 ranges are not a client's own /64 but a way of carrying an IPv4 address, and
+ * are keyed by that address: IPv4-mapped `::ffff:0:0/96` in any spelling, the NAT64
+ * well-known prefix `64:ff9b::/96` under which a translated deployment sees every IPv4
+ * client, and IPv4-compatible `::/96`. Grouped by /64 instead, each of them would put every
+ * IPv4 client on one key. Loopback `::1` stays itself.
  */
 function keyOf(address: string): string {
   if (isIP(address) !== 6 || address === '::1') return address;
-  return ipv6Prefix64(address);
+  const g = ipv6Groups(address);
+  const lowZero = g[2] === 0 && g[3] === 0 && g[4] === 0;
+  const carriesIpv4 = lowZero && (
+    (g[0] === 0 && g[1] === 0 && (g[5] === 0 || g[5] === 0xffff)) ||
+    (g[0] === 0x64 && g[1] === 0xff9b && g[5] === 0)
+  );
+  if (carriesIpv4) return `${g[6] >> 8}.${g[6] & 0xff}.${g[7] >> 8}.${g[7] & 0xff}`;
+  return `${g.slice(0, 4).map((n) => n.toString(16)).join(':')}::/64`;
 }
 
 /**
- * The /64 an IPv6 address belongs to, spelled one way.
- *
- * A /64 is the smallest block a subscriber is handed, so the address inside it is the
- * client's own to choose; keyed by full address, each choice was a fresh budget. The
- * spelling is fixed — zone dropped, `::` expanded, a dotted IPv4 tail counted as two
- * groups, leading zeros and case removed by reading each group as a number — so rewriting
- * the address does not reach a new key. Only the first four groups are kept, so the tail
- * never needs converting.
+ * An IPv6 address as its eight 16-bit groups, whatever the spelling: zone dropped, `::`
+ * expanded, a dotted IPv4 tail read as the last two groups, case and leading zeros gone by
+ * reading each group as a number. Expects an address `net.isIP` has already accepted.
  */
-function ipv6Prefix64(address: string): string {
-  const bare = address.split('%')[0];
-  const dotted = bare.includes('.');
-  const [head, tail] = bare.split('::');
-  const headGroups = head === '' ? [] : head.split(':');
-  const tailGroups = tail === undefined || tail === '' ? [] : tail.split(':');
-  // A dotted tail is one written group standing for two.
-  const written = headGroups.length + tailGroups.length + (dotted ? 1 : 0);
-  const groups = tail === undefined
-    ? headGroups
-    : [...headGroups, ...Array(8 - written).fill('0'), ...tailGroups];
-  const prefix = groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16));
-  return `${prefix.join(':')}::/64`;
+function ipv6Groups(address: string): number[] {
+  const [head, tail] = address.split('%')[0].split('::');
+  const parse = (part: string | undefined): number[] =>
+    part === undefined || part === ''
+      ? []
+      : part.split(':').flatMap((group) => {
+        if (!group.includes('.')) return [parseInt(group, 16)];
+        const [a, b, c, d] = group.split('.').map(Number);
+        return [(a << 8) | b, (c << 8) | d];
+      });
+  const headGroups = parse(head);
+  const tailGroups = parse(tail);
+  if (tail === undefined) return headGroups;
+  return [...headGroups, ...Array(8 - headGroups.length - tailGroups.length).fill(0), ...tailGroups];
 }
 
 /**
@@ -313,12 +337,16 @@ function forwardedAddress(entry: string): string | undefined {
 }
 
 /**
- * `::ffff:127.0.0.1` and `127.0.0.1` are the same client; key them the same way. Case is
- * folded first: a forwarded `::FFFF:` spelling otherwise stayed IPv6.
+ * `::ffff:127.0.0.1` and `127.0.0.1` are the same client; key them the same way.
+ *
+ * Only that spelling, and only when what follows is IPv4: `::ffff:c000:280` stripped to
+ * `c000:280` was no address at all, and the request fell back to the proxy's key. Every
+ * other spelling of a mapped address reaches its IPv4 key through `keyOf`, by value. The
+ * case is left as it came, because this is also the peer the trust check compares with
+ * `--trustedProxies` — a zone such as `%WAN` must still match as written.
  */
 function canonicalAddress(address: string): string {
-  const folded = address.toLowerCase();
-  return folded.startsWith('::ffff:') ? folded.slice(7) : folded;
+  return address.startsWith('::ffff:') && isIP(address.slice(7)) === 4 ? address.slice(7) : address;
 }
 
 export interface HttpTransportOpts {

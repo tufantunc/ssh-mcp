@@ -792,11 +792,9 @@ spent only on a 401; a correct token never consumes from it, so a working client
 throttles itself. Once an address has spent its budget every request from it waits,
 including one with the right token — that is deliberate, since answering the guess would
 otherwise tell the caller which token was right. Clients are told apart by socket address,
-for this budget and for `--rateLimit` alike. An IPv6 client is told apart by its /64, the
-smallest block a subscriber is handed, so hosts that share a /64 share a budget the way
-hosts behind one IPv4 NAT do. **Behind a reverse proxy that means every client shares one
-of each**, so set `--trustProxy` when the proxy is yours — the server prints a warning the
-first time it sees `X-Forwarded-For` without it. `--trustProxy` takes
+for this budget and for `--rateLimit` alike. **Behind a reverse proxy that means every
+client shares one of each**, so set `--trustProxy` when the proxy is yours — the server
+prints a warning the first time it sees `X-Forwarded-For` without it. `--trustProxy` takes
 the *rightmost* `X-Forwarded-For` entry, which is the hop the proxy itself appended;
 everything to its left came from the client, so reading the leftmost would let a client
 choose its own budget or spend a victim's. That only holds if a proxy actually appended
@@ -807,6 +805,12 @@ trusted, the server falls back to the socket address and says so once, so a flag
 not taking effect is not silent. One trusted hop is assumed. A malformed
 `--authFailureLimit` is refused at startup rather than silently disabling the check; only
 `0` turns it off.
+
+An IPv6 client is told apart by its /64 rather than its full address, for both budgets. A
+/64 is usually the smallest block a subscriber is handed, so hosts that share one — a home
+or office network, or customers a hosting provider places on one /64 — share a budget, the
+way hosts behind one IPv4 NAT do. An IPv6 address that carries an IPv4 address (IPv4-mapped,
+or the NAT64 prefix `64:ff9b::/96`) counts as that IPv4 client.
 
 **Always terminate TLS at a reverse proxy** (Caddy/nginx). The server listens on `127.0.0.1` only.
 
