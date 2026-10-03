@@ -810,7 +810,9 @@ An IPv6 client is told apart by its /64 rather than its full address, for both b
 /64 is usually the smallest block a subscriber is handed, so hosts that share one — a home
 or office network, or customers a hosting provider places on one /64 — share a budget, the
 way hosts behind one IPv4 NAT do. An IPv6 address that carries an IPv4 address (IPv4-mapped,
-or the NAT64 prefix `64:ff9b::/96`) counts as that IPv4 client.
+or the NAT64 prefix `64:ff9b::/96`) counts as that IPv4 client. A NAT64 or SIIT translator
+that uses a prefix of its own is not recognised: every IPv4 client it translates shares that
+prefix's /64, and so one budget.
 
 **Always terminate TLS at a reverse proxy** (Caddy/nginx). The server listens on `127.0.0.1` only.
 

@@ -266,11 +266,13 @@ function chargedAddress(
  * are keyed by that address: IPv4-mapped `::ffff:0:0/96` in any spelling, the NAT64
  * well-known prefix `64:ff9b::/96` under which a translated deployment sees every IPv4
  * client, and IPv4-compatible `::/96`. Grouped by /64 instead, each of them would put every
- * IPv4 client on one key. Loopback `::1` stays itself.
+ * IPv4 client on one key. A translator using a prefix of its own is not recognised, and its
+ * IPv4 clients share that prefix's /64. Loopback stays `::1`, however it is written.
  */
 function keyOf(address: string): string {
-  if (isIP(address) !== 6 || address === '::1') return address;
+  if (isIP(address) !== 6) return address;
   const g = ipv6Groups(address);
+  if (g.slice(0, 7).every((n) => n === 0) && g[7] === 1) return '::1';
   const lowZero = g[2] === 0 && g[3] === 0 && g[4] === 0;
   const carriesIpv4 = lowZero && (
     (g[0] === 0 && g[1] === 0 && (g[5] === 0 || g[5] === 0xffff)) ||

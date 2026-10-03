@@ -583,8 +583,11 @@ describe('clientKey', () => {
     expect(clientKeyOf(fake('64:ff9b:1::1.2.3.4'), false)).toBe('64:ff9b:1:0::/64');
   });
 
-  it('keeps loopback as itself', () => {
+  it('keeps loopback as itself, however it is written', () => {
     expect(clientKeyOf(fake('::1'), false)).toBe('::1');
+    // Not the IPv4-compatible `0.0.0.1` it would otherwise read as.
+    expect(clientKeyOf(fake('0:0:0:0:0:0:0:1'), false)).toBe('::1');
+    expect(clientKeyOf(fake('::1%lo0'), false)).toBe('::1');
   });
 
   it('still recognises a named IPv6 proxy by its full address', () => {
