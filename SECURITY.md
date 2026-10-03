@@ -329,7 +329,7 @@ is secure.
 |-----------------|-------------|-------------------|
 | A.8.2 | Privileged access rights | RBAC roles, policy engine, approval modes, denylist |
 | A.8.5 | Secure authentication | Credential cascade, no CLI-arg secrets, keychain + SSH agent + CA cert support |
-| A.8.23 | Web filtering | `--transport http` requires bearer auth, `--rateLimit` token bucket, `--allowedHosts` Host-header allow-list |
+| A.8.23 | Web filtering | `--transport http` requires bearer auth, per-client `--rateLimit` token bucket, `--allowedHosts` Host-header allow-list |
 | A.12.4 | Logging and monitoring | Audit log with ECS fields, hash-chain option, redaction |
 | A.13.1 | Network security controls | Host key verification, frozen algorithms, ProxyJump tunnel |
 | A.14.2 | Security in development | Property tests (fast-check), SAST (Semgrep), secret scanning (gitleaks), npm provenance |
