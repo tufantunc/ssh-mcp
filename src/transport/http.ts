@@ -59,6 +59,11 @@ function nextTokenWaitMs(bucket: Bucket, maxTokens: number): number {
  * Refilled, not stored. A key that stops sending keeps its stored count forever, so
  * ranking by `tokens` treated a bucket spent an hour ago as still spent. A table that
  * was saturated once was then judged saturated for good, which was measured.
+ *
+ * Linear in the table, and left that way: it runs only when a new key arrives at a full
+ * table, and stops early at the first full bucket. The worst case, every bucket partly
+ * spent, measured about 46µs per new key at 1024 entries (Apple M4 Max, Node 24), and
+ * the same for both limiters.
  */
 function fullestBucket(
   buckets: Map<string, Bucket>,
