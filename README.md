@@ -792,9 +792,11 @@ spent only on a 401; a correct token never consumes from it, so a working client
 throttles itself. Once an address has spent its budget every request from it waits,
 including one with the right token — that is deliberate, since answering the guess would
 otherwise tell the caller which token was right. Clients are told apart by socket address,
-for this budget and for `--rateLimit` alike. **Behind a reverse proxy that means every
-client shares one of each**, so set `--trustProxy` when the proxy is yours — the server
-prints a warning the first time it sees `X-Forwarded-For` without it. `--trustProxy` takes
+for this budget and for `--rateLimit` alike. An IPv6 client is told apart by its /64, the
+smallest block a subscriber is handed, so hosts that share a /64 share a budget the way
+hosts behind one IPv4 NAT do. **Behind a reverse proxy that means every client shares one
+of each**, so set `--trustProxy` when the proxy is yours — the server prints a warning the
+first time it sees `X-Forwarded-For` without it. `--trustProxy` takes
 the *rightmost* `X-Forwarded-For` entry, which is the hop the proxy itself appended;
 everything to its left came from the client, so reading the leftmost would let a client
 choose its own budget or spend a victim's. That only holds if a proxy actually appended
