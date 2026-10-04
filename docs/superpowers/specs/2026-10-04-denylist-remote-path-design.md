@@ -61,8 +61,8 @@ Taken in the design round on 2026-10-04, each with the alternative it was chosen
    resolve over SFTP, but the reading drops them anyway — it only widens what can match.
    (Corrected after merge: an earlier version of this paragraph said backslash-separated
    spellings did not resolve at all, which the design-round measurement contradicts.)
-   Two equivalences stay outside any lexical reading and are documented residuals: 8.3 short names (`AUTHOR~1`), which need the target's directory
-   listing, and symlinks. Resolving with SFTP `REALPATH` would cost a round trip per
+   Two equivalences stay outside any lexical reading and are documented residuals: 8.3
+   short names (`AUTHOR~1`), which need the target's directory listing, and symlinks. Resolving with SFTP `REALPATH` would cost a round trip per
    call, needs its behaviour on a not-yet-existing file measured, and is a hardening step
    rather than part of decoupling rules from our format.
 4. **Remote path only, not the local one.** The denylist answers what may happen on the
