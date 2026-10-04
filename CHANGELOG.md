@@ -1,5 +1,56 @@
 # ssh-mcp
 
+## 2.16.0
+
+### Minor Changes
+
+- [#251](https://github.com/tufantunc/ssh-mcp/pull/251) [`dcd51bb`](https://github.com/tufantunc/ssh-mcp/commit/dcd51bbaea0e71713287e11a24f6288a4eeeebea) Thanks [@tufantunc](https://github.com/tufantunc)! - **IPv6 clients are told apart by their /64.** The failed-auth budget (`--authFailureLimit`)
+  and the per-client request budget (`--rateLimit`) both keyed a client by its full address.
+  An IPv6 client is now keyed by its /64, usually the smallest block a subscriber is handed,
+  for a direct connection and for an address read from `X-Forwarded-For` behind a trusted
+  proxy. Any spelling of an address — upper case, leading zeros, `::` written out, a zone
+  suffix — reaches the same key.
+  
+  An IPv6 address that carries an IPv4 address is keyed as that IPv4 client: IPv4-mapped in
+  any spelling (a forwarded `::FFFF:` or `::ffff:c000:280` used to stay IPv6, or fall back to
+  the proxy's key), and the NAT64 prefix `64:ff9b::/96`. IPv4 and loopback keying is
+  unchanged, and a trusted proxy is still recognised by its exact address.
+  
+  **Minor, not patch, because a client that used to be served can now wait.** Hosts that
+  share a /64 — a home or office network, or customers a hosting provider places on one /64 —
+  now share one failed-auth budget and one request budget, the way hosts behind one IPv4 NAT
+  already did.
+
+## 2.15.0
+
+### Minor Changes
+
+- [#247](https://github.com/tufantunc/ssh-mcp/pull/247) [`1471200`](https://github.com/tufantunc/ssh-mcp/commit/1471200008c91dc076c1a6c56569b14bda69777b) Thanks [@tufantunc](https://github.com/tufantunc)! - **`--rateLimit` is now counted per client.** It was one bucket for the whole process: with
+  `--rateLimit=3`, one client was served three times and a second client was refused before
+  it had sent a single request, both on direct connections and behind a trusted proxy. Each
+  client now has its own budget, keyed exactly as the failed-auth budget is: the socket
+  address, or the rightmost `X-Forwarded-For` entry when `--trustProxy` is set and the peer
+  is the proxy. Closes [#187](https://github.com/tufantunc/ssh-mcp/issues/187).
+  
+  **Minor, not patch, because a client that used to be served can now get a 429.** The budget
+  is charged on every authenticated request, not only the MCP route: `GET /status` and an
+  authenticated request to an unknown path spend from it too, and `GET /health` still does
+  not. A monitor polling `/status`, or an MCP client and a `/status` poller sharing one
+  address, can now exceed `--rateLimit` where before `/status` was unlimited. Behind a
+  reverse proxy without `--trustProxy`, every client still shares one budget, as before; the
+  server's warning about that now names both budgets and fires with only `--rateLimit` on.
+  
+  `Retry-After` on both 429s is now the time until that client's next request will be
+  accepted, at least one second, rather than a full token interval. The request-limit 429
+  body now carries `id: null`, as the other error responses already did.
+  
+  **Fix to the failed-auth budget.** Its table of tracked clients judged itself "saturated" by
+  stored token counts, which never change for a client that stops sending. Once 1024
+  addresses had each spent a budget, every later client started with an empty budget for
+  good, so a single typo made its correct token wait, even an hour after the attack ended.
+  Saturation is now judged by tokens after refill, so the condition ends when those buckets
+  refill.
+
 ## 2.14.0
 
 ### Security
