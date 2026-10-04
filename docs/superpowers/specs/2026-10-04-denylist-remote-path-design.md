@@ -55,10 +55,13 @@ Taken in the design round on 2026-10-04, each with the alternative it was chosen
    case variants, a trailing run of dots and spaces, and the `::$DATA` default-stream
    spelling all reached the same file; a UNC spelling did too, and a drive-relative one
    resolves against process state this server cannot see, so it is rooted at its drive as
-   the fail-closed reading. Backslash-separator spellings and `\\?\` device prefixes did
-   **not** resolve over SFTP at all, but the reading drops the prefixes anyway — it only
-   widens what can match. Two equivalences stay outside any lexical reading and are
-   documented residuals: 8.3 short names (`AUTHOR~1`), which need the target's directory
+   the fail-closed reading. Backslash separators resolved as well, both after a drive
+   letter (`C:\Users\…`, no leading `/`) and in a UNC path (`\\server\share\…`); the
+   reading treats `\` as a separator throughout. `\\?\` device prefixes did **not**
+   resolve over SFTP, but the reading drops them anyway — it only widens what can match.
+   (Corrected after merge: an earlier version of this paragraph said backslash-separated
+   spellings did not resolve at all, which the design-round measurement contradicts.)
+   Two equivalences stay outside any lexical reading and are documented residuals: 8.3 short names (`AUTHOR~1`), which need the target's directory
    listing, and symlinks. Resolving with SFTP `REALPATH` would cost a round trip per
    call, needs its behaviour on a not-yet-existing file measured, and is a hardening step
    rather than part of decoupling rules from our format.
