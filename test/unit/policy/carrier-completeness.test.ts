@@ -28,6 +28,25 @@ const operatorProd = {
 const engine = new PolicyEngine(DEFAULT_RULES);
 const decide = (command: string) => engine.evaluate(command, operatorProd, 'run-command');
 
+/**
+ * The fastest of several classifications of `command`, in milliseconds.
+ *
+ * The cost tests below compare two sizes, and a single sample per size let one
+ * stall decide the result: on a shared macOS runner the large input once took
+ * 201ms where it measures 105-124ms under coverage, and a ratio that sits at
+ * about 93x crossed the 200x bound. Noise only ever adds time, so the minimum is
+ * the reading closest to the cost being measured.
+ */
+const fastestMs = (command: string, runs = 5) => {
+  let best = Infinity;
+  for (let i = 0; i < runs; i++) {
+    const started = performance.now();
+    classifyCommand(command);
+    best = Math.min(best, performance.now() - started);
+  }
+  return best;
+};
+
 describe('an unrecognised binary cannot hide a command in its operands', () => {
   it.each([
     ['osascript', `osascript -e 'do shell script "sudo id"'`],
@@ -85,10 +104,8 @@ describe('an unrecognised binary cannot hide a command in its operands', () => {
     const operand = (n: number) => `'${'word '.repeat(n)}'`;
     const small = `whatever-tool ${Array.from({ length: 10 }, () => operand(10)).join(' ')}`;
     const large = `whatever-tool ${Array.from({ length: 100 }, () => operand(100)).join(' ')}`;
-    const time = (c: string) => { const t = performance.now(); classifyCommand(c); return performance.now() - t; };
-    time(small);
-    const a = time(small);
-    const b = time(large);
+    const a = fastestMs(small);
+    const b = fastestMs(large);
     // 100x the operands at 10x the length is 1000x the input; anything near linear
     // is fine and anything quadratic is not.
     expect(b).toBeLessThan(Math.max(a * 3000, 100));
@@ -227,11 +244,10 @@ describe('interpreters that take a program on the command line', () => {
     // checks is the one decoding itself is responsible for.
     const small = encode('Get-Process '.repeat(18));
     const large = encode('Get-Process '.repeat(1_800));
-    const time = (c: string) => { const t = performance.now(); classifyCommand(c); return performance.now() - t; };
-    time(`pwsh -EncodedCommand ${small}`); // warm
-    const ratioSmall = time(`pwsh -EncodedCommand ${small}`);
-    const ratioLarge = time(`pwsh -EncodedCommand ${large}`);
-    expect(ratioLarge).toBeLessThan(Math.max(ratioSmall * 200, 50));
+    // 100x the payload; decoding is linear, measured at about 93x under coverage.
+    const smallMs = fastestMs(`pwsh -EncodedCommand ${small}`);
+    const largeMs = fastestMs(`pwsh -EncodedCommand ${large}`);
+    expect(largeMs).toBeLessThan(Math.max(smallMs * 200, 50));
   });
 });
 
