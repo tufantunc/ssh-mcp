@@ -494,10 +494,11 @@ export async function startHttpServer(
   const sessions = new Map<string, Session>();
   const pendingReservations = new Set<PendingSessionReservation>();
   /**
-   * Sessions picked to make room for an initialize that has not been admitted yet.
-   * A claimed session keeps serving; it is evicted only once the initialize that
-   * claimed it is admitted, so an initialize the SDK goes on to refuse (bad Host,
-   * wrong Accept) or whose client disconnects costs no other client its session.
+   * Eviction candidates set aside for initializes at the cap that are not admitted yet,
+   * so concurrent ones each count on a different session and the 503 comes when none
+   * is left. A claim evicts no one: room is made only once an initialize is admitted,
+   * so one the SDK goes on to refuse (bad Host, wrong Accept) or whose client
+   * disconnects costs no other client its session.
    */
   const evictionClaims = new Set<Session>();
 
@@ -521,7 +522,7 @@ export async function startHttpServer(
 
     for (const session of sessions.values()) {
       if (session.finiteInFlight > 0) finiteInFlightSessions++;
-      else evictable++;
+      else if (!evictionClaims.has(session)) evictable++;
       finiteInFlightRequests += session.finiteInFlight;
       openSseStreams += session.openSseStreams;
       oldestActivity = Math.min(oldestActivity, session.lastActivity);
@@ -593,8 +594,8 @@ export async function startHttpServer(
    * The session to evict at the cap: never one with a request in flight, and one
    * without an open stream before one holding a stream, oldest first within each.
    * Stream holders stay evictable as the last resort because a client that vanished
-   * without FIN/RST keeps its stream until the kernel drops the socket, and 64 such
-   * sessions would otherwise refuse every new client until then.
+   * without FIN/RST keeps its stream open until a write to it fails, which can take
+   * many minutes, and 64 such sessions would refuse every new client until then.
    */
   function pickEvictionCandidate(): Session | undefined {
     let best: Session | undefined;
@@ -704,20 +705,18 @@ export async function startHttpServer(
             session!.pending = false;
             session!.releasePending();
           }
-          const claimed = claim;
           releaseClaim();
           if (session!.closing) return;
-          // Admitted: now make room. The claimed session is the choice unless it has
-          // left on its own or picked up a request since; then take the next candidate.
-          // If nothing is evictable any more, the cap is exceeded by this one session
-          // until something closes, rather than refusing a client already admitted.
-          if (sessions.size + pendingReservations.size >= MAX_SESSIONS) {
-            const claimStillFits = claimed !== undefined
-              && sessions.get(claimed.id!) === claimed
-              && claimed.finiteInFlight === 0
-              && claimed.openSseStreams === 0;
-            const victim = claimStillFits ? claimed : pickEvictionCandidate();
-            if (victim) void closeSession(victim, 'lru');
+          // Admitted: now make room, counting only admitted sessions, since another
+          // initialize still in progress may yet be refused. The claim only reserved a
+          // candidate; the least recently active session is taken now, which may since
+          // have become a different one. If every session is busy the cap is exceeded
+          // rather than refusing a client already admitted, and the next admission
+          // brings the count back under it.
+          while (sessions.size >= MAX_SESSIONS) {
+            const victim = pickEvictionCandidate();
+            if (!victim) break;
+            void closeSession(victim, 'lru');
           }
           sessions.set(id, session!);
         },
