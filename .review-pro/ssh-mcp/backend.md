@@ -8,7 +8,7 @@ extends: core/skills/backend/SKILL.md
 - **MCP tool annotations mismatch** — `readOnlyHint: true` on mutating tool = auto-approval safety regression.
 - **All tools must go through policy + audit** — `read-command`, `run-command`, `privileged-command` via `runAudited()`; `sftp-upload`, `sftp-download`, `signal-process`, `open-session(background)` via inline `checkPolicyAndApprove()` + `auditResult()`.
 - **HTTP transport auth enforcement** — `startHttpServer()` must throw if `bearerToken` is missing.
-- **Rate limiter scope** — applies only to MCP routes (`pathname === '/'`), NOT to `/health` or `/status`. Verify this is intentional for ops endpoints.
+- **Rate limiter scope** — a token bucket per client (`clientKey()`), charged after the bearer check on every authenticated route, `/status` and 404s included. Only `GET /health` is exempt. Verify a new route does not bypass it and that unauthenticated traffic never reaches it.
 - **Body size limit** — POST body capped at 1MB. `req.destroy()` on overflow causes EPIPE on client; consider `res.writeHead(413)` + `req.destroy()` instead.
 - **Audit write stream lifecycle** — `ensureStream()` must close+null the write stream during rotation, then reopen. `rotateIfNeeded()` runs BEFORE write, not after.
 - **MCP resources registration** — `registerResources()` must be called alongside `registerTools()`. Resources: `ssh://connections`, `ssh://connections/{profile}`, `ssh://sessions/{profile}/{session}`.

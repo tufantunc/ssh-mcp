@@ -764,7 +764,7 @@ ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret --rateLimit=60
 | `--bearerToken` | required | Bearer token for authentication (all routes except `GET /health`) |
 | `--httpPort` | 3000 | HTTP listen port |
 | `--httpHost` | 127.0.0.1 | Bind address |
-| `--rateLimit` | 0 (off) | Max requests per minute (0 = unlimited) |
+| `--rateLimit` | 0 (off) | Max authenticated requests per minute, per client (0 = unlimited) |
 | `--authFailureLimit` | 10 | Failed bearer-auth attempts allowed per client per minute (0 = off) |
 | `--trustProxy` | false | Read the client address from `X-Forwarded-For`, but only when the peer is the proxy — bare means a loopback peer |
 | `--trustedProxies` | — | Comma-separated peer addresses allowed to send `X-Forwarded-For`. Empty means loopback only |
@@ -777,7 +777,13 @@ case of a config bind mount that silently did not attach: the server binds the p
 refuses every tool call. `GET /status` carries the profile list itself and stays behind the
 bearer token.
 
-When rate limit is exceeded, the server returns HTTP 429 with `Retry-After` header and a JSON-RPC error body so MCP clients can handle it gracefully.
+`--rateLimit` is a budget per client, keyed the same way as the failed-auth budget below,
+and every authenticated request spends from it: `POST /` and the rest of the MCP route,
+`GET /status`, and an authenticated request to a path that does not exist. `GET /health`
+never does. A wrong token never does either, so unauthenticated traffic cannot spend a
+working client's budget. When a client's budget is spent the server returns HTTP 429 with
+a JSON-RPC error body, and `Retry-After` gives the seconds until that client's next request
+will be accepted.
 
 Failed authentication is throttled separately, and on by default. `--rateLimit` never saw a
 wrong bearer token, because the auth check answers before the limiter is reached — so
@@ -785,18 +791,28 @@ guessing ran at network speed. `--authFailureLimit` gives each client its own sm
 spent only on a 401; a correct token never consumes from it, so a working client never
 throttles itself. Once an address has spent its budget every request from it waits,
 including one with the right token — that is deliberate, since answering the guess would
-otherwise tell the caller which token was right. Clients are told apart by socket address. **Behind a
-reverse proxy that means every client shares one budget**, so set `--trustProxy` when the
-proxy is yours — the server prints a warning the first time it sees `X-Forwarded-For`
-without it. `--trustProxy` takes the *rightmost* `X-Forwarded-For` entry, which is the hop
-the proxy itself appended; everything to its left came from the client, so reading the
-leftmost would let a client choose its own budget or spend a victim's. That only holds if a
-proxy actually appended the entry, so the header is read **only when the peer is the
-proxy** — bare `--trustProxy` means a loopback peer, which is the deployment above; name a
-proxy elsewhere with `--trustedProxies`. When the header cannot be read as an address, or
-the peer is not trusted, the server falls back to the socket address and says so once, so
-a flag that is not taking effect is not silent. One trusted hop is assumed. A malformed `--authFailureLimit` is refused at startup rather than silently
-disabling the check; only `0` turns it off.
+otherwise tell the caller which token was right. Clients are told apart by socket address,
+for this budget and for `--rateLimit` alike. **Behind a reverse proxy that means every
+client shares one of each**, so set `--trustProxy` when the proxy is yours — the server
+prints a warning the first time it sees `X-Forwarded-For` without it. `--trustProxy` takes
+the *rightmost* `X-Forwarded-For` entry, which is the hop the proxy itself appended;
+everything to its left came from the client, so reading the leftmost would let a client
+choose its own budget or spend a victim's. That only holds if a proxy actually appended
+the entry, so the header is read **only when the peer is the proxy** — bare `--trustProxy`
+means a loopback peer, which is the deployment above; name a proxy elsewhere with
+`--trustedProxies`. When the header cannot be read as an address, or the peer is not
+trusted, the server falls back to the socket address and says so once, so a flag that is
+not taking effect is not silent. One trusted hop is assumed. A malformed
+`--authFailureLimit` is refused at startup rather than silently disabling the check; only
+`0` turns it off.
+
+An IPv6 client is told apart by its /64 rather than its full address, for both budgets. A
+/64 is usually the smallest block a subscriber is handed, so hosts that share one — a home
+or office network, or customers a hosting provider places on one /64 — share a budget, the
+way hosts behind one IPv4 NAT do. An IPv6 address that carries an IPv4 address (IPv4-mapped,
+or the NAT64 prefix `64:ff9b::/96`) counts as that IPv4 client. A NAT64 or SIIT translator
+that uses a prefix of its own is not recognised: every IPv4 client it translates shares that
+prefix's /64, and so one budget.
 
 **Always terminate TLS at a reverse proxy** (Caddy/nginx). The server listens on `127.0.0.1` only.
 
@@ -846,7 +862,7 @@ Secrets are **never** passed as CLI arguments.
 | `--httpPort` | 3000 | HTTP transport port |
 | `--httpHost` | 127.0.0.1 | HTTP bind address |
 | `--bearerToken` | — | Bearer token for HTTP transport auth (required for `--transport=http`) |
-| `--rateLimit` | 0 | HTTP requests per minute on the MCP route (0 = unlimited) |
+| `--rateLimit` | 0 | Max authenticated requests per minute, per client (0 = unlimited) |
 | `--authFailureLimit` | 10 | Failed bearer-auth attempts allowed per client per minute (0 = off) |
 | `--trustProxy` | false | Read the client address from `X-Forwarded-For`, but only when the peer is the proxy — bare means a loopback peer |
 | `--trustedProxies` | — | Comma-separated peer addresses allowed to send `X-Forwarded-For`. Empty means loopback only |
