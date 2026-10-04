@@ -765,6 +765,7 @@ ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret --rateLimit=60
 | `--httpPort` | 3000 | HTTP listen port |
 | `--httpHost` | 127.0.0.1 | Bind address |
 | `--rateLimit` | 0 (off) | Max authenticated requests per minute, per client (0 = unlimited) |
+| `--httpSessionTtl` | 1800000 | Idle timeout of an MCP client session over HTTP, in ms (a session with a request in flight or an open SSE stream does not expire). At the 64-session cap a new client evicts the least recently active session with no request in flight, one holding an SSE stream only when no other can go |
 | `--authFailureLimit` | 10 | Failed bearer-auth attempts allowed per client per minute (0 = off) |
 | `--trustProxy` | false | Read the client address from `X-Forwarded-For`, but only when the peer is the proxy — bare means a loopback peer |
 | `--trustedProxies` | — | Comma-separated peer addresses allowed to send `X-Forwarded-For`. Empty means loopback only |
@@ -857,12 +858,13 @@ Secrets are **never** passed as CLI arguments.
 | `--timeout` | 60000 | Command timeout in ms |
 | `--maxChars` | 5000 | Max command length (`none` or `0` disables the limit; in a config file the same setting is `commandMaxChars = 0`) |
 | `--sessionMax` | 5 | Max concurrent sessions per connection |
-| `--sessionTtl` | 600000 | Session idle timeout in ms |
+| `--sessionTtl` | 600000 | Idle timeout of an SSH session in ms |
 | `--transport` | stdio | `stdio` or `http` |
 | `--httpPort` | 3000 | HTTP transport port |
 | `--httpHost` | 127.0.0.1 | HTTP bind address |
 | `--bearerToken` | — | Bearer token for HTTP transport auth (required for `--transport=http`) |
 | `--rateLimit` | 0 | Max authenticated requests per minute, per client (0 = unlimited) |
+| `--httpSessionTtl` | 1800000 | Idle timeout of an MCP client session over HTTP, in ms (a session with a request in flight or an open SSE stream does not expire). At the 64-session cap a new client evicts the least recently active session with no request in flight, one holding an SSE stream only when no other can go |
 | `--authFailureLimit` | 10 | Failed bearer-auth attempts allowed per client per minute (0 = off) |
 | `--trustProxy` | false | Read the client address from `X-Forwarded-For`, but only when the peer is the proxy — bare means a loopback peer |
 | `--trustedProxies` | — | Comma-separated peer addresses allowed to send `X-Forwarded-For`. Empty means loopback only |
