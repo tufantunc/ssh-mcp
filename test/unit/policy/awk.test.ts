@@ -295,6 +295,16 @@ describe('cost', () => {
   };
 
   /**
+   * The fastest of three timings, for the growth ratios below.
+   *
+   * Each size used to be timed once, so a single stall decided the ratio: a
+   * Windows runner measured 8.2x for 4x the input against an 8x bound, where the
+   * same case measures 3.4-4.5x across repeated runs under coverage. Noise only
+   * ever adds time, so the minimum is the reading closest to the cost itself.
+   */
+  const fastestCostMs = (program: string) => Math.min(costMs(program), costMs(program), costMs(program));
+
+  /**
    * Seeded with repeated `print` tokens rather than repeated spaces.
    *
    * An earlier attempt replaced a bounded `[^;{}>]{0,200}` with an unbounded
@@ -329,8 +339,8 @@ describe('cost', () => {
   ])('stays linear on %s', (_label, build) => {
     // 50KB and 200KB, both under the 256KB refusal bound so the lexer actually
     // runs. Max(…, 0.01) because a fast small case can measure as zero.
-    const small = Math.max(costMs(build(50_000)), 0.01);
-    const large = costMs(build(200_000));
+    const small = Math.max(fastestCostMs(build(50_000)), 0.01);
+    const large = fastestCostMs(build(200_000));
     expect(large / small, `4x the input cost ${(large / small).toFixed(1)}x the time`)
       .toBeLessThan(8);
   });
