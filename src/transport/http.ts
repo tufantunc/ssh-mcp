@@ -464,6 +464,8 @@ export async function startHttpServer(
     closing: boolean;
     pending: boolean;
     releasePending: () => void;
+    /** Drops the eviction this session's own initialize claimed, if it has not been admitted. */
+    releaseEvictionClaim: () => void;
     closePromise?: Promise<void>;
   }
 
@@ -491,6 +493,13 @@ export async function startHttpServer(
     : DEFAULT_SESSION_IDLE_TTL_MS;
   const sessions = new Map<string, Session>();
   const pendingReservations = new Set<PendingSessionReservation>();
+  /**
+   * Sessions picked to make room for an initialize that has not been admitted yet.
+   * A claimed session keeps serving; it is evicted only once the initialize that
+   * claimed it is admitted, so an initialize the SDK goes on to refuse (bad Host,
+   * wrong Accept) or whose client disconnects costs no other client its session.
+   */
+  const evictionClaims = new Set<Session>();
 
   function reservePendingSession(): () => void {
     const reservation = { createdAt: Date.now(), released: false };
@@ -542,8 +551,11 @@ export async function startHttpServer(
     if (session.closing) return;
     session.closing = true;
     if (session.id && sessions.get(session.id) === session) sessions.delete(session.id);
+    // Gone for another reason before its claimant was admitted: the slot is free.
+    evictionClaims.delete(session);
     session.pending = false;
     session.releasePending();
+    session.releaseEvictionClaim();
     console.error(`MCP session closed reason=${reason}`);
   }
 
@@ -559,15 +571,43 @@ export async function startHttpServer(
     return session.closePromise;
   }
 
-  function takeIdleSessions(now: number): Session[] {
-    const expired: Session[] = [];
+  /**
+   * Idle means nothing of the client's is open on this server: no request in flight
+   * and no SSE stream. A held stream is how a connected Streamable-HTTP client waits
+   * for notifications, and it stamps activity only when it opens, so judging by
+   * `lastActivity` alone expired connected clients first.
+   */
+  function isIdle(session: Session, now: number): boolean {
+    return session.finiteInFlight === 0
+      && session.openSseStreams === 0
+      && now - session.lastActivity >= sessionIdleTtlMs;
+  }
+
+  function closeExpiredSessions(now: number): void {
     for (const session of sessions.values()) {
-      if (session.finiteInFlight === 0 && now - session.lastActivity >= sessionIdleTtlMs) {
-        detachSession(session, 'ttl');
-        expired.push(session);
+      if (isIdle(session, now)) void closeSession(session, 'ttl');
+    }
+  }
+
+  /**
+   * The session to evict at the cap: never one with a request in flight, and one
+   * without an open stream before one holding a stream, oldest first within each.
+   * Stream holders stay evictable as the last resort because a client that vanished
+   * without FIN/RST keeps its stream until the kernel drops the socket, and 64 such
+   * sessions would otherwise refuse every new client until then.
+   */
+  function pickEvictionCandidate(): Session | undefined {
+    let best: Session | undefined;
+    for (const session of sessions.values()) {
+      if (session.finiteInFlight > 0 || evictionClaims.has(session)) continue;
+      if (!best) { best = session; continue; }
+      const holdsStream = session.openSseStreams > 0;
+      const bestHoldsStream = best.openSseStreams > 0;
+      if (holdsStream !== bestHoldsStream ? !holdsStream : session.lastActivity < best.lastActivity) {
+        best = session;
       }
     }
-    return expired;
+    return best;
   }
 
   function beginRequest(session: Session, req: IncomingMessage, res: ServerResponse): () => void {
@@ -605,7 +645,7 @@ export async function startHttpServer(
     if (sessionId) {
       const existing = sessions.get(sessionId);
       if (existing) {
-        if (existing.finiteInFlight === 0 && Date.now() - existing.lastActivity >= sessionIdleTtlMs) {
+        if (isIdle(existing, Date.now())) {
           await closeSession(existing, 'ttl');
         } else {
           return existing;
@@ -621,40 +661,38 @@ export async function startHttpServer(
       return null;
     }
 
-    const sessionsToClose: Array<{ session: Session; reason: SessionCloseReason }> =
-      takeIdleSessions(Date.now()).map((session) => ({ session, reason: 'ttl' }));
-    if (sessions.size + pendingReservations.size >= MAX_SESSIONS) {
-      let lru: Session | undefined;
-      for (const session of sessions.values()) {
-        if (session.finiteInFlight === 0 && (!lru || session.lastActivity < lru.lastActivity)) {
-          lru = session;
-        }
-      }
-      if (lru) {
-        detachSession(lru, 'lru');
-        sessionsToClose.push({ session: lru, reason: 'lru' });
-      }
-    }
+    closeExpiredSessions(Date.now());
 
+    // At the cap, claim a session to make room with; `pickEvictionCandidate` skips
+    // sessions another initialize has already claimed, so concurrent initializes at
+    // the cap each claim a different one, and the 503 comes only when none is left.
+    let claim: Session | undefined;
     if (sessions.size + pendingReservations.size >= MAX_SESSIONS) {
-      console.error(`MCP session limit reached ${formatSessionStats(sessionStats())}`);
-      jsonRpcError(res, 503, -32000, `Server is at its session limit (${MAX_SESSIONS}). Close an existing session and retry.`);
-      return null;
+      claim = pickEvictionCandidate();
+      if (!claim) {
+        console.error(`MCP session limit reached ${formatSessionStats(sessionStats())}`);
+        jsonRpcError(res, 503, -32000, `Server is at its session limit (${MAX_SESSIONS}). Close an existing session and retry.`);
+        return null;
+      }
+      evictionClaims.add(claim);
     }
+    const releaseClaim = () => {
+      if (claim) evictionClaims.delete(claim);
+      claim = undefined;
+    };
 
     const releasePending = reservePendingSession();
     let clientClosed = false;
     const markClientClosed = () => {
       clientClosed = true;
       releasePending();
+      releaseClaim();
     };
     res.once('close', markClientClosed);
 
     let mcp: McpServer | undefined;
     let session: Session | undefined;
     try {
-      await Promise.all(sessionsToClose.map(({ session: closingSession, reason }) =>
-        closeSession(closingSession, reason)));
       mcp = await createMcpServer();
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
@@ -666,7 +704,22 @@ export async function startHttpServer(
             session!.pending = false;
             session!.releasePending();
           }
-          if (!session!.closing) sessions.set(id, session!);
+          const claimed = claim;
+          releaseClaim();
+          if (session!.closing) return;
+          // Admitted: now make room. The claimed session is the choice unless it has
+          // left on its own or picked up a request since; then take the next candidate.
+          // If nothing is evictable any more, the cap is exceeded by this one session
+          // until something closes, rather than refusing a client already admitted.
+          if (sessions.size + pendingReservations.size >= MAX_SESSIONS) {
+            const claimStillFits = claimed !== undefined
+              && sessions.get(claimed.id!) === claimed
+              && claimed.finiteInFlight === 0
+              && claimed.openSseStreams === 0;
+            const victim = claimStillFits ? claimed : pickEvictionCandidate();
+            if (victim) void closeSession(victim, 'lru');
+          }
+          sessions.set(id, session!);
         },
         onsessionclosed: () => { detachSession(session!, 'delete'); },
       });
@@ -679,6 +732,7 @@ export async function startHttpServer(
         closing: false,
         pending: true,
         releasePending,
+        releaseEvictionClaim: releaseClaim,
       };
       // Covers transport teardown that isn't a DELETE (client disconnect, error).
       transport.onclose = () => {
@@ -693,7 +747,10 @@ export async function startHttpServer(
       return session;
     } catch (error) {
       if (session) await closeSession(session, 'init-abort');
-      else releasePending();
+      else {
+        releasePending();
+        releaseClaim();
+      }
       throw error;
     } finally {
       res.off('close', markClientClosed);
