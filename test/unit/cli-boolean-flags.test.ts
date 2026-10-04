@@ -91,6 +91,32 @@ describe('parseFailureLimit', () => {
   );
 });
 
+describe('parseHttpSessionTtl', () => {
+  it('accepts positive safe integer millisecond values', async () => {
+    const { parseHttpSessionTtl } = await import('../../src/cli.js');
+    expect(parseHttpSessionTtl('1800000')).toBe(1_800_000);
+    expect(parseHttpSessionTtl(' 1 ')).toBe(1);
+    expect(parseHttpSessionTtl('007')).toBe(7);
+    expect(parseHttpSessionTtl(undefined)).toBeUndefined();
+  });
+
+  it.each([null, '', '0', '-1', '+5', '1e3', '10.5', '1000garbage', 'off', 'NaN'])(
+    'refuses %j rather than falling back to the default',
+    async (raw) => {
+      const { parseHttpSessionTtl } = await import('../../src/cli.js');
+      expect(() => parseHttpSessionTtl(raw as any)).toThrow(/httpSessionTtl/);
+    },
+  );
+
+  it.each(['99999999999999999999', '9007199254740992'])(
+    'refuses unsafe integer %s',
+    async (raw) => {
+      const { parseHttpSessionTtl } = await import('../../src/cli.js');
+      expect(() => parseHttpSessionTtl(raw)).toThrow(/positive safe integer/);
+    },
+  );
+});
+
 /**
  * `--opaUrl` was checked only for emptiness, so anything `fetch` cannot use reached the
  * engine and failed on every request — with `OPA sidecar enabled` on stdout and one stderr
