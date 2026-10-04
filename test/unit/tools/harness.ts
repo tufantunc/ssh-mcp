@@ -3,7 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { registerTools, registerResources } from '../../../src/tools/registry.js';
-import { PolicyEngine, DEFAULT_RULES } from '../../../src/policy/engine.js';
+import { PolicyEngine, DEFAULT_RULES, type PolicyRules } from '../../../src/policy/engine.js';
 import { AuditStore } from '../../../src/audit/store.js';
 import type { CommandResult, Profile } from '../../../src/types.js';
 import type { CloseOutcome } from '../../../src/ssh/session.js';
@@ -72,6 +72,7 @@ export interface Harness {
 export async function createHarness(
   overrides: Partial<Profile> = {},
   toolOpts: ToolOpts = {},
+  rules: PolicyRules = DEFAULT_RULES,
 ): Promise<Harness> {
   const profile: Profile = { ...testProfile, ...overrides };
   const execCalls: ExecCall[] = [];
@@ -137,7 +138,7 @@ export async function createHarness(
     { name: 'test', version: '0.0.0' },
     { capabilities: { tools: {}, resources: {} } },
   );
-  registerTools(server, registry, new PolicyEngine(DEFAULT_RULES), audit, toolOpts);
+  registerTools(server, registry, new PolicyEngine(rules), audit, toolOpts);
   registerResources(server, registry);
 
   const client = new Client(

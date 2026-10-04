@@ -65,7 +65,6 @@ describe('[policy] roleBindings', () => {
     const denied = engineFor(before).evaluate(
       'sudo systemctl restart nginx',
       getProfile(before, 'prod-web'),
-      'privileged-command',
     );
     expect(denied.decision).toBe('deny');
     expect(denied.ruleId).toBe('role-binding');
@@ -79,7 +78,6 @@ prod = ["read-only", "safe", "destructive", "privileged"]
     const granted = engineFor(after).evaluate(
       'sudo systemctl restart nginx',
       getProfile(after, 'prod-web'),
-      'privileged-command',
     );
     // Not "allow": the profile still defaults to ask-destructive, so the command
     // now reaches the approval gate instead of being refused outright. That is
@@ -117,15 +115,15 @@ prod = ["read-only"]
     const policy = engineFor(config);
 
     // The one cell the operator wrote: admin/prod narrowed to read-only.
-    expect(policy.evaluate('npm install', getProfile(config, 'prod-web'), 'run-command').decision)
+    expect(policy.evaluate('npm install', getProfile(config, 'prod-web')).decision)
       .toBe('deny');
 
     // admin/staging is untouched — a role-depth merge would have wiped it.
-    expect(policy.evaluate('npm install', getProfile(config, 'staging-web'), 'run-command').decision)
+    expect(policy.evaluate('npm install', getProfile(config, 'staging-web')).decision)
       .toBe('allow');
 
     // And another role entirely is untouched.
-    expect(policy.evaluate('ls -la', getProfile(config, 'prod-readonly'), 'read-command').decision)
+    expect(policy.evaluate('ls -la', getProfile(config, 'prod-readonly')).decision)
       .toBe('allow');
   });
 
@@ -153,7 +151,7 @@ ${profile}
 "tier-1" = ["read-only", "safe", "destructive", "privileged"]
 `));
     expect(
-      engineFor(after).evaluate('sudo make install', getProfile(after, 'build-box'), 'privileged-command').decision,
+      engineFor(after).evaluate('sudo make install', getProfile(after, 'build-box')).decision,
     ).toBe('allow');
   });
 
@@ -180,7 +178,7 @@ ${profile}
 dev = ["read-only", "safe"]
 `));
     expect(
-      engineFor(after).evaluate('npm install', getProfile(after, 'deploy-box'), 'run-command').decision,
+      engineFor(after).evaluate('npm install', getProfile(after, 'deploy-box')).decision,
     ).toBe('allow');
   });
 
@@ -197,7 +195,6 @@ prod = []
     const denied = engineFor(config).evaluate(
       'ls -la',
       getProfile(config, 'prod-web'),
-      'read-command',
     );
     expect(denied.decision).toBe('deny');
     expect(denied.ruleId).toBe('role-binding');
@@ -221,12 +218,12 @@ approvalPolicy = "auto"
 denylist = ["^terraform\\\\s+destroy"]
 `));
     const policy = engineFor(config);
-    const denied = policy.evaluate('terraform destroy -auto-approve', getProfile(config, 'dev-box'), 'run-command');
+    const denied = policy.evaluate('terraform destroy -auto-approve', getProfile(config, 'dev-box'));
     expect(denied.decision).toBe('deny');
     expect(denied.ruleId).toBe('denylist');
     // Neighbouring commands are unaffected: the pattern is a regex, not a ban
     // on the binary.
-    expect(policy.evaluate('terraform plan', getProfile(config, 'dev-box'), 'run-command').decision)
+    expect(policy.evaluate('terraform plan', getProfile(config, 'dev-box')).decision)
       .toBe('allow');
   });
 
@@ -506,7 +503,7 @@ approvalPolicy = "auto"
     // which is the feature #95 asked for.
     expect(() => engineFor(config)).not.toThrow();
     expect(
-      engineFor(config).evaluate('rm -rf /tmp/build', getProfile(config, 'build-box'), 'run-command').decision,
+      engineFor(config).evaluate('rm -rf /tmp/build', getProfile(config, 'build-box')).decision,
     ).toBe('allow');
   });
 

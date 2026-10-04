@@ -180,12 +180,13 @@ both and an auditor cannot tell which set of bytes landed. The digest is 128
 bits rather than a short prefix because that claim has to hold against a caller
 who picks both payloads, not only against an accidental repeat.
 
-The path comes last in that string on purpose. `[policy].denylist` patterns are
-matched against the whole approved string, so a rule anchored on the path —
-`authorized_keys$`, the natural way to write "nothing may write here" — keeps
-working. A rule anchored on the *whole* string (`^sftp:upload /root/.*$`) does
-not: it was coupled to a format that is ours to change, and this release changes
-it. Anchor on the path segment instead.
+`[policy].denylist` patterns are tested against that whole string and, for every
+SFTP tool, against the remote path on its own — as given, lexically normalized,
+and read the way Windows reads it (see "Policy Engine"). A rule written for the
+path, such as `authorized_keys$`, therefore does not depend on where the string
+puts it or on how the file is spelled. A rule anchored on the *whole* string
+(`^sftp:upload /root/.*$`) still does: that layout is ours to change, so anchor
+on the path instead.
 
 `sftp-upload-file` and `sftp-download-file` stream between the remote host and
 local disk instead. Neither the bytes nor a base64 encoding of them ever reaches
@@ -330,7 +331,7 @@ transferTimeoutMs = 60000           # per-profile override
 # operator on prod and leaves operator's other tiers, and viewer and admin,
 # on their defaults.
 [policy]
-denylist = ["^terraform\\s+destroy"]
+denylist = ["^terraform\\s+destroy", "\\.ssh/authorized_keys$"]
 
 [policy.roleBindings.operator]
 prod = ["read-only", "safe", "destructive"]
@@ -491,8 +492,51 @@ never-allowed list rather than replacing it:
 
 ```toml
 [policy]
-denylist = ["^terraform\\s+destroy"]
+denylist = ["^terraform\\s+destroy", "\\.ssh/authorized_keys$"]
 ```
+
+Each pattern is a regular expression tested against the command string of every
+call. For the five SFTP tools it is also tested against the remote path on its
+own, three ways: as given; in a normalized reading, where `//` and `/./`
+collapse, `..` resolves against the segment before it, a trailing `/` is
+dropped, and `\` is read as `/`; and in a **Windows reading**, tested
+case-insensitively. The refusal says which matched.
+
+The Windows reading is what Win32 resolves a path to, measured over SFTP on
+Windows 11 (build 26200): the case variants, a trailing run of dots and spaces,
+and the `::$DATA` default-stream spelling all reach the same file, so a rule
+that caught one spelling and not another was a bypass, not a distinction. On
+top of the normalized reading it strips those spellings, roots a
+drive-relative path (`C:x/…`) at its drive — where it actually resolves
+depends on process state this server cannot see, and rooting is the fail-closed
+reading — drops `\\?\` and `\\.\` device prefixes, and keeps a UNC root
+(`\\server\share\…` → `//server/share/…`). Tested case-insensitively, it also
+catches `Authorized_Keys` with a rule written for `authorized_keys`; on a POSIX
+target those are different files, but erring toward refusal is the direction
+this engine takes everywhere else too.
+
+What the readings do not do:
+
+- **resolve anything on the target.** A relative path stays relative, so a rule
+  anchored on `/root/` does not see `.ssh/authorized_keys`; symlinks are not
+  followed; and an 8.3 short name (`AUTHOR~1`) is not expanded — no lexical
+  reading can, it takes the target's own directory listing to know the long
+  name.
+- **test the local path** of `sftp-upload-file` or `sftp-download-file` on its
+  own. That side is confined by `transferRoot`. The local path does end those two
+  tools' command strings, so a pattern anchored on the end of the string can
+  still match it there, as it always could.
+
+So anchor a path rule on its trailing segments: `\.ssh/authorized_keys$` matches
+the absolute, relative and Windows spellings alike — including the case,
+trailing-dot and `::$DATA` variants of each. A pattern written for a command is
+tested against SFTP paths too — `^rm` refuses an `sftp-download` of a file
+called `rmlist.txt`.
+
+One performance note: patterns are ordinary regular expressions run against
+caller-supplied path bytes — bounded by the remote-path length limit, the same
+exposure the command string has always had. Prefer anchored, linear patterns; a
+catastrophically backtracking one stalls the tool call it matches.
 
 Because role and tier names are free strings, nothing in the merge itself can
 tell a new custom role from a misspelling of an existing one. A cross-check at
@@ -633,7 +677,7 @@ during the outage, and the only signal is a stderr line MCP clients usually disc
 "opa-unavailable"` so the audit record says the gate was down rather than implying a policy
 refused the command.
 
-The request shape follows the AuthZEN Access Evaluation contract:
+The request shape is modeled on the AuthZEN Access Evaluation contract:
 
 ```json
 {
@@ -645,6 +689,17 @@ The request shape follows the AuthZEN Access Evaluation contract:
   }
 }
 ```
+
+For the five SFTP tools, `resource` also carries three path keys: `remotePath`,
+the path as given; and `remotePathNormalized` and `remotePathWindows`, the same
+two readings the local denylist tests, so a rule can match a canonical spelling
+without parsing `command` or reimplementing either reading in Rego. Other tools
+omit all three, and so does an empty path. `remotePath` is **as given** —
+`/root//.ssh/x` arrives spelled that way, so a `startswith` rule on a directory
+misses it: match trailing segments, or match the normalized keys.
+`remotePathWindows` keeps the case it was given; `lower()` both sides in the
+policy for case-insensitive rules. Match fields rather than the whole
+`resource` object — its keys vary by tool.
 
 OPA responds with `{ "result": true/false }`. If OPA denies (`result: false`), the command is blocked even if the built-in engine allows it. If OPA is unreachable, the built-in engine's decision stands by default (fail-open, to avoid locking out access); `--opaFailClosed` refuses instead. A 200 that carries no boolean `result` counts as unreachable — that is what OPA answers for an undefined document, so a misnamed package or an unactivated bundle is an outage rather than consent.
 

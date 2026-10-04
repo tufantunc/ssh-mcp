@@ -26,7 +26,7 @@ const operatorProd = {
 } as unknown as Profile;
 
 const engine = new PolicyEngine(DEFAULT_RULES);
-const decide = (command: string) => engine.evaluate(command, operatorProd, 'run-command');
+const decide = (command: string) => engine.evaluate(command, operatorProd);
 
 /**
  * The fastest of several classifications of `command`, in milliseconds.
@@ -439,7 +439,7 @@ describe('the catch-all cannot feed the unconditional denylist', () => {
     transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,
   } as unknown as Profile;
   const engineForRuling = new PolicyEngine(DEFAULT_RULES);
-  const decideAsAdmin = (command: string) => engineForRuling.evaluate(command, adminAutoDev, 'run-command');
+  const decideAsAdmin = (command: string) => engineForRuling.evaluate(command, adminAutoDev);
 
   it('no longer hard-denies a speculative catch-all match', () => {
     const result = decideAsAdmin("git commit -m 'reboot the worker pool'");
