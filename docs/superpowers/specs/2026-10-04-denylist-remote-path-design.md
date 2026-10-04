@@ -52,9 +52,12 @@ Taken in the design round on 2026-10-04, each with the alternative it was chosen
    call, needs its behaviour on a not-yet-existing file measured, and is a hardening step
    rather than part of decoupling rules from our format.
 4. **Remote path only, not the local one.** The denylist answers what may happen on the
-   target host; the local side is confined by `transferRoot`. Testing `authorized_keys$`
-   against a local path would refuse a download into `./backup/authorized_keys`, which is
-   not what the rule's author meant.
+   target host; the local side is confined by `transferRoot`. The local path is not
+   tested *on its own*. It still ends the command string of `sftp-upload-file` and
+   `sftp-download-file`, which every pattern sees exactly as before, so an end-anchored
+   pattern such as `authorized_keys$` can still match it there — as it always could.
+   (Corrected during implementation: the first version of this decision said such a
+   download would not be refused, which contradicted the compatibility section.)
 
 ## Design
 
@@ -157,8 +160,9 @@ production line removed. No wall-clock waits.
    - For each tool, a second row where the pattern matches only the normalized form
      (`/srv/x/../../root/.ssh/authorized_keys` with `^/root/\.ssh/`), so a tool that stops
      passing its path fails its own row.
-   - `sftp-download-file` with remote `/srv/backup.tar` and local `./authorized_keys` is
-     not refused.
+   - `sftp-download-file` with remote `/srv/backup.tar` and local `authorized_keys` is not
+     refused by `^authorized_keys$`, a pattern that matches the local path alone and
+     neither the command string nor the remote path.
 
 ## Out of scope
 
