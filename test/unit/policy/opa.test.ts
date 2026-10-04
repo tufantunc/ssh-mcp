@@ -119,6 +119,36 @@ describe('OPA evaluation', () => {
     expect(input.context).toEqual({ readOnly: false });
   });
 
+  // #230: the tool pipeline goes through evaluateWithOpa, so the path has to reach the
+  // local denylist there too — and a local refusal never consults the sidecar.
+  it('refuses on the remote path locally, before OPA is asked', async () => {
+    await startOpa(() => ({ body: { result: true } }));
+    const engine = new PolicyEngine({ ...DEFAULT_RULES, denylist: ['authorized_keys$'] });
+    engine.setOpaUrl(url);
+
+    const path = '/root/.ssh/authorized_keys';
+    const result = await engine.evaluateWithOpa(
+      `sftp:upload-file ${path} <- ./k`, makeProfile({ role: 'admin' }), 'sftp-upload-file', { remotePath: path },
+    );
+    expect(result.decision).toBe('deny');
+    expect(result.ruleId).toBe('denylist');
+    expect(requests).toHaveLength(0);
+  });
+
+  // #230: a rego rule can match the path of an SFTP tool without parsing our string.
+  it('sends the remote path as its own field when there is one, and omits it otherwise', async () => {
+    await startOpa(() => ({ body: { result: true } }));
+    const engine = new PolicyEngine(DEFAULT_RULES);
+    engine.setOpaUrl(url);
+
+    await engine.evaluateWithOpa('sftp:list /srv/data', makeProfile(), 'sftp-list', { remotePath: '/srv/data' });
+    await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0].input.resource.remotePath).toBe('/srv/data');
+    expect(requests[1].input.resource).not.toHaveProperty('remotePath');
+  });
+
   it('does not consult OPA when the local policy already denied', async () => {
     await startOpa(() => ({ body: { result: true } }));
     const engine = new PolicyEngine(DEFAULT_RULES);

@@ -7,6 +7,7 @@ import type {
   ApprovalMode,
 } from '../types.js';
 import { classifyCommand, findForbiddenMatch, formatReadOnlyRejection } from './classifier.js';
+import { normalizeRemotePath } from './remote-path.js';
 import { OperatorError } from '../errors.js';
 
 export interface PolicyRules {
@@ -241,6 +242,15 @@ export function resolvePolicyRules(
   return merged;
 }
 
+/**
+ * What a call acts on, beyond its command string. Only the SFTP tools pass anything:
+ * their command string is one this server composes, so a `[policy].denylist` rule
+ * written for the path is also tested against the path itself (#230).
+ */
+export interface PolicySubject {
+  remotePath?: string;
+}
+
 export class PolicyEngine {
   private opaUrl: string | null = null;
   private opaFailClosed = false;
@@ -279,6 +289,7 @@ export class PolicyEngine {
     command: string,
     profile: Profile,
     _toolName: string,
+    subject: PolicySubject = {},
   ): PolicyEvaluation {
     const parsed = classifyCommand(command);
     const allowedClasses = this.getAllowedClasses(profile);
@@ -289,7 +300,7 @@ export class PolicyEngine {
     // only refused one layer up, in the tool itself.
     const readOnlyRejection = parsed.readOnlyRejection;
 
-    const denied = this.findDenyMatch(command);
+    const denied = this.findDenyMatch(command, subject.remotePath);
     if (denied) {
       return {
         decision: 'deny',
@@ -353,8 +364,9 @@ export class PolicyEngine {
     command: string,
     profile: Profile,
     toolName: string,
+    subject: PolicySubject = {},
   ): Promise<PolicyEvaluation> {
-    const local = this.evaluate(command, profile, toolName);
+    const local = this.evaluate(command, profile, toolName, subject);
 
     if (local.decision === 'deny') {
       return local;
@@ -369,7 +381,13 @@ export class PolicyEngine {
       const input = {
         subject: { role: profile.role, profile: profile.name },
         action: { tool: toolName, commandClass: parsed.class },
-        resource: { command: parsed.fullCommand, binary: parsed.binary, host: profile.host },
+        resource: {
+          command: parsed.fullCommand,
+          binary: parsed.binary,
+          host: profile.host,
+          // Undefined for every tool but the SFTP ones, and JSON drops the key then.
+          remotePath: subject.remotePath,
+        },
         context: { readOnly: profile.readOnly },
       };
 
@@ -563,17 +581,30 @@ export class PolicyEngine {
    * group, the class and the allowed set; this path never got the same
    * treatment.
    */
-  private findDenyMatch(command: string): string | null {
+  private findDenyMatch(command: string, remotePath?: string): string | null {
     const builtIn = findForbiddenMatch(command);
     if (builtIn) {
       return `Command matches a built-in never-allowed rule: ${builtIn}. ` +
         `This list cannot be switched off — the [policy].denylist key adds patterns, it does not remove these.`;
     }
 
+    // The path is tested on its own as well as inside the command string, because for the
+    // SFTP tools that string is ours to lay out and a rule written for the path should not
+    // depend on where we put it (#230).
+    const normalized = remotePath === undefined ? undefined : normalizeRemotePath(remotePath);
+    const fromConfig = 'a pattern from [policy].denylist in your config file. ' +
+      'Remove or narrow it there to allow this command.';
     for (const pattern of this.userPatterns) {
       if (pattern.test(command)) {
-        return `Command matches /${pattern.source}/, a pattern from [policy].denylist in your config file. ` +
-          `Remove or narrow it there to allow this command.`;
+        return `Command matches /${pattern.source}/, ${fromConfig}`;
+      }
+      if (remotePath === undefined) continue;
+      if (pattern.test(remotePath)) {
+        return `Remote path ${JSON.stringify(remotePath)} matches /${pattern.source}/, ${fromConfig}`;
+      }
+      if (normalized !== remotePath && pattern.test(normalized!)) {
+        return `Remote path ${JSON.stringify(remotePath)} (read as ${JSON.stringify(normalized)}) ` +
+          `matches /${pattern.source}/, ${fromConfig}`;
       }
     }
 

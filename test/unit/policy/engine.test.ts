@@ -96,6 +96,75 @@ describe('PolicyEngine', () => {
     });
   });
 
+  /**
+   * #230: the SFTP tools' command string is one this server composes, so a rule written
+   * for the path stopped matching whenever the path was not where the rule expected it.
+   * The pattern now also sees the path itself.
+   */
+  describe('denylist sees the remote path', () => {
+    const profile = makeProfile({ role: 'admin', name: 'dev', group: 'dev', approvalPolicy: 'auto' });
+    const withDeny = (...denylist: string[]) => new PolicyEngine({ ...DEFAULT_RULES, denylist });
+    const uploadFile = (remote: string) => `sftp:upload-file ${remote} --overwrite <- ./k`;
+
+    it('refuses when the path matches, wherever the composed string puts it', () => {
+      const path = '/root/.ssh/authorized_keys';
+      const result = withDeny('authorized_keys$').evaluate(uploadFile(path), profile, 'sftp-upload-file', { remotePath: path });
+      expect(result.decision).toBe('deny');
+      expect(result.ruleId).toBe('denylist');
+      expect(result.reason).toContain('Remote path "/root/.ssh/authorized_keys" matches /authorized_keys$/');
+      expect(result.reason).toMatch(/\[policy\]\.denylist/);
+      // Already normal, so there is no second reading to report.
+      expect(result.reason).not.toContain('read as');
+    });
+
+    it('refuses when only the normalized path matches, and shows that reading', () => {
+      const path = '/srv/x/../../root/.ssh/authorized_keys';
+      const result = withDeny('^/root/\\.ssh/').evaluate(uploadFile(path), profile, 'sftp-upload-file', { remotePath: path });
+      expect(result.decision).toBe('deny');
+      expect(result.reason).toContain(`Remote path "${path}" (read as "/root/.ssh/authorized_keys")`);
+    });
+
+    it('catches a Windows path with the trailing-segment rule the README advises', () => {
+      const path = 'C:\\Users\\a\\.ssh\\authorized_keys';
+      const result = withDeny('\\.ssh/authorized_keys$').evaluate(uploadFile(path), profile, 'sftp-upload-file', { remotePath: path });
+      expect(result.decision).toBe('deny');
+      expect(result.reason).toContain('read as "C:/Users/a/.ssh/authorized_keys"');
+    });
+
+    it('catches a relative path with the trailing-segment rule the README advises', () => {
+      const path = '.ssh/authorized_keys';
+      const result = withDeny('\\.ssh/authorized_keys$').evaluate(uploadFile(path), profile, 'sftp-upload-file', { remotePath: path });
+      expect(result.decision).toBe('deny');
+    });
+
+    it('keeps the command wording when the command string matches too', () => {
+      const path = '/root/.ssh/authorized_keys';
+      const result = withDeny('authorized_keys').evaluate(`sftp:list ${path}`, profile, 'sftp-list', { remotePath: path });
+      expect(result.reason).toMatch(/^Command matches \/authorized_keys\//);
+    });
+
+    it('still honours a rule anchored on the whole composed string', () => {
+      const path = '/srv/data';
+      const result = withDeny('^sftp:upload-file ').evaluate(uploadFile(path), profile, 'sftp-upload-file', { remotePath: path });
+      expect(result.decision).toBe('deny');
+      expect(result.reason).toMatch(/^Command matches/);
+    });
+
+    it('tests nothing beyond the command string when no path is passed', () => {
+      const result = withDeny('^/root/').evaluate('sftp:list /root/x', profile, 'sftp-list');
+      expect(result.decision).toBe('allow');
+      // `RegExp.test` reads a missing argument as the string "undefined"; a call with no
+      // path must not be refused by a pattern that happens to match that word.
+      expect(withDeny('undefined').evaluate('ls -la', profile, 'read-command').decision).toBe('allow');
+    });
+
+    it('does not refuse a path no pattern matches', () => {
+      const path = '/srv/backup.tar';
+      const result = withDeny('authorized_keys$', '^/root/').evaluate(`sftp:list ${path}`, profile, 'sftp-list', { remotePath: path });
+      expect(result.decision).toBe('allow');
+    });
+  });
+
   it('readOnly profile only allows read-only', () => {
     const profile = makeProfile({ readOnly: true, name: 'prod-db' });
     expect(engine.evaluate('ls', profile, 'read-command').decision).toBe('allow');
