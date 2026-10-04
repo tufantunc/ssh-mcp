@@ -1087,6 +1087,44 @@ describe('HTTP transport — session lifecycle', () => {
     }
   }, 15_000);
 
+  it('answers 500 when creating the server fails, and frees what the initialize held', async () => {
+    const PORT = 18441;
+    let now = 4_099_500;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await startLifecycleServer(PORT, {
+        beforeCreate: async (index) => {
+          if (index === 64) throw new Error('factory failed');
+        },
+      });
+      const ids: string[] = [];
+      for (let i = 0; i < 64; i++) {
+        now++;
+        ids.push(await initializeSession(PORT));
+      }
+
+      now++;
+      const failed = await mcpRequest(PORT, 'POST', undefined, initializeBody);
+      expect(failed.status).toBe(500);
+      expect(JSON.parse(failed.body).error.code).toBe(-32603);
+      expect(stderr).toHaveBeenCalledWith('MCP request failed:', expect.objectContaining({ message: 'factory failed' }));
+      await waitForSessionStats(PORT, (stats) => {
+        expect(stats.total).toBe(64);
+        expect(stats.pending).toBe(0);
+      });
+
+      // The failed initialize's claim on ids[0] is gone, so the next one takes ids[0].
+      now++;
+      expect(await initializeSession(PORT)).toBeTruthy();
+      expect((await mcpRequest(PORT, 'POST', ids[0], pingBody)).status).toBe(404);
+      expect((await mcpRequest(PORT, 'POST', ids[1], pingBody)).status).toBe(200);
+    } finally {
+      stderr.mockRestore();
+      nowSpy.mockRestore();
+    }
+  }, 15_000);
+
   it('goes over the cap rather than refuse an admitted client, and comes back under it at the next admission', async () => {
     const PORT = 18437;
     const allStarted = deferred();

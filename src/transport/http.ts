@@ -776,6 +776,23 @@ export async function startHttpServer(
     }
   }
 
+  /**
+   * The request handlers' last stop for a throw, such as a server factory that fails.
+   * Without it the rejection went unhandled and the client never got an answer.
+   */
+  async function serveMcpRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+    parsedBody?: unknown,
+  ): Promise<void> {
+    try {
+      await handleMcpRequest(req, res, parsedBody);
+    } catch (error) {
+      console.error('MCP request failed:', error);
+      if (!res.headersSent) jsonRpcError(res, 500, -32603, 'Internal error');
+    }
+  }
+
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
@@ -911,13 +928,13 @@ export async function startHttpServer(
           jsonRpcError(res, 400, -32700, 'Parse error: invalid JSON');
           return;
         }
-        await handleMcpRequest(req, res, parsed);
+        await serveMcpRequest(req, res, parsed);
       });
       return;
     }
 
     if ((req.method === 'GET' || req.method === 'DELETE') && url.pathname === '/') {
-      await handleMcpRequest(req, res);
+      await serveMcpRequest(req, res);
       return;
     }
 
