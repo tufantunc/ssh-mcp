@@ -103,7 +103,6 @@ describe('the engine decision the advisory measured (GHSA-972x-g47g-3922)', () =
     const result = engine.evaluate(
       `C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -EncodedCommand ${encoded('sudo id')}`,
       profile as never,
-      'read-command',
     );
     expect(result.decision).toBe('deny');
   });

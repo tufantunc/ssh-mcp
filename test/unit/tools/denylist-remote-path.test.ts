@@ -65,6 +65,20 @@ describe('a denylist rule written for the path refuses every SFTP tool', () => {
     expect(h.auditRecords.at(-1)).toMatchObject({ decision: 'deny', ruleId: 'denylist' });
   });
 
+  // A spelling that reaches the same file on a Windows target (measured: case and a
+  // trailing dot) and that neither the command string, the path as given, nor the plain
+  // normalized reading matches.
+  it('refused when only the Windows reading matches', async () => {
+    const result = await callWith(
+      ['\\.ssh/authorized_keys$'],
+      TOOLS.find((t) => t.name === 'sftp-upload-file')!,
+      'C:\\Users\\a\\.ssh\\Authorized_Keys.',
+    );
+    expect(result.isError).toBeTruthy();
+    expect(textOf(result)).toContain('the Windows reading');
+    expect(h.auditRecords.at(-1)).toMatchObject({ decision: 'deny', ruleId: 'denylist' });
+  });
+
   // Skipped on Windows like the other transfer-root tests: the call gets past the policy
   // and into the local-path layer, whose permission checks differ there.
   //
@@ -78,8 +92,11 @@ describe('a denylist rule written for the path refuses every SFTP tool', () => {
       arguments: { remotePath: '/srv/backup.tar', localPath: 'authorized_keys' },
     }) as any;
     // The stubbed connection has no SFTP channel, so the transfer itself fails; what
-    // matters is that the policy did not refuse it.
+    // matters is that the policy allowed it and the call got that far. Asserting the
+    // record exists keeps the row from passing vacuously if a future change makes the
+    // call die before policy ever runs.
     expect(textOf(result)).not.toContain('POLICY_DENIED');
+    expect(h.auditRecords.at(-1)).toMatchObject({ decision: 'allow' });
     expect(h.auditRecords.at(-1)?.ruleId).not.toBe('denylist');
   });
 });

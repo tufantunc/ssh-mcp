@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { tracer } from '../observability/tracer.js';
 import type { ConnectionRegistry } from '../ssh/connection-registry.js';
-import type { PolicyEngine, PolicySubject } from '../policy/engine.js';
+import type { PolicyEngine, PolicyResource } from '../policy/engine.js';
 import type { AuditStore } from '../audit/store.js';
 import { sanitizeCommand } from '../guard/sanitizer.js';
 import { requestApproval } from '../guard/elicitation.js';
@@ -81,14 +81,14 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     command: string,
     profileName: string,
     toolName: string,
-    subject: PolicySubject = {},
+    resource: PolicyResource = {},
   ) {
     const span = tracer.startSpan('policy.evaluate');
     span.setAttribute('tool.name', toolName);
     span.setAttribute('ssh.profile', profileName);
     try {
       const conn = await resolveConn(profileName);
-      const evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName, subject);
+      const evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName, resource);
       span.setAttribute('policy.decision', evaluation.decision);
       span.setAttribute('command.class', evaluation.commandClass);
       span.setAttribute('command.binary', evaluation.binary);
@@ -254,10 +254,12 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     /** Rewrite what policy evaluates and what runs (the sudo wrapper). */
     wrap?: (cleanCmd: string) => string;
     /**
-     * The remote path an SFTP tool acts on. `[policy].denylist` is tested against it as
-     * well as against the command string, which for these tools is one we compose (#230).
+     * What the call acts on beyond its command string — its remote path, for the SFTP
+     * tools. Forwarded whole to the policy engine, so `[policy].denylist` is tested
+     * against it as well as against the command string, which for these tools is one we
+     * compose, and OPA's `resource` gains it (#230).
      */
-    remotePath?: string;
+    resource?: PolicyResource;
   }
 
   /**
@@ -303,7 +305,7 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
       }
 
       const { conn, evaluation, approver } = await checkPolicyAndApprove(
-        effective, profileName, opts.toolName, { remotePath: opts.remotePath },
+        effective, profileName, opts.toolName, opts.resource,
       );
       state.evaluation = evaluation;
 

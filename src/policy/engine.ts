@@ -7,7 +7,7 @@ import type {
   ApprovalMode,
 } from '../types.js';
 import { classifyCommand, findForbiddenMatch, formatReadOnlyRejection } from './classifier.js';
-import { normalizeRemotePath } from './remote-path.js';
+import { normalizeRemotePath, normalizeRemotePathForWindows } from './remote-path.js';
 import { OperatorError } from '../errors.js';
 
 export interface PolicyRules {
@@ -245,9 +245,11 @@ export function resolvePolicyRules(
 /**
  * What a call acts on, beyond its command string. Only the SFTP tools pass anything:
  * their command string is one this server composes, so a `[policy].denylist` rule
- * written for the path is also tested against the path itself (#230).
+ * written for the path is also tested against the path itself (#230). The same value
+ * lands in the OPA input's `resource` — the name follows that vocabulary, where the
+ * resource is what is acted on and the subject is the profile doing the acting.
  */
-export interface PolicySubject {
+export interface PolicyResource {
   remotePath?: string;
 }
 
@@ -257,8 +259,12 @@ export class PolicyEngine {
   private opaTimeoutMs = DEFAULT_OPA_TIMEOUT_MS;
   /** Rate-limits the fail-open warning so one outage can't flood stderr. */
   private lastOpaWarning = 0;
-  /** The operator's patterns, compiled once. The built-ins live in classifier.ts. */
-  private readonly userPatterns: RegExp[];
+  /**
+   * The operator's patterns, compiled once — each twice: as written, and
+   * case-insensitively for the Windows reading of a remote path, where a
+   * case variant reaches the same file (#230). The built-ins live in classifier.ts.
+   */
+  private readonly userPatterns: ReadonlyArray<{ exact: RegExp; caseInsensitive: RegExp }>;
 
   constructor(private rules: PolicyRules = DEFAULT_RULES) {
     // Compile eagerly: a deny rule that silently degrades (the old code fell
@@ -266,7 +272,7 @@ export class PolicyEngine {
     // worse than a startup failure, because nothing surfaces the degradation.
     this.userPatterns = (rules.denylist ?? []).map((pattern) => {
       try {
-        return new RegExp(pattern);
+        return { exact: new RegExp(pattern), caseInsensitive: new RegExp(pattern, 'i') };
       } catch (err) {
         throw new OperatorError(
           `Invalid denylist pattern ${JSON.stringify(pattern)}: ${err instanceof Error ? err.message : String(err)}`,
@@ -288,8 +294,7 @@ export class PolicyEngine {
   evaluate(
     command: string,
     profile: Profile,
-    _toolName: string,
-    subject: PolicySubject = {},
+    resource: PolicyResource = {},
   ): PolicyEvaluation {
     const parsed = classifyCommand(command);
     const allowedClasses = this.getAllowedClasses(profile);
@@ -300,7 +305,7 @@ export class PolicyEngine {
     // only refused one layer up, in the tool itself.
     const readOnlyRejection = parsed.readOnlyRejection;
 
-    const denied = this.findDenyMatch(command, subject.remotePath);
+    const denied = this.findDenyMatch(command, resource);
     if (denied) {
       return {
         decision: 'deny',
@@ -364,9 +369,9 @@ export class PolicyEngine {
     command: string,
     profile: Profile,
     toolName: string,
-    subject: PolicySubject = {},
+    resource: PolicyResource = {},
   ): Promise<PolicyEvaluation> {
-    const local = this.evaluate(command, profile, toolName, subject);
+    const local = this.evaluate(command, profile, resource);
 
     if (local.decision === 'deny') {
       return local;
@@ -378,6 +383,11 @@ export class PolicyEngine {
 
     try {
       const parsed = classifyCommand(command);
+      // The path as given, plus both readings the local denylist tests, so a Rego rule
+      // can match a canonical spelling without reimplementing either here. Undefined for
+      // every tool but the SFTP ones — and for an empty path, which means no path — and
+      // JSON drops the keys then.
+      const remotePath = resource.remotePath || undefined;
       const input = {
         subject: { role: profile.role, profile: profile.name },
         action: { tool: toolName, commandClass: parsed.class },
@@ -385,8 +395,9 @@ export class PolicyEngine {
           command: parsed.fullCommand,
           binary: parsed.binary,
           host: profile.host,
-          // Undefined for every tool but the SFTP ones, and JSON drops the key then.
-          remotePath: subject.remotePath,
+          remotePath,
+          remotePathNormalized: remotePath === undefined ? undefined : normalizeRemotePath(remotePath),
+          remotePathWindows: remotePath === undefined ? undefined : normalizeRemotePathForWindows(remotePath),
         },
         context: { readOnly: profile.readOnly },
       };
@@ -581,33 +592,58 @@ export class PolicyEngine {
    * group, the class and the allowed set; this path never got the same
    * treatment.
    */
-  private findDenyMatch(command: string, remotePath?: string): string | null {
+  private findDenyMatch(command: string, resource: PolicyResource): string | null {
     const builtIn = findForbiddenMatch(command);
     if (builtIn) {
       return `Command matches a built-in never-allowed rule: ${builtIn}. ` +
         `This list cannot be switched off — the [policy].denylist key adds patterns, it does not remove these.`;
     }
 
+    // Nothing below can match: skip reading the path at all, which is the commonest
+    // config — the defaults carry no denylist.
+    if (this.userPatterns.length === 0) return null;
+
     // The path is tested on its own as well as inside the command string, because for the
     // SFTP tools that string is ours to lay out and a rule written for the path should not
-    // depend on where we put it (#230).
+    // depend on where we put it (#230). An empty path means none was passed.
+    const remotePath = resource.remotePath || undefined;
     const normalized = remotePath === undefined ? undefined : normalizeRemotePath(remotePath);
+    const windows = remotePath === undefined ? undefined : normalizeRemotePathForWindows(remotePath);
     const fromConfig = 'a pattern from [policy].denylist in your config file. ' +
       'Remove or narrow it there to allow this command.';
-    for (const pattern of this.userPatterns) {
-      if (pattern.test(command)) {
-        return `Command matches /${pattern.source}/, ${fromConfig}`;
+    for (const { exact, caseInsensitive } of this.userPatterns) {
+      if (exact.test(command)) {
+        return `Command matches /${exact.source}/, ${fromConfig}`;
       }
       if (remotePath === undefined) continue;
-      if (pattern.test(remotePath)) {
-        return `Remote path ${JSON.stringify(remotePath)} matches /${pattern.source}/, ${fromConfig}`;
+      if (exact.test(remotePath)) {
+        return `Remote path ${quotePath(remotePath)} matches /${exact.source}/, ${fromConfig}`;
       }
-      if (normalized !== remotePath && pattern.test(normalized!)) {
-        return `Remote path ${JSON.stringify(remotePath)} (read as ${JSON.stringify(normalized)}) ` +
-          `matches /${pattern.source}/, ${fromConfig}`;
+      if (normalized !== remotePath && exact.test(normalized!)) {
+        return `Remote path ${quotePath(remotePath)} (read as ${quotePath(normalized!)}) ` +
+          `matches /${exact.source}/, ${fromConfig}`;
+      }
+      // The Windows reading runs even when it string-equals the plain one, because the
+      // pattern is tested case-insensitively here and exactly above: on Windows the case
+      // variants are the same file (measured, see remote-path.ts).
+      if (caseInsensitive.test(windows!)) {
+        return `Remote path ${quotePath(remotePath)} (read as ${quotePath(windows!)}, the Windows reading) ` +
+          `matches /${caseInsensitive.source}/i, ${fromConfig}`;
       }
     }
 
     return null;
   }
+}
+
+/**
+ * A path as it may appear in a refusal, capped. The paths are caller-supplied and can be
+ * as long as `MAX_REMOTE_PATH_CHARS` (4096); the refusal is rethrown to the MCP client
+ * and written into the audit record, where the command string already carries the full
+ * spelling — so the tail gives up nothing an operator needs, and a refusal stops being
+ * the engine's most verbose sentence by an order of magnitude.
+ */
+function quotePath(path: string): string {
+  const capped = path.length > 256 ? `${path.slice(0, 253)}…` : path;
+  return JSON.stringify(capped);
 }

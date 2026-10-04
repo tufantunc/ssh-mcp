@@ -235,7 +235,7 @@ export function registerTransferTools(
           profile,
           extra,
           synthetic: true,
-          remotePath,
+          resource: { remotePath },
           preCheck: () => { sanitizeRemotePath(remotePath); },
         },
         async (rt) => {
@@ -297,7 +297,7 @@ export function registerTransferTools(
           profile,
           extra,
           synthetic: true,
-          remotePath,
+          resource: { remotePath },
           preCheck: () => { sanitizeRemotePath(remotePath); checkMode(mode); },
         },
         async (rt) => {
@@ -367,7 +367,7 @@ export function registerTransferTools(
           profile,
           extra,
           synthetic: true,
-          remotePath,
+          resource: { remotePath },
           preCheck: () => { sanitizeRemotePath(remotePath); },
         },
         async (rt) => {

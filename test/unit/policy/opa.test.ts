@@ -82,7 +82,7 @@ describe('OPA evaluation', () => {
     const engine = new PolicyEngine(DEFAULT_RULES);
     engine.setOpaUrl(url);
 
-    const local = engine.evaluate('ls -la', makeProfile(), 'read-command');
+    const local = engine.evaluate('ls -la', makeProfile());
     expect(local.decision).not.toBe('deny');
 
     const result = await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
@@ -136,17 +136,39 @@ describe('OPA evaluation', () => {
   });
 
   // #230: a rego rule can match the path of an SFTP tool without parsing our string.
-  it('sends the remote path as its own field when there is one, and omits it otherwise', async () => {
+  // The spelling is pinned as-given — a non-normal one — so a regression that
+  // normalizes before building the input is visible: an operator's `startswith` rule
+  // would silently stop matching the spellings it was written for.
+  it('sends the remote path, as given, with both readings the denylist tests; omits all three otherwise', async () => {
     await startOpa(() => ({ body: { result: true } }));
     const engine = new PolicyEngine(DEFAULT_RULES);
     engine.setOpaUrl(url);
 
-    await engine.evaluateWithOpa('sftp:list /srv/data', makeProfile(), 'sftp-list', { remotePath: '/srv/data' });
+    await engine.evaluateWithOpa('sftp:list /srv//data/.', makeProfile(), 'sftp-list', { remotePath: '/srv//data/.' });
     await engine.evaluateWithOpa('ls -la', makeProfile(), 'read-command');
 
     expect(requests).toHaveLength(2);
-    expect(requests[0].input.resource.remotePath).toBe('/srv/data');
+    expect(requests[0].input.resource.remotePath).toBe('/srv//data/.');
+    expect(requests[0].input.resource.remotePathNormalized).toBe('/srv/data');
+    expect(requests[0].input.resource.remotePathWindows).toBe('/srv/data');
     expect(requests[1].input.resource).not.toHaveProperty('remotePath');
+    expect(requests[1].input.resource).not.toHaveProperty('remotePathNormalized');
+    expect(requests[1].input.resource).not.toHaveProperty('remotePathWindows');
+  });
+
+  // An empty path means none was passed — it must not arrive as `""`, which a rego
+  // `startswith` treats as a real value any rule can be surprised by.
+  it('omits every remote path key for an empty path', async () => {
+    await startOpa(() => ({ body: { result: true } }));
+    const engine = new PolicyEngine(DEFAULT_RULES);
+    engine.setOpaUrl(url);
+
+    await engine.evaluateWithOpa('sftp:list /srv/data', makeProfile(), 'sftp-list', { remotePath: '' });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0].input.resource).not.toHaveProperty('remotePath');
+    expect(requests[0].input.resource).not.toHaveProperty('remotePathNormalized');
+    expect(requests[0].input.resource).not.toHaveProperty('remotePathWindows');
   });
 
   it('does not consult OPA when the local policy already denied', async () => {

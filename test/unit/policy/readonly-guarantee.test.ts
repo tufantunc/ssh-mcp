@@ -26,7 +26,7 @@ const adminProd: Profile = { ...readOnlyAuditor, name: 'prod-web', role: 'admin'
 describe('a readOnly profile cannot write, whatever the command is called', () => {
   const engine = new PolicyEngine(DEFAULT_RULES);
   const refused = (command: string) =>
-    engine.evaluate(command, readOnlyAuditor, 'read-command').decision;
+    engine.evaluate(command, readOnlyAuditor).decision;
 
   it.each([
     ['elevation behind env', 'env sudo rm -f /etc/passwd'],
@@ -62,7 +62,7 @@ describe('a readOnly profile can use the SFTP tools that only read', () => {
   // per-command name would read as per-tool coverage while asserting nothing
   // about the tool — and two of the blocks below were passing `sftp-list` for
   // `sftp:download` commands, a pairing the product never produces.
-  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor, 'sftp-list');
+  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor);
 
   it('allows listing and downloading', () => {
     expect(decide('sftp:list /var/log').decision).toBe('allow');
@@ -162,12 +162,12 @@ describe('the approval gate sees elevation wherever it is', () => {
     '"sudo" systemctl restart nginx',
     'cd /srv && sudo systemctl restart app',
   ])('refuses %s on a prod profile that cannot elevate', (command) => {
-    expect(engine.evaluate(command, adminProd, 'run-command').decision).toBe('deny');
+    expect(engine.evaluate(command, adminProd).decision).toBe('deny');
   });
 
   it('prompts rather than refusing where privileged is granted', () => {
     const adminDev: Profile = { ...adminProd, group: 'dev' };
-    expect(engine.evaluate('env sudo id', adminDev, 'run-command').decision).toBe('require-approval');
+    expect(engine.evaluate('env sudo id', adminDev).decision).toBe('require-approval');
   });
 });
 
@@ -187,7 +187,7 @@ describe('the approval gate sees elevation wherever it is', () => {
  */
 describe('a reader that can be told to execute is not read-only', () => {
   const engine = new PolicyEngine(DEFAULT_RULES);
-  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor, 'read-command');
+  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor);
 
   it.each([
     ['joined by =', 'sort --compress-program=/srv/payload.sh /etc/hostname'],
@@ -280,7 +280,7 @@ describe('a reader that can be told to execute is not read-only', () => {
  */
 describe('sort: the write CLASS, not four spellings of it', () => {
   const engine = new PolicyEngine(DEFAULT_RULES);
-  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor, 'read-command');
+  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor);
   const target = '/root/.ssh/authorized_keys';
 
   // Every argument-less short flag GNU sort accepts ahead of `-o` in a
@@ -391,7 +391,7 @@ describe('sort: the write CLASS, not four spellings of it', () => {
 
 describe('a disqualifying flag is still noticed behind an exec wrapper', () => {
   const engine = new PolicyEngine(DEFAULT_RULES);
-  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor, 'read-command');
+  const decide = (command: string) => engine.evaluate(command, readOnlyAuditor);
 
   it.each([
     ['env, sort --compress-program', 'env sort --compress-program=/srv/payload.sh /etc/hostname'],
@@ -424,7 +424,7 @@ describe('a disqualifying flag is still noticed behind an exec wrapper', () => {
     // newly flag a wrapped command with no disqualifying flag — is checked
     // against a profile that already holds `safe` outright.
     for (const command of ['env sort /etc/hostname', 'nohup find /etc -name "*.conf"']) {
-      expect(engine.evaluate(command, adminProd, 'run-command').decision, command).toBe('allow');
+      expect(engine.evaluate(command, adminProd).decision, command).toBe('allow');
     }
   });
 });

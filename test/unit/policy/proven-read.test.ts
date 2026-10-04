@@ -384,7 +384,7 @@ describe('the refusal names the word (role-binding denial)', () => {
   } as unknown as Profile;
 
   it('a readOnly profile: denies the grammar-rejected reader and names the binary and the word', () => {
-    const evaluation = engine.evaluate('journalctl --foo', readOnlyProfile, 'run-command');
+    const evaluation = engine.evaluate('journalctl --foo', readOnlyProfile);
     expect(evaluation.decision).toBe('deny');
     expect(evaluation.commandClass).toBe('safe');
     expect(evaluation.reason).toContain('journalctl');
@@ -397,7 +397,7 @@ describe('the refusal names the word (role-binding denial)', () => {
     // both appeared somewhere in the reason. This pins the whole sentence
     // `formatReadOnlyRejection` produces, worded exactly as the controller
     // ruling on this task specifies.
-    const evaluation = engine.evaluate('journalctl --foo', readOnlyProfile, 'run-command');
+    const evaluation = engine.evaluate('journalctl --foo', readOnlyProfile);
     expect(evaluation.reason).toContain(
       '`journalctl` is read-only only with the options and operands its grammar lists; ' +
       '`--foo` is not accepted there.',
@@ -405,7 +405,7 @@ describe('the refusal names the word (role-binding denial)', () => {
   });
 
   it('a viewer on prod (not readOnly): same denial, same naming', () => {
-    const evaluation = engine.evaluate('journalctl --foo', viewerProdProfile, 'run-command');
+    const evaluation = engine.evaluate('journalctl --foo', viewerProdProfile);
     expect(evaluation.decision).toBe('deny');
     expect(evaluation.commandClass).toBe('safe');
     expect(evaluation.reason).toContain('journalctl');
@@ -510,13 +510,13 @@ describe("the advisory's measured forms: writes through a reader classify safe, 
   });
 
   it.each(ALL_ROWS)('%s: a readOnly profile classifies safe and denies it (%s)', (_name, command) => {
-    const evaluation = engine.evaluate(command, readOnlyProfile, 'run-command');
+    const evaluation = engine.evaluate(command, readOnlyProfile);
     expect(evaluation.commandClass, command).toBe('safe');
     expect(evaluation.decision, command).toBe('deny');
   });
 
   it.each(ALL_ROWS)('%s: a viewer on prod classifies safe and denies it (%s)', (_name, command) => {
-    const evaluation = engine.evaluate(command, viewerProdProfile, 'run-command');
+    const evaluation = engine.evaluate(command, viewerProdProfile);
     expect(evaluation.commandClass, command).toBe('safe');
     expect(evaluation.decision, command).toBe('deny');
   });
@@ -577,7 +577,7 @@ describe('final review: an unquoted glob word falls a grammar-checked reader to 
   });
 
   it('a readOnly profile denies the glob form and the reason names the word', () => {
-    const evaluation = engine.evaluate('uniq /root/.ssh/id_ed25519*', readOnlyProfile, 'run-command');
+    const evaluation = engine.evaluate('uniq /root/.ssh/id_ed25519*', readOnlyProfile);
     expect(evaluation.commandClass).toBe('safe');
     expect(evaluation.decision).toBe('deny');
     expect(evaluation.reason).toContain('`/root/.ssh/id_ed25519*`');
@@ -624,7 +624,7 @@ describe('final review: an option word after the first operand falls to safe whe
   it('a readOnly profile denies uniq IN -c and the reason names the option word', () => {
     const result = classifyCommand('uniq /etc/passwd -c');
     expect(result.readOnlyRejection).toEqual({ binary: 'uniq', word: '-c' });
-    const evaluation = engine.evaluate('uniq /etc/passwd -c', readOnlyProfile, 'run-command');
+    const evaluation = engine.evaluate('uniq /etc/passwd -c', readOnlyProfile);
     expect(evaluation.commandClass).toBe('safe');
     expect(evaluation.decision).toBe('deny');
     expect(evaluation.reason).toContain('`-c`');
@@ -654,7 +654,7 @@ describe('final review: an option word after the first operand falls to safe whe
   });
 
   it('a readOnly profile denies uniq IN -- and the reason names `--`', () => {
-    const evaluation = engine.evaluate('uniq /etc/passwd --', readOnlyProfile, 'run-command');
+    const evaluation = engine.evaluate('uniq /etc/passwd --', readOnlyProfile);
     expect(evaluation.commandClass).toBe('safe');
     expect(evaluation.decision).toBe('deny');
     expect(evaluation.reason).toContain('`--`');
@@ -689,7 +689,7 @@ describe('final review: exact style refuses `--` instead of ending checks there'
   });
 
   it('a readOnly profile denies find -- PATH -type f', () => {
-    const evaluation = engine.evaluate('find -- /etc/hosts -type f', readOnlyProfile, 'run-command');
+    const evaluation = engine.evaluate('find -- /etc/hosts -type f', readOnlyProfile);
     expect(evaluation.commandClass).toBe('safe');
     expect(evaluation.decision).toBe('deny');
   });
@@ -723,7 +723,7 @@ describe('final review: `git remote show` falls to safe — its operand can run 
   });
 
   it('a readOnly profile denies git remote show <URL> and the reason names `show`', () => {
-    const evaluation = engine.evaluate('git remote show http://10.0.0.1/repo.git', readOnlyProfile, 'run-command');
+    const evaluation = engine.evaluate('git remote show http://10.0.0.1/repo.git', readOnlyProfile);
     expect(evaluation.commandClass).toBe('safe');
     expect(evaluation.decision).toBe('deny');
     expect(evaluation.reason).toContain('`show`');
@@ -750,13 +750,13 @@ describe('final review: viewer holds safe on dev — the engine the docs must de
   } as unknown as Profile);
 
   it('viewer on dev ALLOWS a safe command', () => {
-    const evaluation = engine.evaluate('npm install', viewerOn('dev'), 'run-command');
+    const evaluation = engine.evaluate('npm install', viewerOn('dev'));
     expect(evaluation.commandClass).toBe('safe');
     expect(evaluation.decision).toBe('allow');
   });
 
   it('viewer on prod DENIES the same safe command', () => {
-    const evaluation = engine.evaluate('npm install', viewerOn('prod'), 'run-command');
+    const evaluation = engine.evaluate('npm install', viewerOn('prod'));
     expect(evaluation.commandClass).toBe('safe');
     expect(evaluation.decision).toBe('deny');
   });
@@ -798,7 +798,7 @@ describe('final review: Windows trailing-slash switch operands fall to safe', ()
   });
 
   it('a readOnly profile denies sort /O/ FILE IN', () => {
-    const evaluation = engine.evaluate('sort /O/ /tmp/o /tmp/i', readOnlyProfile, 'run-command');
+    const evaluation = engine.evaluate('sort /O/ /tmp/o /tmp/i', readOnlyProfile);
     expect(evaluation.commandClass).toBe('safe');
     expect(evaluation.decision).toBe('deny');
   });
@@ -822,7 +822,7 @@ describe('final review: an empty rejected word renders as "" in the refusal', ()
   });
 
   it('the engine reason renders the empty word as "" — not blank backticks', () => {
-    const evaluation = engine.evaluate('hostname ""', readOnlyProfile, 'run-command');
+    const evaluation = engine.evaluate('hostname ""', readOnlyProfile);
     expect(evaluation.decision).toBe('deny');
     expect(evaluation.reason).toContain('`""` is not accepted there.');
   });

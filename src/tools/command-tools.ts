@@ -90,7 +90,6 @@ export function registerCommandTools(
             const rawEval = policy.evaluate(
               cleanCmd,
               registry.getProfile(defaultProfileName(profile)),
-              'privileged-command',
             );
             if (rawEval.decision === 'deny') {
               throw new PolicyRefusedError(
