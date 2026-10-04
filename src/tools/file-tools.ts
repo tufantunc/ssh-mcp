@@ -71,6 +71,7 @@ export function registerFileTools(
           profile,
           extra,
           synthetic: true,
+          remotePath,
           preCheck: () => { sanitizeRemotePath(remotePath); },
         },
         async (rt) => {
@@ -104,6 +105,7 @@ export function registerFileTools(
           profile,
           extra,
           synthetic: true,
+          remotePath,
           preCheck: () => { sanitizeRemotePath(remotePath); },
         },
         async (rt) => {
