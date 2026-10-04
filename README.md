@@ -669,7 +669,10 @@ The request shape follows the AuthZEN Access Evaluation contract:
 
 For the five SFTP tools, `resource` also carries `remotePath`, the path the tool
 acts on, so a rule can match it without parsing `command`. Other tools omit the
-key.
+key. It is the path **as given**, not the normalized reading the denylist also
+tests: `/root//.ssh/x` and `/srv/../root/.ssh/x` arrive spelled that way, so a
+rule written with `startswith` on a directory misses them. Match trailing
+segments, or normalize the path in your policy.
 
 OPA responds with `{ "result": true/false }`. If OPA denies (`result: false`), the command is blocked even if the built-in engine allows it. If OPA is unreachable, the built-in engine's decision stands by default (fail-open, to avoid locking out access); `--opaFailClosed` refuses instead. A 200 that carries no boolean `result` counts as unreachable — that is what OPA answers for an undefined document, so a misnamed package or an unactivated bundle is an outage rather than consent.
 
