@@ -1,5 +1,19 @@
 # ssh-mcp
 
+## 2.17.0
+
+### Minor Changes
+
+- [#254](https://github.com/tufantunc/ssh-mcp/pull/254) [`0e895f7`](https://github.com/tufantunc/ssh-mcp/commit/0e895f790c5a5ffa3e402ea73ddc19e86a1412ca) Thanks [@vkazanjian-b4i](https://github.com/vkazanjian-b4i)! - HTTP transport: MCP sessions that clients abandon without a `DELETE` no longer fill the 64-session limit for good ([#253](https://github.com/tufantunc/ssh-mcp/issues/253)). A session with no request in flight and no open SSE stream expires after `--httpSessionTtl` (default 30 minutes), and at the cap a new client is admitted by evicting the least-recently-active such session — one holding its SSE stream only when nothing else is evictable, and never one with a request in flight. The eviction happens only once the new session is admitted, so an `initialize` the server goes on to refuse costs no one their session. Expiry is checked lazily, when the session is next used or a new client initializes, so there is no timer and an expired session keeps its slot until then.
+  
+  **Upgrade note — minor, not patch, because a client that used to keep its session can now lose it.** A session left idle past the TTL, or evicted at the cap, answers `404 Session not found or expired`, and the client has to re-initialize. A client that cannot do that should keep a request or its SSE stream open, or run with a larger `--httpSessionTtl`.
+
+### Patch Changes
+
+- [#243](https://github.com/tufantunc/ssh-mcp/pull/243) [`bdbb8c1`](https://github.com/tufantunc/ssh-mcp/commit/bdbb8c1a50e93b7ba6bed5b7a209d65bfed15a2a) Thanks [@dependabot](https://github.com/apps/dependabot)! - Update OpenTelemetry to 0.222: `@opentelemetry/sdk-node` and `@opentelemetry/exporter-trace-otlp-http` go from `^0.221.0` to `^0.222.0`, the only part of this bump that changes what `npm i ssh-mcp` resolves, since a caret on a 0.x version does not reach the next minor. The lockfile also moves `@modelcontextprotocol/sdk` to 1.30.1, `@opentelemetry/resources` to 2.11.0, `smol-toml` to 1.9.0 and `zod` to 4.6.5, all inside ranges this package already declared. `npm audit --omit=dev` reports nothing.
+
+- [#254](https://github.com/tufantunc/ssh-mcp/pull/254) [`0e895f7`](https://github.com/tufantunc/ssh-mcp/commit/0e895f790c5a5ffa3e402ea73ddc19e86a1412ca) Thanks [@vkazanjian-b4i](https://github.com/vkazanjian-b4i)! - HTTP transport: an MCP request that fails inside the server, such as when creating the session's server throws, now gets a `500` JSON-RPC internal error and a line on stderr, instead of no answer and an unhandled promise rejection.
+
 ## 2.16.0
 
 ### Minor Changes
