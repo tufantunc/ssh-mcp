@@ -1,5 +1,11 @@
 # ssh-mcp
 
+## 2.19.0
+
+### Minor Changes
+
+- [`96673d0`](https://github.com/tufantunc/ssh-mcp/commit/96673d0586b62446ff810fb73cefe56f2789e64a) Thanks [@tufantunc](https://github.com/tufantunc)! - fix(policy): harden the built-in never-allowed rules
+
 ## 2.18.0
 
 ### Minor Changes
