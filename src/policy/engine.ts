@@ -8,14 +8,20 @@ import type {
 } from '../types.js';
 import { classifyCommand, findForbiddenMatch, formatReadOnlyRejection } from './classifier.js';
 import { normalizeRemotePath, normalizeRemotePathForWindows } from './remote-path.js';
+import { findNeverAllowedWriteTarget, neverAllowedWriteLabel } from './never-allowed-writes.js';
 import { OperatorError } from '../errors.js';
+
+/** The operator-facing promise every built-in never-allowed refusal ends with. */
+const NEVER_ALLOWED_TRAILER =
+  'This list cannot be switched off — the [policy].denylist key adds patterns, it does not remove these.';
 
 export interface PolicyRules {
   roleBindings: Record<string, Record<string, CommandClass[]>>;
   /**
    * Extra deny patterns supplied by the operator, as regex source strings.
-   * The canonical never-allowed list (FORBIDDEN_PATTERNS) lives in
-   * classifier.ts and is always applied on top of these — not repeated here.
+   * The canonical never-allowed list lives in classifier.ts (FORBIDDEN_PATTERNS,
+   * FORBIDDEN_RULES) plus src/policy/never-allowed-writes.ts for the write-path
+   * families, and is always applied on top of these — not repeated here.
    */
   denylist?: string[];
 }
@@ -251,6 +257,13 @@ export function resolvePolicyRules(
  */
 export interface PolicyResource {
   remotePath?: string;
+  /**
+   * The call writes its remote path. Set by the SFTP upload tools, left unset by the
+   * read tools: the never-allowed write paths are refused for a declared write and
+   * stay class-governed for a read, and the fact is the tool layer's to state — the
+   * engine does not guess it from the composed command string.
+   */
+  remoteWrite?: boolean;
 }
 
 export class PolicyEngine {
@@ -396,6 +409,7 @@ export class PolicyEngine {
           binary: parsed.binary,
           host: profile.host,
           remotePath,
+          remoteWrite: resource.remoteWrite || undefined,
           remotePathNormalized: remotePath === undefined ? undefined : normalizeRemotePath(remotePath),
           remotePathWindows: remotePath === undefined ? undefined : normalizeRemotePathForWindows(remotePath),
         },
@@ -595,8 +609,18 @@ export class PolicyEngine {
   private findDenyMatch(command: string, resource: PolicyResource): string | null {
     const builtIn = findForbiddenMatch(command);
     if (builtIn) {
-      return `Command matches a built-in never-allowed rule: ${builtIn}. ` +
-        `This list cannot be switched off — the [policy].denylist key adds patterns, it does not remove these.`;
+      return `Command matches a built-in never-allowed rule: ${builtIn}. ${NEVER_ALLOWED_TRAILER}`;
+    }
+
+    // The built-in never-allowed write paths, tested against a remote path the tool
+    // declared it writes. Runs before the early return below because the defaults
+    // carry no operator denylist — this check is not the operator's to switch on.
+    if (resource.remoteWrite && resource.remotePath) {
+      const target = findNeverAllowedWriteTarget(resource.remotePath);
+      if (target !== null) {
+        return `Remote path ${quotePath(resource.remotePath)} matches a built-in never-allowed rule: ` +
+          `${neverAllowedWriteLabel(target)}. ${NEVER_ALLOWED_TRAILER}`;
+      }
     }
 
     // Nothing below can match: skip reading the path at all, which is the commonest

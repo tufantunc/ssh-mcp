@@ -43,25 +43,29 @@ describe('a denylist rule written for the path refuses every SFTP tool', () => {
   // sftp-list, sftp-download and sftp-upload end their string with the path, so the
   // command string matches first and keeps its wording; the two streaming tools end
   // with the local path, which is the #230 gap.
+  //
+  // The rows use `.ssh/backup_keys` rather than `authorized_keys` because the
+  // never-allowed write paths now refuse the upload tools' path outright — the
+  // built-in check runs first, and these rows are about the operator's patterns.
   it.each(TOOLS)('$name: refused when the path as given matches', async (tool) => {
-    const result = await callWith(['authorized_keys$'], tool, '/root/.ssh/authorized_keys');
+    const result = await callWith(['backup_keys$'], tool, '/root/.ssh/backup_keys');
     expect(result.isError).toBeTruthy();
-    expect(textOf(result)).toMatch(/matches \/authorized_keys\$\//);
+    expect(textOf(result)).toMatch(/matches \/backup_keys\$\//);
     expect(h.auditRecords.at(-1)).toMatchObject({ decision: 'deny', ruleId: 'denylist' });
   });
 
   it.each(TOOLS.filter((t) => t.name.endsWith('-file')))(
     '$name: the refusal names the remote path, since the composed string ends with the local one',
     async (tool) => {
-      const result = await callWith(['authorized_keys$'], tool, '/root/.ssh/authorized_keys');
-      expect(textOf(result)).toContain('Remote path "/root/.ssh/authorized_keys" matches /authorized_keys$/');
+      const result = await callWith(['backup_keys$'], tool, '/root/.ssh/backup_keys');
+      expect(textOf(result)).toContain('Remote path "/root/.ssh/backup_keys" matches /backup_keys$/');
     },
   );
 
   it.each(TOOLS)('$name: refused when only the normalized path matches', async (tool) => {
-    const result = await callWith(['^/root/\\.ssh/'], tool, '/srv/x/../../root/.ssh/authorized_keys');
+    const result = await callWith(['^/root/\\.ssh/'], tool, '/srv/x/../../root/.ssh/backup_keys');
     expect(result.isError).toBeTruthy();
-    expect(textOf(result)).toContain('read as "/root/.ssh/authorized_keys"');
+    expect(textOf(result)).toContain('read as "/root/.ssh/backup_keys"');
     expect(h.auditRecords.at(-1)).toMatchObject({ decision: 'deny', ruleId: 'denylist' });
   });
 
@@ -70,9 +74,9 @@ describe('a denylist rule written for the path refuses every SFTP tool', () => {
   // normalized reading matches.
   it('refused when only the Windows reading matches', async () => {
     const result = await callWith(
-      ['\\.ssh/authorized_keys$'],
+      ['\\.ssh/backup_keys$'],
       TOOLS.find((t) => t.name === 'sftp-upload-file')!,
-      'C:\\Users\\a\\.ssh\\Authorized_Keys.',
+      'C:\\Users\\a\\.ssh\\Backup_Keys.',
     );
     expect(result.isError).toBeTruthy();
     expect(textOf(result)).toContain('the Windows reading');

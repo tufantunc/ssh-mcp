@@ -77,7 +77,8 @@ export interface PolicyConfig {
   roleBindings?: Record<string, Record<string, CommandClass[]>>;
   /**
    * Extra deny patterns, as regex source strings. Appended to the built-in
-   * never-allowed list (FORBIDDEN_PATTERNS in classifier.ts), which always
+   * never-allowed list (FORBIDDEN_PATTERNS/FORBIDDEN_RULES in classifier.ts plus
+   * the write-path families in policy/never-allowed-writes.ts), which always
    * applies — setting this cannot switch off the canonical protections. It
    * does replace any `denylist` on the base PolicyRules, which the compiled-in
    * defaults do not set.

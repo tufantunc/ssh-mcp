@@ -156,6 +156,25 @@ describe('OPA evaluation', () => {
     expect(requests[1].input.resource).not.toHaveProperty('remotePathWindows');
   });
 
+  // The write declaration rides with the path readings: a rego rule can ask what the
+  // call does to the path without parsing our composed string. Reads and non-SFTP
+  // tools omit the key entirely, exactly like the path keys.
+  it('sends remoteWrite only when the tool declared the call writes its path', async () => {
+    await startOpa(() => ({ body: { result: true } }));
+    const engine = new PolicyEngine(DEFAULT_RULES);
+    engine.setOpaUrl(url);
+
+    await engine.evaluateWithOpa('sftp:upload --overwrite /tmp/x', makeProfile(), 'sftp-upload', {
+      remotePath: '/tmp/x',
+      remoteWrite: true,
+    });
+    await engine.evaluateWithOpa('sftp:download /tmp/x', makeProfile(), 'sftp-download', { remotePath: '/tmp/x' });
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0].input.resource.remoteWrite).toBe(true);
+    expect(requests[1].input.resource).not.toHaveProperty('remoteWrite');
+  });
+
   // An empty path means none was passed — it must not arrive as `""`, which a rego
   // `startswith` treats as a real value any rule can be surprised by.
   it('omits every remote path key for an empty path', async () => {

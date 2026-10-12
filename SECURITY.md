@@ -230,6 +230,15 @@ the reader's grammar accepts. The grammar only ever decides between `read-only` 
 
 **Residual risks, recorded rather than closed:**
 
+- **The never-allowed write paths are refused in the forms the README lists.** Upload
+  tools' remote path, shell redirects, and the destinations of `tee`, `cp`, `mv`,
+  `install` and `dd of=` name the path — the two `/etc` families by prefix, so a
+  same-prefix sibling (`/etc/cronography`) over-refuses by design. Any other way of
+  writing those files (`sed -i`, `rsync`, `truncate`, cmd.exe's `copy`, `move` and
+  `robocopy`, a program an interpreter reads, a path the target computes from `cd` or
+  variables) classifies by verb, not by target, and is governed by class and approval
+  instead. `authorized_keys2` and a non-default sshd `AuthorizedKeysFile` are not on
+  the list either; the operator denylist covers them.
 - **DNS/ICMP egress.** `dig`, `nslookup`, `host`, `ping` and `traceroute` can leak small
   amounts of data through the queries and probes they send. None of them can modify the
   host, so they stay `read-only`; tighten them via profile policy (denylist, or omit the

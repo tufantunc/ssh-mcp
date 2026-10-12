@@ -65,7 +65,7 @@ export function registerFileTools(
           profile,
           extra,
           synthetic: true,
-          resource: { remotePath },
+          resource: { remotePath, remoteWrite: true },
           preCheck: () => { sanitizeRemotePath(remotePath); },
         },
         async (rt) => {

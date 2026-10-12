@@ -238,6 +238,60 @@ describe('PolicyEngine', () => {
     });
   });
 
+  describe('a declared remote write to a never-allowed path', () => {
+    // The file's own fixture helper; admin + auto so the class gates that remain
+    // (destructive, privileged) do not mask the denylist decision under test.
+    const profile = makeProfile({ role: 'admin', name: 'dev', approvalPolicy: 'auto' });
+    const UPLOAD_KEYS = 'sftp:upload --overwrite --bytes=1 --sha256=x /root/.ssh/authorized_keys';
+
+    it('is refused with the built-in wording, with no operator denylist at all', () => {
+      const result = engine.evaluate(UPLOAD_KEYS, profile, {
+        remotePath: '/root/.ssh/authorized_keys',
+        remoteWrite: true,
+      });
+      expect(result.decision).toBe('deny');
+      expect(result.ruleId).toBe('denylist');
+      expect(result.reason).toMatch(/built-in never-allowed rule/);
+      expect(result.reason).toContain("writing to any user's authorized_keys");
+      expect(result.reason).toContain('cannot be switched off');
+    });
+
+    it('the Windows reading refuses a case-variant spelling', () => {
+      const result = engine.evaluate('sftp:upload --overwrite --bytes=1 --sha256=x k', profile, {
+        remotePath: 'C:\\Users\\a\\.ssh\\Authorized_Keys.',
+        remoteWrite: true,
+      });
+      expect(result.decision).toBe('deny');
+      expect(result.ruleId).toBe('denylist');
+    });
+
+    it('a declared write to a benign path is not refused by the built-ins', () => {
+      const result = engine.evaluate('sftp:upload --overwrite --bytes=1 --sha256=x /tmp/x', profile, {
+        remotePath: '/tmp/x',
+        remoteWrite: true,
+      });
+      expect(result.decision).toBe('allow');
+    });
+
+    it('a read of the same path is not refused — remoteWrite is what makes it a write', () => {
+      const result = engine.evaluate('sftp:download /root/.ssh/authorized_keys', profile, {
+        remotePath: '/root/.ssh/authorized_keys',
+      });
+      expect(result.decision).toBe('allow');
+    });
+
+    it('the built-in wording wins even when an operator pattern also matches the path', () => {
+      const withDeny = new PolicyEngine({ ...DEFAULT_RULES, denylist: ['authorized_keys$'] });
+      const result = withDeny.evaluate(UPLOAD_KEYS, profile, {
+        remotePath: '/root/.ssh/authorized_keys',
+        remoteWrite: true,
+      });
+      expect(result.decision).toBe('deny');
+      expect(result.reason).toMatch(/built-in never-allowed rule/);
+      expect(result.reason).toContain('cannot be switched off');
+    });
+  });
+
   it('readOnly profile only allows read-only', () => {
     const profile = makeProfile({ readOnly: true, name: 'prod-db' });
     expect(engine.evaluate('ls', profile).decision).toBe('allow');

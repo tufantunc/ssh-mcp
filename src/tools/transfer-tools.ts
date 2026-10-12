@@ -297,7 +297,7 @@ export function registerTransferTools(
           profile,
           extra,
           synthetic: true,
-          resource: { remotePath },
+          resource: { remotePath, remoteWrite: true },
           preCheck: () => { sanitizeRemotePath(remotePath); checkMode(mode); },
         },
         async (rt) => {

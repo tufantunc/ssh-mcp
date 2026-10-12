@@ -36,7 +36,9 @@ async function upload(args: Record<string, unknown>) {
 describe('the approved string for sftp-upload describes the operation', () => {
   it('spells the replacement, the payload and the destination, in that order', async () => {
     h = await createHarness({});
-    const record = await upload({ remotePath: '/etc/crontab', content: 'x' });
+    // `/srv/crontab`, not `/etc/crontab`: the built-in never-allowed list refuses an
+    // upload to the real one outright, and these rows are about the approval gate.
+    const record = await upload({ remotePath: '/srv/crontab', content: 'x' });
     // The decision, not only the string. Measured in review: without this, the
     // whole file passed with the approver declining, with a readOnly profile, and
     // with approvalPolicy 'never' — because a refusal records the same command.
@@ -49,7 +51,7 @@ describe('the approved string for sftp-upload describes the operation', () => {
     expect(String(record.error ?? ''), 'the call must not have been refused')
       .not.toMatch(/APPROVAL_DENIED|POLICY_DENIED/);
     expect(record.command).toMatch(
-      new RegExp(`^sftp:upload --overwrite --bytes=1 --sha256=${DIGEST} /etc/crontab$`),
+      new RegExp(`^sftp:upload --overwrite --bytes=1 --sha256=${DIGEST} /srv/crontab$`),
     );
   });
 
@@ -60,8 +62,8 @@ describe('the approved string for sftp-upload describes the operation', () => {
     // only in content, which is the case an attacker constructs and the one the
     // digest exists for.
     h = await createHarness({});
-    const a = await upload({ remotePath: '/etc/crontab', content: '* * * * * /bin/true\n' });
-    const b = await upload({ remotePath: '/etc/crontab', content: '* * * * * /bin/evil\n' });
+    const a = await upload({ remotePath: '/srv/crontab', content: '* * * * * /bin/true\n' });
+    const b = await upload({ remotePath: '/srv/crontab', content: '* * * * * /bin/evil\n' });
     expect(a.command).toContain(' --bytes=20 ');
     expect(b.command).toContain(' --bytes=20 ');
     expect(a.command).not.toBe(b.command);
@@ -108,15 +110,15 @@ describe('the string is what an approval grant is keyed on', () => {
   // (`approvalGrantTtlMs` 0), so this block has to turn them on.
   it('does not let one approval cover a different payload to the same path', async () => {
     h = await createHarness({}, { approvalGrantTtlMs: 60_000 });
-    await upload({ remotePath: '/etc/crontab', content: '* * * * * /bin/true\n' });
-    await upload({ remotePath: '/etc/crontab', content: '* * * * * /bin/evil\n' });
+    await upload({ remotePath: '/srv/crontab', content: '* * * * * /bin/true\n' });
+    await upload({ remotePath: '/srv/crontab', content: '* * * * * /bin/evil\n' });
     expect(h.approvalPrompts(), 'the second payload must be approved on its own').toBe(2);
   });
 
   it('still lets one approval cover a byte-identical repeat', async () => {
     h = await createHarness({}, { approvalGrantTtlMs: 60_000 });
-    await upload({ remotePath: '/etc/crontab', content: '* * * * * /bin/true\n' });
-    await upload({ remotePath: '/etc/crontab', content: '* * * * * /bin/true\n' });
+    await upload({ remotePath: '/srv/crontab', content: '* * * * * /bin/true\n' });
+    await upload({ remotePath: '/srv/crontab', content: '* * * * * /bin/true\n' });
     expect(h.approvalPrompts(), 'an identical repeat is the same operation').toBe(1);
   });
 });
