@@ -6,6 +6,10 @@
 
 - [`96673d0`](https://github.com/tufantunc/ssh-mcp/commit/96673d0586b62446ff810fb73cefe56f2789e64a) Thanks [@tufantunc](https://github.com/tufantunc)! - fix(policy): harden the built-in never-allowed rules
 
+### Security
+
+- Fixed [GHSA-rrxj-hcj2-vwm6](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-rrxj-hcj2-vwm6): the never-allowed write paths (`/etc/cron`, `/etc/systemd`, any user's `authorized_keys`) are now refused for the SFTP upload tools' remote path, the target of a shell redirect, and the destinations of `tee`, `cp`, `mv`, `install` and `dd of=`, in any spelling the path readings resolve. Affected: `< 2.19.0`.
+
 ## 2.18.0
 
 ### Minor Changes
