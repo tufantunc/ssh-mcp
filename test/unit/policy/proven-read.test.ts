@@ -301,7 +301,7 @@ describe('classifyCommand carries readOnlyRejection only for the outer safe it p
   it('names the reader and the rejected flag', () => {
     const result = classifyCommand('journalctl --foo');
     expect(result.class).toBe('safe');
-    expect(result.readOnlyRejection).toEqual({ binary: 'journalctl', word: '--foo' });
+    expect(result.readOnlyRejection).toEqual({ binary: 'journalctl', word: '--foo', cause: 'grammar' });
   });
 
   it('names the rejected operand, not a flag, for an operand-count violation', () => {
@@ -311,7 +311,7 @@ describe('classifyCommand carries readOnlyRejection only for the outer safe it p
     // are not about an unrecognised flag.
     const result = classifyCommand('hostname pwned');
     expect(result.class).toBe('safe');
-    expect(result.readOnlyRejection).toEqual({ binary: 'hostname', word: 'pwned' });
+    expect(result.readOnlyRejection).toEqual({ binary: 'hostname', word: 'pwned', cause: 'grammar' });
   });
 
   it('carries nothing when the command is not a reader at all', () => {
@@ -553,6 +553,7 @@ describe('final review: an unquoted glob word falls a grammar-checked reader to 
     expect(classifyCommand('uniq /root/.ssh/id_ed25519*').readOnlyRejection).toEqual({
       binary: 'uniq',
       word: '/root/.ssh/id_ed25519*',
+      cause: 'grammar',
     });
   });
 
@@ -623,7 +624,7 @@ describe('final review: an option word after the first operand falls to safe whe
 
   it('a readOnly profile denies uniq IN -c and the reason names the option word', () => {
     const result = classifyCommand('uniq /etc/passwd -c');
-    expect(result.readOnlyRejection).toEqual({ binary: 'uniq', word: '-c' });
+    expect(result.readOnlyRejection).toEqual({ binary: 'uniq', word: '-c', cause: 'grammar' });
     const evaluation = engine.evaluate('uniq /etc/passwd -c', readOnlyProfile);
     expect(evaluation.commandClass).toBe('safe');
     expect(evaluation.decision).toBe('deny');
@@ -640,7 +641,7 @@ describe('final review: an option word after the first operand falls to safe whe
     // judged by the position rule like any other.
     const result = classifyCommand('uniq /etc/passwd --');
     expect(result.class).toBe('safe');
-    expect(result.readOnlyRejection).toEqual({ binary: 'uniq', word: '--' });
+    expect(result.readOnlyRejection).toEqual({ binary: 'uniq', word: '--', cause: 'grammar' });
   });
 
   it('ifconfig en0 -- falls to safe — same class, same fix', () => {
@@ -818,7 +819,7 @@ describe('final review: an empty rejected word renders as "" in the refusal', ()
   it('a quoted empty operand is refused with the empty word carried', () => {
     const result = classifyCommand('hostname ""');
     expect(result.class).toBe('safe');
-    expect(result.readOnlyRejection).toEqual({ binary: 'hostname', word: '' });
+    expect(result.readOnlyRejection).toEqual({ binary: 'hostname', word: '', cause: 'grammar' });
   });
 
   it('the engine reason renders the empty word as "" — not blank backticks', () => {

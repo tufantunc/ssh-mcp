@@ -551,9 +551,9 @@ export class PolicyEngine {
     }
 
     // A `safe` command refused here is often not a hard "no" — it is one
-    // argv word away from `read-only`, and without this the reader concludes
-    // the binary is forbidden outright and never learns which spelling would
-    // have worked.
+    // spelling away from `read-only` (an argv word the grammar refused, or a
+    // shell metacharacter), and without this the reader concludes the binary is
+    // forbidden outright and never learns which spelling would have worked.
     if (parsed.readOnlyRejection) {
       reason += ` ${formatReadOnlyRejection(parsed.readOnlyRejection)}`;
     }
