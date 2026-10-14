@@ -1,4 +1,4 @@
-import type { CommandClass, ParsedCommand } from '../types.js';
+import type { CommandClass, ParsedCommand, ReadOnlyRejection } from '../types.js';
 import { AWK_NAMES, readAwkInvocation, type AwkFindings } from './awk.js';
 import { matchesGrammar, type ArgGrammar } from './reader-grammar.js';
 import { findNeverAllowedWriteTarget, neverAllowedWriteLabel, type NeverAllowedWriteTarget } from './never-allowed-writes.js';
@@ -2528,7 +2528,7 @@ function classifyCommandInDialect(command: string, depth: number, dialect: Shell
  * copies this onto its own `ParsedCommand` result — but only when `outer` is
  * also the winning side, see the comment above.
  */
-type ClassifiedOuter = ParsedCommand & { readOnlyRejection?: { binary: string; word: string } };
+type ClassifiedOuter = ParsedCommand & { readOnlyRejection?: ReadOnlyRejection };
 
 /** The class of the command itself, reading none of what it carries. */
 function classifyOuter(trimmed: string, dialect: ShellDialect): ClassifiedOuter {
@@ -2564,8 +2564,18 @@ function classifyOuter(trimmed: string, dialect: ShellDialect): ClassifiedOuter 
   const twoWordPrefix = words.slice(0, 2).join(' ');
   if (READ_ONLY_ALLOWLIST.has(binary) || READ_ONLY_ALLOWLIST.has(twoWordPrefix)
     || READ_ONLY_SYNTHETIC.has(binary)) {
-    if (SHELL_CONTROL_CHARS.test(trimmed)) {
-      return { binary, fullCommand, class: 'safe' as CommandClass };
+    const metacharacter = SHELL_CONTROL_CHARS.exec(trimmed);
+    if (metacharacter) {
+      return {
+        binary,
+        fullCommand,
+        class: 'safe' as CommandClass,
+        readOnlyRejection: {
+          binary: READ_ONLY_ALLOWLIST.has(twoWordPrefix) ? twoWordPrefix : binary,
+          word: metacharacter[0],
+          cause: 'shell-metacharacter',
+        },
+      };
     }
 
     // The SFTP verbs are synthesised by the tool layer, never typed by a caller,
@@ -2596,7 +2606,7 @@ function classifyOuter(trimmed: string, dialect: ShellDialect): ClassifiedOuter 
           binary,
           fullCommand,
           class: 'safe' as CommandClass,
-          readOnlyRejection: { binary: readerName, word: globWord },
+          readOnlyRejection: { binary: readerName, word: globWord, cause: 'grammar' },
         };
       }
     }
@@ -2607,7 +2617,7 @@ function classifyOuter(trimmed: string, dialect: ShellDialect): ClassifiedOuter 
         binary,
         fullCommand,
         class: 'safe' as CommandClass,
-        readOnlyRejection: { binary: readerName, word: match.word },
+        readOnlyRejection: { binary: readerName, word: match.word, cause: 'grammar' },
       };
     }
 
@@ -2628,7 +2638,20 @@ function classifyOuter(trimmed: string, dialect: ShellDialect): ClassifiedOuter 
  * `read-command`'s `enforceClass` refusal never drift into two spellings of
  * the same sentence.
  */
-function formatReadOnlyRejection(rejection: { binary: string; word: string }): string {
+function formatReadOnlyRejection(rejection: ReadOnlyRejection): string {
+  if (rejection.cause === 'shell-metacharacter') {
+    // `\n` and `\r` are in SHELL_CONTROL_CHARS, and quoted raw they would break the
+    // sentence across lines or render as nothing.
+    const char = rejection.word.replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+    // The SFTP verbs' operand is a path the tool layer built the command from, so the
+    // path is what the caller can change — not "the command", which they never typed.
+    if (READ_ONLY_SYNTHETIC.has(rejection.binary)) {
+      return `The remote path contains \`${char}\`, which counts as a shell metacharacter here, ` +
+        `so \`${rejection.binary}\` is read-only only for a path without one.`;
+    }
+    return `\`${rejection.binary}\` is read-only only when the command contains no shell metacharacter; ` +
+      `\`${char}\` is one.`;
+  }
   // The rejected word can be the empty string — a quoted empty operand
   // (`hostname ""`) — and two bare backticks would render as a blank where
   // the word that cost the class should be. `""` is the shell's own spelling

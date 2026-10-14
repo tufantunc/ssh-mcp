@@ -80,6 +80,30 @@ describe('read-command — enforceClass', () => {
     expect(text).toContain('journalctl');
     expect(text).toContain('--foo');
   });
+
+  // #224: the metacharacter downgrade names the character, like a grammar rejection does.
+  it('refuses a reader carrying a shell metacharacter and names the character', async () => {
+    h = await createHarness();
+    const res = await call('read-command', { command: 'cat /x;y' });
+    expect(res.isError).toBe(true);
+    expect(h.execCalls).toHaveLength(0);
+    expect(textOf(res)).toContain(
+      '`cat` is read-only only when the command contains no shell metacharacter; `;` is one.',
+    );
+  });
+});
+
+describe('sftp-list — a path with a shell metacharacter (#224)', () => {
+  it('refuses a readOnly profile and names the path, not only the profile', async () => {
+    h = await createHarness({ role: 'viewer', readOnly: true });
+    const res = await call('sftp-list', { remotePath: '/srv/backup(old)' });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain(
+      'The remote path contains `(`, which counts as a shell metacharacter here, ' +
+      'so `sftp:list` is read-only only for a path without one.',
+    );
+    expect(h.auditRecords.at(-1)).toMatchObject({ decision: 'deny', ruleId: 'role-binding' });
+  });
 });
 
 describe('run-command — approval gate', () => {
