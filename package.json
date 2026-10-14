@@ -74,6 +74,6 @@
     "node": "^18.19.0 || >=20.6.0"
   },
   "optionalDependencies": {
-    "@napi-rs/keyring": "^1.1.0"
+    "@napi-rs/keyring": "^2.1.0"
   }
 }
