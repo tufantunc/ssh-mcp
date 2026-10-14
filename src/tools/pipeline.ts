@@ -310,11 +310,12 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
       state.evaluation = evaluation;
 
       if (opts.enforceClass && evaluation.commandClass !== opts.enforceClass) {
-        // A command that fell to `safe` because a reader's grammar rejected one
-        // of its argv words is one spelling away from the class this tool
-        // demands — say which word, or the caller only learns that the tool
-        // refused it, not why the reader that ran the exact same binary
-        // would not have.
+        // A command that fell to `safe` because a reader was refused read-only —
+        // its grammar rejected an argv word, or the command carries a shell
+        // metacharacter — is one spelling away from the class this tool demands.
+        // Say which word or character, or the caller only learns that the tool
+        // refused it, not why the reader that ran the exact same binary would
+        // not have.
         const rejectionSuffix = evaluation.readOnlyRejection
           ? ` ${formatReadOnlyRejection(evaluation.readOnlyRejection)}`
           : '';

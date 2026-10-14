@@ -593,6 +593,14 @@ read-only only with the options and operands its grammar lists; `--foo` is not a
 there. ``), so the caller can see which spelling of the same command still works. See
 [SECURITY.md](./SECURITY.md) for the residual risks this leaves open.
 
+A reader also falls to `safe` when its command carries a shell metacharacter — `;` `&` `|`
+`<` `>` `` ` `` `$` `(` `)` `{` `}`, a newline or a carriage return — quoted or not, because
+the allowlist vouches for the binary, never for what a shell might do with the rest of the
+line. The refusal names the first such character. For `sftp-list` and `sftp-download` it is
+in the remote path, so `/srv/backup(old)` is refused for a `readOnly` profile with
+`` The remote path contains `(`, which counts as a shell metacharacter here, so `sftp:list`
+is read-only only for a path without one. ``
+
 A separate **forbidden** list is never allowed, whatever the role or approval
 policy: `rm -rf /`, `mkfs`, `dd of=/dev/`, `shutdown`, `curl|sh`, fork bombs,
 writes naming `/etc/cron`, `/etc/systemd` or any user's `authorized_keys`,

@@ -80,6 +80,45 @@ describe('read-command — enforceClass', () => {
     expect(text).toContain('journalctl');
     expect(text).toContain('--foo');
   });
+
+  // #224: the metacharacter downgrade names the character, like a grammar rejection does.
+  it('refuses a reader carrying a shell metacharacter and names the character', async () => {
+    h = await createHarness();
+    const res = await call('read-command', { command: 'cat /x;y' });
+    expect(res.isError).toBe(true);
+    expect(h.execCalls).toHaveLength(0);
+    expect(textOf(res)).toContain(
+      '`cat` is read-only only when the command contains no shell metacharacter; `;` is one.',
+    );
+    expect(h.auditRecords.at(-1)).toMatchObject({
+      commandClass: 'safe',
+      binary: 'cat',
+      error: expect.stringContaining('`;` is one.'),
+    });
+  });
+});
+
+describe('the SFTP readers — a path with a shell metacharacter (#224)', () => {
+  it.each([
+    ['sftp-list', 'sftp:list', '/srv/backup(old)'],
+    ['sftp-download', 'sftp:download', '/srv/backup(old)'],
+    // A Windows path is the likeliest way to meet one, and it takes the two-dialect pass.
+    ['sftp-list', 'sftp:list', 'C:\\Program Files (x86)'],
+  ])('%s on %s: refuses a readOnly profile and names the path, not only the profile', async (tool, verb, remotePath) => {
+    h = await createHarness({ role: 'viewer', readOnly: true });
+    const res = await call(tool, { remotePath });
+    expect(res.isError).toBe(true);
+    const sentence = 'The remote path contains `(`, which counts as a shell metacharacter here, ' +
+      `so \`${verb}\` is read-only only for a path without one.`;
+    expect(textOf(res)).toContain(sentence);
+    expect(h.auditRecords.at(-1)).toMatchObject({
+      decision: 'deny',
+      ruleId: 'role-binding',
+      commandClass: 'safe',
+      binary: verb,
+      error: expect.stringContaining(sentence),
+    });
+  });
 });
 
 describe('run-command — approval gate', () => {

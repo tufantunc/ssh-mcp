@@ -1,4 +1,4 @@
-import type { CommandClass, ParsedCommand } from '../types.js';
+import type { CommandClass, ParsedCommand, ReadOnlyRejection } from '../types.js';
 import { AWK_NAMES, readAwkInvocation, type AwkFindings } from './awk.js';
 import { matchesGrammar, type ArgGrammar } from './reader-grammar.js';
 import { findNeverAllowedWriteTarget, neverAllowedWriteLabel, type NeverAllowedWriteTarget } from './never-allowed-writes.js';
@@ -2507,9 +2507,10 @@ function classifyCommandInDialect(command: string, depth: number, dialect: Shell
     if (CLASS_RANK[parsed.class] > CLASS_RANK[highest.class]) highest = parsed;
   }
 
-  // `readOnlyRejection` only ever describes the outer command's own grammar
-  // rejection, and only means anything when that is also what decided the
-  // final class. `highest === outer` (reference equality) is exactly that
+  // `readOnlyRejection` only ever describes why the outer command's reader was
+  // refused read-only — a grammar rejection or a shell metacharacter, see
+  // `ReadOnlyRejection` — and only means anything when that is also what decided
+  // the final class. `highest === outer` (reference equality) is exactly that
   // condition: the synthetic floor and the nested-command loop above only
   // ever replace `highest` with something of strictly higher rank than
   // `outer`'s, so if either one fired, `highest` is no longer `outer` and the
@@ -2522,16 +2523,8 @@ function classifyCommandInDialect(command: string, depth: number, dialect: Shell
   return result;
 }
 
-/**
- * `classifyOuter`'s own return shape, carrying the word a reader's grammar
- * rejected so a later stage can name it in a refusal message. `classifyCommand`
- * copies this onto its own `ParsedCommand` result — but only when `outer` is
- * also the winning side, see the comment above.
- */
-type ClassifiedOuter = ParsedCommand & { readOnlyRejection?: { binary: string; word: string } };
-
 /** The class of the command itself, reading none of what it carries. */
-function classifyOuter(trimmed: string, dialect: ShellDialect): ClassifiedOuter {
+function classifyOuter(trimmed: string, dialect: ShellDialect): ParsedCommand {
   const binary = extractBinary(trimmed, dialect);
   const fullCommand = trimmed;
 
@@ -2564,8 +2557,21 @@ function classifyOuter(trimmed: string, dialect: ShellDialect): ClassifiedOuter 
   const twoWordPrefix = words.slice(0, 2).join(' ');
   if (READ_ONLY_ALLOWLIST.has(binary) || READ_ONLY_ALLOWLIST.has(twoWordPrefix)
     || READ_ONLY_SYNTHETIC.has(binary)) {
-    if (SHELL_CONTROL_CHARS.test(trimmed)) {
-      return { binary, fullCommand, class: 'safe' as CommandClass };
+    // Whichever key matched decides both which entry answers and how many
+    // leading words are the command name rather than an argument: a two-word
+    // entry's grammar reads words[2..], a one-word entry's reads words[1..]. An
+    // SFTP verb's two-word prefix is never a key, so it is named by itself.
+    const matchedTwoWord = READ_ONLY_ALLOWLIST.has(twoWordPrefix);
+    const readerName = matchedTwoWord ? twoWordPrefix : binary;
+
+    const metacharacter = SHELL_CONTROL_CHARS.exec(trimmed);
+    if (metacharacter) {
+      return {
+        binary,
+        fullCommand,
+        class: 'safe' as CommandClass,
+        readOnlyRejection: { binary: readerName, word: metacharacter[0], cause: 'shell-metacharacter' },
+      };
     }
 
     // The SFTP verbs are synthesised by the tool layer, never typed by a caller,
@@ -2575,11 +2581,6 @@ function classifyOuter(trimmed: string, dialect: ShellDialect): ClassifiedOuter 
       return { binary, fullCommand, class: 'read-only' as CommandClass };
     }
 
-    // Whichever key matched decides both which entry answers and how many
-    // leading words are the command name rather than an argument: a two-word
-    // entry's grammar reads words[2..], a one-word entry's reads words[1..].
-    const matchedTwoWord = READ_ONLY_ALLOWLIST.has(twoWordPrefix);
-    const readerName = matchedTwoWord ? twoWordPrefix : binary;
     const entry = READERS[readerName];
     const argWords = words.slice(matchedTwoWord ? 2 : 1);
 
@@ -2596,7 +2597,7 @@ function classifyOuter(trimmed: string, dialect: ShellDialect): ClassifiedOuter 
           binary,
           fullCommand,
           class: 'safe' as CommandClass,
-          readOnlyRejection: { binary: readerName, word: globWord },
+          readOnlyRejection: { binary: readerName, word: globWord, cause: 'grammar' },
         };
       }
     }
@@ -2607,7 +2608,7 @@ function classifyOuter(trimmed: string, dialect: ShellDialect): ClassifiedOuter 
         binary,
         fullCommand,
         class: 'safe' as CommandClass,
-        readOnlyRejection: { binary: readerName, word: match.word },
+        readOnlyRejection: { binary: readerName, word: match.word, cause: 'grammar' },
       };
     }
 
@@ -2618,17 +2619,40 @@ function classifyOuter(trimmed: string, dialect: ShellDialect): ClassifiedOuter 
 }
 
 /**
- * The sentence a refusal appends when it carries a `readOnlyRejection`, worded
- * so the reason names the binary that would have qualified and the argv word
- * that cost it: "is not accepted there" rather than "is not one of them",
- * because most rejections are operand rules (`hostname NAME`, `sort /data`) or
- * a listed value flag missing its value, where "is not one of them" would be
- * false — it may be a perfectly good flag name, just not one bare or in this
- * position. One function so the engine's role-binding denial and
- * `read-command`'s `enforceClass` refusal never drift into two spellings of
- * the same sentence.
+ * The sentence a refusal appends when it carries a `readOnlyRejection`, in one of
+ * two shapes chosen by its `cause`. Both name the reader that would have qualified
+ * and what cost it the class.
+ *
+ * - `grammar`: names the argv word, as "is not accepted there" rather than "is not
+ *   one of them", because most rejections are operand rules (`hostname NAME`,
+ *   `sort /data`) or a listed value flag missing its value, where "is not one of
+ *   them" would be false — it may be a perfectly good flag name, just not one bare
+ *   or in this position.
+ * - `shell-metacharacter`: names the character, and for the SFTP verbs says it is
+ *   in the remote path (#224).
+ *
+ * One function so the engine's role-binding denial and `read-command`'s
+ * `enforceClass` refusal never drift into two spellings of the same sentence.
  */
-function formatReadOnlyRejection(rejection: { binary: string; word: string }): string {
+function formatReadOnlyRejection(rejection: ReadOnlyRejection): string {
+  if (rejection.cause === 'shell-metacharacter') {
+    // `\n` and `\r` are in SHELL_CONTROL_CHARS, and quoted raw they would break the
+    // sentence across lines or render as nothing. A backtick is in it too, and inside
+    // single backticks it would print as three in a row; double backticks with
+    // padding is Markdown's own way to quote one.
+    const char = rejection.word.replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+    const quoted = char === '`' ? '`` ` ``' : `\`${char}\``;
+    // The SFTP verbs' operand is a path the tool layer built the command from, so the
+    // path is what the caller can change — not "the command", which they never typed.
+    // The verb is named as the audit record spells it (`sftp:list`), not as the tool
+    // (`sftp-list`), so the refusal and the record it is filed under read the same.
+    if (READ_ONLY_SYNTHETIC.has(rejection.binary)) {
+      return `The remote path contains ${quoted}, which counts as a shell metacharacter here, ` +
+        `so \`${rejection.binary}\` is read-only only for a path without one.`;
+    }
+    return `\`${rejection.binary}\` is read-only only when the command contains no shell metacharacter; ` +
+      `${quoted} is one.`;
+  }
   // The rejected word can be the empty string — a quoted empty operand
   // (`hostname ""`) — and two bare backticks would render as a blank where
   // the word that cost the class should be. `""` is the shell's own spelling
