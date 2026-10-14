@@ -18,16 +18,16 @@ const readOnlyProfile = {
 } as unknown as Profile;
 
 describe('the metacharacter downgrade says what decided it', () => {
-  it('records the character and the cause for an SFTP verb', () => {
-    const parsed = classifyCommand('sftp:list /srv/backup(old)');
+  it.each(['sftp:list', 'sftp:download'])('records the character and the cause for %s', (verb) => {
+    const parsed = classifyCommand(`${verb} /srv/backup(old)`);
     expect(parsed.class).toBe('safe');
     expect(parsed.readOnlyRejection).toEqual({
-      binary: 'sftp:list', word: '(', cause: 'shell-metacharacter',
+      binary: verb, word: '(', cause: 'shell-metacharacter',
     });
   });
 
-  it('records the first metacharacter for a typed reader', () => {
-    expect(classifyCommand('cat /x;y').readOnlyRejection).toEqual({
+  it('records the first metacharacter for a typed reader, not a later one', () => {
+    expect(classifyCommand('cat /x;y|z').readOnlyRejection).toEqual({
       binary: 'cat', word: ';', cause: 'shell-metacharacter',
     });
   });
@@ -75,5 +75,12 @@ describe('a readOnly refusal names the metacharacter', () => {
   it.each([['\r', '\\r'], ['\n', '\\n']])('shows an invisible metacharacter escaped', (char, shown) => {
     const evaluation = engine.evaluate(`cat /x${char}y`, readOnlyProfile);
     expect(evaluation.reason).toContain(`\`${shown}\` is one.`);
+  });
+
+  it('quotes a backtick so it stays readable', () => {
+    // Wrapped in single backticks it would print as three in a row, the one
+    // character the sentence exists to name lost in its own quoting.
+    const evaluation = engine.evaluate('cat `which foo`', readOnlyProfile);
+    expect(evaluation.reason).toContain('`` ` `` is one.');
   });
 });

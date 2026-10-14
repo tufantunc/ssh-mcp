@@ -590,13 +590,16 @@ requires — all of these refuse `safe` except the viewer on dev, so a command t
 run under the old, name-only
 rule can now be refused. The refusal names the rejected word (for example, `` `journalctl` is
 read-only only with the options and operands its grammar lists; `--foo` is not accepted
-there. ``), so the caller can see which spelling of the same command still works. A
-command carrying a shell metacharacter (`;`, `&`, `|`, `<`, `>`, `` ` ``, `$`, `(`, `)`, `{`,
-`}`) falls to `safe` the same way, and the refusal names the character. For `sftp-list` and
-`sftp-download` that character is in the remote path — `/srv/backup(old)` is refused for a
-`readOnly` profile with `` The remote path contains `(`, which counts as a shell
-metacharacter here, so `sftp:list` is read-only only for a path without one. `` See
+there. ``), so the caller can see which spelling of the same command still works. See
 [SECURITY.md](./SECURITY.md) for the residual risks this leaves open.
+
+A reader also falls to `safe` when its command carries a shell metacharacter — `;` `&` `|`
+`<` `>` `` ` `` `$` `(` `)` `{` `}`, a newline or a carriage return — quoted or not, because
+the allowlist vouches for the binary, never for what a shell might do with the rest of the
+line. The refusal names the first such character. For `sftp-list` and `sftp-download` it is
+in the remote path, so `/srv/backup(old)` is refused for a `readOnly` profile with
+`` The remote path contains `(`, which counts as a shell metacharacter here, so `sftp:list`
+is read-only only for a path without one. ``
 
 A separate **forbidden** list is never allowed, whatever the role or approval
 policy: `rm -rf /`, `mkfs`, `dd of=/dev/`, `shutdown`, `curl|sh`, fork bombs,

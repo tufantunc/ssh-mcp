@@ -163,8 +163,9 @@ export interface CommandResult {
  * - `grammar`: the reader's grammar refused `word`, an argv word (or, for an
  *   operand-count/`each` violation, the offending operand; for a value flag left
  *   with nothing to consume, the flag itself).
- * - `shell-metacharacter`: the command carries `word`, the first character a shell
- *   would act on, so the allowlist cannot vouch for the rest of the line (#224).
+ * - `shell-metacharacter`: `word` is the first character of the command that is in
+ *   `SHELL_CONTROL_CHARS`, quoted or not; with one present the allowlist cannot vouch
+ *   for the rest of the line (#224).
  */
 export interface ReadOnlyRejection {
   binary: string;
