@@ -1,5 +1,13 @@
 # ssh-mcp
 
+## 2.19.1
+
+### Patch Changes
+
+- [#262](https://github.com/tufantunc/ssh-mcp/pull/262) [`7126efe`](https://github.com/tufantunc/ssh-mcp/commit/7126efea42494528aba6159534f36f2bf8acdb2f) Thanks [@tufantunc](https://github.com/tufantunc)! - A reader refused `read-only` because its command carries a shell metacharacter now says so ([#224](https://github.com/tufantunc/ssh-mcp/issues/224)). The refusal used to name only the profile ("Clear readOnly on the profile"), so `sftp-list` on a path like `/srv/backup(old)` read as a profile problem; it now names the character, and for `sftp-list` and `sftp-download` says the character is in the remote path. Nothing is refused or allowed that was not before.
+
+- [#266](https://github.com/tufantunc/ssh-mcp/pull/266) [`2446c3e`](https://github.com/tufantunc/ssh-mcp/commit/2446c3e0c727bd3b4f86375259f15043b0bcc6ea) Thanks [@dependabot](https://github.com/apps/dependabot)! - Require `@modelcontextprotocol/sdk` `^1.31.0` (was `^1.30.0`), so an install can no longer keep an SDK affected by GHSA-6qxp-vccf-f47h (the SDK's OAuth client could send credentials to an authorization server the MCP server chose). That SDK also brings `proxy-addr` 2.0.8, past GHSA-jqcg-44mw-7w3h. Neither is reachable through this server — it uses neither the SDK's OAuth client nor express's proxy trust, and its HTTP transport resolves client addresses itself — but a dependency scanner reports both against any install that still resolves the older versions.
+
 ## 2.19.0
 
 ### Minor Changes
