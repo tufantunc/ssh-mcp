@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { classifyCommand, nestedCommands } from '../../../src/policy/classifier.js';
 import { readAwkInvocation } from '../../../src/policy/awk.js';
+import { cpuMs } from './cpu-cost.js';
 
 /**
  * #184: an awk program can start a process or write a file while the command
@@ -295,14 +296,19 @@ describe('cost', () => {
   };
 
   /**
-   * The fastest of three timings, for the growth ratios below.
+   * The CPU cost of classifying `program`, for the growth ratios below — see `cpuMs`
+   * for why CPU time and not wall-clock time.
    *
    * Each size used to be timed once, so a single stall decided the ratio: a
    * Windows runner measured 8.2x for 4x the input against an 8x bound, where the
-   * same case measures 3.4-4.5x across repeated runs under coverage. Noise only
-   * ever adds time, so the minimum is the reading closest to the cost itself.
+   * same case measures 3.4-4.5x across repeated runs under coverage. The fastest of
+   * three wall-clock timings fixed stalls but not load: with every core busy, three
+   * runs in six still read 8.6-9.2x.
    */
-  const fastestCostMs = (program: string) => Math.min(costMs(program), costMs(program), costMs(program));
+  const fastestCostMs = (program: string) => {
+    expect(classOf(program), program.slice(0, 24)).toBe('safe');
+    return cpuMs(() => classOf(program));
+  };
 
   /**
    * Seeded with repeated `print` tokens rather than repeated spaces.

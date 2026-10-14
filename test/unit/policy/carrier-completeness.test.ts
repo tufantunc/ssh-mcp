@@ -4,6 +4,7 @@ import {
   classifyCommand, READ_ONLY_ALLOWLIST, READERS, nestedCommands, findForbiddenMatch,
 } from '../../../src/policy/classifier.js';
 import type { Profile } from '../../../src/types.js';
+import { cpuMs } from './cpu-cost.js';
 
 /**
  * GHSA-qmx6-47vm-3vf7: a binary the classifier does not recognise laundered an
@@ -29,23 +30,16 @@ const engine = new PolicyEngine(DEFAULT_RULES);
 const decide = (command: string) => engine.evaluate(command, operatorProd);
 
 /**
- * The fastest of several classifications of `command`, in milliseconds.
+ * The CPU cost of classifying `command`, in milliseconds — see `cpuMs` for why
+ * CPU time and not wall-clock time.
  *
- * The cost tests below compare two sizes, and a single sample per size let one
- * stall decide the result: on a shared macOS runner the large input once took
- * 201ms where it measures 105-124ms under coverage, and a ratio that sits at
- * about 93x crossed the 200x bound. Noise only ever adds time, so the minimum is
- * the reading closest to the cost being measured.
+ * The cost tests below compare two sizes. A single wall-clock sample per size let
+ * one stall decide the result: on a shared macOS runner the large input once took
+ * 201ms where it measures 105-124ms under coverage, and a ratio that sits at about
+ * 93x crossed the 200x bound. The fastest of five samples fixed stalls but not load:
+ * with every core busy the encoded-operand case still failed four runs out of four.
  */
-const fastestMs = (command: string, runs = 5) => {
-  let best = Infinity;
-  for (let i = 0; i < runs; i++) {
-    const started = performance.now();
-    classifyCommand(command);
-    best = Math.min(best, performance.now() - started);
-  }
-  return best;
-};
+const fastestMs = (command: string) => cpuMs(() => classifyCommand(command));
 
 describe('an unrecognised binary cannot hide a command in its operands', () => {
   it.each([

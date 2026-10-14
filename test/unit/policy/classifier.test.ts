@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { classifyCommand, extractBinary, isForbidden } from '../../../src/policy/classifier.js';
+import { cpuMs } from './cpu-cost.js';
 
 describe('classifyCommand', () => {
   it('classifies allowlisted commands as read-only', () => {
@@ -289,11 +290,11 @@ describe('forbidden pattern matching cost', () => {
    */
   it('stays linear on a command built from the pattern heads themselves', () => {
     const seed = 'dd curl wget chown -R x ';
+    // CPU time, not wall-clock time: see `cpuMs` for why, and for the load that made
+    // this ratio fail on wall-clock time.
     const cost = (bytes: number) => {
       const command = seed.repeat(Math.ceil(bytes / seed.length)).slice(0, bytes);
-      const started = process.hrtime.bigint();
-      classifyCommand(command);
-      return Number(process.hrtime.bigint() - started) / 1e6;
+      return cpuMs(() => classifyCommand(command));
     };
 
     // A ratio rather than a wall-clock bound. "Stays linear" is a claim about growth, and
