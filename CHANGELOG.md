@@ -1,5 +1,11 @@
 # ssh-mcp
 
+## 2.19.2
+
+### Patch Changes
+
+- [`40315cf`](https://github.com/tufantunc/ssh-mcp/commit/40315cf46ede8bfa93e05c579d70545122d39cbd) Thanks [@tufantunc](https://github.com/tufantunc)! - `privileged-command`: harden how the sudo password reaches sudo, and always scrub the configured sudo password from command output. The wrapped command now runs with stdin at EOF; approval prompts and audit records show `exec 0</dev/null;` inside the wrapped `sudo … sh -c` string.
+
 ## 2.19.1
 
 ### Patch Changes
