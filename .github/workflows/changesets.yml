@@ -67,7 +67,7 @@ jobs:
       # lockfile, before `npm ci` runs. Taking the npm that ships with a pinned
       # Node removes a mutable reference from the publish path rather than
       # bumping it.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.x'
 
@@ -246,7 +246,7 @@ jobs:
       # CycloneDX/SPDX output shape all come from the bundled npm, and the SBOM is
       # what gets signed. A Node image whose npm changes that output publishes a
       # differently-shaped SBOM under a valid signature, silently.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.x'
 
@@ -329,7 +329,7 @@ jobs:
           subject-path: package.tgz
           sbom-path: sbom.spdx.json
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom
           path: |
@@ -340,7 +340,7 @@ jobs:
       - name: Record the release tag for the asset job
         run: echo "$RELEASE_TAG" > release-tag.txt
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-tag
           path: release-tag.txt
@@ -372,7 +372,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: '{sbom,release-tag}'
           merge-multiple: true
@@ -455,7 +455,7 @@ jobs:
       # them touch node_modules. 24.x only to match the release job; unlike
       # there, no npm version is load-bearing here, and `engines` allows far
       # older.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.x'
 
