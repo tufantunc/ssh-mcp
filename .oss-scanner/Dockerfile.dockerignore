@@ -1,0 +1,10 @@
+# Replaces the root .dockerignore for .oss-scanner/Dockerfile only (see the
+# comment there). Keeps the tests, docs and markdown the root file drops; drops
+# only what `npm ci` rebuilds or what is local to one machine.
+node_modules
+build
+coverage
+.env*
+*.tgz
+.claude
+.opencode
