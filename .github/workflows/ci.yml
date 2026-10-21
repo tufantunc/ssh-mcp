@@ -314,12 +314,14 @@ jobs:
               --config=p/owasp-top-ten \
               --config=p/command-injection \
               --exclude=docker/alpine-sshd/Dockerfile \
-              --exclude=docker/dropbear-sshd/Dockerfile
+              --exclude=docker/dropbear-sshd/Dockerfile \
+              --exclude=.oss-scanner/Dockerfile
 
-      # Excluded above rather than suppressed globally: both are throwaway test
-      # fixtures running sshd, which has to be root to authenticate users and open
-      # shells as them, so `missing-user` is wrong for these two files and right
-      # everywhere else.
+      # Excluded above rather than suppressed globally: all three run sshd, which
+      # has to be root to authenticate users and open shells as them, so
+      # `missing-user` is wrong for these files and right everywhere else. The
+      # first two are throwaway test fixtures; .oss-scanner/Dockerfile is the
+      # OSS Scanner's image, whose agent runs as root to start those servers.
 
       - name: gitleaks
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
