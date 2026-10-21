@@ -98,7 +98,16 @@ export function registerCommandTools(
               );
             }
           },
-          wrap: (cleanCmd) => `sudo -p "" -S sh -c ${shellSingleQuote(cleanCmd)}`,
+          // `sudo -S` reads stdin only when it actually needs a password. Under
+          // NOPASSWD — or any policy that skips the prompt — the password line
+          // written for it stays in the pipe, and sudo exec's this `sh -c` with
+          // that same stdin, so a stdin-reading command could hand the password
+          // straight back (GHSA-9m75-x2ch-j4jr). Re-pointing fd 0 at /dev/null
+          // before the command runs means sudo still gets its password from the
+          // channel when it does prompt, and the command can never see it.
+          // stdin carries nothing else the command could want: the password
+          // line was the only thing ever written.
+          wrap: (cleanCmd) => `sudo -p "" -S sh -c ${shellSingleQuote(`exec 0</dev/null; ${cleanCmd}`)}`,
         },
         (rt) => {
           const sudoPassword = rt.conn.getSudoPassword();

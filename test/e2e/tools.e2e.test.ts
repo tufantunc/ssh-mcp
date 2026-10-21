@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { startE2E, e2eAvailable, textOf } from './harness.js';
+import { createConnection } from '../integration/fixtures.js';
 
 // §5 of the readiness report: exercise all 14 tools through a real MCP client
 // over a real transport against a real SSH server. This is the check that would
@@ -60,6 +61,43 @@ describe.skipIf(!available)('E2E — tool surface over stdio', () => {
     // which is the intended behaviour — stderr is not swallowed.)
     expect(textOf(res)).not.toContain('secret');
   });
+
+  it('privileged-command does not leak the sudo password when sudo does not prompt (GHSA-9m75-x2ch-j4jr)', async () => {
+    // Stage the host the way a NOPASSWD deployment looks: sudo never prompts,
+    // so `sudo -S` never reads stdin, and whatever was written for it stays in
+    // the pipe for the wrapper's `sh -c` to inherit. Provisioned over a plain
+    // SSH connection — writing /etc/sudoers through the tool layer is exactly
+    // what its policy exists to refuse.
+    const NOPASSWD_LINE = 'admin ALL=(ALL) NOPASSWD:ALL';
+    const stage = await createConnection('admin');
+    try {
+      const append = await stage.exec(
+        `sudo -p "" -S sh -c 'echo "${NOPASSWD_LINE}" >> /etc/sudoers'`,
+        { stdin: 'secret\n', timeoutMs: 10000 },
+      );
+      expect(append.exitCode).toBe(0);
+
+      // The advisory's repro: a short canary sudo password (below every
+      // entropy threshold), a stdin-reading command, a client allowed to call
+      // privileged-command. Under the old wrapper the tool result was exactly
+      // the canary.
+      const probe = await startE2E({ env: { SSH_MCP_ADMIN_SUDO_PASSWORD: 'Canary-PW-77' } });
+      try {
+        const res = await probe.callTool('privileged-command', { command: 'head -1' });
+        expect(res.isError).toBeFalsy();
+        const text = textOf(res);
+        expect(text).not.toContain('Canary-PW-77');
+        // Empty, not just scrubbed: head itself read EOF from /dev/null, so
+        // the password never reached the command at all.
+        expect(text.trim()).toBe('');
+      } finally {
+        await probe.cleanup();
+      }
+    } finally {
+      await stage.exec(`sudo -n sed -i '/^${NOPASSWD_LINE}$/d' /etc/sudoers`).catch(() => {});
+      await stage.close();
+    }
+  }, 60000);
 
   it('interactive sessions keep CWD and environment between commands', async () => {
     const opened = await e2e.callTool('open-session', { name: 'e2e-shell', type: 'interactive' });

@@ -16,14 +16,15 @@ export function textResult(text: string): ToolResult {
  * is reported as isError with the redacted stderr and the exit status, so a
  * failed remote command cannot be mistaken for an empty success.
  */
-export function commandOutput(result: CommandResult) {
+export function commandOutput(result: CommandResult, opts: { literalSecrets?: string[] } = {}) {
   // ssh2 reports exitCode null when the process died from a signal.
   const failed = result.exitCode !== 0 || Boolean(result.signal);
   // entropyScan matches the SFTP and session-output paths. Without it a plain
   // `env` dump hands high-entropy secrets straight to the model, since the
   // regex layer only knows a fixed set of token shapes.
-  const stdout = redactText(result.stdout, { entropyScan: true });
-  const stderr = redactText(result.stderr, { entropyScan: true });
+  const redactOpts = { entropyScan: true, literalSecrets: opts.literalSecrets };
+  const stdout = redactText(result.stdout, redactOpts);
+  const stderr = redactText(result.stderr, redactOpts);
 
   const parts: string[] = [];
   if (stdout) parts.push(stdout);
