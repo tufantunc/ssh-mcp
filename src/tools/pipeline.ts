@@ -368,7 +368,12 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
         onProgress: rt.onProgress,
         abortSignal: rt.abortSignal,
       });
-      return { audited, output: commandOutput(audited) };
+      // The sudo password is the one secret that can plausibly end up in this
+      // output (GHSA-9m75-x2ch-j4jr): it is written onto the very channel the
+      // command reads. Scrub it here whatever the exec path was.
+      const sudoPassword = rt.conn.getSudoPassword?.();
+      const literalSecrets = sudoPassword ? [sudoPassword] : undefined;
+      return { audited, output: commandOutput(audited, { literalSecrets }) };
     };
   }
 

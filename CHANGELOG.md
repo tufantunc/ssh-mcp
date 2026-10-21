@@ -1,5 +1,25 @@
 # ssh-mcp
 
+## 2.20.0
+
+### Minor Changes
+
+- [`dd61692`](https://github.com/tufantunc/ssh-mcp/commit/dd61692884d04d661083484a45c74d7b31bcd883) Thanks [@tufantunc](https://github.com/tufantunc)! - `fix(policy)`: the command classifier recognises additional exec carriers and privilege brokers. A command that relied on the previous default may now prompt for approval, or be refused outright under a profile that does not grant the class it earns.
+
+### Security
+
+- Fixed [GHSA-cm4c-4q74-mgmj](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-cm4c-4q74-mgmj): common exec carriers — `sqlite3` `.shell`/`.system`, `tar --checkpoint-action=exec=…`, `gdb -ex`/`--eval-command`, `expect -c`, the vi family's `-c`/`--cmd`, `make`, `ssh host cmd` — and the privilege brokers `docker run --privileged`, `docker exec -u 0`, `systemd-run --uid=0` and `nsenter -t` classified `safe`, the one class that never reaches the approval gate, so a role limited to safe commands could run any of them — root included — with no approval and no role check. Each now classifies `destructive` or `privileged`, across the flag long forms, attached and `user:group` values, subcommand synonyms, option abbreviations, detached values, wrapper prefixes and Windows `.exe`/case spellings the review round measured. Reported by @NotAFlightRisk. Affected: `<= 2.19.2`.
+
+## 2.19.2
+
+### Patch Changes
+
+- [`40315cf`](https://github.com/tufantunc/ssh-mcp/commit/40315cf46ede8bfa93e05c579d70545122d39cbd) Thanks [@tufantunc](https://github.com/tufantunc)! - `privileged-command`: harden how the sudo password reaches sudo, and always scrub the configured sudo password from command output. The wrapped command now runs with stdin at EOF; approval prompts and audit records show `exec 0</dev/null;` inside the wrapped `sudo … sh -c` string.
+
+### Security
+
+- Fixed [GHSA-9m75-x2ch-j4jr](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-9m75-x2ch-j4jr): `privileged-command` could leave the sudo password readable by the wrapped command when sudo did not prompt (e.g. NOPASSWD); the command's stdin is now /dev/null and the configured sudo password is always scrubbed from output. Reported by @shinjiyu. Affected: `<= 2.19.1`.
+
 ## 2.19.1
 
 ### Patch Changes
