@@ -1,5 +1,11 @@
 # ssh-mcp
 
+## 2.20.0
+
+### Minor Changes
+
+- [`dd61692`](https://github.com/tufantunc/ssh-mcp/commit/dd61692884d04d661083484a45c74d7b31bcd883) Thanks [@tufantunc](https://github.com/tufantunc)! - `fix(policy)`: the command classifier recognises additional exec carriers and privilege brokers. A command that relied on the previous default may now prompt for approval, or be refused outright under a profile that does not grant the class it earns.
+
 ## 2.19.2
 
 ### Patch Changes
