@@ -4,7 +4,7 @@ import {
   extractBinary,
   findForbiddenMatch,
 } from '../../../src/policy/classifier.js';
-import { cpuMs } from './cpu-cost.js';
+import { growthRatio } from './cpu-cost.js';
 
 /**
  * GHSA-qvx5-rxrj-9vfh, part 1: the classifier read the command as sent, but the transport
@@ -300,16 +300,15 @@ describe('reading a carrier does not become a way to stall the server', () => {
   });
 
   it('and stays linear as the count grows', () => {
-    // CPU time, not wall-clock time: see `cpuMs` for why, and for the load that made
-    // this ratio fail on wall-clock time.
-    const cost = (n: number) => {
-      const command = `${'-ok '.repeat(n)}x`;
-      return cpuMs(() => classifyCommand(command));
-    };
+    // CPU time read in interleaved pairs: see `cpuMs` for the load that made this
+    // ratio fail on wall-clock time, and `growthRatio` for the change of core speed
+    // that made a sibling fail on CPU time.
+    const small = `${'-ok '.repeat(100)}x`;
+    const large = `${'-ok '.repeat(200)}x`;
     // Linear means doubling the tokens roughly doubles the cost. The broken form
     // quadrupled it, so anything under 8x is a wide berth that does not depend on how
     // fast the runner is.
-    expect(cost(200) / Math.max(cost(100), 0.01)).toBeLessThan(8);
+    expect(growthRatio(() => classifyCommand(small), () => classifyCommand(large))).toBeLessThan(8);
   });
 });
 
