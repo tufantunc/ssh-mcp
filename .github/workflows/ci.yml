@@ -266,13 +266,26 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: echo "$NEEDS"
-      # One expression over `needs.*`, so adding a job to `needs` above covers it
-      # by construction. Three explicit comparisons was the first shape, and it
-      # made the gate's correctness depend on three lists staying in step — the
-      # same failure mode one level up from the one this job exists to prevent.
-      - name: Fail if any job did not succeed
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
-        run: exit 1
+      # An allow-list: anything but `success` fails. This step used to name the
+      # results that fail (`failure`, `cancelled`, `skipped`), and on 2026-10-21 a
+      # macos job that never got a runner came back `abandoned`, which that list
+      # did not name, so the gate reported green with macOS untested. A result
+      # GitHub adds later now fails by default instead of passing by default.
+      #
+      # One expression over every entry of `needs`, so adding a job to `needs`
+      # above covers it by construction. Three explicit comparisons was the first
+      # shape, and it made the gate's correctness depend on three lists staying in
+      # step — the same failure mode one level up from the one this job prevents.
+      - name: Fail unless every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          bad=$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success") | "\(.key): \(.value.result)"')
+          if [ -n "$bad" ]; then
+            echo "::error::not every job succeeded:"
+            echo "$bad"
+            exit 1
+          fi
 
   security-scan:
     runs-on: ubuntu-latest
