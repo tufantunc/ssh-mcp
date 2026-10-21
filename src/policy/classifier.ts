@@ -764,6 +764,20 @@ const INTERPRETERS: Record<string, InterpreterSpec> = Object.assign(
   deno: { programBearingWords: ['eval'], readable: false },
   pwsh: { programBearingWords: ['-c', '-Command', '-e', '-EncodedCommand'], readable: false },
   powershell: { programBearingWords: ['-c', '-Command', '-e', '-EncodedCommand'], readable: false },
+  // The same gap as the osascript/lua block above, measured on 2.19.1
+  // (GHSA-cm4c-4q74-mgmj): `gdb -ex`, `expect -c` and `vi/vim/ex -c` each
+  // hand a program to an executor and each classified `safe` — the one class
+  // that never reaches the approval gate. `readable: false` throughout: the
+  // program is gdb command language / expect / ex, not shell text, so its
+  // presence is what counts, exactly like python's `-c`.
+  gdb: { programBearingWords: ['-ex', '--eval-command', '-iex', '--init-eval-command'], readable: false },
+  expect: { programBearingWords: ['-c'], readable: false },
+  vi: { programBearingWords: ['-c', '--cmd'], readable: false },
+  vim: { programBearingWords: ['-c', '--cmd'], readable: false },
+  ex: { programBearingWords: ['-c', '--cmd'], readable: false },
+  view: { programBearingWords: ['-c', '--cmd'], readable: false },
+  gvim: { programBearingWords: ['-c', '--cmd'], readable: false },
+  vimdiff: { programBearingWords: ['-c', '--cmd'], readable: false },
   },
 );
 
@@ -1230,6 +1244,16 @@ export function nestedCommands(command: string, speculativeOperands = true, dial
       // `-ok` tokens in 81 bytes cost 17 seconds of a single-threaded event loop.
       i = stop === -1 ? words.length : i + 1 + stop;
     }
+
+    // Two carriers whose program is embedded inside a single word, as shell
+    // text this file can read, so the carried command is classified as itself
+    // (GHSA-cm4c-4q74-mgmj). The speculative-operand catch-all above cannot
+    // see either one: a `--checkpoint-action=exec=…` word starts with `-`, and
+    // the sqlite3 dot-command is only ever one word to begin with. Both
+    // helpers are head-gated, so an operand that merely mentions the spelling
+    // carries nothing.
+    found.push(...tarCheckpointExecPrograms(words));
+    found.push(...sqliteShellPrograms(words));
   }
 
   // A pipe stage whose command word is an interpreter with no program of its own runs
@@ -1272,6 +1296,11 @@ const EXEC_WRAPPERS = new Set([
   'timeout', 'chrt', 'taskset', 'xargs', 'watch',
   // `busybox <applet>` runs the applet, so it wraps rather than interprets.
   'busybox',
+  // Review round (GHSA-cm4c-4q74-mgmj): each of these runs the command it
+  // wraps, and being absent here hid every head-keyed gate behind it —
+  // `strace docker run --privileged …` and `flock make …` classified `safe`.
+  // Also closes the pre-existing `strace sudo id` hole the same way.
+  'strace', 'ltrace', 'valgrind', 'flock', 'chroot', 'perf', 'time',
 ]);
 
 /**
@@ -1494,6 +1523,191 @@ function elevatedBinary(words: string[]): string | null {
 function elevatedBinaryOf(command: string, dialect: ShellDialect = 'posix'): string | null {
   for (const words of tokenizeSegments(command, dialect)) {
     const found = elevatedBinary(words);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+/**
+ * sqlite3 dot-commands that hand the rest of their line to `/bin/sh`, and the
+ * shell text they hand over. `.shell id` only executes as ONE argv word — as
+ * two words sqlite reads `.shell` with no argument and errors — so matching
+ * the embedded form is not a shortcut, it is the whole surface
+ * (GHSA-cm4c-4q74-mgmj).
+ */
+const SQLITE_SHELL_DOT_COMMAND = /^\.(?:shell|system)\s+(\S.*)$/;
+
+/**
+ * Fold a command word for the head-keyed carrier and broker tables below:
+ * strip a Windows executable suffix and fold case, the same normalization
+ * `resolveInterpreter` applies for the interpreter table. This server
+ * advertises Windows hosts, where the same binary arrives as `ssh.exe` or
+ * `Docker`, and a head-keyed table that does not fold is keyed on a spelling
+ * the target may never use — measured in the review round: every gate below
+ * was bypassable with an `.exe` spelling.
+ */
+function foldCommandWord(word: string): string {
+  return word.replace(WINDOWS_EXE_SUFFIX, '').toLowerCase();
+}
+
+/** The segment's command word, folded for the tables below, or null. */
+function foldedHeadOf(words: string[]): string | null {
+  const idx = effectiveCommandIndex(words);
+  return idx === -1 ? null : foldCommandWord(stripPath(unquote(words[idx])));
+}
+
+function sqliteShellPrograms(words: string[]): string[] {
+  if (foldedHeadOf(words) !== 'sqlite3') return [];
+  const programs: string[] = [];
+  for (let i = effectiveCommandIndex(words) + 1; i < words.length; i++) {
+    const match = SQLITE_SHELL_DOT_COMMAND.exec(words[i]);
+    if (match) programs.push(match[1]);
+  }
+  return programs;
+}
+
+/**
+ * GNU tar's `--checkpoint-action=exec=…` hands its value to `sh -c` at every
+ * checkpoint. All three spellings fire (GHSA-cm4c-4q74-mgmj, review round):
+ * attached with any unambiguous `getopt_long` prefix of the option —
+ * `--checkpoint-a` is where it diverges from `--checkpoint`, and the loose
+ * `[a-z-]*` tail over-accepts abbreviations real tar would refuse, which only
+ * classifies a command that cannot run — and detached, the value as the next
+ * argv word, which tar 1.34 measured executing. Head-gated like
+ * `sqliteShellPrograms`, so an `echo` of the flag text is a mention
+ * (the `grep -e`/`echo` false positives of the review round).
+ */
+const TAR_CHECKPOINT_FLAG = /^--checkpoint-a[a-z-]*$/;
+const TAR_CHECKPOINT_EXEC_ATTACHED = /^--checkpoint-a[a-z-]*=exec=(.+)$/;
+const TAR_CHECKPOINT_ACTION_EXEC = /^exec=(.+)$/;
+
+function tarCheckpointExecPrograms(words: string[]): string[] {
+  if (foldedHeadOf(words) !== 'tar') return [];
+  const start = effectiveCommandIndex(words) + 1;
+  const programs: string[] = [];
+  for (let i = start; i < words.length; i++) {
+    const attached = TAR_CHECKPOINT_EXEC_ATTACHED.exec(words[i]);
+    if (attached) {
+      programs.push(attached[1]);
+      continue;
+    }
+    if (TAR_CHECKPOINT_FLAG.test(words[i])) {
+      const detached = TAR_CHECKPOINT_ACTION_EXEC.exec(words[i + 1] ?? '');
+      if (detached) programs.push(detached[1]);
+    }
+  }
+  return programs;
+}
+
+/**
+ * Builders whose every invocation runs recipes — shell commands read from a
+ * file this classifier never sees. `make deploy` is as arbitrary as
+ * `sh -c '…'`; the Makefile is simply elsewhere (GHSA-cm4c-4q74-mgmj).
+ */
+const RECIPE_RUNNERS = new Set(['make', 'gmake']);
+
+/** Root user spellings, with or without docker's `user[:group]` suffix. */
+const ROOT_USERS = new Set(['0', 'root']);
+
+/** `0`, `root`, `0:0`, `root:root` — uid 0 however the CLI spells it. */
+function isRootUserValue(value: string): boolean {
+  return ROOT_USERS.has(value.split(':')[0]);
+}
+
+/** Docker's own global flags that consume the next word, before the subcommand. */
+const DOCKER_GLOBAL_VALUE_FLAGS = new Set(['-H', '--host', '--context', '--config', '--log-level', '-l']);
+
+/** `--privileged`, `--privileged=true`, `--privileged=1` — and not `=false`/`=0`. */
+function isPrivilegedFlag(word: string): boolean {
+  if (word === '--privileged') return true;
+  const value = word.slice('--privileged='.length);
+  return word.startsWith('--privileged=') && (value === 'true' || value === '1');
+}
+
+/**
+ * The privilege brokers: binaries that reach root by their own design, at
+ * their own flag, rather than by carrying another command the way `sudo`
+ * does. `docker run --privileged` and `docker exec -u 0` are uid 0 in the
+ * container, `systemd-run --uid=0` runs the unit as root (and `-p User=root`
+ * is the property spelling of the same choice), and `nsenter -t` runs inside
+ * another process's namespaces — pid 1's are the host's, and text cannot
+ * tell which target an operand names. The `runuser`/`setpriv` answer:
+ * `privileged` (GHSA-cm4c-4q74-mgmj).
+ *
+ * Scoped to the root spellings. Plain `docker run img cmd` and
+ * `docker exec ctr cmd` still run as the image's default user — gating every
+ * container command is a policy decision this fix does not make for the
+ * operator's everyday `docker run -e FOO=bar img`.
+ */
+function brokeredElevation(words: string[]): string | null {
+  const head = foldedHeadOf(words);
+  if (head === null) return null;
+  const args = words.slice(effectiveCommandIndex(words) + 1);
+
+  if (head === 'docker') {
+    // Global flags first — an operator aiming at a remote daemon writes
+    // `-H tcp://…` or `--context prod` before the subcommand.
+    let i = 0;
+    while (i < args.length && args[i].startsWith('-')) {
+      i += DOCKER_GLOBAL_VALUE_FLAGS.has(args[i]) ? 2 : 1;
+    }
+    let sub = args[i];
+    let rest = args.slice(i + 1);
+    // `docker container run|exec` is the same subcommand spelled in two words.
+    if (sub === 'container') {
+      sub = rest[0];
+      rest = rest.slice(1);
+    }
+    if (sub !== 'run' && sub !== 'exec') return null;
+
+    // Deliberately not stopped at the image/container operand: docker's own
+    // value-taking flags (`-e VAR=x`) make that boundary unparseable without
+    // docker's full option table, and a `--user=root` in the container's argv
+    // still names root-seeking behaviour inside it. Over-classifying reaches
+    // an approval prompt; under-classifying reaches none.
+    for (let j = 0; j < rest.length; j++) {
+      const word = rest[j];
+      if (isPrivilegedFlag(word)) return 'docker';
+      if ((word === '-u' || word === '--user') && isRootUserValue(rest[j + 1] ?? '')) return 'docker';
+      if (word.startsWith('--user=') && isRootUserValue(word.slice('--user='.length))) return 'docker';
+      // `-u0`, `-u=0`: the value glued to the shorthand, as pflag allows.
+      if (/^-u=?.+/.test(word) && word !== '-u' && isRootUserValue(word.replace(/^-u=?/, ''))) return 'docker';
+    }
+    return null;
+  }
+
+  if (head === 'systemd-run') {
+    for (let j = 0; j < args.length; j++) {
+      const word = args[j];
+      if (word === '--uid' && isRootUserValue(args[j + 1] ?? '')) return 'systemd-run';
+      if (word.startsWith('--uid=') && isRootUserValue(word.slice('--uid='.length))) return 'systemd-run';
+      const property = word === '-p' || word === '--property'
+        ? args[j + 1] ?? ''
+        : word.startsWith('--property=') ? word.slice('--property='.length) : null;
+      if (property !== null) {
+        const user = /^User=(.+)$/i.exec(property);
+        if (user && isRootUserValue(user[1])) return 'systemd-run';
+      }
+    }
+    return null;
+  }
+
+  if (head === 'nsenter') {
+    for (let j = 0; j < args.length; j++) {
+      const word = args[j];
+      if ((word === '-t' || word === '--target') && args[j + 1] !== undefined) return 'nsenter';
+      // getopt allows the pid attached to the short flag: `-t1`.
+      if (/^-t\d/.test(word) || (word.startsWith('--target=') && word.length > '--target='.length)) return 'nsenter';
+    }
+    return null;
+  }
+
+  return null;
+}
+
+function brokeredElevationOf(command: string, dialect: ShellDialect = 'posix'): string | null {
+  for (const words of tokenizeSegments(command, dialect)) {
+    const found = brokeredElevation(words);
     if (found !== null) return found;
   }
   return null;
@@ -2365,6 +2579,28 @@ function hasUnreadableProgram(command: string, dialect: ShellDialect = 'posix'):
     const { words, sep } = segments[i];
     if (sep === '|' && readsProgramFromStdin(words)) return true;
 
+    // Carriers whose program is not on this command line at all, or is
+    // written for a shell on another host (GHSA-cm4c-4q74-mgmj). All three
+    // are "we cannot tell", the `awk -f progfile` answer, so `destructive`:
+    //  - `make`/`gmake` run recipes from a file this classifier never sees;
+    //  - `ssh` hands its operands to a login shell elsewhere — any non-flag
+    //    word means execution this text cannot read. A separated flag value
+    //    (`ssh -p 2222` with no destination) counts too, which only moves an
+    //    unrunnable fragment to `destructive`: every runnable ssh carries a
+    //    destination that counts anyway;
+    //  - `sqlite3` with a `.shell`/`.system` dot-command and `tar` with a
+    //    checkpoint `exec=` action spawn a shell for text the helpers emit
+    //    into `nestedCommands`, which is what puts an inner elevation above
+    //    `destructive`.
+    const cmdIdx = effectiveCommandIndex(words);
+    if (cmdIdx !== -1) {
+      const head = foldCommandWord(stripPath(unquote(words[cmdIdx])));
+      const operands = words.slice(cmdIdx + 1);
+      if (RECIPE_RUNNERS.has(head)) return true;
+      if (head === 'ssh' && operands.some((w) => !w.startsWith('-'))) return true;
+    }
+    if (sqliteShellPrograms(words).length > 0 || tarCheckpointExecPrograms(words).length > 0) return true;
+
     if (!operandsAreData(words)) {
       for (let j = 0; j < words.length; j++) {
         const spec = resolveInterpreter(stripPath(unquote(words[j])));
@@ -2534,6 +2770,15 @@ function classifyOuter(trimmed: string, dialect: ShellDialect): ParsedCommand {
   const elevated = elevatedBinaryOf(trimmed, dialect);
   if (elevated !== null) {
     return { binary: elevated, fullCommand, class: 'privileged' as CommandClass };
+  }
+
+  // Checked beside the elevation it matches in authority but not in shape:
+  // a broker needs no `sudo` in front of it, so `elevatedBinaryOf` never
+  // fires, and the brokers each classified `safe` — the class no approval
+  // gate ever sees (GHSA-cm4c-4q74-mgmj).
+  const broker = brokeredElevationOf(trimmed, dialect);
+  if (broker !== null) {
+    return { binary: broker, fullCommand, class: 'privileged' as CommandClass };
   }
 
   if (hasUnreadableProgram(trimmed, dialect) || hasDangerousAwk(trimmed, dialect)
