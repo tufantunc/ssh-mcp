@@ -1,3 +1,4 @@
+---
 "ssh-mcp": patch
 ---
 
