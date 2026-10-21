@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { classifyCommand, extractBinary, isForbidden } from '../../../src/policy/classifier.js';
-import { cpuMs } from './cpu-cost.js';
+import { growthRatio } from './cpu-cost.js';
 
 describe('classifyCommand', () => {
   it('classifies allowlisted commands as read-only', () => {
@@ -290,12 +290,12 @@ describe('forbidden pattern matching cost', () => {
    */
   it('stays linear on a command built from the pattern heads themselves', () => {
     const seed = 'dd curl wget chown -R x ';
-    // CPU time, not wall-clock time: see `cpuMs` for why, and for the load that made
-    // this ratio fail on wall-clock time.
-    const cost = (bytes: number) => {
-      const command = seed.repeat(Math.ceil(bytes / seed.length)).slice(0, bytes);
-      return cpuMs(() => classifyCommand(command));
-    };
+    // CPU time read in interleaved pairs: see `cpuMs` for the load that made this
+    // ratio fail on wall-clock time, and `growthRatio` for the change of core speed
+    // that made a sibling fail on CPU time.
+    const command = (bytes: number) => seed.repeat(Math.ceil(bytes / seed.length)).slice(0, bytes);
+    const small = command(50_000);
+    const large = command(200_000);
 
     // A ratio rather than a wall-clock bound. "Stays linear" is a claim about growth, and
     // an absolute budget measures the runner: this asserted 1000 ms against ~460 ms
@@ -309,7 +309,7 @@ describe('forbidden pattern matching cost', () => {
     // traded a failed assertion for a test timeout. CI measured ~8x this machine, so the
     // explicit timeout is what stops a slow runner turning a passing assertion into a
     // timeout again. Absolute cost at size is covered by the 200k-character cases above.
-    const ratio = cost(200_000) / Math.max(cost(50_000), 0.01);
+    const ratio = growthRatio(() => classifyCommand(small), () => classifyCommand(large));
     expect(ratio).toBeLessThan(8);
   }, 30_000);
 });

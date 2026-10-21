@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { classifyCommand, nestedCommands } from '../../../src/policy/classifier.js';
 import { readAwkInvocation } from '../../../src/policy/awk.js';
-import { cpuMs } from './cpu-cost.js';
+import { growthRatio } from './cpu-cost.js';
 
 /**
  * #184: an awk program can start a process or write a file while the command
@@ -296,21 +296,6 @@ describe('cost', () => {
   };
 
   /**
-   * The CPU cost of classifying `program`, for the growth ratios below — see `cpuMs`
-   * for why CPU time and not wall-clock time.
-   *
-   * Each size used to be timed once, so a single stall decided the ratio: a
-   * Windows runner measured 8.2x for 4x the input against an 8x bound, where the
-   * same case measures 3.4-4.5x across repeated runs under coverage. The fastest of
-   * three wall-clock timings fixed stalls but not load: with every core busy, three
-   * runs in six still read 8.6-9.2x.
-   */
-  const fastestCostMs = (program: string) => {
-    expect(classOf(program), program.slice(0, 24)).toBe('safe');
-    return cpuMs(() => classOf(program));
-  };
-
-  /**
    * Seeded with repeated `print` tokens rather than repeated spaces.
    *
    * An earlier attempt replaced a bounded `[^;{}>]{0,200}` with an unbounded
@@ -336,6 +321,14 @@ describe('cost', () => {
    * check it: the previous version of this test timed one input size and called
    * that linearity. Quadrupling the input should roughly quadruple the cost; the
    * quadratic shape this guards against grew sixteen-fold.
+   *
+   * Measured with `growthRatio`, which says why in full. Each size used to be timed
+   * once, so a single stall decided the ratio: a Windows runner measured 8.2x
+   * against the 8x bound, where the same case measures 3.4-4.5x under coverage. The
+   * fastest of three wall-clock timings fixed stalls but not load: with every core
+   * busy, three runs in six still read 8.6-9.2x. CPU time fixed load but not a
+   * change of core speed between the two sizes: a macOS runner read 8.2x on the
+   * string literals.
    */
   it.each([
     ['repeated print statements', (n: number) => `awk '{${'print $1;'.repeat(Math.ceil(n / 9))}}'`],
@@ -343,13 +336,17 @@ describe('cost', () => {
     ['many string literals', (n: number) => `awk '{print ${'"aaaaaaaa" '.repeat(Math.ceil(n / 11))}}'`],
     ['punctuation that matches no operator', (n: number) => `awk '{x = ${'?:,~'.repeat(Math.ceil(n / 4))} 1}'`],
   ])('stays linear on %s', (_label, build) => {
-    // 50KB and 200KB, both under the 256KB refusal bound so the lexer actually
-    // runs. Max(…, 0.01) because a fast small case can measure as zero.
-    const small = Math.max(fastestCostMs(build(50_000)), 0.01);
-    const large = fastestCostMs(build(200_000));
-    expect(large / small, `4x the input cost ${(large / small).toFixed(1)}x the time`)
-      .toBeLessThan(8);
-  });
+    // 50KB and 200KB, both under the 256KB refusal bound so the lexer actually runs.
+    const small = build(50_000);
+    const large = build(200_000);
+    expect(classOf(small), small.slice(0, 24)).toBe('safe');
+    expect(classOf(large), large.slice(0, 24)).toBe('safe');
+    const ratio = growthRatio(() => classOf(small), () => classOf(large));
+    expect(ratio, `4x the input cost ${ratio.toFixed(1)}x the time`).toBeLessThan(8);
+    // Five pairs cost about 1.75x the old three-and-three under coverage, where each
+    // classification outlasts the 50ms reading floor, and CI's coverage jobs already
+    // took up to 3.0s here: past the 5s default, a slow runner would time out.
+  }, 30_000);
 });
 
 /**
