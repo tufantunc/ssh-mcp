@@ -1,5 +1,13 @@
 # ssh-mcp
 
+## 2.20.1
+
+### Patch Changes
+
+- [#275](https://github.com/tufantunc/ssh-mcp/pull/275) [`d47a335`](https://github.com/tufantunc/ssh-mcp/commit/d47a335215bc493667585b54fc11c967dbc6e435) Thanks [@dependabot](https://github.com/apps/dependabot)! - Allow `@napi-rs/keyring` 2 (`^2.1.1`, was `^1.1.0`) for `auth = "keychain"` profiles. Its one breaking change is how a store failure is reported: a locked or inaccessible keychain used to read as "no entry" and now raises an error. This server already caught that error, so the outcome is the same — the lookup fails and the remaining credential sources are tried — except that the failure is now logged (`Keychain lookup failed …`) instead of passing silently.
+
+- [#274](https://github.com/tufantunc/ssh-mcp/pull/274) [`6fd0f53`](https://github.com/tufantunc/ssh-mcp/commit/6fd0f532b907d086f586687d085854980c462c6a) Thanks [@dependabot](https://github.com/apps/dependabot)! - Require `@modelcontextprotocol/sdk` `^1.32.1` (was `^1.31.0`), so an install can no longer keep an SDK affected by GHSA-46jr-4wx8-v453 (one HTTP request could exhaust server memory while it was validated). Over this server's HTTP transport that request is only accepted after the bearer token check, and the body is capped at 1 MiB, so it takes a token holder to send it. The same SDK release also fixes GHSA-rvq5-wwqv-78pq, GHSA-22jm-h49p-29qw and GHSA-6prh-2h8m-c8cw, none of which this server reaches: it checks its own bearer token rather than using the SDK's `requireBearerAuth()`, passes no `taskStore`, and uses no SDK client transport. A dependency scanner still reports all four against any install that resolves an older SDK.
+
 ## 2.20.0
 
 ### Minor Changes
