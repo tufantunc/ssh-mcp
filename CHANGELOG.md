@@ -6,6 +6,10 @@
 
 - [`40315cf`](https://github.com/tufantunc/ssh-mcp/commit/40315cf46ede8bfa93e05c579d70545122d39cbd) Thanks [@tufantunc](https://github.com/tufantunc)! - `privileged-command`: harden how the sudo password reaches sudo, and always scrub the configured sudo password from command output. The wrapped command now runs with stdin at EOF; approval prompts and audit records show `exec 0</dev/null;` inside the wrapped `sudo … sh -c` string.
 
+### Security
+
+- Fixed [GHSA-9m75-x2ch-j4jr](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-9m75-x2ch-j4jr): `privileged-command` could leave the sudo password readable by the wrapped command when sudo did not prompt (e.g. NOPASSWD); the command's stdin is now /dev/null and the configured sudo password is always scrubbed from output. Reported by @shinjiyu. Affected: `<= 2.19.1`.
+
 ## 2.19.1
 
 ### Patch Changes
