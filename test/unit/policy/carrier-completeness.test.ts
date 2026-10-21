@@ -74,7 +74,11 @@ describe('an unrecognised binary cannot hide a command in its operands', () => {
   it('leaves the commands an operator runs all day alone', () => {
     for (const [command, expected] of [
       ['kubectl get pods', 'safe'],
-      ['make deploy', 'safe'],
+      // `make` itself was this list's example until GHSA-cm4c-4q74-mgmj: its
+      // recipes are shell commands this classifier never sees, so every make
+      // invocation is destructive now. A single-word operand still carries
+      // nothing — that is what this row pins — so another builder stands in.
+      ['cargo build', 'safe'],
       ['docker run -e FOO=bar img', 'safe'],
       ['terraform apply', 'safe'],
       ["grep 'sudo' /var/log/auth.log", 'read-only'],

@@ -34,6 +34,18 @@ function shannonEntropy(str: string): number {
 export interface RedactOptions {
   entropyScan?: boolean;
   entropyThreshold?: number;
+  /**
+   * Secret values to scrub verbatim — the profile's sudo password, whose only
+   * distinctive feature is that we know it. It is neither token-shaped nor
+   * reliably high-entropy, so neither the pattern nor the entropy layer can
+   * catch it (GHSA-9m75-x2ch-j4jr).
+   *
+   * Values shorter than 4 characters are ignored: scrubbing, say, a 2-character
+   * password would replace that substring everywhere in ordinary output. The
+   * exec wrapper that keeps such values out of command output in the first
+   * place is the primary layer; this is defense in depth.
+   */
+  literalSecrets?: string[];
 }
 
 export function redactText(text: string, opts: RedactOptions = {}): string {
@@ -53,6 +65,12 @@ export function redactText(text: string, opts: RedactOptions = {}): string {
       }
       return match;
     });
+  }
+
+  for (const secret of opts.literalSecrets ?? []) {
+    if (secret && secret.length >= 4) {
+      result = result.split(secret).join(`[REDACTED:secret:${secret.length}]`);
+    }
   }
 
   return result;

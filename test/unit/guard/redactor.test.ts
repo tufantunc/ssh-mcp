@@ -100,3 +100,25 @@ describe('redactRecord', () => {
     expect(result.signingKey).toBe('[REDACTED]');
   });
 });
+
+describe('literal secrets (GHSA-9m75-x2ch-j4jr)', () => {
+  it('masks a configured secret verbatim regardless of length or entropy', () => {
+    // Short, low-entropy, no token shape: nothing else in the redactor could
+    // catch it, which is exactly how the sudo password leaked.
+    const result = redactText('leak: Canary-PW-77\n', { literalSecrets: ['Canary-PW-77'] });
+    expect(result).toBe('leak: [REDACTED:secret:12]\n');
+  });
+
+  it('masks every occurrence, in stdout-sized text', () => {
+    const result = redactText('a sudo-secret b sudo-secret c', { literalSecrets: ['sudo-secret'] });
+    expect(result).toBe('a [REDACTED:secret:11] b [REDACTED:secret:11] c');
+  });
+
+  it('ignores values too short to scrub safely', () => {
+    // A 1–3 character "secret" would shred ordinary output — every line
+    // containing the letter it happens to be. The wrapper, not the redactor,
+    // is the layer that keeps such values out of output.
+    const result = redactText('cat dog', { literalSecrets: ['dog', 'a', ''] });
+    expect(result).toBe('cat dog');
+  });
+});

@@ -1,7 +1,7 @@
 {
   "name": "ssh-mcp",
   "license": "MIT",
-  "version": "2.19.1",
+  "version": "2.20.0",
   "description": "MCP server exposing policy-gated, audited SSH access for Linux and Windows hosts via the Model Context Protocol.",
   "mcpName": "io.github.tufantunc/ssh-mcp",
   "type": "module",
@@ -27,11 +27,11 @@
     "build"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@opentelemetry/api": "^1.9.1",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.223.0",
     "@opentelemetry/resources": "^2.9.0",
-    "@opentelemetry/sdk-node": "^0.222.0",
+    "@opentelemetry/sdk-node": "^0.223.0",
     "@opentelemetry/semantic-conventions": "^1.43.0",
     "smol-toml": "^1.7.1",
     "ssh2": "^1.17.0",
