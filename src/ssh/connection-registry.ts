@@ -223,6 +223,9 @@ export class ConnectionRegistry {
       const conn = this.connections.get(name);
       if (!conn) continue;
       this.connections.delete(name);
+      // Terminal from here on: a tool call that resolved it before the swap must not be
+      // able to redial it with the old profile before the reloader gets to close it.
+      conn.retire();
       toClose.push({ conn, profile: name, reason });
     }
 

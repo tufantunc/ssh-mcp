@@ -117,6 +117,11 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
         // A live grant from an earlier explicit approval of this exact command.
         if (grants.has(conn.profile.name, command, evaluation.commandClass)) {
           span.setAttribute('policy.grant', 'reused');
+          if (registry.generation !== genAtEval) {
+            // The grant is current, but the evaluation that led here is not.
+            const recheck = await recheckAfterReload(conn, command, toolName, resource, evaluation, 'decision');
+            return { conn, evaluation: recheck.evaluation, approver: undefined };
+          }
           return { conn, evaluation, approver: 'jit-grant' };
         }
 
@@ -136,7 +141,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
         // the one current when it is written: a reload landing in between then leaves a
         // grant that never counts.
         if (registry.generation !== genAtEval) {
-          const recheck = await recheckAfterReload(conn, command, toolName, resource, evaluation);
+          const recheck = await recheckAfterReload(conn, command, toolName, resource, evaluation, 'approval');
           grants.record(conn.profile.name, command, evaluation.commandClass, { generation: recheck.generation });
           return { conn, evaluation: recheck.evaluation, approver: approval.approver };
         }
@@ -144,6 +149,10 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
         return { conn, evaluation, approver: approval.approver };
       }
 
+      if (registry.generation !== genAtEval) {
+        const recheck = await recheckAfterReload(conn, command, toolName, resource, evaluation, 'decision');
+        return { conn, evaluation: recheck.evaluation, approver: undefined };
+      }
       return { conn, evaluation, approver: undefined };
     } finally {
       span.end();
@@ -151,49 +160,63 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
   }
 
   /**
-   * The config was reloaded while a human was deciding. Their approval was of a command
-   * under the old rules, so it stands only if the new rules would still have put this
-   * same decision to them: the command still runs on the same connection, and the new
-   * evaluation — against the profile as swapped in and the rules as replaced — is
-   * `allow` or `require-approval` for the class they approved.
+   * The config was reloaded after the decision in hand was made: while the connection was
+   * resolved or the policy evaluated (`'decision'`), or while a human was deciding
+   * (`'approval'`). The decision was made under the old rules, so it stands only if the
+   * command still runs on the same connection, and the new evaluation, against the
+   * profile as swapped in and the rules as replaced, would lead to the same thing:
+   *
+   * - after an approval, `allow`, or `require-approval` again, for the class the human
+   *   approved: the new rules would still have put this same decision to them;
+   * - after an `allow` or a reused grant, `allow` for the same class. A decision nobody
+   *   was asked about is not carried over to rules that would now ask, or refuse.
    *
    * Anything else refuses with `config-reloaded` rather than prompting again: a second
    * prompt for a call already in flight is a surprise, and a retry asks under the new
    * rules from the start. Returns the new evaluation, which is what the audit records,
-   * and the generation it was checked under, which is what the grant is tagged with.
+   * and the generation it was checked under, which is what a grant is tagged with.
    */
   async function recheckAfterReload(
     conn: Awaited<ReturnType<typeof resolveConn>>,
     command: string,
     toolName: string,
     resource: PolicyResource,
-    approved: PolicyEvaluation,
+    decided: PolicyEvaluation,
+    after: 'approval' | 'decision',
   ): Promise<{ evaluation: PolicyEvaluation; generation: number }> {
     const refuse = (): never => {
       throw new PolicyRefusedError(
-        'CONFIG_RELOADED: The configuration was reloaded while this command awaited approval, ' +
-        'and the approval does not carry over to the new rules; retry the call.',
+        after === 'approval'
+          ? 'CONFIG_RELOADED: The configuration was reloaded while this command awaited approval, ' +
+            'and the approval does not carry over to the new rules; retry the call.'
+          : 'CONFIG_RELOADED: The configuration was reloaded while this command was being checked, ' +
+            'and the decision does not carry over to the new rules; retry the call.',
         {
-          ...approved,
+          ...decided,
           decision: 'deny',
           ruleId: 'config-reloaded',
-          // Fixed: the approved evaluation's reason may quote the old config.
-          reason: 'The configuration was reloaded while waiting for approval; the command was not run.',
+          // Fixed: the decided evaluation's reason may quote the old config.
+          reason: after === 'approval'
+            ? 'The configuration was reloaded while waiting for approval; the command was not run.'
+            : 'The configuration was reloaded while the command was being checked; the command was not run.',
         },
       );
     };
 
     // Still stored means applyConfig swapped its profile in place; gone means the reload
     // closed it (profile removed, connection fields changed, bastion closing), and any
-    // connection a retry reaches is not the one the human approved running on.
+    // connection a retry reaches is not the one the decision was made for.
     if (!registry.liveConnections().includes(conn)) refuse();
 
     const genAtRecheck = registry.generation;
     const current = await policy.evaluateWithOpa(command, conn.profile, toolName, resource);
     // Another reload during the re-evaluation: this one is stale too.
     if (registry.generation !== genAtRecheck) refuse();
-    if (current.decision !== 'allow' && current.decision !== 'require-approval') refuse();
-    if (current.commandClass !== approved.commandClass) refuse();
+    const accepted = after === 'approval'
+      ? current.decision === 'allow' || current.decision === 'require-approval'
+      : current.decision === 'allow';
+    if (!accepted) refuse();
+    if (current.commandClass !== decided.commandClass) refuse();
     return { evaluation: current, generation: genAtRecheck };
   }
 
@@ -394,11 +417,14 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
 
       // Counted after the policy allowed it and before it runs: a denied
       // command should not burn quota, and an allowed one should be counted
-      // even if it later fails on the host — the work was still spent.
-      const budget = quota.consume(profileName, profile.commandQuotaPerDay);
+      // even if it later fails on the host — the work was still spent. The limit is
+      // read from the connection's live profile, not the one captured above: a reload
+      // during the policy or approval await swaps it in place.
+      const limit = conn.profile.commandQuotaPerDay;
+      const budget = quota.consume(profileName, limit);
       if (!budget.allowed) {
         throw new PolicyRefusedError(
-          `QUOTA_EXCEEDED: profile "${profileName}" has used its ${profile.commandQuotaPerDay} commands ` +
+          `QUOTA_EXCEEDED: profile "${profileName}" has used its ${limit} commands ` +
           `for the last 24h. Next slot frees at ${budget.retryAt?.toISOString()}.`,
           { ...evaluation, decision: 'deny', ruleId: 'command-quota' },
         );

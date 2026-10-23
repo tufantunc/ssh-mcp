@@ -137,8 +137,8 @@ function expectNoCanary(h: Harness, outcome: ReloadOutcome) {
 
 /**
  * A planted connection whose close order and sessions the test controls. applyConfig
- * reads `profile`, calls `replaceProfile` on a kept one, and hands the rest back; the
- * reloader reads `listSessions` and calls `close`.
+ * reads `profile`, calls `replaceProfile` on a kept one and `retire` on one it closes,
+ * and hands those back; the reloader reads `listSessions` and calls `close`.
  */
 function plant(
   h: Harness,
@@ -154,6 +154,10 @@ function plant(
     },
     replaceProfile(p: Profile) {
       profile = p;
+    },
+    retired: false,
+    retire() {
+      this.retired = true;
     },
     listSessions: () =>
       sessions.map((s) => ({ name: s, toInfo: () => ({ type: 'background' }) })),
@@ -397,6 +401,9 @@ describe('ConfigReloader: an applied reload', () => {
     expect(keep.readOnly).toBe(true);
     expect(h.policy.evaluate('terraform plan', keep).ruleId).toBe('denylist');
     expect(h.registry.liveConnections()).toEqual([conns.keep]);
+    // Every connection the reload closes is retired first; the kept one is not.
+    expect([conns.jump, conns.app, conns.gone].map((c) => c.retired)).toEqual([true, true, true]);
+    expect(conns.keep.retired).toBe(false);
   });
 
   it('closes a dependent before the bastion it runs through', async () => {

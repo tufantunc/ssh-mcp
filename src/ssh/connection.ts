@@ -10,6 +10,10 @@ import { redactText } from '../guard/redactor.js';
 import { shellSingleQuote } from '../guard/sanitizer.js';
 import { openWithRetry } from './channel-retry.js';
 import { terminateChannel, COULD_NOT_SIGNAL } from './channel-signal.js';
+import { OperatorError } from '../errors.js';
+
+/** Fixed text: a reload-closed connection's refusal names nothing from the config. */
+export const RETIRED_BY_RELOAD = 'This connection was closed by a configuration reload; retry the call.';
 
 /**
  * What this server tells a host it is, on every channel it opens for a command.
@@ -111,6 +115,8 @@ export class SSHConnection {
   private knownHostsStore: Map<string, string>;
   private hostKeyMode: HostKeyMode;
   private bastionSock: ClientChannel | null;
+  /** Set by a reload that closes this connection; see retire(). */
+  private retired = false;
 
   constructor(
     profile: Profile,
@@ -181,6 +187,18 @@ export class SSHConnection {
   }
 
   /**
+   * The other config-reload seam: this connection is in a reload's close list, so it is
+   * terminal. A tool call that resolved it before the swap still holds it, and without
+   * this, a dropped link would be redialled with the pre-reload profile into a connection
+   * the registry no longer holds and no reload or reaper would ever reach. Every way in
+   * that could dial or open a channel goes through `ensureConnected`, which now refuses,
+   * connected or not; `close()` still works, and is what the reloader calls next.
+   */
+  retire(): void {
+    this.retired = true;
+  }
+
+  /**
    * The announcement for a channel about to be opened, or nothing.
    *
    * One accessor rather than an object literal at each site. The first version of
@@ -203,6 +221,7 @@ export class SSHConnection {
   }
 
   async ensureConnected(): Promise<void> {
+    if (this.retired) throw new OperatorError(RETIRED_BY_RELOAD);
     if (this.isConnected()) return;
     if (this.connecting) return this.connecting;
 

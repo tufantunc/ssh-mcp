@@ -316,3 +316,145 @@ describe('a grant from before a config reload', () => {
     expect(approve).toHaveBeenCalledTimes(3);
   });
 });
+
+/**
+ * A reload can land while the policy decision itself is being made: the connection
+ * resolve and an OPA round-trip are both awaits. A decision that came back `allow`, or
+ * found a grant, was made under rules that are no longer live, so it is re-checked the
+ * way an approval is, and stands only if the new rules allow the command outright with
+ * the same class.
+ */
+describe('a decision made while a reload landed', () => {
+  const RECHECK_REASON = 'The configuration was reloaded while the command was being checked; the command was not run.';
+
+  beforeEach(() => {
+    approve.mockReset();
+  });
+
+  /** The engine is real; the first evaluation lands `reload` before it returns. */
+  function reloadDuringEvaluation(policy: PolicyEngine, reload: () => void) {
+    const evaluate = policy.evaluateWithOpa.bind(policy);
+    let first = true;
+    return vi.spyOn(policy, 'evaluateWithOpa').mockImplementation(async (...args) => {
+      const result = await evaluate(...args);
+      if (first) {
+        first = false;
+        reload();
+      }
+      return result;
+    });
+  }
+
+  const runRead = (h: ReturnType<typeof setup>, command = 'ls /') => h.pipeline.runAudited(
+    command,
+    { toolName: 'run-command', failureClass: 'safe', profile: testProfile.name, extra: {} },
+    h.pipeline.execAndReport(),
+  );
+
+  it('refuses an allow when the new rules deny the command', async () => {
+    const policy = new PolicyEngine(DEFAULT_RULES);
+    // Allowed without a prompt under `auto`; refused outright under `deny`.
+    const h = setup({ ...testProfile, approvalPolicy: 'auto' }, policy);
+    const spy = reloadDuringEvaluation(policy, () => {
+      h.registry.applyConfig(configOf({ ...testProfile, approvalPolicy: 'deny' }));
+    });
+
+    const err: any = await h.run().catch((e) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/^CONFIG_RELOADED: /);
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(h.exec).not.toHaveBeenCalled();
+    expect(h.records).toHaveLength(1);
+    expect(h.records[0]).toMatchObject({ decision: 'deny', ruleId: 'config-reloaded' });
+    expect(err.evaluation.reason).toBe(RECHECK_REASON);
+  });
+
+  it('refuses an allow when the new rules ask for approval instead', async () => {
+    const policy = new PolicyEngine(DEFAULT_RULES);
+    const h = setup(testProfile, policy);
+    reloadDuringEvaluation(policy, () => {
+      h.registry.applyConfig(configOf({ ...testProfile, approvalPolicy: 'ask-all' }));
+    });
+
+    await expect(runRead(h)).rejects.toThrow(/^CONFIG_RELOADED: /);
+
+    expect(approve).not.toHaveBeenCalled();
+    expect(h.exec).not.toHaveBeenCalled();
+  });
+
+  it('refuses an allow when the reload closed the connection', async () => {
+    const policy = new PolicyEngine(DEFAULT_RULES);
+    const h = setup(testProfile, policy);
+    reloadDuringEvaluation(policy, () => {
+      h.registry.applyConfig(configOf({ ...testProfile, host: 'elsewhere' }));
+    });
+
+    await expect(runRead(h)).rejects.toThrow(/^CONFIG_RELOADED: /);
+
+    expect(h.exec).not.toHaveBeenCalled();
+    expect(h.records[0]).toMatchObject({ decision: 'deny', ruleId: 'config-reloaded' });
+  });
+
+  it('proceeds when the new rules still allow it with the same class', async () => {
+    const policy = new PolicyEngine(DEFAULT_RULES);
+    const h = setup(testProfile, policy);
+    const spy = reloadDuringEvaluation(policy, () => {
+      h.registry.applyConfig(configOf({ ...testProfile, workdir: '/srv' }));
+    });
+
+    await runRead(h);
+
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(h.exec).toHaveBeenCalledTimes(1);
+    expect(h.records[0]).toMatchObject({ decision: 'allow' });
+  });
+
+  it('refuses a grant reuse when the new rules deny the command', async () => {
+    const policy = new PolicyEngine(DEFAULT_RULES);
+    const h = setup(testProfile, policy);
+    reloadDuringEvaluation(policy, () => {
+      h.registry.applyConfig(configOf({ ...testProfile, approvalPolicy: 'deny' }));
+      // A grant under the new generation, as another call's approval would leave: the
+      // evaluation in hand still says require-approval, so the grant would be reused.
+      h.pipeline.grants.record(testProfile.name, COMMAND, 'destructive');
+    });
+
+    await expect(h.run()).rejects.toThrow(/^CONFIG_RELOADED: /);
+
+    expect(approve).not.toHaveBeenCalled();
+    expect(h.exec).not.toHaveBeenCalled();
+    expect(h.records[0]).toMatchObject({ decision: 'deny', ruleId: 'config-reloaded' });
+  });
+
+  it('proceeds on a grant reuse when the new rules allow the command outright', async () => {
+    const policy = new PolicyEngine(DEFAULT_RULES);
+    const h = setup(testProfile, policy);
+    reloadDuringEvaluation(policy, () => {
+      h.registry.applyConfig(configOf({ ...testProfile, approvalPolicy: 'auto' }));
+      h.pipeline.grants.record(testProfile.name, COMMAND, 'destructive');
+    });
+
+    await h.run();
+
+    expect(approve).not.toHaveBeenCalled();
+    expect(h.exec).toHaveBeenCalledTimes(1);
+    expect(h.records[0]).toMatchObject({ decision: 'allow', commandClass: 'destructive' });
+  });
+
+  // The quota limit is read from the live profile, after every await: a reload that
+  // lowered it while the decision was being made applies to this very call.
+  it('charges the quota against the profile as the reload left it', async () => {
+    const policy = new PolicyEngine(DEFAULT_RULES);
+    const h = setup({ ...testProfile, commandQuotaPerDay: 5 }, policy);
+    await runRead(h);
+    expect(h.exec).toHaveBeenCalledTimes(1);
+
+    reloadDuringEvaluation(policy, () => {
+      h.registry.applyConfig(configOf({ ...testProfile, commandQuotaPerDay: 1 }));
+    });
+
+    await expect(runRead(h)).rejects.toThrow(/^QUOTA_EXCEEDED: /);
+    expect(h.exec).toHaveBeenCalledTimes(1);
+  });
+});
