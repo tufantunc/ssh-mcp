@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { startE2E, e2eAvailable, textOf } from './harness.js';
 import { createConnection } from '../integration/fixtures.js';
 
-// §5 of the readiness report: exercise all 14 tools through a real MCP client
+// §5 of the readiness report: exercise all 15 tools through a real MCP client
 // over a real transport against a real SSH server. This is the check that would
 // have caught open-session being registered without a handler — the in-process
 // harness found it, but only because it too went through the MCP layer.
