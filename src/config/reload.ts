@@ -376,7 +376,9 @@ export class ConfigReloader {
   ): Promise<ReloadOutcome> {
     this.last = outcome;
     // The second synthetic record after session:close; a proper non-command
-    // AuditRecord variant is the queued fix for both.
+    // AuditRecord variant is the queued fix for both. Three cases: applied (allow),
+    // refused with nothing changed (deny), and failed after the swap began, so possibly
+    // part applied (deny, with its own rule id so the log tells it from a refusal).
     await this.audit({
       mcpRequestId: requestId,
       profile: '-',
@@ -385,7 +387,7 @@ export class ConfigReloader {
       commandClass: 'safe',
       binary: 'config:reload',
       decision: outcome.ok ? 'allow' : 'deny',
-      ruleId: 'config-reload',
+      ruleId: outcome.partial ? 'config-reload-partial' : 'config-reload',
       durationMs: Date.now() - startedAt,
       error: outcome.error ? `${outcome.error.name}: ${outcome.error.message}` : undefined,
     });

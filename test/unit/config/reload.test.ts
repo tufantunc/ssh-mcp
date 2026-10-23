@@ -426,6 +426,28 @@ describe('ConfigReloader: an applied reload', () => {
     expect(closes.indexOf('app')).toBeLessThan(closes.indexOf('jump'));
   });
 
+  it('does not start closing the bastion until its dependent has finished closing', async () => {
+    const h = await startFrom(profileToml('jump') + profileToml('app', 'via = "jump"'));
+    const closes: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    plant(h, 'jump', [], closes);
+    plant(h, 'app', [], closes, () => held);
+    await dir.write(
+      profileToml('jump').replace('jump.example.test', 'jump2.example.test') + profileToml('app', 'via = "jump"'),
+    );
+
+    const reloading = h.reloader.reload('tool', 1);
+    await vi.waitFor(() => expect(closes).toEqual(['app']));
+    // Let everything already queued run: the bastion's close must still not have begun.
+    await new Promise((r) => setImmediate(r));
+    expect(closes).toEqual(['app']);
+
+    release();
+    await reloading;
+    expect(closes).toEqual(['app', 'jump']);
+  });
+
   it('hashes the bytes and records the outcome in status', async () => {
     const { h, outcome } = await applied();
     const expected = createHash('sha256').update(await readFile(h.path)).digest('hex');
@@ -634,6 +656,8 @@ describe('ConfigReloader: a defect after the swap began', () => {
     const reloads = (await auditRecords(h)).filter((r) => r.binary === 'config:reload');
     expect(reloads.map((r) => r.decision)).toEqual(['deny', 'allow']);
     expect(reloads[0].mcpRequestId).toBe('req-d');
+    // Told apart from a refusal, which changed nothing, by its rule id.
+    expect(reloads.map((r) => r.ruleId)).toEqual(['config-reload-partial', 'config-reload']);
     expect(reloads[0].error).toMatch(/TypeError: .*partially applied/);
     expect(reloads[0].error).not.toContain(CANARY);
   });
