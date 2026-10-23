@@ -50,7 +50,7 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 
 ## Stopping a Command
 
-Six things stop a command, and they all escalate the same way on the exec channel —
+Seven things stop a command, and they all escalate the same way on the exec channel —
 `SIGINT` immediately, `SIGTERM` after 1s, `SIGKILL` after 2s, then the channel is closed:
 
 | trigger | policy check | audit record |
@@ -59,6 +59,7 @@ Six things stop a command, and they all escalate the same way on the exec channe
 | an MCP client cancelling the request | no | the failed command's own record |
 | a channel that arrives after the request already timed out | no | trace only (`ssh.exec.lateStop`) |
 | `close-session` on a background session | **no** | yes (`session:close …`, `ruleId session-release`) |
+| a config reload that closes the connection (profile removed, a connection field changed, or its bastion closing) | no | yes (`session:close … (reload)`, one per session) |
 | the session reaper (idle TTL, or `sessionBackgroundMaxMs`, 1h by default) | no | **no** |
 | connection teardown — shutdown, or the idle-connection reaper | no | **no** |
 
@@ -69,6 +70,8 @@ caller-initiated, but it is deliberately *not* refusable: routing it through the
 engine meant a `readOnly` profile could open a background session and then be denied
 permission to close it, with no other way to stop the command for an hour. A control whose
 refusal mode is "the thing you asked me to stop keeps running" is worse than no control.
+A reload closes only the connections that the operator's edit to the config file
+invalidated, and records each session it closes the way `close-session` does.
 
 The last two rows are the ones to weigh before pointing this at something that matters: a
 background `tail -f` that passes its TTL is `SIGKILL`ed by a timer, with no tool call, no
@@ -276,6 +279,13 @@ the reader's grammar accepts. The grammar only ever decides between `read-only` 
    your account, `SYSTEM` and `Administrators`, which a config under `%APPDATA%` inherits
    automatically. There the finding is reported rather than enforced — `--strictConfigAcl`
    enforces it if you want that.
+8. **Treat write access to the config file as control of the running server.** A reload
+   (the `reload-config` tool, or `SIGHUP` outside Windows) trusts the file's ownership and
+   permissions exactly as startup does: the same mode-bit check on Linux and macOS, the same
+   ACL check and flags on Windows. So the guidance in item 7 applies unchanged. What is new
+   is the timing: anyone who can write the config file can change the policy of a running
+   server without a restart, and any caller of `reload-config` can make the change take
+   effect, since the tool asks for no approval.
 
 ## Supported Versions
 

@@ -369,6 +369,8 @@ export async function loadAppConfig(argv: Record<string, string | null>): Promis
   // no profiles: an MCP client or directory can then complete the handshake and read
   // `tools/list`, and every tool call is refused by `ConnectionRegistry` with the message
   // below — including `list-connections`, which resolves no profile and so had to be told.
+  // `reload-config` is the exception, by design: it reaches no profile, and writing the
+  // file then reloading is how a server started this way gets configured.
   //
   // Measured before this: `initialize` and `tools/list` against our own image drew no
   // JSON-RPC response at all — the process exited on this check first — so every directory
@@ -380,7 +382,7 @@ export async function loadAppConfig(argv: Record<string, string | null>): Promis
   // softens — see `nothingRequested`, which tests for the flags being absent rather than
   // falsy so that a valueless or space-separated one stays a typo.
   if (nothingRequested(argv)) {
-    console.error(`Warning: starting unconfigured — every tool call will be refused.\n${new UnconfiguredError(getConfigPath()).message}`);
+    console.error(`Warning: starting unconfigured — every tool call except reload-config will be refused until a config file is loaded.\n${new UnconfiguredError(getConfigPath()).message}`);
     return {
       config: { defaults: defaultsFromArgv(argv), profiles: [] },
       source: 'unconfigured',
