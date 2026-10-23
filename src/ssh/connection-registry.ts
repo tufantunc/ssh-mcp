@@ -112,6 +112,11 @@ export class ConnectionRegistry {
     return Array.from(this.connections.values()).map((c) => c.toInfo());
   }
 
+  /** Every stored connection, with no profile lookup (the profile may have been removed by a reload). */
+  liveConnections(): SSHConnection[] {
+    return Array.from(this.connections.values());
+  }
+
   listAllProfiles(): Profile[] {
     return this.config.profiles;
   }

@@ -11,6 +11,7 @@ import { transferForbiddenDirs } from './tools/forbidden-dirs.js';
 import { initKeychain } from './config/credential-resolver.js';
 import { getConfigPath } from './config/loader.js';
 import { SERVER_VERSION } from './version.js';
+import { reapOnce } from './ssh/reaper.js';
 import {
   parseArgv,
   buildAppConfig,
@@ -108,19 +109,8 @@ async function main() {
   }
 
   const reaperInterval = setInterval(() => {
-    // Session reaping is awaited before connection reaping, and that order is load-bearing:
-    // closing a background session now signals its command, and `reapIdleConnections` gates
-    // on `sessionCount`, which drops to zero as soon as a session is closed. Fired without
-    // awaiting, the connection was torn down microseconds after the first signal and the
-    // TERM and KILL rungs were discarded — so a command that ignores INT survived its own
-    // reaping.
-    void (async () => {
-      const conns = registry.listConnections()
-        .map((info) => registry.get(info.profile))
-        .filter((c): c is NonNullable<typeof c> => Boolean(c));
-      await Promise.all(conns.map((conn) => conn.reapExpiredSessions().catch(() => {})));
-      registry.reapIdleConnections();
-    })();
+    // Session-then-connection ordering (load-bearing) is documented in `reapOnce`.
+    void reapOnce(registry).catch((err) => console.error('reaper failed:', err));
   }, 60_000);
 
   /**
