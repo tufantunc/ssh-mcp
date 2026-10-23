@@ -14,7 +14,7 @@ import { SERVER_VERSION } from './version.js';
 import { reapOnce } from './ssh/reaper.js';
 import {
   parseArgv,
-  buildAppConfig,
+  loadAppConfig,
   checkRemovedFlags,
   flagEnabled,
   parseFailureLimit,
@@ -33,7 +33,11 @@ async function main() {
     return;
   }
 
-  const config = await buildAppConfig(argv);
+  // `configSource` and `configPath` are what a later reload needs to know.
+  const { config, source: configSource, path: configPath } = await loadAppConfig(argv);
+  // Not consumed yet (tsc's noUnusedLocals is on); the reload task reads them.
+  void configSource;
+  void configPath;
   const hostKeyMode = resolveHostKeyMode(argv);
   const entropyScan = flagEnabled(argv, 'auditEntropyScan');
   const tamperEvident = flagEnabled(argv, 'auditTamperEvident');

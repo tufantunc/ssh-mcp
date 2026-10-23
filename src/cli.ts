@@ -16,7 +16,7 @@
 
 import { loadConfig, getConfigPath } from './config/loader.js';
 import { OperatorError, ConfigNotFoundError, UnconfiguredError } from './errors.js';
-import type { AclFinding } from './config/windows-acl.js';
+import type { AclFinding, AclOptions } from './config/windows-acl.js';
 import { HOST_GROUPS } from './policy/engine.js';
 import type { HostKeyMode } from './ssh/host-key.js';
 import type { AppConfig, Profile, Defaults } from './types.js';
@@ -272,7 +272,16 @@ export function defaultsFromArgv(argv: Record<string, string | null>): Defaults 
   };
 }
 
-export async function buildAppConfig(argv: Record<string, string | null>): Promise<AppConfig> {
+export type ConfigSource = 'file' | 'unconfigured' | 'flags';
+
+export interface LoadedConfig {
+  config: AppConfig;
+  source: ConfigSource;
+  /** The file that was read, or the default path for `unconfigured` and `flags`. */
+  path: string;
+}
+
+export function aclOptionsFromArgv(argv: Record<string, string | null>): AclOptions {
   // The way past an ACL that could not be read, rather than an operator with no
   // exit. See assertPrivateOnWindows.
   // The sink is supplied here rather than left to the module's default, which is the
@@ -285,13 +294,26 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
   // act on them". Nothing ever read it, and this split made the claim impossible — main()
   // is in another module and the array was not exported. Re-adding a collection point is
   // one line when there is a consumer to write it against.
-  const aclOpts = {
+  return {
     enforce: flagEnabled(argv, 'strictConfigAcl'),
     allowUnchecked: flagEnabled(argv, 'allowUncheckedConfigAcl'),
     onFinding: (f: AclFinding) => {
       console.error(`Warning: ${f.message}`);
     },
   };
+}
+
+/** Loads a config file through the same validation startup uses. Reload calls this. */
+export function loadConfigFile(path: string, argv: Record<string, string | null>): Promise<AppConfig> {
+  return loadConfig(path, aclOptionsFromArgv(argv));
+}
+
+export async function buildAppConfig(argv: Record<string, string | null>): Promise<AppConfig> {
+  return (await loadAppConfig(argv)).config;
+}
+
+export async function loadAppConfig(argv: Record<string, string | null>): Promise<LoadedConfig> {
+  const aclOpts = aclOptionsFromArgv(argv);
 
   if (argv.config !== undefined) {
     // `parseArgv` stores null for a flag written without `=`, so a bare `--config` used to
@@ -301,7 +323,7 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
     if (argv.config === null || argv.config === '') {
       throw new OperatorError('--config needs a path: --config=<path>');
     }
-    return loadConfig(argv.config, aclOpts);
+    return { config: await loadConfig(argv.config, aclOpts), source: 'file', path: argv.config };
   }
 
   try {
@@ -317,7 +339,7 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
         'Pass --config <path> to choose a different file.',
       );
     }
-    return fromFile;
+    return { config: fromFile, source: 'file', path: getConfigPath() };
   } catch (err) {
     // Only "there is no file" means fall through. A file that exists and is
     // unusable — malformed TOML, a schema violation, a permission failure —
@@ -347,7 +369,11 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
   // falsy so that a valueless or space-separated one stays a typo.
   if (nothingRequested(argv)) {
     console.error(`Warning: starting unconfigured — every tool call will be refused.\n${new UnconfiguredError(getConfigPath()).message}`);
-    return { defaults: defaultsFromArgv(argv), profiles: [] };
+    return {
+      config: { defaults: defaultsFromArgv(argv), profiles: [] },
+      source: 'unconfigured',
+      path: getConfigPath(),
+    };
   }
 
   if (!argv.host || !argv.user) {
@@ -384,5 +410,5 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
     transferTimeoutMs: defaults.transferTimeoutMs,
   };
 
-  return { defaults, profiles: [profile] };
+  return { config: { defaults, profiles: [profile] }, source: 'flags', path: getConfigPath() };
 }
