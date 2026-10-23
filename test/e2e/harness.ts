@@ -39,6 +39,12 @@ export interface E2EClient {
   setApproval(accept: boolean): void;
   callTool(name: string, args?: Record<string, unknown>): Promise<any>;
   close(): Promise<void>;
+  /** The config file the child was started with. */
+  configPath: string;
+  /** Overwrite that file (its mode stays 0600), e.g. before a reload. */
+  rewriteConfig(opts: StartOptions | string): Promise<void>;
+  /** The child's pid, for signalling it. */
+  pid: number;
 }
 
 export interface StartOptions {
@@ -46,6 +52,8 @@ export interface StartOptions {
   defaults?: string;
   /** Extra lines appended to the admin profile. */
   adminProfile?: string;
+  /** Extra TOML appended after the generated profiles, e.g. a further `[[profiles]]`. */
+  extra?: string;
   /** Extra CLI args for the server process. */
   args?: string[];
   /**
@@ -83,6 +91,7 @@ auth = "password"
 role = "viewer"
 group = "dev"
 readOnly = true
+${opts.extra ?? ''}
 `;
 }
 
@@ -132,6 +141,8 @@ export async function startE2E(opts: StartOptions = {}): Promise<E2EClient & { c
   });
 
   await client.connect(transport);
+  const pid = transport.pid;
+  if (pid === null) throw new Error('the server process has no pid after connect');
 
   return {
     client,
@@ -143,6 +154,11 @@ export async function startE2E(opts: StartOptions = {}): Promise<E2EClient & { c
     async close() {
       await client.close().catch(() => {});
     },
+    configPath,
+    async rewriteConfig(next) {
+      await writeFile(configPath, typeof next === 'string' ? next : configToml(next), 'utf8');
+    },
+    pid,
     async cleanup() {
       await client.close().catch(() => {});
       await rm(dir, { recursive: true, force: true });

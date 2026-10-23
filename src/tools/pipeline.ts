@@ -9,6 +9,7 @@ import { commandOutput, type ToolResult } from './results.js';
 import { CommandQuota } from '../policy/quota.js';
 import { formatReadOnlyRejection } from '../policy/classifier.js';
 import type { LocalPathContext } from './local-path.js';
+import type { ConfigReloader } from '../config/reload.js';
 import { ApprovalGrants } from '../guard/approval-grants.js';
 import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass } from '../types.js';
 
@@ -58,6 +59,11 @@ export interface ToolDeps {
    * which is the same answer a configured server with no `transferRoot` gives.
    */
   localPath?: LocalPathContext;
+  /**
+   * The one reloader the server shares across every MCP server it builds. Optional for the
+   * same reason as `localPath`: absent, `reload-config` still registers and refuses.
+   */
+  reloader?: ConfigReloader;
 }
 
 /**

@@ -3,7 +3,7 @@ import { createHash } from 'crypto';
 import { mkdtemp, readFile, rm } from 'fs/promises';
 import { platform, tmpdir } from 'os';
 import { join } from 'path';
-import { ConfigReloader, type ReloadOutcome } from '../../../src/config/reload.js';
+import { ConfigReloader, installSighupReload, type ReloadOutcome } from '../../../src/config/reload.js';
 import { defaultsFromArgv, loadConfigFile, type ConfigSource } from '../../../src/cli.js';
 import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
 import { PolicyEngine, resolvePolicyRules } from '../../../src/policy/engine.js';
@@ -619,6 +619,82 @@ describe('ConfigReloader: a defect after the swap began', () => {
       'session:close background s-c (reload)',
       'session:close unknown s-b (reload)',
     ]);
+  });
+});
+
+describe('ConfigReloader: formatOutcome says what a failure left behind', () => {
+  it('a refusal says nothing was changed', async () => {
+    const h = await startFrom(BASE);
+    await dir.write('[[profiles]\n');
+
+    const text = h.reloader.formatOutcome(await h.reloader.reload('tool', 1));
+
+    expect(text).toMatch(/^Config reload \(tool\) refused: ConfigParseError: /);
+    expect(text).toContain('Nothing was changed.');
+    expect(text).not.toMatch(/partially applied/);
+  });
+
+  it('a failure after the swap began says it may be partially applied, not that nothing changed', async () => {
+    const h = await startFrom(BASE);
+    vi.spyOn(h.registry, 'applyConfig').mockImplementationOnce(() => {
+      throw new TypeError('boom');
+    });
+    await dir.write(BASE.replace('user = "test"', 'user = "test"\nworkdir = "/w"'));
+
+    const outcome = await h.reloader.reload('sighup', 'sighup');
+    const text = h.reloader.formatOutcome(outcome);
+
+    expect(outcome.ok).toBe(false);
+    expect(text).not.toContain('Nothing was changed');
+    expect(text).not.toContain('refused');
+    expect(text).toMatch(/^Config reload \(sighup\) failed after the swap began: TypeError: /);
+    expect(text).toMatch(/may be partially applied/);
+    expect(text).toMatch(/reload-config status/);
+    expect(text).toMatch(/restart the server if/);
+  });
+});
+
+describe('installSighupReload', () => {
+  function fakeProcess(platform: NodeJS.Platform) {
+    const handlers = new Map<string, () => void>();
+    return {
+      platform,
+      on: vi.fn((event: string, fn: () => void) => {
+        handlers.set(event, fn);
+      }),
+      handlers,
+    };
+  }
+
+  it('is not wired on Windows, where SIGHUP means the console is closing', () => {
+    const proc = fakeProcess('win32');
+    const reload = vi.fn();
+
+    expect(installSighupReload({ reload }, proc as never)).toBe(false);
+    expect(proc.on).not.toHaveBeenCalled();
+  });
+
+  it('reloads with trigger and request id "sighup" elsewhere', async () => {
+    const proc = fakeProcess('linux');
+    const reload = vi.fn(async () => ({ ok: true }) as ReloadOutcome);
+
+    expect(installSighupReload({ reload }, proc as never)).toBe(true);
+    proc.handlers.get('SIGHUP')!();
+
+    expect(reload).toHaveBeenCalledWith('sighup', 'sighup');
+  });
+
+  it('catches a rejected reload, logs a message that quotes nothing, and keeps running', async () => {
+    const proc = fakeProcess('darwin');
+    const reload = vi.fn(async () => {
+      throw new TypeError(`defect ${CANARY}`);
+    });
+    installSighupReload({ reload }, proc as never);
+
+    proc.handlers.get('SIGHUP')!();
+    await vi.waitFor(() => expect(stderr.join('\n')).toMatch(/SIGHUP.*TypeError/));
+
+    expect(stderr.join('\n')).not.toContain(CANARY);
   });
 });
 

@@ -15,6 +15,7 @@ export const TOOL_DESCRIPTIONS: Record<string, string> = {
   'sftp-upload-file': 'Upload a local file to the remote host over SFTP, streaming it without passing the contents through model context. The local file must be inside the transferRoot directory the operator configured; without that setting this tool refuses. Use this for binary or large files; use sftp-upload for short text you already have.',
   'sftp-download-file': 'Download a remote file to local disk over SFTP, streaming it without passing the contents through model context. The destination must be inside the transferRoot directory the operator configured; without that setting this tool refuses. Use this for binary or large files; use sftp-download when you need to read the contents.',
   'signal-process': 'Send a signal (INT, TERM, KILL) to a remote process by PID.',
+  'reload-config': 'Report or reload the server\'s config file. action="status" (the default) shows the config path, when it was loaded, the sha256 of its bytes and the result of the last reload; never the contents. action="reload" re-reads the file, validates it exactly as startup does, and applies it only if every check passes; a refused reload changes nothing. Command-line flags are never reloaded. Applying closes connections, with their sessions, whose profile was removed or whose connection fields changed, and clears approval grants.',
 };
 
 export function getToolHashes(): Record<string, string> {

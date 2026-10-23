@@ -43,6 +43,11 @@ export interface ReloadOutcome {
   trigger: 'tool' | 'sighup';
   /** On refusal. Built from safe parts only: never a value or a snippet from the file. */
   error?: { name: string; message: string };
+  /**
+   * Set when the failure came after the swap began, so the server may run part old, part
+   * new config. A refusal (validation failed) leaves it unset: nothing was changed.
+   */
+  partial?: boolean;
   diff?: ProfileDiff;
   policyChanged?: boolean;
   closed?: ClosedConnection[];
@@ -137,6 +142,12 @@ export class ConfigReloader {
   formatOutcome(o: ReloadOutcome): string {
     if (!o.ok) {
       const error = o.error ?? { name: 'Error', message: 'unknown failure' };
+      if (o.partial) {
+        return (
+          `Config reload (${o.trigger}) failed after the swap began: ${error.name}: ${error.message}\n` +
+          'Check reload-config status, and restart the server if it does not show the new config.'
+        );
+      }
       return `Config reload (${o.trigger}) refused: ${error.name}: ${error.message}\nNothing was changed.`;
     }
 
@@ -227,10 +238,9 @@ export class ConfigReloader {
       const error = {
         name: errorName(err),
         message:
-          `Reload of ${this.path} failed after the swap began, so it may be partially applied. ` +
-          'Reload again, or restart the server.',
+          `Reload of ${this.path} failed after the swap began, so it may be partially applied.`,
       };
-      return this.finish({ ok: false, at, trigger, error }, requestId, startedAt);
+      return this.finish({ ok: false, at, trigger, error, partial: true }, requestId, startedAt);
     }
   }
 
@@ -378,6 +388,25 @@ export class ConfigReloader {
       console.error(`Audit write failed while recording a config reload: ${describeCloseError(err)}`);
     }
   }
+}
+
+/**
+ * SIGHUP reloads the config, on platforms where SIGHUP is a signal an operator sends. On
+ * Windows it means the console is closing, so it is not wired there. Never exits: the
+ * reload reports its own outcome, and a defect that rejects anyway is logged by class only,
+ * since its message may quote the file.
+ */
+export function installSighupReload(
+  reloader: Pick<ConfigReloader, 'reload'>,
+  proc: Pick<NodeJS.Process, 'platform' | 'on'> = process,
+): boolean {
+  if (proc.platform === 'win32') return false;
+  proc.on('SIGHUP', () => {
+    reloader.reload('sighup', 'sighup').catch((err: unknown) => {
+      console.error(`Config reload on SIGHUP failed unexpectedly (${errorName(err)}); the server keeps running.`);
+    });
+  });
+  return true;
 }
 
 /**

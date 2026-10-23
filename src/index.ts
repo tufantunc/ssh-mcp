@@ -12,6 +12,7 @@ import { initKeychain } from './config/credential-resolver.js';
 import { getConfigPath } from './config/loader.js';
 import { SERVER_VERSION } from './version.js';
 import { reapOnce } from './ssh/reaper.js';
+import { ConfigReloader, installSighupReload } from './config/reload.js';
 import {
   parseArgv,
   loadAppConfig,
@@ -33,11 +34,10 @@ async function main() {
     return;
   }
 
-  // `configSource` and `configPath` are what a later reload needs to know.
-  const { config, source: configSource, path: configPath } = await loadAppConfig(argv);
-  // Not consumed yet (tsc's noUnusedLocals is on); the reload task reads them.
-  void configSource;
-  void configPath;
+  // The whole of it, not just `config`: the reloader needs to know where the live config
+  // came from, its hash and when it was loaded.
+  const startup = await loadAppConfig(argv);
+  const { config } = startup;
   const hostKeyMode = resolveHostKeyMode(argv);
   const entropyScan = flagEnabled(argv, 'auditEntropyScan');
   const tamperEvident = flagEnabled(argv, 'auditTamperEvident');
@@ -75,6 +75,11 @@ async function main() {
     throw new OperatorError('--opaFailClosed does nothing without --opaUrl.');
   }
 
+  // One reloader for the process: every MCP server below (one under stdio, one per HTTP
+  // session) reloads the same registry, policy and transfer root, and the reloader
+  // serializes them.
+  const reloader = new ConfigReloader({ argv, registry, policy, audit, localPath, startup });
+
   // An McpServer binds to a single transport, so HTTP needs one per session.
   const createMcpServer = (): McpServer => {
     // capabilities moved from serverInfo to ServerOptions in SDK 1.30.
@@ -82,7 +87,7 @@ async function main() {
       { name: 'SSH MCP Server', version: SERVER_VERSION },
       { capabilities: { tools: {}, resources: {} } },
     );
-    registerTools(server, registry, policy, audit, { localPath });
+    registerTools(server, registry, policy, audit, { localPath, reloader });
     registerResources(server, registry);
     return server;
   };
@@ -160,6 +165,9 @@ async function main() {
 
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
+  // Before this, SIGHUP's default action killed the process without flushing the audit
+  // log. Now it reloads the config, except on Windows; see installSighupReload.
+  installSighupReload(reloader);
 }
 
 const isTestMode = process.env.SSH_MCP_TEST === '1';
