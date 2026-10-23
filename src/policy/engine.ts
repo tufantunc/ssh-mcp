@@ -266,6 +266,23 @@ export interface PolicyResource {
   remoteWrite?: boolean;
 }
 
+/**
+ * Compile eagerly: a deny rule that silently degrades (the old code fell back to
+ * substring-matching the command against the regex *source*) is worse than a startup
+ * failure, because nothing surfaces the degradation.
+ */
+function compileDenylist(rules: PolicyRules): ReadonlyArray<{ exact: RegExp; caseInsensitive: RegExp }> {
+  return (rules.denylist ?? []).map((pattern) => {
+    try {
+      return { exact: new RegExp(pattern), caseInsensitive: new RegExp(pattern, 'i') };
+    } catch (err) {
+      throw new OperatorError(
+        `Invalid denylist pattern ${JSON.stringify(pattern)}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  });
+}
+
 export class PolicyEngine {
   private opaUrl: string | null = null;
   private opaFailClosed = false;
@@ -277,21 +294,21 @@ export class PolicyEngine {
    * case-insensitively for the Windows reading of a remote path, where a
    * case variant reaches the same file (#230). The built-ins live in classifier.ts.
    */
-  private readonly userPatterns: ReadonlyArray<{ exact: RegExp; caseInsensitive: RegExp }>;
+  private userPatterns: ReadonlyArray<{ exact: RegExp; caseInsensitive: RegExp }>;
 
   constructor(private rules: PolicyRules = DEFAULT_RULES) {
-    // Compile eagerly: a deny rule that silently degrades (the old code fell
-    // back to substring-matching the command against the regex *source*) is
-    // worse than a startup failure, because nothing surfaces the degradation.
-    this.userPatterns = (rules.denylist ?? []).map((pattern) => {
-      try {
-        return { exact: new RegExp(pattern), caseInsensitive: new RegExp(pattern, 'i') };
-      } catch (err) {
-        throw new OperatorError(
-          `Invalid denylist pattern ${JSON.stringify(pattern)}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    });
+    this.userPatterns = compileDenylist(rules);
+  }
+
+  /**
+   * Swap in reloaded rules. The denylist compiles before anything is assigned, so an
+   * invalid pattern throws with the engine still on its old rules, never half of each.
+   * OPA settings are argv-only and stay as they are.
+   */
+  replaceRules(rules: PolicyRules): void {
+    const patterns = compileDenylist(rules);
+    this.rules = rules;
+    this.userPatterns = patterns;
   }
 
   setOpaUrl(url: string | null, failClosed = false, timeoutMs = DEFAULT_OPA_TIMEOUT_MS): void {
