@@ -44,19 +44,20 @@ afterEach(async () => {
 });
 
 /** A real reloader over a real file, behind the stubbed tool harness. */
-async function startWithReloader(): Promise<{ path: string; reloader: ConfigReloader }> {
+async function startWithReloader(): Promise<{ path: string; reloader: ConfigReloader; registry: ConnectionRegistry }> {
   const path = await dir.write(TOML);
   const { config, sha256 } = await loadConfigWithDigest(path, {});
+  const registry = new ConnectionRegistry(config, 'insecure');
   const reloader = new ConfigReloader({
     aclOptions: {},
-    registry: new ConnectionRegistry(config, 'insecure'),
+    registry,
     policy: new PolicyEngine(resolvePolicyRules(config.profiles, config.policy)),
     audit: new AuditStore(auditPath),
     localPath: {},
     startup: { config, source: 'file', path, sha256, loadedAt: '2026-10-23T00:00:00.000Z' },
   });
   h = await createHarness({}, { reloader });
-  return { path, reloader };
+  return { path, reloader, registry };
 }
 
 const call = (args: Record<string, unknown> = {}) =>
@@ -90,7 +91,7 @@ describe('reload-config', () => {
 
     expect(res.isError).toBeFalsy();
     expect(text).toContain(path);
-    expect(text).toContain('file');
+    expect(text).toContain('Source: file');
     expect(text).toContain(status.loadedAt);
     expect(text).toContain(status.sha256!);
     expect(text).toMatch(/Last reload: none/);
@@ -110,6 +111,31 @@ describe('reload-config', () => {
     expect(text).toMatch(/Last reload: .*\(tool\), applied/);
     expect(text).toContain('Profiles: changed dev (user).');
     expect(text).not.toContain(CANARY);
+  });
+
+  it('status after a refused reload says refused, and that nothing changed', async () => {
+    await startWithReloader();
+    await dir.write('[[profiles]\n');
+    await call({ action: 'reload' });
+
+    const text = textOf(await call({ action: 'status' }));
+
+    expect(text).toMatch(/Last reload: .*\(tool\), refused\./);
+    expect(text).toContain('Nothing was changed.');
+  });
+
+  it('status after a failure past the swap says so, and not that nothing changed', async () => {
+    const { registry } = await startWithReloader();
+    vi.spyOn(registry, 'applyConfig').mockImplementationOnce(() => {
+      throw new TypeError('boom');
+    });
+    await dir.write(TOML.replace('user = "test"', 'user = "test2"'));
+    await call({ action: 'reload' });
+
+    const text = textOf(await call({ action: 'status' }));
+
+    expect(text).toMatch(/Last reload: .*\(tool\), failed after the swap began\./);
+    expect(text).not.toContain('Nothing was changed.');
   });
 
   it('reload applies a valid file and returns formatOutcome', async () => {
