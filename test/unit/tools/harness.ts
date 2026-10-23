@@ -11,7 +11,11 @@ import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
 import { defaultsFromArgv } from '../../../src/cli.js';
 import type { ToolDeps } from '../../../src/tools/pipeline.js';
 
-type ToolOpts = Omit<ToolDeps, 'server' | 'registry' | 'policy' | 'audit'>;
+/**
+ * `approvalGrantTtlMs` is a config default, read live from the registry; it is accepted
+ * here and served from the stub registry's `currentDefaults()`.
+ */
+type ToolOpts = Omit<ToolDeps, 'server' | 'registry' | 'policy' | 'audit'> & { approvalGrantTtlMs?: number };
 
 /**
  * In-process MCP client + server over InMemoryTransport, with the SSH layer
@@ -71,7 +75,7 @@ export interface Harness {
 
 export async function createHarness(
   overrides: Partial<Profile> = {},
-  toolOpts: ToolOpts = {},
+  { approvalGrantTtlMs = 0, ...toolOpts }: ToolOpts = {},
   rules: PolicyRules = DEFAULT_RULES,
 ): Promise<Harness> {
   const profile: Profile = { ...testProfile, ...overrides };
@@ -129,6 +133,8 @@ export async function createHarness(
     getProfile: () => profile,
     listConnections: () => [conn.toInfo()],
     listAllProfiles: () => [profile],
+    currentDefaults: () => ({ ...defaultsFromArgv({}), approvalGrantTtlMs }),
+    generation: 0,
   };
 
   // Capture audit records instead of writing to disk.

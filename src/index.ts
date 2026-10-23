@@ -82,10 +82,7 @@ async function main() {
       { name: 'SSH MCP Server', version: SERVER_VERSION },
       { capabilities: { tools: {}, resources: {} } },
     );
-    registerTools(server, registry, policy, audit, {
-      approvalGrantTtlMs: config.defaults.approvalGrantTtlMs,
-      localPath,
-    });
+    registerTools(server, registry, policy, audit, { localPath });
     registerResources(server, registry);
     return server;
   };

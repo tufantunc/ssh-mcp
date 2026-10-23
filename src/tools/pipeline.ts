@@ -46,8 +46,6 @@ export class PolicyRefusedError extends Error {
 
 export interface ToolDeps {
   server: McpServer;
-  /** Lifetime of a just-in-time approval grant; 0 = always prompt. */
-  approvalGrantTtlMs?: number;
   registry: ConnectionRegistry;
   policy: PolicyEngine;
   audit: AuditStore;
@@ -70,9 +68,14 @@ export interface ToolDeps {
  * and audit store. Tool groups receive the result and never touch those four
  * directly, so there is exactly one path from caller input to a remote command.
  */
-export function createPipeline({ server, registry, policy, audit, approvalGrantTtlMs = 0 }: ToolDeps) {
+export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
   const quota = new CommandQuota();
-  const grants = new ApprovalGrants(approvalGrantTtlMs);
+  // Both read live: a reload changes the TTL, and moves the generation that retires
+  // every grant given under the rules before it.
+  const grants = new ApprovalGrants(
+    () => registry.currentDefaults().approvalGrantTtlMs,
+    () => registry.generation,
+  );
   async function resolveConn(profileName?: string) {
     return registry.getOrCreate(profileName);
   }
@@ -88,6 +91,9 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     span.setAttribute('ssh.profile', profileName);
     try {
       const conn = await resolveConn(profileName);
+      // Captured before evaluating: a reload from here on means the decision below was
+      // made under rules that are no longer the live ones.
+      const genAtEval = registry.generation;
       const evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName, resource);
       span.setAttribute('policy.decision', evaluation.decision);
       span.setAttribute('command.class', evaluation.commandClass);
@@ -119,6 +125,11 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
             evaluation,
           );
         }
+        if (registry.generation !== genAtEval) {
+          const current = await recheckAfterReload(conn, command, toolName, resource, evaluation);
+          grants.record(conn.profile.name, command, evaluation.commandClass);
+          return { conn, evaluation: current, approver: approval.approver };
+        }
         grants.record(conn.profile.name, command, evaluation.commandClass);
         return { conn, evaluation, approver: approval.approver };
       }
@@ -127,6 +138,46 @@ export function createPipeline({ server, registry, policy, audit, approvalGrantT
     } finally {
       span.end();
     }
+  }
+
+  /**
+   * The config was reloaded while a human was deciding. Their approval was of a command
+   * under the old rules, so it stands only if the new rules would still have put this
+   * same decision to them: the command still runs on the same connection, and the new
+   * evaluation — against the profile as swapped in and the rules as replaced — is
+   * `allow` or `require-approval` for the class they approved.
+   *
+   * Anything else refuses with `config-reloaded` rather than prompting again: a second
+   * prompt for a call already in flight is a surprise, and a retry asks under the new
+   * rules from the start. Returns the new evaluation, which is what the audit records.
+   */
+  async function recheckAfterReload(
+    conn: Awaited<ReturnType<typeof resolveConn>>,
+    command: string,
+    toolName: string,
+    resource: PolicyResource,
+    approved: PolicyEvaluation,
+  ): Promise<PolicyEvaluation> {
+    const refuse = (): never => {
+      throw new PolicyRefusedError(
+        'CONFIG_RELOADED: The configuration was reloaded while this command awaited approval, ' +
+        'and the approval does not carry over to the new rules; retry the call.',
+        { ...approved, decision: 'deny', ruleId: 'config-reloaded' },
+      );
+    };
+
+    // Still stored means applyConfig swapped its profile in place; gone means the reload
+    // closed it (profile removed, connection fields changed, bastion closing), and any
+    // connection a retry reaches is not the one the human approved running on.
+    if (!registry.liveConnections().includes(conn)) refuse();
+
+    const genAtRecheck = registry.generation;
+    const current = await policy.evaluateWithOpa(command, conn.profile, toolName, resource);
+    // Another reload during the re-evaluation: this one is stale too.
+    if (registry.generation !== genAtRecheck) refuse();
+    if (current.decision !== 'allow' && current.decision !== 'require-approval') refuse();
+    if (current.commandClass !== approved.commandClass) refuse();
+    return current;
   }
 
   async function auditResult(

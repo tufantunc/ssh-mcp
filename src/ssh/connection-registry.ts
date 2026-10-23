@@ -1,6 +1,6 @@
 import { getProfile as getConfigProfile, getConfigPath } from '../config/loader.js';
 import { OperatorError, UnconfiguredError } from '../errors.js';
-import type { AppConfig, Profile, ConnectionInfo } from '../types.js';
+import type { AppConfig, Defaults, Profile, ConnectionInfo } from '../types.js';
 import { resolveCredentials } from '../config/credential-resolver.js';
 import { SSHConnection } from './connection.js';
 import type { HostKeyMode } from './host-key.js';
@@ -170,6 +170,11 @@ export class ConnectionRegistry {
 
   listAllProfiles(): Profile[] {
     return this.config.profiles;
+  }
+
+  /** The live config's defaults: read at each use, so a reload takes effect without a rebuild. */
+  currentDefaults(): Defaults {
+    return this.config.defaults;
   }
 
   /**

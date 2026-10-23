@@ -51,4 +51,35 @@ describe('ApprovalGrants', () => {
     g.clear();
     expect(g.has('dev', 'rm -rf /tmp/x', 'destructive')).toBe(false);
   });
+
+  // A reload bumps the generation. A grant given under the old rules must stop
+  // counting at once, before anything gets round to clearing it.
+  it('does not honour a grant from an older generation', () => {
+    let generation = 0;
+    const g = new ApprovalGrants(60_000, () => generation);
+    g.record('dev', 'rm -rf /tmp/x', 'destructive');
+    expect(g.has('dev', 'rm -rf /tmp/x', 'destructive')).toBe(true);
+
+    generation = 1;
+    expect(g.has('dev', 'rm -rf /tmp/x', 'destructive')).toBe(false);
+
+    // Recorded again under the new generation, it counts again.
+    g.record('dev', 'rm -rf /tmp/x', 'destructive');
+    expect(g.has('dev', 'rm -rf /tmp/x', 'destructive')).toBe(true);
+  });
+
+  // The TTL is read live, so a reload that turns grants on applies to the next record.
+  it('reads the TTL at each record', () => {
+    const now = Date.now();
+    let ttl = 0;
+    const g = new ApprovalGrants(() => ttl);
+    g.record('dev', 'rm -rf /tmp/a', 'destructive', now);
+    expect(g.has('dev', 'rm -rf /tmp/a', 'destructive', now + 1)).toBe(false);
+
+    ttl = 1000;
+    g.record('dev', 'rm -rf /tmp/b', 'destructive', now);
+    expect(g.has('dev', 'rm -rf /tmp/a', 'destructive', now + 1)).toBe(false);
+    expect(g.has('dev', 'rm -rf /tmp/b', 'destructive', now + 999)).toBe(true);
+    expect(g.has('dev', 'rm -rf /tmp/b', 'destructive', now + 1000)).toBe(false);
+  });
 });

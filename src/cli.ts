@@ -247,8 +247,9 @@ export function resolveHostGroup(argv: Record<string, string | null>): string {
 /**
  * The defaults a quick-start profile inherits, from flags alone.
  *
- * Named because an unconfigured start needs them too — `approvalGrantTtlMs` is read while
- * wiring the tools, long before any profile exists, so the two paths have to agree.
+ * Named because an unconfigured start needs them too — `approvalGrantTtlMs` is read from
+ * the registry's defaults, which exist long before any profile does, so the two paths have
+ * to agree.
  */
 export function defaultsFromArgv(argv: Record<string, string | null>): Defaults {
   return {
