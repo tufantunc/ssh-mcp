@@ -96,7 +96,8 @@ export function stopAndDescribe(
 }
 
 export class SSHConnection {
-  readonly profile: Profile;
+  /** Replaced in place by a config reload; see replaceProfile. */
+  private currentProfile: Profile;
   private client: Client | null = null;
   private credentials: ResolvedCredentials;
   private readonly sessions: SessionManager;
@@ -118,7 +119,7 @@ export class SSHConnection {
     hostKeyMode: HostKeyMode = 'tofu',
     bastionSock?: ClientChannel,
   ) {
-    this.profile = profile;
+    this.currentProfile = profile;
     this.credentials = credentials;
     this.knownHostsStore = knownHostsStore;
     this.hostKeyMode = hostKeyMode;
@@ -162,6 +163,21 @@ export class SSHConnection {
       onChannelOpened: () => { this.activeChannels++; },
       onChannelClosed: () => { this.activeChannels--; },
     });
+  }
+
+  /** Read live on every use: policy is evaluated against this, per command. */
+  get profile(): Profile {
+    return this.currentProfile;
+  }
+
+  /**
+   * The config-reload seam. Only a profile whose connection fields are unchanged may come
+   * through here (the registry closes the connection otherwise), so the link, the
+   * credentials and the pinned host key stay valid; policy fields and limits apply from
+   * the next call.
+   */
+  replaceProfile(p: Profile): void {
+    this.currentProfile = p;
   }
 
   /**

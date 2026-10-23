@@ -24,7 +24,9 @@ describe('reapOnce', () => {
     const registry = new ConnectionRegistry(configWith('a'));
     const conn = fakeConn();
     (registry as any).connections.set('a', conn);
-    // Task 4's applyConfig does not exist yet; swap the config the way a reload will.
+    // Not applyConfig: it takes a removed profile's connection out of the map, so the
+    // reaper would never see it. This pins the reaper's own guard, should a connection
+    // without a profile ever be stored by some other path.
     (registry as any).config = configWith('b');
 
     await expect(reapOnce(registry)).resolves.toBeUndefined();
