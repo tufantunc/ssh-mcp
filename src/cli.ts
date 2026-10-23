@@ -20,6 +20,7 @@ import type { AclFinding, AclOptions } from './config/windows-acl.js';
 import { HOST_GROUPS } from './policy/engine.js';
 import type { HostKeyMode } from './ssh/host-key.js';
 import type { AppConfig, Profile, Defaults } from './types.js';
+import type { ConfigSource, LoadedConfig } from './config/loaded.js';
 
 /**
  * Whether the operator asked for a quick start at all.
@@ -273,19 +274,6 @@ export function defaultsFromArgv(argv: Record<string, string | null>): Defaults 
   };
 }
 
-export type ConfigSource = 'file' | 'unconfigured' | 'flags';
-
-export interface LoadedConfig {
-  config: AppConfig;
-  source: ConfigSource;
-  /** The file that was read, or the default path for `unconfigured` and `flags`. */
-  path: string;
-  /** Of the bytes that were parsed; null when no file was (`unconfigured`, `flags`). */
-  sha256: string | null;
-  /** When the config was loaded, as an ISO timestamp. */
-  loadedAt: string;
-}
-
 export function aclOptionsFromArgv(argv: Record<string, string | null>): AclOptions {
   // The way past an ACL that could not be read, rather than an operator with no
   // exit. See assertPrivateOnWindows.
@@ -308,24 +296,19 @@ export function aclOptionsFromArgv(argv: Record<string, string | null>): AclOpti
   };
 }
 
+function loaded(config: AppConfig, source: ConfigSource, path: string, sha256: string | null): LoadedConfig {
+  return { config, source, path, sha256, loadedAt: new Date().toISOString() };
+}
+
 /**
- * Loads a config file through the same validation startup uses, with the sha256 of the
- * bytes that were parsed. Reload calls this.
+ * The startup config: from `--config`, the default path, or the quick-start flags, or
+ * none at all. `aclOpts` is the ACL posture from argv; main() computes it once and hands
+ * the same options to the reloader.
  */
-export function loadConfigFile(
-  path: string,
+export async function loadAppConfig(
   argv: Record<string, string | null>,
-): Promise<{ config: AppConfig; sha256: string }> {
-  return loadConfigWithDigest(path, aclOptionsFromArgv(argv));
-}
-
-export async function buildAppConfig(argv: Record<string, string | null>): Promise<AppConfig> {
-  return (await loadAppConfig(argv)).config;
-}
-
-export async function loadAppConfig(argv: Record<string, string | null>): Promise<LoadedConfig> {
-  const aclOpts = aclOptionsFromArgv(argv);
-
+  aclOpts: AclOptions = aclOptionsFromArgv(argv),
+): Promise<LoadedConfig> {
   if (argv.config !== undefined) {
     // `parseArgv` stores null for a flag written without `=`, so a bare `--config` used to
     // be falsy here and fall into the default-path branch — which now refuses rather than
@@ -335,7 +318,7 @@ export async function loadAppConfig(argv: Record<string, string | null>): Promis
       throw new OperatorError('--config needs a path: --config=<path>');
     }
     const { config, sha256 } = await loadConfigWithDigest(argv.config, aclOpts);
-    return { config, source: 'file', path: argv.config, sha256, loadedAt: new Date().toISOString() };
+    return loaded(config, 'file', argv.config, sha256);
   }
 
   try {
@@ -351,7 +334,7 @@ export async function loadAppConfig(argv: Record<string, string | null>): Promis
         'Pass --config <path> to choose a different file.',
       );
     }
-    return { config: fromFile, source: 'file', path: getConfigPath(), sha256, loadedAt: new Date().toISOString() };
+    return loaded(fromFile, 'file', getConfigPath(), sha256);
   } catch (err) {
     // Only "there is no file" means fall through. A file that exists and is
     // unusable — malformed TOML, a schema violation, a permission failure —
@@ -383,13 +366,7 @@ export async function loadAppConfig(argv: Record<string, string | null>): Promis
   // falsy so that a valueless or space-separated one stays a typo.
   if (nothingRequested(argv)) {
     console.error(`Warning: starting unconfigured — every tool call except reload-config will be refused until a config file is loaded.\n${new UnconfiguredError(getConfigPath()).message}`);
-    return {
-      config: { defaults: defaultsFromArgv(argv), profiles: [] },
-      source: 'unconfigured',
-      path: getConfigPath(),
-      sha256: null,
-      loadedAt: new Date().toISOString(),
-    };
+    return loaded({ defaults: defaultsFromArgv(argv), profiles: [] }, 'unconfigured', getConfigPath(), null);
   }
 
   if (!argv.host || !argv.user) {
@@ -426,11 +403,5 @@ export async function loadAppConfig(argv: Record<string, string | null>): Promis
     transferTimeoutMs: defaults.transferTimeoutMs,
   };
 
-  return {
-    config: { defaults, profiles: [profile] },
-    source: 'flags',
-    path: getConfigPath(),
-    sha256: null,
-    loadedAt: new Date().toISOString(),
-  };
+  return loaded({ defaults, profiles: [profile] }, 'flags', getConfigPath(), null);
 }

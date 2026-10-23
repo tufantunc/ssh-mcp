@@ -4,7 +4,9 @@ import { mkdtemp, readFile, rm } from 'fs/promises';
 import { platform, tmpdir } from 'os';
 import { join } from 'path';
 import { ConfigReloader, installSighupReload, type ReloadOutcome } from '../../../src/config/reload.js';
-import { defaultsFromArgv, loadConfigFile, type ConfigSource } from '../../../src/cli.js';
+import { aclOptionsFromArgv, defaultsFromArgv } from '../../../src/cli.js';
+import { loadConfigWithDigest } from '../../../src/config/loader.js';
+import type { ConfigSource } from '../../../src/config/loaded.js';
 import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
 import { PolicyEngine, resolvePolicyRules } from '../../../src/policy/engine.js';
 import { AuditStore } from '../../../src/audit/store.js';
@@ -66,14 +68,13 @@ function build(
   path: string,
   source: ConfigSource = 'file',
   sha256: string | null = null,
-  argv: Record<string, string | null> = {},
 ): Harness {
   const registry = new ConnectionRegistry(config, 'insecure');
   const policy = new PolicyEngine(resolvePolicyRules(config.profiles, config.policy));
   const audit = new AuditStore(join(auditDir, 'audit.log'));
   const localPath = { transferRoot: config.defaults.transferRoot };
   const reloader = new ConfigReloader({
-    argv,
+    aclOptions: {},
     registry,
     policy,
     audit,
@@ -89,7 +90,7 @@ const sha256Of = async (path: string) => createHash('sha256').update(await readF
 /** A server started from `toml`, loaded through the same loader the reload uses. */
 async function startFrom(toml: string, source: ConfigSource = 'file'): Promise<Harness> {
   const path = await dir.write(toml);
-  const { config, sha256 } = await loadConfigFile(path, {});
+  const { config, sha256 } = await loadConfigWithDigest(path, {});
   return build(config, path, source, source === 'file' ? sha256 : null);
 }
 
@@ -175,18 +176,18 @@ describe('ConfigReloader: a refused reload changes nothing', () => {
     {
       name: 'malformed TOML',
       toml: `[[profiles]\nname = "${CANARY}"\n`,
-      raw: (path) => loadConfigFile(path, {}),
+      raw: (path) => loadConfigWithDigest(path, {}),
     },
     {
       name: 'a schema violation',
       toml: `${BASE}auth = "${CANARY}"\n"${CANARY}" = 1\n`,
-      raw: (path) => loadConfigFile(path, {}),
+      raw: (path) => loadConfigWithDigest(path, {}),
     },
     {
       name: 'a bad denylist regex',
       toml: `${BASE}\n[policy]\ndenylist = ["(${CANARY}"]\n`,
       raw: async (path) => {
-        const { config: c } = await loadConfigFile(path, {});
+        const { config: c } = await loadConfigWithDigest(path, {});
         return new PolicyEngine(resolvePolicyRules(c.profiles, c.policy));
       },
     },
@@ -194,7 +195,7 @@ describe('ConfigReloader: a refused reload changes nothing', () => {
       name: 'a cross-check failure',
       toml: BASE.replace('user = "test"', `user = "test"\nrole = "${CANARY}"`),
       raw: async (path) => {
-        const { config: c } = await loadConfigFile(path, {});
+        const { config: c } = await loadConfigWithDigest(path, {});
         return resolvePolicyRules(c.profiles, c.policy);
       },
     },
@@ -202,7 +203,7 @@ describe('ConfigReloader: a refused reload changes nothing', () => {
       // Role and group names are keys, so they land in the schema issue path.
       name: 'a schema violation under a role and group named in the file',
       toml: `${BASE}\n[policy.roleBindings.${CANARY}-role]\n${CANARY}-group = ["not-a-class"]\n`,
-      raw: (path) => loadConfigFile(path, {}),
+      raw: (path) => loadConfigWithDigest(path, {}),
     },
   ];
 
@@ -825,7 +826,7 @@ describe('ConfigReloader: the hash is of the bytes that were parsed', () => {
 
     const config: AppConfig = { defaults: defaultsFromArgv({}), profiles: [] };
     const reloader = new Reloader({
-      argv: {},
+      aclOptions: {},
       registry: new Registry(config, 'insecure'),
       policy: new Engine(),
       audit: new Store(join(auditDir, 'audit.log')),
@@ -869,12 +870,13 @@ describe('ConfigReloader: quota counters survive a reload', () => {
   });
 });
 
-describe('ConfigReloader: the argv ACL flags reach the loader (Review Focus 4)', () => {
+describe('ConfigReloader: the ACL options from argv reach the loader (Review Focus 4)', () => {
   /**
    * The Windows ACL check, stubbed to come back with a finding the default posture
    * refuses (an ACL that could not be read). `--allowUncheckedConfigAcl` waives it; its
-   * absence refuses. Pinned at the reloader, because a reload that built its own ACL
-   * options (or none) would pass every other test here.
+   * absence refuses. main() computes the options from argv once, with
+   * `aclOptionsFromArgv`, and hands the same object to the reloader; pinned here because
+   * a reload that built its own options (or none) would pass every other test.
    */
   afterEach(() => {
     vi.doUnmock('os');
@@ -909,26 +911,36 @@ describe('ConfigReloader: the argv ACL flags reach the loader (Review Focus 4)',
 
     const path = await dir.write(BASE);
     const config: AppConfig = { defaults: defaultsFromArgv({}), profiles: [] };
+    const registry = new Registry(config, 'insecure');
+    const policy = new Engine();
+    const audit = new Store(join(auditDir, 'audit.log'));
+    const localPath = {};
     const reloader = new Reloader({
-      argv,
-      registry: new Registry(config, 'insecure'),
-      policy: new Engine(),
-      audit: new Store(join(auditDir, 'audit.log')),
-      localPath: {},
+      aclOptions: aclOptionsFromArgv(argv),
+      registry,
+      policy,
+      audit,
+      localPath,
       startup: { config, source: 'unconfigured', path, sha256: null, loadedAt: STARTED_AT },
     });
-    return reloader.reload('tool', 1);
+    const h: Harness = { path, registry, policy, audit, localPath, reloader };
+    const before = snapshot(h);
+    return { h, before, outcome: await reloader.reload('tool', 1) };
   }
 
-  it('passes with --allowUncheckedConfigAcl', async () => {
-    const outcome = await reloadUnderAclFinding({ allowUncheckedConfigAcl: null });
+  it('passes with --allowUncheckedConfigAcl, and reports the finding', async () => {
+    const { outcome } = await reloadUnderAclFinding({ allowUncheckedConfigAcl: null });
     expect(outcome.error).toBeUndefined();
     expect(outcome.ok).toBe(true);
+    // Waived, not silent: the sink aclOptionsFromArgv installs printed the finding.
+    expect(stderr.some((line) => line.startsWith('Warning: '))).toBe(true);
   });
 
-  it('refuses without it', async () => {
-    const outcome = await reloadUnderAclFinding({});
+  it('refuses without it, naming the flag, and changes nothing', async () => {
+    const { h, before, outcome } = await reloadUnderAclFinding({});
     expect(outcome.ok).toBe(false);
     expect(outcome.error?.name).toBe('OperatorError');
+    expect(outcome.error?.message).toContain('--allowUncheckedConfigAcl');
+    expectUnchanged(h, before);
   });
 });

@@ -1,16 +1,18 @@
-import { loadConfigFile, type ConfigSource, type LoadedConfig } from '../cli.js';
-import { ConfigParseError, ConfigSchemaError, OperatorError } from '../errors.js';
 import { isDeepStrictEqual } from 'node:util';
+import { ConfigParseError, ConfigSchemaError, OperatorError, errorName } from '../errors.js';
 import { PolicyEngine, resolvePolicyRules, type CompiledRules, type PolicyRules } from '../policy/engine.js';
-import { RELEASE } from '../tools/session-tools.js';
+import { RELEASE, sessionKind, sessionReleaseCommand } from '../audit/session-release.js';
+import { loadConfigWithDigest } from './loader.js';
+import type { ConfigSource, LoadedConfig } from './loaded.js';
 import type { ProfileChange, ProfileDiff } from './reload-diff.js';
+import type { AclOptions } from './windows-acl.js';
 import type { AuditStore } from '../audit/store.js';
-import type { ApplyResult, ConnectionRegistry } from '../ssh/connection-registry.js';
+import type { ApplyResult, CloseReason, ConnectionRegistry } from '../ssh/connection-registry.js';
 import type { AppConfig } from '../types.js';
 
 export interface ReloadDeps {
-  /** The startup argv. Never reloaded; read for the ACL flags the loader takes. */
-  argv: Record<string, string | null>;
+  /** The ACL options startup checked the file with, from argv once in main(); never reloaded. */
+  aclOptions: AclOptions;
   registry: ConnectionRegistry;
   policy: PolicyEngine;
   audit: AuditStore;
@@ -31,7 +33,7 @@ export interface ReloadStatus {
 
 export interface ClosedConnection {
   profile: string;
-  reason: string;
+  reason: CloseReason;
   /** Session names, collected before the close. */
   sessions: string[];
   /** Set when the close failed: the error class and code only. */
@@ -52,7 +54,7 @@ export interface ReloadOutcome {
   diff?: ProfileDiff;
   policyChanged?: boolean;
   closed?: ClosedConnection[];
-  /** Kept-open profiles whose session-fixed fields changed. */
+  /** Profiles with an open connection, kept open, whose session-fixed fields changed. */
   sessionFieldsChanged?: ProfileChange[];
   grantsInvalidated?: boolean;
   /** Of the bytes that were parsed and applied. */
@@ -91,7 +93,7 @@ type CloseEntry = ApplyResult['toClose'][number];
 
 const FLAGS_REFUSAL = 'started from command-line flags; restart to use a config file';
 
-const CLOSE_REASONS: Record<string, string> = {
+const CLOSE_REASONS: Record<CloseReason, string> = {
   removed: 'profile removed',
   'connection-field': 'connection field changed',
   'bastion-closed': 'its bastion closed',
@@ -165,6 +167,9 @@ export class ConfigReloader {
       return `Config reload (${o.trigger}) refused: ${error.name}: ${error.message}\nNothing was changed.`;
     }
 
+    /** "name (field, field), name (field)": a profile change by name and field names only. */
+    const describeChanges = (cs: ProfileChange[]) => cs.map((c) => `${c.name} (${c.fields.join(', ')})`).join(', ');
+
     const lines = [`Config reloaded from ${this.path} (${o.trigger}); sha256 ${o.sha256}, loaded at ${o.loadedAt}.`];
     const diff = o.diff;
     if (diff && (diff.added.length || diff.removed.length || diff.changed.length)) {
@@ -172,7 +177,7 @@ export class ConfigReloader {
       if (diff.added.length) parts.push(`added ${diff.added.join(', ')}`);
       if (diff.removed.length) parts.push(`removed ${diff.removed.join(', ')}`);
       if (diff.changed.length) {
-        parts.push(`changed ${diff.changed.map((c) => `${c.name} (${c.fields.join(', ')})`).join(', ')}`);
+        parts.push(`changed ${describeChanges(diff.changed)}`);
       }
       lines.push(`Profiles: ${parts.join('; ')}.`);
     } else {
@@ -182,12 +187,11 @@ export class ConfigReloader {
     for (const c of o.closed ?? []) {
       const sessions = c.sessions.length ? `sessions closed: ${c.sessions.join(', ')}` : 'no sessions';
       const failed = c.error ? `; close failed: ${c.error}` : '';
-      lines.push(`Closed connection ${c.profile} (${CLOSE_REASONS[c.reason] ?? c.reason}), ${sessions}${failed}.`);
+      lines.push(`Closed connection ${c.profile} (${CLOSE_REASONS[c.reason]}), ${sessions}${failed}.`);
     }
     if (o.sessionFieldsChanged?.length) {
       lines.push(
-        'Kept open; the new values apply to new sessions and commands: ' +
-        `${o.sessionFieldsChanged.map((c) => `${c.name} (${c.fields.join(', ')})`).join(', ')}.`,
+        `Kept open; the new values apply to new sessions and commands: ${describeChanges(o.sessionFieldsChanged)}.`,
       );
     }
     if (o.grantsInvalidated) lines.push('Approval grants: cleared; the next approval grants anew.');
@@ -224,10 +228,6 @@ export class ConfigReloader {
       this.loadedAt = loadedAt;
       this.sha256 = sha256;
 
-      // A session-fixed change matters only where a session could have fixed it.
-      const open = new Set(registry.liveConnections().map((c) => c.profile.name));
-      const sessionFieldsChanged = applied.sessionFieldsChanged.filter((c) => open.has(c.name));
-
       const closed = await this.closeAll(applied.toClose, requestId);
       return await this.finish(
         {
@@ -237,7 +237,7 @@ export class ConfigReloader {
           diff: applied.diff,
           policyChanged,
           closed,
-          sessionFieldsChanged,
+          sessionFieldsChanged: applied.sessionFieldsChanged,
           // applyConfig bumped the generation, which is what invalidates every grant.
           grantsInvalidated: true,
           sha256,
@@ -261,7 +261,7 @@ export class ConfigReloader {
     if (this.source === 'flags') throw new ReloadRefusedError(FLAGS_REFUSAL);
 
     // The hash is of the very bytes the loader parsed, not of a second read.
-    const { config: next, sha256 } = await loadConfigFile(this.path, this.deps.argv);
+    const { config: next, sha256 } = await loadConfigWithDigest(this.path, this.deps.aclOptions);
 
     let rules: PolicyRules;
     try {
@@ -353,7 +353,7 @@ export class ConfigReloader {
               mcpRequestId: requestId,
               profile: entry.profile,
               user: entry.conn.profile.user,
-              command: `${RELEASE.binary} ${s.kind} ${s.name} (reload)`,
+              command: sessionReleaseCommand(s.kind, s.name, { reload: true }),
               commandClass: RELEASE.commandClass,
               binary: RELEASE.binary,
               decision: RELEASE.decision,
@@ -452,15 +452,7 @@ function sessionsOf(conn: CloseEntry['conn']): { name: string; kind: string }[] 
   } catch {
     return [];
   }
-  return list.map((s) => {
-    let kind = 'unknown';
-    try {
-      kind = s.toInfo().type;
-    } catch {
-      // Recorded as unknown, as close-session does for a session it cannot describe.
-    }
-    return { name: s.name, kind };
-  });
+  return list.map((s) => ({ name: s.name, kind: sessionKind(s) }));
 }
 
 /**
@@ -474,10 +466,6 @@ function maskedIssuePath(path: string[]): string {
     ? path.map((seg, i) => (i === 2 || i === 3 ? '*' : seg))
     : path;
   return masked.join('.');
-}
-
-function errorName(err: unknown): string {
-  return err instanceof Error ? err.name : typeof err;
 }
 
 /** Class and code only: a transport error's message can name the host. */

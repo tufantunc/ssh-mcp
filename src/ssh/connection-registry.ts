@@ -17,7 +17,7 @@ export interface ApplyResult {
   diff: ProfileDiff;
   /** Already out of the registry; the caller closes them. */
   toClose: { conn: SSHConnection; profile: string; reason: 'removed' | 'connection-field' | 'bastion-closed' }[];
-  /** Profiles kept open whose session-fixed fields changed, with only those fields named. */
+  /** Profiles with an open connection, kept open, whose session-fixed fields changed: only those fields named. */
   sessionFieldsChanged: ProfileChange[];
 }
 
@@ -269,8 +269,12 @@ export class ConnectionRegistry {
     const sessionFieldsChanged: ProfileChange[] = [];
     for (const change of diff.changed) {
       if (closing.has(change.name)) continue;
+      // Only a profile with an open connection: there is nothing to swap otherwise, and a
+      // session-fixed change matters only where a session could have fixed it.
+      const conn = this.connections.get(change.name);
       const profile = nextByName.get(change.name);
-      if (profile) this.connections.get(change.name)?.replaceProfile(profile);
+      if (!conn || !profile) continue;
+      conn.replaceProfile(profile);
       const fields = change.fields.filter((f) => SESSION_FIXED_FIELDS.includes(f));
       if (fields.length > 0) sessionFieldsChanged.push({ name: change.name, fields });
     }

@@ -16,6 +16,7 @@ import { ConfigReloader, installSighupReload } from './config/reload.js';
 import {
   parseArgv,
   loadAppConfig,
+  aclOptionsFromArgv,
   checkRemovedFlags,
   flagEnabled,
   parseFailureLimit,
@@ -36,7 +37,9 @@ async function main() {
 
   // The whole of it, not just `config`: the reloader needs to know where the live config
   // came from, its hash and when it was loaded.
-  const startup = await loadAppConfig(argv);
+  // The ACL posture, once: startup's load and every reload check the file with it.
+  const aclOptions = aclOptionsFromArgv(argv);
+  const startup = await loadAppConfig(argv, aclOptions);
   const { config } = startup;
   const hostKeyMode = resolveHostKeyMode(argv);
   const entropyScan = flagEnabled(argv, 'auditEntropyScan');
@@ -78,7 +81,7 @@ async function main() {
   // One reloader for the process: every MCP server below (one under stdio, one per HTTP
   // session) reloads the same registry, policy and transfer root, and the reloader
   // serializes them.
-  const reloader = new ConfigReloader({ argv, registry, policy, audit, localPath, startup });
+  const reloader = new ConfigReloader({ aclOptions, registry, policy, audit, localPath, startup });
 
   // An McpServer binds to a single transport, so HTTP needs one per session.
   const createMcpServer = (): McpServer => {

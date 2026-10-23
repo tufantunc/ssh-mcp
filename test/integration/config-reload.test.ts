@@ -11,7 +11,7 @@ import { SSHConnection } from '../../src/ssh/connection.js';
 import { PolicyEngine, resolvePolicyRules } from '../../src/policy/engine.js';
 import { AuditStore } from '../../src/audit/store.js';
 import { ConfigReloader } from '../../src/config/reload.js';
-import { loadConfigFile } from '../../src/cli.js';
+import { loadConfigWithDigest } from '../../src/config/loader.js';
 import { registerTools } from '../../src/tools/registry.js';
 import { textOf } from '../unit/tools/harness.js';
 import type { AppConfig, AuditRecord } from '../../src/types.js';
@@ -158,12 +158,12 @@ async function startLive(toml: string): Promise<Live> {
   await writeFile(path, toml, 'utf8');
   await chmod(path, 0o600);
 
-  const { config, sha256 } = await loadConfigFile(path, {});
+  const { config, sha256 } = await loadConfigWithDigest(path, {});
   const registry = new Registry(config, 'insecure');
   const policy = new PolicyEngine(resolvePolicyRules(config.profiles, config.policy));
   const audit = new AuditStore(auditPath);
   const reloader = new ConfigReloader({
-    argv: {},
+    aclOptions: {},
     registry,
     policy,
     audit,

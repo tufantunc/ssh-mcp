@@ -3,6 +3,7 @@ import { TOOL_DESCRIPTIONS as D } from './descriptions.js';
 import { textResult, type ToolResult } from './results.js';
 import type { ToolDeps } from './pipeline.js';
 import type { ConfigReloader, ReloadOutcome } from '../config/reload.js';
+import { errorName } from '../errors.js';
 
 /**
  * `reload-config`: the config file's status, or a reload of it.
@@ -13,7 +14,7 @@ import type { ConfigReloader, ReloadOutcome } from '../config/reload.js';
  * the source, the load time and the hash, and the outcome text is `formatOutcome`, which
  * names profiles and fields only.
  */
-export function registerConfigTools({ server, reloader }: ToolDeps) {
+export function registerConfigTools({ server, reloader }: Pick<ToolDeps, 'server' | 'reloader'>) {
   server.tool(
     'reload-config',
     D['reload-config'],
@@ -37,7 +38,7 @@ export function registerConfigTools({ server, reloader }: ToolDeps) {
       } catch (err) {
         // reload() resolves on every failure it knows of; this is a defect. Its message
         // may quote the file, so only the class is reported.
-        const name = err instanceof Error ? err.name : typeof err;
+        const name = errorName(err);
         console.error(`Config reload (tool) failed unexpectedly (${name}).`);
         return {
           ...textResult(

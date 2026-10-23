@@ -60,8 +60,10 @@ export interface ToolDeps {
    */
   localPath?: LocalPathContext;
   /**
-   * The one reloader the server shares across every MCP server it builds. Optional for the
-   * same reason as `localPath`: absent, `reload-config` still registers and refuses.
+   * The one reloader the server shares across every MCP server it builds. main() always
+   * passes it, an unconfigured start included; it is optional only for test harnesses
+   * that build the tool layer without one. Absent, `reload-config` still registers and
+   * refuses.
    */
   reloader?: ConfigReloader;
 }

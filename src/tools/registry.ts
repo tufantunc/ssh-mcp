@@ -19,10 +19,13 @@ export { registerResources } from './resources.js';
  * The handlers live in four groups by subject (sessions, commands, text-mode
  * file transfer, streaming file transfer) and share one audited pipeline, built
  * here. A fifth, the config reload, runs no remote command and takes no
- * pipeline. Splitting them up is what keeps the
- * pipeline the only route from caller input to a remote command: a handler that
- * wanted to bypass policy or audit would have to reach past `pipeline` for the
- * registry, which it is not given.
+ * pipeline; it is handed only the server and the reloader.
+ *
+ * The four groups are handed `deps` whole, registry included, so nothing here
+ * stops a handler from reaching past `pipeline`. Keeping the pipeline the only
+ * route from caller input to a remote command, and so to policy, approval and
+ * audit, is a convention: a handler that runs a remote command any other way is
+ * a defect a review should refuse.
  */
 export function registerTools(
   server: McpServer,
@@ -40,5 +43,5 @@ export function registerTools(
   registerTransferTools(deps, pipeline);
   // Not given the pipeline: a reload runs no remote command, so it is neither
   // policy-gated nor quota-counted. The reloader writes its own audit record.
-  registerConfigTools(deps);
+  registerConfigTools({ server, reloader: opts.reloader });
 }

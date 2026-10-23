@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, writeFile, chmod, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { loadConfig, getProfile } from '../../../src/config/loader.js';
+import { loadConfigWithDigest, getProfile } from '../../../src/config/loader.js';
 import {
   PolicyEngine,
   DEFAULT_RULES,
@@ -18,7 +18,7 @@ import type { AppConfig } from '../../../src/types.js';
  * existed in the type long before anything fed it from configuration — which is
  * precisely what made the README document a table that was parsed and dropped
  * (#95). A test asserting only that the config parses would have passed then
- * too. So every case here goes config file → loadConfig → mergePolicyRules →
+ * too. So every case here goes config file → loadConfigWithDigest → mergePolicyRules →
  * evaluate(), and asserts on the verdict at the end of that chain.
  */
 
@@ -61,7 +61,7 @@ group = "prod"
 
 describe('[policy] roleBindings', () => {
   it('grants privileged to admin on prod, which the defaults refuse', async () => {
-    const before = await loadConfig(await writeConfig(ADMIN_PROD_PROFILE));
+    const { config: before } = await loadConfigWithDigest(await writeConfig(ADMIN_PROD_PROFILE));
     const denied = engineFor(before).evaluate(
       'sudo systemctl restart nginx',
       getProfile(before, 'prod-web'),
@@ -69,7 +69,7 @@ describe('[policy] roleBindings', () => {
     expect(denied.decision).toBe('deny');
     expect(denied.ruleId).toBe('role-binding');
 
-    const after = await loadConfig(await writeConfig(`
+    const { config: after } = await loadConfigWithDigest(await writeConfig(`
 ${ADMIN_PROD_PROFILE}
 
 [policy.roleBindings.admin]
@@ -87,7 +87,7 @@ prod = ["read-only", "safe", "destructive", "privileged"]
   });
 
   it('leaves the tiers and roles the override never mentions on their defaults', async () => {
-    const config = await loadConfig(await writeConfig(`
+    const { config } = await loadConfigWithDigest(await writeConfig(`
 [[profiles]]
 name = "prod-web"
 host = "10.0.0.5"
@@ -141,10 +141,10 @@ approvalPolicy = "auto"
     // only while roleBindings were compiled in, because the prod cell was that
     // role's strictest. Now that a [policy] block can widen prod, an unresolved
     // tier is a startup error rather than a fallback to whatever prod became.
-    const before = await loadConfig(await writeConfig(profile));
+    const { config: before } = await loadConfigWithDigest(await writeConfig(profile));
     expect(() => engineFor(before)).toThrow(/no bindings for group "tier-1"/);
 
-    const after = await loadConfig(await writeConfig(`
+    const { config: after } = await loadConfigWithDigest(await writeConfig(`
 ${profile}
 
 [policy.roleBindings.admin]
@@ -168,10 +168,10 @@ approvalPolicy = "auto"
     // An unknown role is demoted to read-only, and at the point of use that is
     // indistinguishable from a policy decision someone made on purpose. It is the
     // exact shape of #95, from the profile side rather than the [policy] side.
-    const before = await loadConfig(await writeConfig(profile));
+    const { config: before } = await loadConfigWithDigest(await writeConfig(profile));
     expect(() => engineFor(before)).toThrow(/role "deployer" has no role bindings/);
 
-    const after = await loadConfig(await writeConfig(`
+    const { config: after } = await loadConfigWithDigest(await writeConfig(`
 ${profile}
 
 [policy.roleBindings.deployer]
@@ -183,7 +183,7 @@ dev = ["read-only", "safe"]
   });
 
   it('treats an empty class list as a real lockdown, not as unset', async () => {
-    const config = await loadConfig(await writeConfig(`
+    const { config } = await loadConfigWithDigest(await writeConfig(`
 ${ADMIN_PROD_PROFILE}
 
 [policy.roleBindings.admin]
@@ -205,7 +205,7 @@ prod = []
   });
 
   it('applies a denylist from config', async () => {
-    const config = await loadConfig(await writeConfig(`
+    const { config } = await loadConfigWithDigest(await writeConfig(`
 [[profiles]]
 name = "dev-box"
 host = "10.0.0.9"
@@ -228,7 +228,7 @@ denylist = ["^terraform\\\\s+destroy"]
   });
 
   it('behaves exactly like the compiled defaults when no [policy] section exists', async () => {
-    const config = await loadConfig(await writeConfig(ADMIN_PROD_PROFILE));
+    const { config } = await loadConfigWithDigest(await writeConfig(ADMIN_PROD_PROFILE));
     expect(config.policy).toBeUndefined();
     expect(mergePolicyRules(DEFAULT_RULES, config.policy)).toBe(DEFAULT_RULES);
   });
@@ -244,7 +244,7 @@ prod = ["read-only", "priviledged"]
 `);
     // The whole point: a typo that parses to a grant of nothing is
     // indistinguishable at runtime from a deliberate policy decision.
-    await expect(loadConfig(path)).rejects.toThrow(/policy\.roleBindings\.admin\.prod/);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/policy\.roleBindings\.admin\.prod/);
   });
 
   it('rejects an unknown key inside [policy] rather than dropping it', async () => {
@@ -254,7 +254,7 @@ ${ADMIN_PROD_PROFILE}
 [policy]
 allowlist = ["ls"]
 `);
-    await expect(loadConfig(path)).rejects.toThrow(/Config validation error/);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/Config validation error/);
   });
 
   it('rejects a role or tier named __proto__ rather than accepting one that cannot exist', async () => {
@@ -266,7 +266,7 @@ ${ADMIN_PROD_PROFILE}
 [policy.roleBindings."__proto__"]
 prod = ["privileged"]
 `);
-    await expect(loadConfig(path)).rejects.toThrow(/Reserved name/);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/Reserved name/);
 
     const tier = await writeConfig(`
 ${ADMIN_PROD_PROFILE}
@@ -274,7 +274,7 @@ ${ADMIN_PROD_PROFILE}
 [policy.roleBindings.admin]
 "constructor" = ["privileged"]
 `);
-    await expect(loadConfig(tier)).rejects.toThrow(/Reserved name/);
+    await expect(loadConfigWithDigest(tier)).rejects.toThrow(/Reserved name/);
   });
 
   it('names the role a reserved tier sits under, not just the tier', async () => {
@@ -288,7 +288,7 @@ ${ADMIN_PROD_PROFILE}
 [policy.roleBindings.admin]
 "__proto__" = ["privileged"]
 `);
-    await expect(loadConfig(path)).rejects.toThrow(/policy\.roleBindings\.admin\.__proto__/);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/policy\.roleBindings\.admin\.__proto__/);
   });
 
   it('rejects a role named prototype', async () => {
@@ -301,7 +301,7 @@ ${ADMIN_PROD_PROFILE}
 [policy.roleBindings."prototype"]
 prod = ["privileged"]
 `);
-    await expect(loadConfig(path)).rejects.toThrow(/Reserved name/);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/Reserved name/);
   });
 
   it('reports every reserved name rather than stopping at the first', async () => {
@@ -317,7 +317,7 @@ prod = ["privileged"]
 [policy.roleBindings.admin]
 "prototype" = ["privileged"]
 `);
-    const error = await loadConfig(path).then(() => null, (e: Error) => e);
+    const error = await loadConfigWithDigest(path).then(() => null, (e: Error) => e);
     expect(error?.message).toMatch(/roleBindings\.constructor/);
     expect(error?.message).toMatch(/roleBindings\.admin\.prototype/);
   });
@@ -331,7 +331,7 @@ ${ADMIN_PROD_PROFILE}
 [policy.roleBindings.""]
 prod = ["privileged"]
 `);
-    await expect(loadConfig(path)).rejects.toThrow(/cannot be empty/);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/cannot be empty/);
   });
 
   it('refuses roleBindings that is not a table', async () => {
@@ -341,7 +341,7 @@ ${ADMIN_PROD_PROFILE}
 [policy]
 roleBindings = "nope"
 `);
-    await expect(loadConfig(path)).rejects.toThrow(/policy\.roleBindings/);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/policy\.roleBindings/);
   });
 
   it('names the root in a top-level validation error instead of an empty path', async () => {
@@ -351,7 +351,7 @@ ${ADMIN_PROD_PROFILE}
 [policies]
 roleBindings = {}
 `);
-    await expect(loadConfig(path)).rejects.toThrow(/\(root\): Unrecognized key/);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/\(root\): Unrecognized key/);
   });
 
   it('names the unrecognised section rather than failing generically', async () => {
@@ -365,7 +365,7 @@ enabled = true
     // clean startup, no warning, and none of the configured behaviour. Asserting
     // on the section name rather than the wrapper, so the test still means
     // something if the message ever stops saying which key was rejected.
-    await expect(loadConfig(path)).rejects.toThrow(/telemetry/);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/telemetry/);
   });
 });
 
@@ -401,7 +401,7 @@ describe('mergePolicyRules', () => {
  */
 describe('startup coherence', () => {
   it('rejects a profile whose group nothing defines', async () => {
-    const config = await loadConfig(await writeConfig(`
+    const { config } = await loadConfigWithDigest(await writeConfig(`
 [[profiles]]
 name = "build-box"
 host = "10.0.0.8"
@@ -420,7 +420,7 @@ prod = ["read-only", "safe", "destructive", "privileged"]
   });
 
   it('rejects a profile whose inferred tier nothing defines', async () => {
-    const config = await loadConfig(await writeConfig(`
+    const { config } = await loadConfigWithDigest(await writeConfig(`
 [[profiles]]
 name = "staging-web"
 host = "10.0.0.11"
@@ -443,7 +443,7 @@ prod = ["read-only", "safe", "destructive", "privileged"]
   });
 
   it('rejects a roleBindings block no profile can reach', async () => {
-    const config = await loadConfig(await writeConfig(`
+    const { config } = await loadConfigWithDigest(await writeConfig(`
 [[profiles]]
 name = "prod-web"
 host = "10.0.0.5"
@@ -460,7 +460,7 @@ prod = ["read-only"]
   });
 
   it('rejects a tier key no profile can reach', async () => {
-    const config = await loadConfig(await writeConfig(`
+    const { config } = await loadConfigWithDigest(await writeConfig(`
 ${ADMIN_PROD_PROFILE}
 
 [policy.roleBindings.admin]
@@ -470,7 +470,7 @@ stagign = ["read-only"]
   });
 
   it('reports every problem at once rather than the first', async () => {
-    const config = await loadConfig(await writeConfig(`
+    const { config } = await loadConfigWithDigest(await writeConfig(`
 [[profiles]]
 name = "build-box"
 host = "10.0.0.8"
@@ -487,7 +487,7 @@ prod = ["read-only"]
   });
 
   it('accepts a custom role and tier that a profile actually uses', async () => {
-    const config = await loadConfig(await writeConfig(`
+    const { config } = await loadConfigWithDigest(await writeConfig(`
 [[profiles]]
 name = "build-box"
 host = "10.0.0.8"
@@ -508,7 +508,7 @@ approvalPolicy = "auto"
   });
 
   it('accepts a config with no [policy] section at all', async () => {
-    const config = await loadConfig(await writeConfig(ADMIN_PROD_PROFILE));
+    const { config } = await loadConfigWithDigest(await writeConfig(ADMIN_PROD_PROFILE));
     expect(() => engineFor(config)).not.toThrow();
     expect(resolvePolicyRules(config.profiles, config.policy)).toBe(DEFAULT_RULES);
   });

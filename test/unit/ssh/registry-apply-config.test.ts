@@ -163,6 +163,21 @@ describe('ConnectionRegistry.applyConfig', () => {
     expect(result.sessionFieldsChanged).toEqual([{ name: 'web', fields: ['workdir'] }]);
   });
 
+  // A session-fixed field matters only where a session could have fixed it: a profile
+  // with no open connection has none.
+  it('does not report session fields for a profile with no open connection', () => {
+    const registry = new ConnectionRegistry(configOf(makeProfile('web'), makeProfile('idle')));
+    plant(registry, makeProfile('web'));
+
+    const result = registry.applyConfig(configOf(
+      makeProfile('web', { workdir: '/srv/app' }),
+      makeProfile('idle', { workdir: '/srv/app' }),
+    ));
+
+    expect(result.diff.changed.map((c) => c.name).sort()).toEqual(['idle', 'web']);
+    expect(result.sessionFieldsChanged).toEqual([{ name: 'web', fields: ['workdir'] }]);
+  });
+
   it('does not report session fields for a connection it closes', () => {
     const before = makeProfile('web');
     const registry = new ConnectionRegistry(configOf(before));

@@ -4,7 +4,8 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { createHarness, textOf, type Harness } from './harness.js';
 import { ConfigReloader, type ReloadOutcome } from '../../../src/config/reload.js';
-import { defaultsFromArgv, loadConfigFile } from '../../../src/cli.js';
+import { defaultsFromArgv } from '../../../src/cli.js';
+import { loadConfigWithDigest } from '../../../src/config/loader.js';
 import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
 import { PolicyEngine, resolvePolicyRules } from '../../../src/policy/engine.js';
 import { AuditStore } from '../../../src/audit/store.js';
@@ -45,9 +46,9 @@ afterEach(async () => {
 /** A real reloader over a real file, behind the stubbed tool harness. */
 async function startWithReloader(): Promise<{ path: string; reloader: ConfigReloader }> {
   const path = await dir.write(TOML);
-  const { config, sha256 } = await loadConfigFile(path, {});
+  const { config, sha256 } = await loadConfigWithDigest(path, {});
   const reloader = new ConfigReloader({
-    argv: {},
+    aclOptions: {},
     registry: new ConnectionRegistry(config, 'insecure'),
     policy: new PolicyEngine(resolvePolicyRules(config.profiles, config.policy)),
     audit: new AuditStore(auditPath),
@@ -171,7 +172,7 @@ describe('reload-config', () => {
     const config = { defaults: defaultsFromArgv({}), profiles: [] };
     const registry = new ConnectionRegistry(config, 'insecure');
     const reloader = new ConfigReloader({
-      argv: {},
+      aclOptions: {},
       registry,
       policy: new PolicyEngine(),
       audit: new AuditStore(auditPath),

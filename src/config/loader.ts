@@ -95,14 +95,12 @@ async function checkPosixMode(filePath: string): Promise<void> {
   }
 }
 
-export async function loadConfig(customPath?: string, opts: AclOptions = {}): Promise<AppConfig> {
-  return (await loadConfigWithDigest(customPath, opts)).config;
-}
-
 /**
- * `loadConfig`, plus the sha256 of the very buffer that was parsed. Hashing a second read
- * would report bytes that were never applied whenever the file changed in between, and the
- * hash is the operator's only content-free evidence of which config is live.
+ * Read, permission-check, parse, validate and normalize a config file, with the sha256 of
+ * the very buffer that was parsed. Startup and reload both load through this. Hashing a
+ * second read would report bytes that were never applied whenever the file changed in
+ * between, and the hash is the operator's only content-free evidence of which config is
+ * live.
  */
 export async function loadConfigWithDigest(
   customPath?: string,
@@ -216,7 +214,7 @@ function normalizeConfig(raw: RawConfig): AppConfig {
   // survives anywhere in AppConfig. Leaving the raw value on `defaults` left one
   // object carrying two encodings of "unlimited" — `profile.maxChars` as
   // MAX_SAFE_INTEGER, `defaults.commandMaxChars` as 0 — with nothing in the
-  // types to tell them apart. buildAppConfig's quick-start path already copies it
+  // types to tell them apart. loadAppConfig's quick-start path already copies it
   // straight across (`maxChars: defaults.commandMaxChars`), and was correct only
   // because that path's value comes from parseMaxChars, which never returns 0.
   // Correct by

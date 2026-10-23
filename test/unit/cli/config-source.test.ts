@@ -5,7 +5,7 @@ import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from '../config/helpers
 
 /**
  * A reload has to know where the running config came from, so `loadAppConfig` tags
- * each of `buildAppConfig`'s three outcomes. The default-path cases go through a mocked
+ * each of its three outcomes. The default-path cases go through a mocked
  * loader for the reason config-failure-reporting.test.ts gives: that path is not
  * redirectable on macOS.
  */
@@ -83,21 +83,14 @@ describe('loadAppConfig tags the config with its source', () => {
     expect(loaded.sha256).toBeNull();
     expect(loaded.config.profiles).toEqual([]);
   });
-
-  it('buildAppConfig still returns just the config', async () => {
-    const path = await cfg.write(MINIMAL_CONFIG, 0o600);
-    vi.resetModules();
-    const { buildAppConfig, loadAppConfig } = await import('../../../src/cli.js');
-    expect(await buildAppConfig({ config: path })).toEqual((await loadAppConfig({ config: path })).config);
-  });
 });
 
-describe('loadConfigFile and aclOptionsFromArgv', () => {
-  it('loadConfigFile loads a file through the startup validation path', async () => {
+describe('loadConfigWithDigest and aclOptionsFromArgv', () => {
+  it('loadConfigWithDigest loads a file through the startup validation path, with its hash', async () => {
     const path = await cfg.write(MINIMAL_CONFIG, 0o600);
     vi.resetModules();
-    const { loadConfigFile } = await import('../../../src/cli.js');
-    const { config, sha256 } = await loadConfigFile(path, {});
+    const { loadConfigWithDigest } = await import('../../../src/config/loader.js');
+    const { config, sha256 } = await loadConfigWithDigest(path, {});
     expect(config.profiles.length).toBeGreaterThan(0);
     expect(sha256).toBe(createHash('sha256').update(await readFile(path)).digest('hex'));
   });
