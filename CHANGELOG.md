@@ -6,6 +6,10 @@
 
 - [`b2d0a0e`](https://github.com/tufantunc/ssh-mcp/commit/b2d0a0e1e085cad07648270da9a9f83b8255e219) Thanks [@tufantunc](https://github.com/tufantunc)! - `fix(policy)`: the never-allowed rules read the operation rather than one spelling of it — flag clusters in either order, separated flags and long forms, root targets that resolve to `/`, world-writable modes beyond the literal `777`, the `-t`/subcommand device formatters, the firewall policy spelling, and the same operations behind a wrapper's own operands. A mention of a forbidden phrase is no longer refused as though it were an invocation.
 
+### Security
+
+- Fixed [GHSA-5cjr-rc2p-f66f](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-5cjr-rc2p-f66f): the never-allowed rules matched one spelling of an operation, so `rm -fr /`, `rm -r -f /`, `rm --recursive --force /`, `rm -R -f /` and `mkfs -t ext4 /dev/sda1` classified `safe` — the one class the default `ask-destructive` policy never prompts on — and executed with no approval at all, while the same operation in its canonical spelling was refused outright. The rules now read the operation through the tokeniser: flag clusters in either order, separated flags and long forms, root targets that resolve to `/` (`//`, `/etc/..`), world-writable modes beyond the literal `777`, the `-t`/subcommand device formatters and their siblings, the firewall policy spelling, and the same operations behind a wrapper's own operands (`flock /tmp/lk rm -rf /`). A mention of a forbidden phrase is no longer refused as an invocation. Reported by @wildminder. Affected: `< 2.20.2`.
+
 ## 2.20.1
 
 ### Patch Changes
