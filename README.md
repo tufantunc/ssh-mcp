@@ -505,7 +505,12 @@ made before it, so the next run of a granted command asks again. An approval ans
 a reload landed is re-checked against the new rules: the command runs only if its connection
 is still open and the new rules still allow it or ask for it, in the same command class.
 Otherwise it is refused with `CONFIG_RELOADED` and no grant is recorded; retry the call to
-be asked under the new rules.
+be asked under the new rules. A decision that needed no prompt is re-checked the same way
+when a reload lands while it is being made (while the connection is resolved, or during an
+OPA round-trip): a command the old rules allowed, or a grant reuse, runs only if its
+connection is still open and the new rules allow it outright, in the same class; otherwise
+it is refused with `CONFIG_RELOADED`. The command quota is charged against the profile as
+the reload left it.
 
 **Already running.** A command or transfer that is running when the reload lands finishes
 under the rules it started with, unless the reload closes its connection; the next call is
@@ -523,19 +528,33 @@ ACL flags and `--config` itself. The flags that stand in for `[defaults]` (`--ti
 only while no file is loaded, as at startup, so a server that started unconfigured takes its
 defaults from the file once a reload loads one.
 
-**Audit.** Every attempt, applied or refused, writes one `config:reload` record (decision
-`allow` or `deny`, with the refusal in `error`), and each session a reload closes writes a
+**Audit.** Every reload that runs writes one `config:reload` record, in one of three forms:
+
+| Outcome | `decision` | `ruleId` | `error` |
+|---|---|---|---|
+| applied | `allow` | `config-reload` | unset |
+| refused: a check failed, nothing changed | `deny` | `config-reload` | the refusal |
+| failed after the swap began, so possibly partly applied | `deny` | `config-reload-partial` | the error class, and that it may be partly applied |
+
+The other fields are fixed: `command` and `binary` are `config:reload`, `commandClass` is
+`safe`, `profile` and `user` are `-`, and `mcpRequestId` is the tool call's request id, or
+`sighup` for a reload the signal triggered. Each session a reload closes also writes a
 `session:close … (reload)` record, as the `close-session` tool does. A connection that fails
-to close is reported, not rolled back: the new config is already in effect. Reloads run one
-at a time: one asked for while another is running waits for it and then reads the file
-afresh, and any asked for while that one is still waiting join it and get its report, so a
-burst of requests or `SIGHUP`s costs at most two reloads. If something fails after the checks have passed —
-a defect, not a refusal — the report says the reload failed after the swap began and may be
-partly applied; check `reload-config` status, and restart if it does not show the new config.
+to close is reported, not rolled back: the new config is already in effect.
+
+Reloads run one at a time: one asked for while another is running waits for it and then
+reads the file afresh, and any asked for while that one is still waiting join it and share
+its report and its record, so a burst of requests or `SIGHUP`s costs at most two reloads.
+If something fails after the checks have passed (a defect, not a refusal), the report says
+the reload failed after the swap began and may be partly applied; check `reload-config`
+status, and restart if it does not show the new config.
 
 **`SIGHUP` no longer stops the server.** Before, its default action ended the process
 without flushing the audit log. Now, everywhere but Windows, it triggers a reload and the
-server keeps running. A stdio server still exits when its client closes stdin.
+server keeps running. A stdio server still exits when its client closes stdin. An HTTP
+server started from a terminal is no longer stopped when that terminal closes, since the
+hangup it sends is now handled as a reload: stop it with `SIGTERM` or `SIGINT`, or run it
+under a supervisor.
 
 ---
 

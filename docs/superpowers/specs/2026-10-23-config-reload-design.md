@@ -59,12 +59,16 @@ not. Nothing says so, and the README never says either way.
      and the result of the last reload attempt. Never the contents.
    - Called to apply, it reloads and reports the outcome (below).
 2. **SIGHUP, on non-Windows platforms only**, calls the same reload function. Today SIGHUP
-   kills the process without flushing the audit log, so this is strictly an improvement.
+   kills the process without flushing the audit log, so this is an improvement, with one
+   consequence the changeset and README state: an HTTP-transport server started from a
+   terminal is no longer stopped by the hangup when that terminal closes, and is stopped
+   with SIGTERM/SIGINT or run under a supervisor instead.
    On Windows, SIGHUP means "console closing" and is not wired. Under stdio the operator
    often lacks the PID, so the tool is the primary path and the signal is a convenience.
 
-Concurrent reloads are serialized: a second call while one is running waits for it or is
-told one is in progress (builder's choice), and never interleaves.
+Concurrent reloads are serialized and never interleave: a second call while one is running
+waits for it, and further calls while that one is still waiting join it and share its
+outcome (see "Work already in flight").
 
 ## What a reload does
 
@@ -159,9 +163,22 @@ approval grants are tagged with the generation they were created under.
   it; any asked for while that one is still waiting join it and share its outcome. A
   running reload is never joined, since it may have read the file before the change.
 - **A call waiting on a human approval prompt** re-evaluates against the current profile
-  and rules when the wait returns. If the generation changed and the decision now
-  differs, the call is refused and no grant is recorded. A human approved a command under
-  rules that no longer exist, and re-adding a grant would undo the clear.
+  and rules when the wait returns, if the generation changed. It proceeds only if its
+  connection is still in the registry and the new rules allow the command or still ask for
+  it, in the same command class: the new rules would still have put this same decision to
+  the human. Otherwise the call is refused with `config-reloaded` and no grant is
+  recorded. A human approved a command under rules that no longer exist, and a grant from
+  before the reload must not outlive them. A grant the call does record is tagged with the
+  generation its re-check ran under.
+- **A decision made without a prompt** (an allow, or a reused grant) while a reload landed,
+  during the connection resolve or an OPA round-trip, is re-checked the same way, but
+  proceeds only if the new rules allow the command outright, in the same class: nobody was
+  asked, so nothing carries over to rules that would now ask or refuse. The command quota
+  is charged against the connection's live profile, read after every await.
+- **A connection a reload closes is retired** in the swap: a call that resolved it before
+  the swap cannot redial it (with the old profile, outside the registry) or open a channel
+  on it; it fails with "This connection was closed by a configuration reload; retry the
+  call."
 - **A command or transfer already running** is left to finish. Interrupting a remote
   command midway is itself a half-applied action on the remote host. The next call is
   evaluated under the new rules. Removing the profile closes the connection, but that is
@@ -183,20 +200,25 @@ The tool result, on both success and failure, includes:
 - whether the policy rules changed;
 - connections closed and sessions closed, with the reason (removed / connection field
   changed);
-- the number of approval grants cleared;
+- that approval grants were retired;
 - the new sha256 and loadedAt.
 
 The same summary goes to stderr.
 
 ## Audit
 
-Every attempt is audited with a synthetic record, following the existing `session:close`
-precedent (`session-tools.ts`):
+Every reload that runs is audited with one synthetic record, following the existing
+`session:close` precedent (`src/audit/session-release.ts`); a call that joined a waiting
+reload shares its record:
 
 - `command: 'config:reload'`, `binary: 'config:reload'`, `commandClass: 'safe'`;
-- `profile: '-'`;
-- `decision: 'allow'` for an applied reload, `'deny'` for a refused one, with `error` set
-  on refusal.
+- `profile: '-'`, `user: '-'`;
+- `mcpRequestId`: the tool call's request id, or `'sighup'` for a SIGHUP-triggered reload;
+- applied: `decision: 'allow'`, `ruleId: 'config-reload'`;
+- refused (a check failed, nothing changed): `decision: 'deny'`, `ruleId: 'config-reload'`,
+  with the refusal in `error`;
+- failed after the swap began (possibly part applied): `decision: 'deny'`,
+  `ruleId: 'config-reload-partial'`, with the error class in `error`.
 
 The code comment says this is the second user of the workaround, which is the case for a
 proper non-command `AuditRecord` variant later. Tamper-evident chaining applies as for any
@@ -255,7 +277,8 @@ Following CONTRIBUTING.md, every behaviour gets a test that fails without it:
   - zero-profile refusal and unconfigured → configured;
   - the diff report;
   - grants cleared;
-  - a connect in flight across a reload is discarded;
+  - a connect in flight across a reload is discarded when the reload closes its profile,
+    and stored with the new profile otherwise;
   - an approval that completes across a reload is re-checked, and records no grant when
     refused;
   - quick-start refusal; `transferRoot` none → some allowed;
