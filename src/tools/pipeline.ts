@@ -137,10 +137,10 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
         // grant that never counts.
         if (registry.generation !== genAtEval) {
           const recheck = await recheckAfterReload(conn, command, toolName, resource, evaluation);
-          grants.record(conn.profile.name, command, evaluation.commandClass, undefined, recheck.generation);
+          grants.record(conn.profile.name, command, evaluation.commandClass, { generation: recheck.generation });
           return { conn, evaluation: recheck.evaluation, approver: approval.approver };
         }
-        grants.record(conn.profile.name, command, evaluation.commandClass, undefined, genAtEval);
+        grants.record(conn.profile.name, command, evaluation.commandClass, { generation: genAtEval });
         return { conn, evaluation, approver: approval.approver };
       }
 

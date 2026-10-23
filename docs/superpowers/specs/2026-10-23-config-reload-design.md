@@ -122,9 +122,11 @@ In one synchronous step, so no tool call can observe a mix:
     fields. None of them is identity, credentials or policy.
   - A connection that is the **bastion of another connection** is subject to the same
     rules, and closing it closes what runs through it.
-- **approval grants**: clear all of them, in every pipeline (one per MCP session under
-  HTTP). `ApprovalGrants.clear()` exists for this and has no caller today. If the grant
-  TTL changed, new grants use the new TTL.
+- **approval grants**: every one stops counting, in every pipeline (one per MCP session
+  under HTTP). A grant is tagged with the config generation it was checked under and
+  counts only while that is the current one, so the generation the swap bumps is the
+  only invalidation; nothing clears them. If the grant TTL changed, new grants use the
+  new TTL.
 - **quota counters** are kept: they are keyed by profile name and read their limit live,
   so a new limit applies immediately.
 
