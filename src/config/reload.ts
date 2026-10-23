@@ -1,0 +1,409 @@
+import { createHash } from 'crypto';
+import { readFile } from 'fs/promises';
+import { loadConfigFile, type ConfigSource, type LoadedConfig } from '../cli.js';
+import {
+  ConfigNotFoundError,
+  ConfigParseError,
+  ConfigSchemaError,
+  OperatorError,
+} from '../errors.js';
+import { PolicyEngine, resolvePolicyRules, type PolicyRules } from '../policy/engine.js';
+import { RELEASE } from '../tools/session-tools.js';
+import { policyRulesChanged, type ProfileChange, type ProfileDiff } from './reload-diff.js';
+import type { AuditStore } from '../audit/store.js';
+import type { ApplyResult, ConnectionRegistry } from '../ssh/connection-registry.js';
+import type { AppConfig } from '../types.js';
+
+export interface ReloadDeps {
+  /** The startup argv. Never reloaded; read for the ACL flags the loader takes. */
+  argv: Record<string, string | null>;
+  registry: ConnectionRegistry;
+  policy: PolicyEngine;
+  audit: AuditStore;
+  /** The object the transfer tools read; only none → some is written through it. */
+  localPath: { transferRoot?: string };
+  startup: LoadedConfig;
+}
+
+export interface ReloadStatus {
+  path: string;
+  source: ConfigSource;
+  loadedAt: string;
+  /** Of the bytes last applied; null until a reload has applied one. */
+  sha256: string | null;
+  last: ReloadOutcome | null;
+}
+
+export interface ClosedConnection {
+  profile: string;
+  reason: string;
+  /** Session names, collected before the close. */
+  sessions: string[];
+  /** Set when the close failed: the error class and code only. */
+  error?: string;
+}
+
+export interface ReloadOutcome {
+  ok: boolean;
+  at: string;
+  trigger: 'tool' | 'sighup';
+  /** On refusal. Built from safe parts only: never a value or a snippet from the file. */
+  error?: { name: string; message: string };
+  diff?: ProfileDiff;
+  policyChanged?: boolean;
+  closed?: ClosedConnection[];
+  /** Kept-open profiles whose session-fixed fields changed. */
+  sessionFieldsChanged?: ProfileChange[];
+  grantsInvalidated?: boolean;
+  sha256?: string;
+}
+
+/** A refusal by a reload-only rule. Its message names fields and the path, never values. */
+export class ReloadRefusedError extends OperatorError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ReloadRefusedError';
+  }
+}
+
+/**
+ * A failure whose own message may quote the file, carried with one that does not. The
+ * name stays the original error's class.
+ */
+class Redacted extends Error {
+  constructor(readonly reported: { name: string; message: string }) {
+    super(reported.message);
+  }
+}
+
+interface Validated {
+  next: AppConfig;
+  rules: PolicyRules;
+  sha256: string;
+  policyChanged: boolean;
+}
+
+type CloseEntry = ApplyResult['toClose'][number];
+
+const FLAGS_REFUSAL = 'started from command-line flags; restart to use a config file';
+
+const CLOSE_REASONS: Record<string, string> = {
+  removed: 'profile removed',
+  'connection-field': 'connection field changed',
+  'bastion-closed': 'its bastion closed',
+};
+
+/**
+ * Reloads config.toml into the running server: validate exactly as startup does, into
+ * fresh objects; swap in one synchronous step; then close what has to close, audit, and
+ * report. A refused reload changes nothing, including the registry's generation, so it
+ * does not invalidate approval grants either.
+ */
+export class ConfigReloader {
+  private readonly deps: ReloadDeps;
+  private current: AppConfig;
+  private source: ConfigSource;
+  private readonly path: string;
+  private loadedAt: string;
+  private sha256: string | null = null;
+  private last: ReloadOutcome | null = null;
+  /** The previous reload. Each call chains on it, so two never interleave. */
+  private queue: Promise<unknown> = Promise.resolve();
+
+  constructor(deps: ReloadDeps) {
+    this.deps = deps;
+    this.current = deps.startup.config;
+    this.source = deps.startup.source;
+    this.path = deps.startup.path;
+    this.loadedAt = new Date().toISOString();
+  }
+
+  status(): ReloadStatus {
+    return {
+      path: this.path,
+      source: this.source,
+      loadedAt: this.loadedAt,
+      sha256: this.sha256,
+      last: this.last,
+    };
+  }
+
+  reload(trigger: 'tool' | 'sighup', requestId: string | number): Promise<ReloadOutcome> {
+    const run = this.queue.then(() => this.run(trigger, requestId));
+    // A defect that rejects one reload must not wedge every later one.
+    this.queue = run.catch(() => {});
+    return run;
+  }
+
+  /** The one human-readable summary: the tool's text and the stderr line. */
+  formatOutcome(o: ReloadOutcome): string {
+    if (!o.ok) {
+      const error = o.error ?? { name: 'Error', message: 'unknown failure' };
+      return `Config reload (${o.trigger}) refused: ${error.name}: ${error.message}\nNothing was changed.`;
+    }
+
+    const lines = [`Config reloaded from ${this.path} (${o.trigger}); sha256 ${o.sha256}.`];
+    const diff = o.diff;
+    if (diff && (diff.added.length || diff.removed.length || diff.changed.length)) {
+      const parts: string[] = [];
+      if (diff.added.length) parts.push(`added ${diff.added.join(', ')}`);
+      if (diff.removed.length) parts.push(`removed ${diff.removed.join(', ')}`);
+      if (diff.changed.length) {
+        parts.push(`changed ${diff.changed.map((c) => `${c.name} (${c.fields.join(', ')})`).join(', ')}`);
+      }
+      lines.push(`Profiles: ${parts.join('; ')}.`);
+    } else {
+      lines.push('Profiles: unchanged.');
+    }
+    lines.push(`Policy rules: ${o.policyChanged ? 'changed' : 'unchanged'}.`);
+    for (const c of o.closed ?? []) {
+      const sessions = c.sessions.length ? `sessions closed: ${c.sessions.join(', ')}` : 'no sessions';
+      const failed = c.error ? `; close failed: ${c.error}` : '';
+      lines.push(`Closed connection ${c.profile} (${CLOSE_REASONS[c.reason] ?? c.reason}), ${sessions}${failed}.`);
+    }
+    if (o.sessionFieldsChanged?.length) {
+      lines.push(
+        'Kept open; the new values apply to new sessions and commands: ' +
+        `${o.sessionFieldsChanged.map((c) => `${c.name} (${c.fields.join(', ')})`).join(', ')}.`,
+      );
+    }
+    if (o.grantsInvalidated) lines.push('Approval grants: cleared; the next approval grants anew.');
+    return lines.join('\n');
+  }
+
+  private async run(trigger: 'tool' | 'sighup', requestId: string | number): Promise<ReloadOutcome> {
+    const startedAt = Date.now();
+    const at = new Date(startedAt).toISOString();
+
+    let validated: Validated;
+    try {
+      validated = await this.validate();
+    } catch (err) {
+      return this.finish({ ok: false, at, trigger, error: this.safeError(err) }, requestId, startedAt);
+    }
+    const { next, rules, sha256, policyChanged } = validated;
+
+    // The swap: one synchronous block, no await, so no tool call observes a mix. Rules
+    // first: they were already compiled once above, and if they threw anyway nothing
+    // else has moved yet.
+    const { registry, policy, localPath } = this.deps;
+    policy.replaceRules(rules);
+    const applied = registry.applyConfig(next);
+    if (localPath.transferRoot === undefined && next.defaults.transferRoot !== undefined) {
+      localPath.transferRoot = next.defaults.transferRoot;
+    }
+    this.current = next;
+    this.source = 'file';
+    this.loadedAt = at;
+    this.sha256 = sha256;
+
+    // A session-fixed change matters only where a session could have fixed it.
+    const open = new Set(registry.liveConnections().map((c) => c.profile.name));
+    const sessionFieldsChanged = applied.sessionFieldsChanged.filter((c) => open.has(c.name));
+
+    const closed = await this.closeAll(applied.toClose, requestId);
+    return this.finish(
+      {
+        ok: true,
+        at,
+        trigger,
+        diff: applied.diff,
+        policyChanged,
+        closed,
+        sessionFieldsChanged,
+        // applyConfig bumped the generation, which is what invalidates every grant.
+        grantsInvalidated: true,
+        sha256,
+      },
+      requestId,
+      startedAt,
+    );
+  }
+
+  /** Startup's pipeline plus the reload-only rules, into fresh objects. Mutates nothing. */
+  private async validate(): Promise<Validated> {
+    if (this.source === 'flags') throw new ReloadRefusedError(FLAGS_REFUSAL);
+
+    const sha256 = createHash('sha256').update(await this.readBytes()).digest('hex');
+    const next = await loadConfigFile(this.path, this.deps.argv);
+
+    let rules: PolicyRules;
+    try {
+      rules = resolvePolicyRules(next.profiles, next.policy);
+    } catch (err) {
+      // The problems quote role and group names from the file.
+      throw new Redacted({
+        name: errorName(err),
+        message:
+          `Policy configuration error in ${this.path}: the profiles' role/group and ` +
+          '[policy.roleBindings] do not agree. The details quote values from the file, ' +
+          'so they are not repeated here; startup prints them in full.',
+      });
+    }
+    try {
+      new PolicyEngine(rules);
+    } catch (err) {
+      // The engine's message quotes the pattern.
+      throw new Redacted({
+        name: errorName(err),
+        message: `Invalid denylist pattern in ${this.path}: policy.denylist has an entry that is not a valid regular expression.`,
+      });
+    }
+
+    const before = this.deps.localPath.transferRoot;
+    const after = next.defaults.transferRoot;
+    if (before !== undefined && after !== before) {
+      throw new ReloadRefusedError(
+        after === undefined
+          ? 'defaults.transferRoot was removed; that needs a restart, since a transfer in flight holds the old root.'
+          : 'defaults.transferRoot changed; that needs a restart, since a transfer in flight holds the old root.',
+      );
+    }
+
+    return { next, rules, sha256, policyChanged: policyRulesChanged(this.current, next) };
+  }
+
+  private async readBytes(): Promise<Buffer> {
+    try {
+      return await readFile(this.path);
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') throw new ConfigNotFoundError(this.path);
+      throw new OperatorError(`Config file ${this.path} could not be read (${err?.code ?? errorName(err)}).`);
+    }
+  }
+
+  /**
+   * The outcome's error, built from safe parts: the error class, the config path, and for
+   * a schema error the issue paths and codes. The parser quotes source text, a schema
+   * message can name what it received, and the policy messages quote patterns and role
+   * names, so none of those messages is used.
+   */
+  private safeError(err: unknown): { name: string; message: string } {
+    if (err instanceof Redacted) return err.reported;
+    if (err instanceof ConfigParseError) {
+      const where = err.line !== undefined ? ` (line ${err.line}, column ${err.column ?? '?'})` : '';
+      return { name: err.name, message: `Failed to parse TOML config at ${this.path}${where}.` };
+    }
+    if (err instanceof ConfigSchemaError) {
+      const issues = err.issues.map((i) => `${i.path} (${i.code})`).join(', ');
+      return { name: err.name, message: `Config validation error in ${this.path}: ${issues}.` };
+    }
+    // What is left from the loader is our own refusals, a missing or unreadable file, and
+    // the permission check: built from the path, the file mode and the accounts on an
+    // ACL, never from the file's contents.
+    if (err instanceof OperatorError) return { name: err.name, message: err.message };
+    return { name: errorName(err), message: `Unexpected failure while reloading ${this.path}.` };
+  }
+
+  /**
+   * Close dependents first, so a bastion link never dies under its dependents' sessions.
+   * A failed close is reported, not rolled back: the new config is already in effect.
+   */
+  private async closeAll(toClose: CloseEntry[], requestId: string | number): Promise<ClosedConnection[]> {
+    const sessions = new Map(
+      toClose.map((e) => [e, e.conn.listSessions().map((s) => ({ name: s.name, kind: s.toInfo().type }))]),
+    );
+    const results = new Map<CloseEntry, ClosedConnection>();
+
+    for (const wave of dependentsFirst(toClose)) {
+      await Promise.all(
+        wave.map(async (entry) => {
+          const startedAt = Date.now();
+          let error: string | undefined;
+          try {
+            await entry.conn.close();
+          } catch (err) {
+            error = describeCloseError(err);
+          }
+          const names = sessions.get(entry) ?? [];
+          results.set(entry, {
+            profile: entry.profile,
+            reason: entry.reason,
+            sessions: names.map((s) => s.name),
+            ...(error ? { error } : {}),
+          });
+          for (const s of names) {
+            await this.audit({
+              mcpRequestId: requestId,
+              profile: entry.profile,
+              user: entry.conn.profile.user,
+              command: `${RELEASE.binary} ${s.kind} ${s.name} (reload)`,
+              commandClass: RELEASE.commandClass,
+              binary: RELEASE.binary,
+              decision: RELEASE.decision,
+              ruleId: RELEASE.ruleId,
+              exitCode: error ? 1 : 0,
+              durationMs: Date.now() - startedAt,
+              error,
+            });
+          }
+        }),
+      );
+    }
+    return toClose.map((e) => results.get(e) as ClosedConnection);
+  }
+
+  private async finish(
+    outcome: ReloadOutcome,
+    requestId: string | number,
+    startedAt: number,
+  ): Promise<ReloadOutcome> {
+    this.last = outcome;
+    // The second synthetic record after session:close; a proper non-command
+    // AuditRecord variant is the queued fix for both.
+    await this.audit({
+      mcpRequestId: requestId,
+      profile: '-',
+      user: '-',
+      command: 'config:reload',
+      commandClass: 'safe',
+      binary: 'config:reload',
+      decision: outcome.ok ? 'allow' : 'deny',
+      ruleId: 'config-reload',
+      durationMs: Date.now() - startedAt,
+      error: outcome.error ? `${outcome.error.name}: ${outcome.error.message}` : undefined,
+    });
+    console.error(this.formatOutcome(outcome));
+    return outcome;
+  }
+
+  /** A failed audit write is reported, never thrown: the reload already happened, or did not. */
+  private async audit(entry: Parameters<AuditStore['record']>[0]): Promise<void> {
+    try {
+      await this.deps.audit.record(entry);
+    } catch (err) {
+      console.error(`Audit write failed while recording a config reload: ${describeCloseError(err)}`);
+    }
+  }
+}
+
+/**
+ * Waves of connections to close, each closed only after every connection running
+ * through it. The via read is the connection's own profile, which is the hop its live
+ * channel actually runs over.
+ */
+function dependentsFirst(entries: CloseEntry[]): CloseEntry[][] {
+  const waves: CloseEntry[][] = [];
+  let remaining = entries;
+  while (remaining.length > 0) {
+    const bastions = new Set(remaining.map((e) => e.conn.profile.via));
+    const ready = remaining.filter((e) => !bastions.has(e.profile));
+    // A via cycle leaves nothing ready; close the rest together rather than never.
+    const wave = ready.length > 0 ? ready : remaining;
+    waves.push(wave);
+    remaining = remaining.filter((e) => !wave.includes(e));
+  }
+  return waves;
+}
+
+function errorName(err: unknown): string {
+  return err instanceof Error ? err.name : typeof err;
+}
+
+/** Class and code only: a transport error's message can name the host. */
+function describeCloseError(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' || typeof code === 'number'
+    ? `${errorName(err)} (${code})`
+    : errorName(err);
+}

@@ -1,0 +1,621 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createHash } from 'crypto';
+import { mkdtemp, readFile, rm } from 'fs/promises';
+import { platform, tmpdir } from 'os';
+import { join } from 'path';
+import { ConfigReloader, type ReloadOutcome } from '../../../src/config/reload.js';
+import { defaultsFromArgv, loadConfigFile, type ConfigSource } from '../../../src/cli.js';
+import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
+import { PolicyEngine, resolvePolicyRules } from '../../../src/policy/engine.js';
+import { AuditStore } from '../../../src/audit/store.js';
+import { CommandQuota } from '../../../src/policy/quota.js';
+import type { AppConfig, AuditRecord, Profile } from '../../../src/types.js';
+import { makeConfigDir, type ConfigDir } from './helpers.js';
+
+/** A value that lives only in the config file. Nothing the reloader prints may contain it. */
+const CANARY = 'canary-host-9f3a';
+const onWindows = platform() === 'win32';
+
+const BASE = `
+[[profiles]]
+name = "dev"
+host = "${CANARY}"
+user = "test"
+group = "dev"
+`;
+
+const profileToml = (name: string, extra = '') => `
+[[profiles]]
+name = "${name}"
+host = "${name}.example.test"
+user = "u"
+group = "dev"
+${extra}
+`;
+
+let dir: ConfigDir;
+let auditDir: string;
+let stderr: string[];
+
+beforeEach(async () => {
+  dir = await makeConfigDir('ssh-mcp-reload-');
+  auditDir = await mkdtemp(join(tmpdir(), 'ssh-mcp-reload-audit-'));
+  stderr = [];
+  vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+    stderr.push(a.map(String).join(' '));
+  });
+});
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await dir.cleanup();
+  await rm(auditDir, { recursive: true, force: true });
+});
+
+interface Harness {
+  path: string;
+  registry: ConnectionRegistry;
+  policy: PolicyEngine;
+  audit: AuditStore;
+  localPath: { transferRoot?: string };
+  reloader: ConfigReloader;
+}
+
+function build(
+  config: AppConfig,
+  path: string,
+  source: ConfigSource = 'file',
+  argv: Record<string, string | null> = {},
+): Harness {
+  const registry = new ConnectionRegistry(config, 'insecure');
+  const policy = new PolicyEngine(resolvePolicyRules(config.profiles, config.policy));
+  const audit = new AuditStore(join(auditDir, 'audit.log'));
+  const localPath = { transferRoot: config.defaults.transferRoot };
+  const reloader = new ConfigReloader({
+    argv,
+    registry,
+    policy,
+    audit,
+    localPath,
+    startup: { config, source, path },
+  });
+  return { path, registry, policy, audit, localPath, reloader };
+}
+
+/** A server started from `toml`, loaded through the same loader the reload uses. */
+async function startFrom(toml: string, source: ConfigSource = 'file'): Promise<Harness> {
+  const path = await dir.write(toml);
+  return build(await loadConfigFile(path, {}), path, source);
+}
+
+async function auditRecords(h: Harness): Promise<AuditRecord[]> {
+  await h.audit.close();
+  const text = await readFile(join(auditDir, 'audit.log'), 'utf8').catch(() => '');
+  return text.split('\n').filter(Boolean).map((l) => JSON.parse(l) as AuditRecord);
+}
+
+/** Everything a refused reload must leave alone, by reference. */
+function snapshot(h: Harness) {
+  return {
+    config: (h.registry as any).config,
+    rules: (h.policy as any).rules,
+    patterns: (h.policy as any).userPatterns,
+    transferRoot: h.localPath.transferRoot,
+    generation: h.registry.generation,
+  };
+}
+
+function expectNoCanary(h: Harness, outcome: ReloadOutcome) {
+  expect(JSON.stringify(outcome)).not.toContain(CANARY);
+  expect(h.reloader.formatOutcome(outcome)).not.toContain(CANARY);
+  expect(stderr.join('\n')).not.toContain(CANARY);
+}
+
+/**
+ * A planted connection whose close order and sessions the test controls. applyConfig
+ * reads `profile`, calls `replaceProfile` on a kept one, and hands the rest back; the
+ * reloader reads `listSessions` and calls `close`.
+ */
+function plant(
+  h: Harness,
+  name: string,
+  sessions: string[],
+  log: string[],
+  close: () => Promise<void> = async () => {},
+) {
+  let profile = h.registry.listAllProfiles().find((p) => p.name === name) as Profile;
+  const conn = {
+    get profile() {
+      return profile;
+    },
+    replaceProfile(p: Profile) {
+      profile = p;
+    },
+    listSessions: () =>
+      sessions.map((s) => ({ name: s, toInfo: () => ({ type: 'background' }) })),
+    close: async () => {
+      log.push(name);
+      await close();
+    },
+  };
+  (h.registry as any).connections.set(name, conn);
+  return conn;
+}
+
+describe('ConfigReloader: a refused reload changes nothing', () => {
+  // Each case also proves its canary would have leaked: the raw error from the layer
+  // that refuses does quote it, so the absence below is the reloader's doing.
+  const cases: { name: string; toml: string; raw: (path: string) => Promise<unknown> }[] = [
+    {
+      name: 'malformed TOML',
+      toml: `[[profiles]\nname = "${CANARY}"\n`,
+      raw: (path) => loadConfigFile(path, {}),
+    },
+    {
+      name: 'a schema violation',
+      toml: `${BASE}auth = "${CANARY}"\n"${CANARY}" = 1\n`,
+      raw: (path) => loadConfigFile(path, {}),
+    },
+    {
+      name: 'a bad denylist regex',
+      toml: `${BASE}\n[policy]\ndenylist = ["(${CANARY}"]\n`,
+      raw: async (path) => {
+        const c = await loadConfigFile(path, {});
+        return new PolicyEngine(resolvePolicyRules(c.profiles, c.policy));
+      },
+    },
+    {
+      name: 'a cross-check failure',
+      toml: BASE.replace('user = "test"', `user = "test"\nrole = "${CANARY}"`),
+      raw: async (path) => {
+        const c = await loadConfigFile(path, {});
+        return resolvePolicyRules(c.profiles, c.policy);
+      },
+    },
+  ];
+
+  it.each(cases)('$name', async ({ toml, raw }) => {
+    const h = await startFrom(BASE);
+    const before = snapshot(h);
+    await dir.write(toml);
+    await expect(raw(h.path)).rejects.toThrow(CANARY);
+
+    const outcome = await h.reloader.reload('tool', 1);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error?.name).toBeTruthy();
+    expect(outcome.error?.message).toBeTruthy();
+    expect(snapshot(h)).toEqual(before);
+    expect((h.registry as any).config).toBe(before.config);
+    expect((h.policy as any).rules).toBe(before.rules);
+    expect(h.registry.generation).toBe(before.generation);
+    expect(outcome.grantsInvalidated).toBeUndefined();
+    expect(h.reloader.status().last).toBe(outcome);
+    expectNoCanary(h, outcome);
+  });
+
+  it('names the TOML position and the path, not the source text', async () => {
+    const h = await startFrom(BASE);
+    await dir.write(`[[profiles]\nname = "${CANARY}"\n`);
+    const { error } = await h.reloader.reload('tool', 1);
+    expect(error?.name).toBe('ConfigParseError');
+    expect(error?.message).toContain(h.path);
+    expect(error?.message).toMatch(/line 1, column \d+/);
+  });
+
+  it('names the schema issue paths and codes, not the received values', async () => {
+    const h = await startFrom(BASE);
+    await dir.write(`${BASE}auth = "${CANARY}"\n"${CANARY}" = 1\n`);
+    const { error } = await h.reloader.reload('tool', 1);
+    expect(error?.name).toBe('ConfigSchemaError');
+    expect(error?.message).toContain(h.path);
+    expect(error?.message).toContain('profiles.0.auth (invalid_value)');
+    expect(error?.message).toContain('profiles.0 (unrecognized_keys)');
+  });
+
+  it('names the denylist without quoting the pattern', async () => {
+    const h = await startFrom(BASE);
+    await dir.write(`${BASE}\n[policy]\ndenylist = ["(${CANARY}"]\n`);
+    const { error } = await h.reloader.reload('tool', 1);
+    expect(error?.message).toContain('policy.denylist');
+  });
+
+  it.skipIf(onWindows)('a world-readable file', async () => {
+    const h = await startFrom(BASE);
+    const before = snapshot(h);
+    await dir.write(BASE, 0o644);
+
+    const outcome = await h.reloader.reload('tool', 1);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error?.message).toMatch(/group\/world accessible/);
+    expect(snapshot(h)).toEqual(before);
+    expectNoCanary(h, outcome);
+  });
+
+  it.each([
+    ['some -> other', '/srv/transfer-a', '/srv/transfer-b'],
+    ['some -> none', '/srv/transfer-a', undefined],
+  ])('a transferRoot change (%s)', async (_label, from, to) => {
+    const withRoot = (root?: string) =>
+      root === undefined ? BASE : `[defaults]\ntransferRoot = "${root}"\n${BASE}`;
+    const h = await startFrom(withRoot(from));
+    const before = snapshot(h);
+    await dir.write(withRoot(to));
+
+    const outcome = await h.reloader.reload('tool', 1);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error?.message).toMatch(/transferRoot/);
+    expect(outcome.error?.message).toMatch(/restart/);
+    expect(outcome.error?.message).not.toContain('/srv/');
+    expect(h.localPath.transferRoot).toBe(from);
+    expect(snapshot(h)).toEqual(before);
+  });
+
+  it('zero profiles', async () => {
+    const h = await startFrom(BASE);
+    const before = snapshot(h);
+    await dir.write('profiles = []\n');
+
+    const outcome = await h.reloader.reload('tool', 1);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error?.message).toContain('profiles (too_small)');
+    expect(snapshot(h)).toEqual(before);
+  });
+
+  it("source: 'flags'", async () => {
+    const h = await startFrom(BASE, 'flags');
+    const before = snapshot(h);
+
+    const outcome = await h.reloader.reload('sighup', 1);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error?.message).toBe('started from command-line flags; restart to use a config file');
+    expect(snapshot(h)).toEqual(before);
+  });
+
+  it('audits a refusal as one config:reload deny with the error', async () => {
+    const h = await startFrom(BASE);
+    await dir.write(`[[profiles]\nname = "${CANARY}"\n`);
+    await h.reloader.reload('tool', 'req-9');
+
+    const records = await auditRecords(h);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      mcpRequestId: 'req-9',
+      command: 'config:reload',
+      binary: 'config:reload',
+      commandClass: 'safe',
+      profile: '-',
+      decision: 'deny',
+      ruleId: 'config-reload',
+    });
+    expect(records[0].error).toMatch(/ConfigParseError/);
+    expect(records[0].error).not.toContain(CANARY);
+  });
+});
+
+describe('ConfigReloader: an applied reload', () => {
+  const START =
+    profileToml('jump') +
+    profileToml('app', 'via = "jump"').replace('app.example.test', CANARY) +
+    profileToml('keep') +
+    profileToml('idle') +
+    profileToml('gone');
+  const NEXT =
+    profileToml('jump').replace('jump.example.test', 'jump2.example.test') +
+    profileToml('app', 'via = "jump"').replace('app.example.test', CANARY) +
+    profileToml('keep', 'workdir = "/w"\nreadOnly = true') +
+    profileToml('idle', 'workdir = "/w"') +
+    profileToml('new') +
+    '\n[policy]\ndenylist = ["^terraform"]\n';
+
+  async function applied() {
+    const h = await startFrom(START);
+    const closes: string[] = [];
+    const conns = {
+      jump: plant(h, 'jump', ['s-jump'], closes),
+      app: plant(h, 'app', ['s-app'], closes),
+      keep: plant(h, 'keep', ['s-keep'], closes),
+      gone: plant(h, 'gone', ['s-g1', 's-g2'], closes),
+    };
+    const generation = h.registry.generation;
+    await dir.write(NEXT);
+    const outcome = await h.reloader.reload('tool', 'req-1');
+    return { h, closes, conns, generation, outcome };
+  }
+
+  const sortChanges = (cs: { name: string; fields: string[] }[] = []) =>
+    cs.map((c) => ({ name: c.name, fields: [...c.fields].sort() })).sort((a, b) => a.name.localeCompare(b.name));
+
+  it('reports the diff, policy change, closures and session-fixed fields', async () => {
+    const { h, outcome, generation } = await applied();
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.trigger).toBe('tool');
+    expect(outcome.diff?.added).toEqual(['new']);
+    expect(outcome.diff?.removed).toEqual(['gone']);
+    expect(sortChanges(outcome.diff?.changed)).toEqual([
+      { name: 'idle', fields: ['workdir'] },
+      { name: 'jump', fields: ['host'] },
+      { name: 'keep', fields: ['readOnly', 'workdir'] },
+    ]);
+    expect(outcome.policyChanged).toBe(true);
+    expect([...(outcome.closed ?? [])].sort((a, b) => a.profile.localeCompare(b.profile))).toEqual([
+      { profile: 'app', reason: 'bastion-closed', sessions: ['s-app'] },
+      { profile: 'gone', reason: 'removed', sessions: ['s-g1', 's-g2'] },
+      { profile: 'jump', reason: 'connection-field', sessions: ['s-jump'] },
+    ]);
+    // Only `keep` has an open connection; `idle` changed the same field with none.
+    expect(outcome.sessionFieldsChanged).toEqual([{ name: 'keep', fields: ['workdir'] }]);
+    expect(outcome.grantsInvalidated).toBe(true);
+    expect(h.registry.generation).toBe(generation + 1);
+  });
+
+  it('swaps the policy rules and the kept connection profile', async () => {
+    const { h, conns } = await applied();
+    const keep = h.registry.getProfile('keep');
+    expect(conns.keep.profile).toBe(keep);
+    expect(keep.readOnly).toBe(true);
+    expect(h.policy.evaluate('terraform plan', keep).ruleId).toBe('denylist');
+    expect(h.registry.liveConnections()).toEqual([conns.keep]);
+  });
+
+  it('closes a dependent before the bastion it runs through', async () => {
+    const { closes } = await applied();
+    expect(closes).toHaveLength(3);
+    expect(closes.indexOf('app')).toBeLessThan(closes.indexOf('jump'));
+  });
+
+  it('hashes the bytes and records the outcome in status', async () => {
+    const { h, outcome } = await applied();
+    const expected = createHash('sha256').update(await readFile(h.path)).digest('hex');
+    expect(outcome.sha256).toBe(expected);
+    const status = h.reloader.status();
+    expect(status.last).toBe(outcome);
+    expect(status.sha256).toBe(expected);
+    expect(status.source).toBe('file');
+    expect(status.path).toBe(h.path);
+    expect(status.loadedAt).toBe(outcome.at);
+  });
+
+  it('never prints a value from the file', async () => {
+    const { h, outcome } = await applied();
+    // The canary is the host of a profile the report names, so this bites.
+    expect(h.reloader.formatOutcome(outcome)).toContain('app');
+    expectNoCanary(h, outcome);
+    expect(stderr.join('\n')).toContain(h.reloader.formatOutcome(outcome));
+  });
+
+  it('audits one config:reload allow and one session:close per closed session', async () => {
+    const { h } = await applied();
+    const records = await auditRecords(h);
+
+    const reloads = records.filter((r) => r.binary === 'config:reload');
+    expect(reloads).toHaveLength(1);
+    expect(reloads[0]).toMatchObject({
+      mcpRequestId: 'req-1',
+      command: 'config:reload',
+      commandClass: 'safe',
+      profile: '-',
+      decision: 'allow',
+      ruleId: 'config-reload',
+    });
+    expect(reloads[0].error).toBeUndefined();
+
+    const closes = records.filter((r) => r.binary === 'session:close');
+    expect(closes.map((r) => r.command).sort()).toEqual([
+      'session:close background s-app (reload)',
+      'session:close background s-g1 (reload)',
+      'session:close background s-g2 (reload)',
+      'session:close background s-jump (reload)',
+    ]);
+    for (const r of closes) {
+      expect(r).toMatchObject({ decision: 'allow', commandClass: 'safe', ruleId: 'session-release' });
+    }
+    expect(closes.find((r) => r.command.includes('s-app'))?.profile).toBe('app');
+    // The config:reload record comes last: it is written once the closes are done.
+    expect(records[records.length - 1].binary).toBe('config:reload');
+  });
+
+  it('reports a failed close and still closes the others', async () => {
+    const h = await startFrom(profileToml('a') + profileToml('b'));
+    const closes: string[] = [];
+    plant(h, 'a', ['s-a'], closes, async () => {
+      throw Object.assign(new Error(`cannot close ${CANARY}`), { code: 'EPIPE' });
+    });
+    plant(h, 'b', [], closes);
+    await dir.write(profileToml('c'));
+
+    const outcome = await h.reloader.reload('tool', 1);
+
+    expect(outcome.ok).toBe(true);
+    expect(closes.sort()).toEqual(['a', 'b']);
+    expect(outcome.closed).toEqual([
+      { profile: 'a', reason: 'removed', sessions: ['s-a'], error: 'Error (EPIPE)' },
+      { profile: 'b', reason: 'removed', sessions: [] },
+    ]);
+    expect(h.reloader.formatOutcome(outcome)).toMatch(/close failed/);
+    expectNoCanary(h, outcome);
+  });
+
+  it('closes a chain of bastions from the far end inwards', async () => {
+    const h = await startFrom(profileToml('a') + profileToml('b', 'via = "a"') + profileToml('c', 'via = "b"'));
+    const closes: string[] = [];
+    for (const name of ['a', 'b', 'c']) plant(h, name, [], closes);
+    await dir.write(
+      profileToml('a').replace('a.example.test', 'a2.example.test') +
+      profileToml('b', 'via = "a"') +
+      profileToml('c', 'via = "b"'),
+    );
+
+    await h.reloader.reload('tool', 1);
+
+    expect(closes).toEqual(['c', 'b', 'a']);
+  });
+});
+
+describe('ConfigReloader: transferRoot none -> some', () => {
+  it('is allowed and sets localPath.transferRoot', async () => {
+    const h = await startFrom(BASE);
+    expect(h.localPath.transferRoot).toBeUndefined();
+    await dir.write(`[defaults]\ntransferRoot = "/srv/transfer"\n${BASE}`);
+
+    const outcome = await h.reloader.reload('tool', 1);
+
+    expect(outcome.ok).toBe(true);
+    expect(h.localPath.transferRoot).toBe('/srv/transfer');
+  });
+});
+
+describe('ConfigReloader: unconfigured startup', () => {
+  it('reloads into a configured server once the file is written', async () => {
+    const path = join(dir.dir, 'config.toml');
+    const h = build({ defaults: defaultsFromArgv({}), profiles: [] }, path, 'unconfigured');
+    expect(h.reloader.status()).toMatchObject({ path, source: 'unconfigured', sha256: null, last: null });
+
+    const missing = await h.reloader.reload('tool', 1);
+    expect(missing.ok).toBe(false);
+    expect(missing.error?.name).toBe('ConfigNotFoundError');
+
+    await dir.write(BASE);
+    const outcome = await h.reloader.reload('tool', 2);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.diff?.added).toEqual(['dev']);
+    expect(h.registry.getProfile('dev').name).toBe('dev');
+    expect(h.reloader.status().source).toBe('file');
+  });
+});
+
+describe('ConfigReloader: concurrency (Review Focus 3)', () => {
+  it('serializes two reloads started together', async () => {
+    const h = await startFrom(BASE + profileToml('gone'));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    plant(h, 'gone', [], [], () => held);
+    const apply = vi.spyOn(h.registry, 'applyConfig');
+    await dir.write(BASE);
+
+    const first = h.reloader.reload('tool', 1);
+    const second = h.reloader.reload('sighup', 2);
+
+    await vi.waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+    // The first is stuck closing `gone`; the second must not have started its swap.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(apply).toHaveBeenCalledTimes(1);
+
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    expect(apply).toHaveBeenCalledTimes(2);
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    expect(a.at <= b.at).toBe(true);
+    expect(b.trigger).toBe('sighup');
+    expect(h.reloader.status().last).toBe(b);
+  });
+
+  it('keeps serving after a reload rejects unexpectedly', async () => {
+    const h = await startFrom(BASE);
+    vi.spyOn(h.registry, 'applyConfig').mockImplementationOnce(() => {
+      throw new Error('boom');
+    });
+    await dir.write(BASE);
+    await expect(h.reloader.reload('tool', 1)).rejects.toThrow('boom');
+    const outcome = await h.reloader.reload('tool', 2);
+    expect(outcome.ok).toBe(true);
+  });
+});
+
+describe('ConfigReloader: quota counters survive a reload', () => {
+  const withQuota = (n: number, extra = '') =>
+    BASE.replace('user = "test"', `user = "test"\ncommandQuotaPerDay = ${n}${extra}`);
+
+  it('keeps the spend and reads the new limit live', async () => {
+    const h = await startFrom(withQuota(3));
+    const quota = new CommandQuota();
+    // The pipeline's call: the profile name, and the limit read from the live profile.
+    const spend = () => quota.consume('dev', h.registry.getProfile('dev').commandQuotaPerDay).allowed;
+
+    expect(spend()).toBe(true);
+    expect(spend()).toBe(true);
+
+    await dir.write(withQuota(3, '\nworkdir = "/w"'));
+    expect((await h.reloader.reload('tool', 1)).ok).toBe(true);
+    expect(spend()).toBe(true);
+    expect(spend()).toBe(false);
+
+    await dir.write(withQuota(5));
+    expect((await h.reloader.reload('tool', 2)).ok).toBe(true);
+    expect(spend()).toBe(true);
+    expect(spend()).toBe(true);
+    expect(spend()).toBe(false);
+  });
+});
+
+describe('ConfigReloader: the argv ACL flags reach the loader (Review Focus 4)', () => {
+  /**
+   * The Windows ACL check, stubbed to come back with a finding the default posture
+   * refuses (an ACL that could not be read). `--allowUncheckedConfigAcl` waives it; its
+   * absence refuses. Pinned at the reloader, because a reload that built its own ACL
+   * options (or none) would pass every other test here.
+   */
+  afterEach(() => {
+    vi.doUnmock('os');
+    vi.doUnmock('../../../src/config/windows-acl.js');
+    vi.resetModules();
+  });
+
+  async function reloadUnderAclFinding(argv: Record<string, string | null>) {
+    vi.resetModules();
+    vi.doMock('os', async () => {
+      const actual = await vi.importActual<typeof import('os')>('os');
+      return { ...actual, platform: () => 'win32' };
+    });
+    vi.doMock('../../../src/config/windows-acl.js', async () => {
+      const actual = await vi.importActual<typeof import('../../../src/config/windows-acl.js')>(
+        '../../../src/config/windows-acl.js',
+      );
+      return {
+        ...actual,
+        assertPrivateOnWindows: (path: string, opts: Parameters<typeof actual.assertPrivateOnWindows>[1]) =>
+          actual.assertPrivateOnWindows(path, opts, async () => ({
+            status: 'unknown',
+            reason: 'read-refused',
+            detail: 'stubbed',
+          })),
+      };
+    });
+    const { ConfigReloader: Reloader } = await import('../../../src/config/reload.js');
+    const { ConnectionRegistry: Registry } = await import('../../../src/ssh/connection-registry.js');
+    const { PolicyEngine: Engine } = await import('../../../src/policy/engine.js');
+    const { AuditStore: Store } = await import('../../../src/audit/store.js');
+
+    const path = await dir.write(BASE);
+    const config: AppConfig = { defaults: defaultsFromArgv({}), profiles: [] };
+    const reloader = new Reloader({
+      argv,
+      registry: new Registry(config, 'insecure'),
+      policy: new Engine(),
+      audit: new Store(join(auditDir, 'audit.log')),
+      localPath: {},
+      startup: { config, source: 'unconfigured', path },
+    });
+    return reloader.reload('tool', 1);
+  }
+
+  it('passes with --allowUncheckedConfigAcl', async () => {
+    const outcome = await reloadUnderAclFinding({ allowUncheckedConfigAcl: null });
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.ok).toBe(true);
+  });
+
+  it('refuses without it', async () => {
+    const outcome = await reloadUnderAclFinding({});
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error?.name).toBe('OperatorError');
+  });
+});
