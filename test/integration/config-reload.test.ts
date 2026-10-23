@@ -7,11 +7,13 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { ConnectionRegistry as Registry, type ConnectionRegistry } from '../../src/ssh/connection-registry.js';
+import { SSHConnection } from '../../src/ssh/connection.js';
 import { PolicyEngine, resolvePolicyRules } from '../../src/policy/engine.js';
 import { AuditStore } from '../../src/audit/store.js';
 import { ConfigReloader } from '../../src/config/reload.js';
 import { loadConfigFile } from '../../src/cli.js';
 import { registerTools } from '../../src/tools/registry.js';
+import { textOf } from '../unit/tools/harness.js';
 import type { AppConfig, AuditRecord } from '../../src/types.js';
 import { isSshServerUp, assertAvailable, SSH_HOST } from './helpers.js';
 import { PORTS, allServersUp, checkAllServers, createAppConfig, createRegistry, setupEnv } from './fixtures.js';
@@ -35,10 +37,12 @@ describe.skipIf(!up)('config reload during an in-flight connect (Review Focus 2)
   beforeAll(() => env.save());
   afterAll(() => env.restore());
   afterEach(async () => {
+    vi.restoreAllMocks();
     await registry?.closeAll();
   });
 
-  it('discards a connect that resolves after a connection-field swap', async () => {
+  it('discards and closes a connect that resolves after a connection-field swap', async () => {
+    const close = vi.spyOn(SSHConnection.prototype, 'close');
     registry = createRegistry();
     const connecting = registry.getOrCreate('admin');
 
@@ -50,21 +54,32 @@ describe.skipIf(!up)('config reload during an in-flight connect (Review Focus 2)
     );
     expect(registry.get('admin')).toBeUndefined();
     expect(registry.liveConnections()).toEqual([]);
+    // The discarded connection was closed, not left open outside the registry.
+    expect(close).toHaveBeenCalledTimes(1);
+    const discarded = close.mock.contexts[0] as SSHConnection;
+    expect(discarded.isConnected()).toBe(false);
+
+    // Back to the original user: the retry builds a new connection, not the closed one.
+    registry.applyConfig(createAppConfig());
+    const retried = await registry.getOrCreate('admin');
+    expect(retried.isConnected()).toBe(true);
+    expect(registry.get('admin')).toBe(retried);
+    expect(retried).not.toBe(discarded);
   });
 
-  it('discards it on a policy-only swap too, and the retry connects under the new profile', async () => {
+  it('stores a connect that resolves after a policy-only swap, under the new profile', async () => {
+    const close = vi.spyOn(SSHConnection.prototype, 'close');
     registry = createRegistry();
     const connecting = registry.getOrCreate('admin');
 
     registry.applyConfig(withProfile('admin', { role: 'viewer' }));
 
-    await expect(connecting).rejects.toThrow(/reloaded while connecting/);
-    expect(registry.get('admin')).toBeUndefined();
-
-    const conn = await registry.getOrCreate('admin');
+    const conn = await connecting;
     expect(conn.isConnected()).toBe(true);
     expect(conn.profile.role).toBe('viewer');
+    expect(conn.profile).toBe(registry.getProfile('admin'));
     expect(registry.get('admin')).toBe(conn);
+    expect(close).not.toHaveBeenCalled();
   });
 
   it('keeps a stored connection reconnecting across a policy-only swap', async () => {
@@ -135,7 +150,6 @@ interface Live {
   close(): Promise<void>;
 }
 
-const textOf = (result: any): string => (result.content ?? []).map((c: any) => c.text ?? '').join('\n');
 
 async function startLive(toml: string): Promise<Live> {
   const dir = await mkdtemp(join(tmpdir(), 'ssh-mcp-reload-int-'));
@@ -240,21 +254,28 @@ describe.skipIf(!allUp)('reload-config against live connections', () => {
     const conn = live.registry.get('admin')!;
 
     // Same profile name, now pointing at the operator server as operator. The password
-    // comes from the profile-named env var, so it moves with the profile.
+    // comes from the profile-named env var, so it moves with the profile. Restored even
+    // on a failure, so a failing assertion here cannot break the next test's login.
+    const savedPassword = process.env.SSH_MCP_ADMIN_PASSWORD;
     process.env.SSH_MCP_ADMIN_PASSWORD = 'oppass';
-    await live.rewrite(profileToml('admin', 'operator'));
-    const reload = await live.call('reload-config', { action: 'reload' });
-    expect(reload.isError).toBeFalsy();
-    expect(textOf(reload)).toMatch(/Profiles: changed admin \((?=[^)]*\bport\b)(?=[^)]*\buser\b)[^)]*\)\./);
-    expect(textOf(reload)).toContain('Closed connection admin (connection field changed), no sessions.');
+    try {
+      await live.rewrite(profileToml('admin', 'operator'));
+      const reload = await live.call('reload-config', { action: 'reload' });
+      expect(reload.isError).toBeFalsy();
+      expect(textOf(reload)).toMatch(/Profiles: changed admin \((?=[^)]*\bport\b)(?=[^)]*\buser\b)[^)]*\)\./);
+      expect(textOf(reload)).toContain('Closed connection admin (connection field changed), no sessions.');
 
-    expect(conn.isConnected()).toBe(false);
-    expect(live.registry.get('admin')).toBeUndefined();
+      expect(conn.isConnected()).toBe(false);
+      expect(live.registry.get('admin')).toBeUndefined();
 
-    const second = await live.call('run-command', { profile: 'admin', command: 'id -un' });
-    expect(second.isError).toBeFalsy();
-    expect(textOf(second).trim()).toBe('operator');
-    expect(live.registry.get('admin')).not.toBe(conn);
+      const second = await live.call('run-command', { profile: 'admin', command: 'id -un' });
+      expect(second.isError).toBeFalsy();
+      expect(textOf(second).trim()).toBe('operator');
+      expect(live.registry.get('admin')).not.toBe(conn);
+    } finally {
+      if (savedPassword === undefined) delete process.env.SSH_MCP_ADMIN_PASSWORD;
+      else process.env.SSH_MCP_ADMIN_PASSWORD = savedPassword;
+    }
   }, 60000);
 
   it('closes a removed profile\'s connection and sessions, and audits each session close', async () => {

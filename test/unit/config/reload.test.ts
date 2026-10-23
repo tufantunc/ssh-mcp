@@ -562,30 +562,53 @@ describe('ConfigReloader: unconfigured startup', () => {
 });
 
 describe('ConfigReloader: concurrency (Review Focus 3)', () => {
-  it('serializes two reloads started together', async () => {
+  /** A reload held in its close of `gone` until the returned release is called. */
+  async function heldReload() {
     const h = await startFrom(BASE + profileToml('gone'));
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     plant(h, 'gone', [], [], () => held);
     const apply = vi.spyOn(h.registry, 'applyConfig');
     await dir.write(BASE);
-
     const first = h.reloader.reload('tool', 1);
-    const second = h.reloader.reload('sighup', 2);
-
+    // Running: it has swapped and is stuck closing `gone`.
     await vi.waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
-    // The first is stuck closing `gone`; the second must not have started its swap.
-    await new Promise((r) => setTimeout(r, 50));
+    return { h, apply, first, release };
+  }
+
+  it('runs a reload asked for while one is running only after it, on the file as it is then', async () => {
+    const { h, apply, first, release } = await heldReload();
+
+    const second = h.reloader.reload('sighup', 2);
+    // Written while the first is still running. A second reload that ran alongside the
+    // first, or that had read the file already, would not see `late`.
+    await dir.write(BASE + profileToml('late'));
     expect(apply).toHaveBeenCalledTimes(1);
 
     release();
     const [a, b] = await Promise.all([first, second]);
     expect(apply).toHaveBeenCalledTimes(2);
     expect(a.ok).toBe(true);
+    expect(a.diff?.removed).toEqual(['gone']);
     expect(b.ok).toBe(true);
-    expect(a.at <= b.at).toBe(true);
     expect(b.trigger).toBe('sighup');
+    expect(b.diff?.added).toEqual(['late']);
     expect(h.reloader.status().last).toBe(b);
+  });
+
+  it('coalesces reloads asked for while one is running into one more run', async () => {
+    const { h, apply, first, release } = await heldReload();
+
+    const queued = [2, 3, 4, 5, 6].map((id) => h.reloader.reload('sighup', id));
+
+    release();
+    const outcomes = await Promise.all([first, ...queued]);
+    expect(apply).toHaveBeenCalledTimes(2);
+    // Every caller that joined the queued run gets its outcome.
+    for (const o of outcomes.slice(2)) expect(o).toBe(outcomes[1]);
+    expect(outcomes[1]).not.toBe(outcomes[0]);
+    const reloads = (await auditRecords(h)).filter((r) => r.binary === 'config:reload');
+    expect(reloads.map((r) => r.mcpRequestId)).toEqual([1, 2]);
   });
 
 });

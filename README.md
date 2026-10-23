@@ -494,8 +494,11 @@ a change to each of those profiles. `defaultProfile`, `connectionIdleReapMs` and
 `approvalGrantTtlMs` apply at once. Command quota counts are kept, so a new
 `commandQuotaPerDay` applies to what has already been spent. Host keys accepted on first use
 are kept too, because the connection registry is updated in place rather than rebuilt. A
-new connection that was still being opened when the reload landed is discarded, and that call
-fails with "The configuration was reloaded while connecting; retry the call."
+new connection that was still being opened when the reload landed is discarded only if the
+reload closes its profile (removed, a connection field changed, or its bastion closing); that
+call fails with "The configuration was reloaded while connecting; retry the call." Any other
+is kept, with the profile as the reload left it, so reloading an unchanged file does not fail
+other calls' connects.
 
 **Approvals.** Every applied reload, even of an unchanged file, retires every approval grant
 made before it, so the next run of a granted command asks again. An approval answered after
@@ -524,7 +527,9 @@ defaults from the file once a reload loads one.
 `allow` or `deny`, with the refusal in `error`), and each session a reload closes writes a
 `session:close … (reload)` record, as the `close-session` tool does. A connection that fails
 to close is reported, not rolled back: the new config is already in effect. Reloads run one
-at a time; a second waits for the first. If something fails after the checks have passed —
+at a time: one asked for while another is running waits for it and then reads the file
+afresh, and any asked for while that one is still waiting join it and get its report, so a
+burst of requests or `SIGHUP`s costs at most two reloads. If something fails after the checks have passed —
 a defect, not a refusal — the report says the reload failed after the swap began and may be
 partly applied; check `reload-config` status, and restart if it does not show the new config.
 

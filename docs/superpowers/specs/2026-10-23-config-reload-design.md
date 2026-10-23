@@ -143,10 +143,19 @@ A **config generation** counter increments on every applied reload. Connections 
 approval grants are tagged with the generation they were created under.
 
 - **A connect in progress** captures the generation it started from. If the generation
-  moved by the time it would store the connection, it closes that connection instead and
-  the call fails with "config reloaded, retry". A stale-credential connection stored
-  after the swap is exactly the half-applied state this design forbids. Waiting for
-  connects to drain is rejected, because one hung connect could block a security reload.
+  moved by the time it would store the connection, and a reload since then closed its
+  profile (removed, a connection field changed, or its bastion closing), it closes that
+  connection instead and the call fails with "config reloaded, retry". A stale-credential
+  connection stored after the swap is exactly the half-applied state this design forbids.
+  Any other new connection is stored with the profile as the reload left it, as the swap
+  would have updated it in place; failing it too let a client reloading in a loop fail
+  every other session's first connect. A stored connection being reconnected is kept if
+  the swap updated it in place, and refused if the swap took it out of the registry.
+  Waiting for connects to drain is rejected, because one hung connect could block a
+  security reload.
+- **Reloads are serialized and coalesced.** One asked for while another runs waits for
+  it; any asked for while that one is still waiting join it and share its outcome. A
+  running reload is never joined, since it may have read the file before the change.
 - **A call waiting on a human approval prompt** re-evaluates against the current profile
   and rules when the wait returns. If the generation changed and the decision now
   differs, the call is refused and no grant is recorded. A human approved a command under

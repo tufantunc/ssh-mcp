@@ -21,7 +21,9 @@ export interface ApplyResult {
   sessionFieldsChanged: ProfileChange[];
 }
 
-type CloseReason = ApplyResult['toClose'][number]['reason'];
+export type CloseReason = ApplyResult['toClose'][number]['reason'];
+
+const RELOADED_WHILE_CONNECTING = 'The configuration was reloaded while connecting; retry the call.';
 
 export class ConnectionRegistry {
   private connections = new Map<string, SSHConnection>();
@@ -30,15 +32,34 @@ export class ConnectionRegistry {
   private hostKeyMode: HostKeyMode;
   private config: AppConfig;
   private configGeneration = 0;
+  /**
+   * Per profile name, the last generation whose applyConfig closed it (removed, connection
+   * field changed, or its bastion closing). A new connect that started before that is
+   * discarded; see getOrCreate.
+   */
+  private closedAt = new Map<string, number>();
 
   constructor(config: AppConfig, hostKeyMode: HostKeyMode = 'tofu') {
     this.config = config;
     this.hostKeyMode = hostKeyMode;
   }
 
-  /** Increments on every applyConfig; a connect that started under an older one is discarded. */
+  /**
+   * Increments on every applyConfig. A connection that was still being opened under an
+   * older generation is checked when it would be stored: a new one is discarded if a
+   * reload since then closed its profile (removed, a connection field changed, or its
+   * bastion closing), and otherwise stored with the current profile; a stored one being
+   * reconnected is kept if the swap updated it in place, and refused if the swap took it
+   * out of the registry. Approval grants count only under the generation they were
+   * recorded in.
+   */
   get generation(): number {
     return this.configGeneration;
+  }
+
+  /** Whether an applyConfig after generation `gen` closed this profile name. */
+  private closedSince(name: string, gen: number): boolean {
+    return (this.closedAt.get(name) ?? -1) > gen;
   }
 
   async getOrCreate(profileName?: string): Promise<SSHConnection> {
@@ -100,14 +121,28 @@ export class ConnectionRegistry {
         }
         attempt = conn;
         await conn.ensureConnected();
-        // A reload landed while this connect was in flight. A new connection was built from
-        // the profile as it was and applyConfig never saw it, so storing it would leave the
-        // old posture running after the swap: discard it rather than wait for connects to
-        // drain, which one hung connect could turn into a blocked security reload. A stored
-        // connection being reconnected was seen: still stored means applyConfig swapped its
-        // profile in place and it is current; gone means it is in a toClose list.
-        if (this.generation !== gen && !(reused && this.connections.get(profile.name) === conn)) {
-          throw new OperatorError('The configuration was reloaded while connecting; retry the call.');
+        // A reload landed while this connect was in flight.
+        if (this.generation !== gen) {
+          if (reused) {
+            // A stored connection being reconnected was seen by applyConfig: still stored
+            // means its profile was swapped in place and it is current; gone means it is in
+            // a toClose list.
+            if (this.connections.get(profile.name) !== conn) throw new OperatorError(RELOADED_WHILE_CONNECTING);
+          } else {
+            // A new connection was built from the profile as it was, and applyConfig never
+            // saw it. If the reload would have closed it (profile removed, a connection field
+            // changed, its bastion closing), storing it would leave the old posture running
+            // after the swap: discard it, rather than wait for connects to drain, which one
+            // hung connect could turn into a blocked security reload. Otherwise the link is
+            // still the one the config describes, and only the profile object is stale: store
+            // it with the current one, as applyConfig would have swapped it in place. Failing
+            // it instead let a client reloading in a loop fail every other session's connects.
+            const current = this.closedSince(profile.name, gen)
+              ? undefined
+              : this.config.profiles.find((p) => p.name === profile.name);
+            if (!current) throw new OperatorError(RELOADED_WHILE_CONNECTING);
+            conn.replaceProfile(current);
+          }
         }
         // Stored only once connected and current, so no caller can pick up a stale object
         // mid-connect.
@@ -217,8 +252,10 @@ export class ConnectionRegistry {
 
     const toClose: ApplyResult['toClose'] = [];
     for (const [name, reason] of closing) {
-      // An in-flight connect for it would be discarded anyway; forget it so the next call
-      // starts fresh instead of joining it.
+      // A new connect in flight for it will be discarded when it would be stored (see
+      // getOrCreate); forget it so the next call starts fresh instead of joining it. An
+      // in-flight connect for any other profile is kept, and stays joinable.
+      this.closedAt.set(name, this.configGeneration);
       this.pending.delete(name);
       const conn = this.connections.get(name);
       if (!conn) continue;

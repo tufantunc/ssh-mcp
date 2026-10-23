@@ -111,6 +111,8 @@ export class ConfigReloader {
   private last: ReloadOutcome | null = null;
   /** The previous reload. Each call chains on it, so two never interleave. */
   private queue: Promise<unknown> = Promise.resolve();
+  /** A reload queued behind the running one and not yet started; later calls join it. */
+  private waiting: Promise<ReloadOutcome> | null = null;
 
   constructor(deps: ReloadDeps) {
     this.deps = deps;
@@ -131,8 +133,20 @@ export class ConfigReloader {
     };
   }
 
+  /**
+   * Reloads run one at a time. A call made while one is waiting to start joins that one
+   * and gets its outcome (reported and audited under the trigger and request id of the
+   * call that queued it), so a client calling in a loop, or a burst of SIGHUPs, costs at
+   * most the reload running now and one more. A reload already running is never joined:
+   * it may have read the file before the change the caller is asking to apply.
+   */
   reload(trigger: 'tool' | 'sighup', requestId: string | number): Promise<ReloadOutcome> {
-    const run = this.queue.then(() => this.run(trigger, requestId));
+    if (this.waiting) return this.waiting;
+    const run = this.queue.then(() => {
+      this.waiting = null;
+      return this.run(trigger, requestId);
+    });
+    this.waiting = run;
     // A defect that rejects one reload must not wedge every later one.
     this.queue = run.catch(() => {});
     return run;
