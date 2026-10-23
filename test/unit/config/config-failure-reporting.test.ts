@@ -127,7 +127,11 @@ describe('buildAppConfig only falls through when the file is absent', () => {
         '../../../src/config/loader.js',
       );
       loadConfigMock = vi.fn().mockRejectedValue(err);
-      return { ...actual, loadConfig: loadConfigMock };
+      // cli.ts loads through loadConfigWithDigest; the mock stands in for the parse.
+      return {
+        ...actual,
+        loadConfigWithDigest: async (...a: unknown[]) => ({ config: await (loadConfigMock as (...b: unknown[]) => unknown)(...a), sha256: 'stub' }),
+      };
     });
     const { buildAppConfig } = await import('../../../src/cli.js');
     return buildAppConfig(argv);
@@ -277,7 +281,11 @@ describe('buildAppConfig threads --allowUncheckedConfigAcl to the loader', () =>
         defaults: { defaultProfile: 'p' },
         profiles: [{ name: 'p', host: 'h', user: 'u' }],
       });
-      return { ...actual, loadConfig: loadConfigMock };
+      // cli.ts loads through loadConfigWithDigest; the mock stands in for the parse.
+      return {
+        ...actual,
+        loadConfigWithDigest: async (...a: unknown[]) => ({ config: await (loadConfigMock as (...b: unknown[]) => unknown)(...a), sha256: 'stub' }),
+      };
     });
     const { buildAppConfig } = await import('../../../src/cli.js');
     await buildAppConfig(argv);

@@ -1,12 +1,5 @@
-import { createHash } from 'crypto';
-import { readFile } from 'fs/promises';
 import { loadConfigFile, type ConfigSource, type LoadedConfig } from '../cli.js';
-import {
-  ConfigNotFoundError,
-  ConfigParseError,
-  ConfigSchemaError,
-  OperatorError,
-} from '../errors.js';
+import { ConfigParseError, ConfigSchemaError, OperatorError } from '../errors.js';
 import { PolicyEngine, resolvePolicyRules, type PolicyRules } from '../policy/engine.js';
 import { RELEASE } from '../tools/session-tools.js';
 import { policyRulesChanged, type ProfileChange, type ProfileDiff } from './reload-diff.js';
@@ -28,8 +21,9 @@ export interface ReloadDeps {
 export interface ReloadStatus {
   path: string;
   source: ConfigSource;
+  /** When the live config was loaded: at startup, or by the last applied reload. */
   loadedAt: string;
-  /** Of the bytes last applied; null until a reload has applied one. */
+  /** Of the bytes the live config was parsed from; null while no file has been. */
   sha256: string | null;
   last: ReloadOutcome | null;
 }
@@ -55,7 +49,10 @@ export interface ReloadOutcome {
   /** Kept-open profiles whose session-fixed fields changed. */
   sessionFieldsChanged?: ProfileChange[];
   grantsInvalidated?: boolean;
+  /** Of the bytes that were parsed and applied. */
   sha256?: string;
+  /** When the new config went live. */
+  loadedAt?: string;
 }
 
 /** A refusal by a reload-only rule. Its message names fields and the path, never values. */
@@ -105,7 +102,7 @@ export class ConfigReloader {
   private source: ConfigSource;
   private readonly path: string;
   private loadedAt: string;
-  private sha256: string | null = null;
+  private sha256: string | null;
   private last: ReloadOutcome | null = null;
   /** The previous reload. Each call chains on it, so two never interleave. */
   private queue: Promise<unknown> = Promise.resolve();
@@ -115,7 +112,8 @@ export class ConfigReloader {
     this.current = deps.startup.config;
     this.source = deps.startup.source;
     this.path = deps.startup.path;
-    this.loadedAt = new Date().toISOString();
+    this.loadedAt = deps.startup.loadedAt;
+    this.sha256 = deps.startup.sha256;
   }
 
   status(): ReloadStatus {
@@ -142,7 +140,7 @@ export class ConfigReloader {
       return `Config reload (${o.trigger}) refused: ${error.name}: ${error.message}\nNothing was changed.`;
     }
 
-    const lines = [`Config reloaded from ${this.path} (${o.trigger}); sha256 ${o.sha256}.`];
+    const lines = [`Config reloaded from ${this.path} (${o.trigger}); sha256 ${o.sha256}, loaded at ${o.loadedAt}.`];
     const diff = o.diff;
     if (diff && (diff.added.length || diff.removed.length || diff.changed.length)) {
       const parts: string[] = [];
@@ -183,49 +181,65 @@ export class ConfigReloader {
     }
     const { next, rules, sha256, policyChanged } = validated;
 
-    // The swap: one synchronous block, no await, so no tool call observes a mix. Rules
-    // first: they were already compiled once above, and if they threw anyway nothing
-    // else has moved yet.
-    const { registry, policy, localPath } = this.deps;
-    policy.replaceRules(rules);
-    const applied = registry.applyConfig(next);
-    if (localPath.transferRoot === undefined && next.defaults.transferRoot !== undefined) {
-      localPath.transferRoot = next.defaults.transferRoot;
+    // Validation passed, so from here on a throw is a defect, and it may leave the server
+    // part old, part new. It is still audited and reported like any other attempt, and
+    // the call resolves with that outcome rather than rejecting: a SIGHUP handler or a
+    // tool reports it the same way, and nothing has to remember to catch.
+    try {
+      // The swap: one synchronous block, no await, so no tool call observes a mix. Rules
+      // first: they were already compiled once above, and if they threw anyway nothing
+      // else has moved yet.
+      const { registry, policy, localPath } = this.deps;
+      policy.replaceRules(rules);
+      const applied = registry.applyConfig(next);
+      if (localPath.transferRoot === undefined && next.defaults.transferRoot !== undefined) {
+        localPath.transferRoot = next.defaults.transferRoot;
+      }
+      const loadedAt = new Date().toISOString();
+      this.current = next;
+      this.source = 'file';
+      this.loadedAt = loadedAt;
+      this.sha256 = sha256;
+
+      // A session-fixed change matters only where a session could have fixed it.
+      const open = new Set(registry.liveConnections().map((c) => c.profile.name));
+      const sessionFieldsChanged = applied.sessionFieldsChanged.filter((c) => open.has(c.name));
+
+      const closed = await this.closeAll(applied.toClose, requestId);
+      return await this.finish(
+        {
+          ok: true,
+          at,
+          trigger,
+          diff: applied.diff,
+          policyChanged,
+          closed,
+          sessionFieldsChanged,
+          // applyConfig bumped the generation, which is what invalidates every grant.
+          grantsInvalidated: true,
+          sha256,
+          loadedAt,
+        },
+        requestId,
+        startedAt,
+      );
+    } catch (err) {
+      const error = {
+        name: errorName(err),
+        message:
+          `Reload of ${this.path} failed after the swap began, so it may be partially applied. ` +
+          'Reload again, or restart the server.',
+      };
+      return this.finish({ ok: false, at, trigger, error }, requestId, startedAt);
     }
-    this.current = next;
-    this.source = 'file';
-    this.loadedAt = at;
-    this.sha256 = sha256;
-
-    // A session-fixed change matters only where a session could have fixed it.
-    const open = new Set(registry.liveConnections().map((c) => c.profile.name));
-    const sessionFieldsChanged = applied.sessionFieldsChanged.filter((c) => open.has(c.name));
-
-    const closed = await this.closeAll(applied.toClose, requestId);
-    return this.finish(
-      {
-        ok: true,
-        at,
-        trigger,
-        diff: applied.diff,
-        policyChanged,
-        closed,
-        sessionFieldsChanged,
-        // applyConfig bumped the generation, which is what invalidates every grant.
-        grantsInvalidated: true,
-        sha256,
-      },
-      requestId,
-      startedAt,
-    );
   }
 
   /** Startup's pipeline plus the reload-only rules, into fresh objects. Mutates nothing. */
   private async validate(): Promise<Validated> {
     if (this.source === 'flags') throw new ReloadRefusedError(FLAGS_REFUSAL);
 
-    const sha256 = createHash('sha256').update(await this.readBytes()).digest('hex');
-    const next = await loadConfigFile(this.path, this.deps.argv);
+    // The hash is of the very bytes the loader parsed, not of a second read.
+    const { config: next, sha256 } = await loadConfigFile(this.path, this.deps.argv);
 
     let rules: PolicyRules;
     try {
@@ -263,15 +277,6 @@ export class ConfigReloader {
     return { next, rules, sha256, policyChanged: policyRulesChanged(this.current, next) };
   }
 
-  private async readBytes(): Promise<Buffer> {
-    try {
-      return await readFile(this.path);
-    } catch (err: any) {
-      if (err?.code === 'ENOENT') throw new ConfigNotFoundError(this.path);
-      throw new OperatorError(`Config file ${this.path} could not be read (${err?.code ?? errorName(err)}).`);
-    }
-  }
-
   /**
    * The outcome's error, built from safe parts: the error class, the config path, and for
    * a schema error the issue paths and codes. The parser quotes source text, a schema
@@ -285,7 +290,7 @@ export class ConfigReloader {
       return { name: err.name, message: `Failed to parse TOML config at ${this.path}${where}.` };
     }
     if (err instanceof ConfigSchemaError) {
-      const issues = err.issues.map((i) => `${i.path} (${i.code})`).join(', ');
+      const issues = err.issues.map((i) => `${maskedIssuePath(i.path)} (${i.code})`).join(', ');
       return { name: err.name, message: `Config validation error in ${this.path}: ${issues}.` };
     }
     // What is left from the loader is our own refusals, a missing or unreadable file, and
@@ -300,9 +305,7 @@ export class ConfigReloader {
    * A failed close is reported, not rolled back: the new config is already in effect.
    */
   private async closeAll(toClose: CloseEntry[], requestId: string | number): Promise<ClosedConnection[]> {
-    const sessions = new Map(
-      toClose.map((e) => [e, e.conn.listSessions().map((s) => ({ name: s.name, kind: s.toInfo().type }))]),
-    );
+    const sessions = new Map(toClose.map((e) => [e, sessionsOf(e.conn)]));
     const results = new Map<CloseEntry, ClosedConnection>();
 
     for (const wave of dependentsFirst(toClose)) {
@@ -394,6 +397,41 @@ function dependentsFirst(entries: CloseEntry[]): CloseEntry[][] {
     remaining = remaining.filter((e) => !wave.includes(e));
   }
   return waves;
+}
+
+/**
+ * A connection's sessions, collected before it closes. One connection that cannot list
+ * them, or one session that cannot describe itself, must not stop the others closing.
+ */
+function sessionsOf(conn: CloseEntry['conn']): { name: string; kind: string }[] {
+  let list: ReturnType<CloseEntry['conn']['listSessions']>;
+  try {
+    list = conn.listSessions();
+  } catch {
+    return [];
+  }
+  return list.map((s) => {
+    let kind = 'unknown';
+    try {
+      kind = s.toInfo().type;
+    } catch {
+      // Recorded as unknown, as close-session does for a session it cannot describe.
+    }
+    return { name: s.name, kind };
+  });
+}
+
+/**
+ * A schema issue's path, with the keys the operator chose replaced by `*`. Under
+ * `policy.roleBindings` the next two segments are a role name and a group name, which are
+ * values from the file in the sense the cross-check refusal withholds them.
+ */
+function maskedIssuePath(path: string[]): string {
+  if (path.length === 0) return '(root)';
+  const masked = path[0] === 'policy' && path[1] === 'roleBindings'
+    ? path.map((seg, i) => (i === 2 || i === 3 ? '*' : seg))
+    : path;
+  return masked.join('.');
 }
 
 function errorName(err: unknown): string {

@@ -65,6 +65,7 @@ function build(
   config: AppConfig,
   path: string,
   source: ConfigSource = 'file',
+  sha256: string | null = null,
   argv: Record<string, string | null> = {},
 ): Harness {
   const registry = new ConnectionRegistry(config, 'insecure');
@@ -77,15 +78,19 @@ function build(
     policy,
     audit,
     localPath,
-    startup: { config, source, path },
+    startup: { config, source, path, sha256, loadedAt: STARTED_AT },
   });
   return { path, registry, policy, audit, localPath, reloader };
 }
 
+const STARTED_AT = '2026-10-23T00:00:00.000Z';
+const sha256Of = async (path: string) => createHash('sha256').update(await readFile(path)).digest('hex');
+
 /** A server started from `toml`, loaded through the same loader the reload uses. */
 async function startFrom(toml: string, source: ConfigSource = 'file'): Promise<Harness> {
   const path = await dir.write(toml);
-  return build(await loadConfigFile(path, {}), path, source);
+  const { config, sha256 } = await loadConfigFile(path, {});
+  return build(config, path, source, source === 'file' ? sha256 : null);
 }
 
 async function auditRecords(h: Harness): Promise<AuditRecord[]> {
@@ -94,15 +99,34 @@ async function auditRecords(h: Harness): Promise<AuditRecord[]> {
   return text.split('\n').filter(Boolean).map((l) => JSON.parse(l) as AuditRecord);
 }
 
-/** Everything a refused reload must leave alone, by reference. */
+/** Everything a refused reload must leave alone. */
 function snapshot(h: Harness) {
   return {
     config: (h.registry as any).config,
     rules: (h.policy as any).rules,
     patterns: (h.policy as any).userPatterns,
+    localPath: h.localPath,
     transferRoot: h.localPath.transferRoot,
     generation: h.registry.generation,
+    sha256: h.reloader.status().sha256,
+    loadedAt: h.reloader.status().loadedAt,
   };
+}
+
+/**
+ * The one check every refusal makes: the same objects by reference, and the same
+ * generation, so a failed reload does not invalidate grants either.
+ */
+function expectUnchanged(h: Harness, before: ReturnType<typeof snapshot>) {
+  const now = snapshot(h);
+  expect(now.config).toBe(before.config);
+  expect(now.rules).toBe(before.rules);
+  expect(now.patterns).toBe(before.patterns);
+  expect(now.localPath).toBe(before.localPath);
+  expect(now.transferRoot).toBe(before.transferRoot);
+  expect(now.generation).toBe(before.generation);
+  expect(now.sha256).toBe(before.sha256);
+  expect(now.loadedAt).toBe(before.loadedAt);
 }
 
 function expectNoCanary(h: Harness, outcome: ReloadOutcome) {
@@ -160,7 +184,7 @@ describe('ConfigReloader: a refused reload changes nothing', () => {
       name: 'a bad denylist regex',
       toml: `${BASE}\n[policy]\ndenylist = ["(${CANARY}"]\n`,
       raw: async (path) => {
-        const c = await loadConfigFile(path, {});
+        const { config: c } = await loadConfigFile(path, {});
         return new PolicyEngine(resolvePolicyRules(c.profiles, c.policy));
       },
     },
@@ -168,9 +192,15 @@ describe('ConfigReloader: a refused reload changes nothing', () => {
       name: 'a cross-check failure',
       toml: BASE.replace('user = "test"', `user = "test"\nrole = "${CANARY}"`),
       raw: async (path) => {
-        const c = await loadConfigFile(path, {});
+        const { config: c } = await loadConfigFile(path, {});
         return resolvePolicyRules(c.profiles, c.policy);
       },
+    },
+    {
+      // Role and group names are keys, so they land in the schema issue path.
+      name: 'a schema violation under a role and group named in the file',
+      toml: `${BASE}\n[policy.roleBindings.${CANARY}-role]\n${CANARY}-group = ["not-a-class"]\n`,
+      raw: (path) => loadConfigFile(path, {}),
     },
   ];
 
@@ -185,10 +215,7 @@ describe('ConfigReloader: a refused reload changes nothing', () => {
     expect(outcome.ok).toBe(false);
     expect(outcome.error?.name).toBeTruthy();
     expect(outcome.error?.message).toBeTruthy();
-    expect(snapshot(h)).toEqual(before);
-    expect((h.registry as any).config).toBe(before.config);
-    expect((h.policy as any).rules).toBe(before.rules);
-    expect(h.registry.generation).toBe(before.generation);
+    expectUnchanged(h, before);
     expect(outcome.grantsInvalidated).toBeUndefined();
     expect(h.reloader.status().last).toBe(outcome);
     expectNoCanary(h, outcome);
@@ -213,6 +240,14 @@ describe('ConfigReloader: a refused reload changes nothing', () => {
     expect(error?.message).toContain('profiles.0 (unrecognized_keys)');
   });
 
+  it('masks role and group names in a schema issue path', async () => {
+    const h = await startFrom(BASE);
+    await dir.write(`${BASE}\n[policy.roleBindings.${CANARY}-role]\n${CANARY}-group = ["not-a-class"]\n`);
+    const { error } = await h.reloader.reload('tool', 1);
+    expect(error?.name).toBe('ConfigSchemaError');
+    expect(error?.message).toContain('policy.roleBindings.*.*.0 (invalid_value)');
+  });
+
   it('names the denylist without quoting the pattern', async () => {
     const h = await startFrom(BASE);
     await dir.write(`${BASE}\n[policy]\ndenylist = ["(${CANARY}"]\n`);
@@ -229,7 +264,7 @@ describe('ConfigReloader: a refused reload changes nothing', () => {
 
     expect(outcome.ok).toBe(false);
     expect(outcome.error?.message).toMatch(/group\/world accessible/);
-    expect(snapshot(h)).toEqual(before);
+    expectUnchanged(h, before);
     expectNoCanary(h, outcome);
   });
 
@@ -250,7 +285,7 @@ describe('ConfigReloader: a refused reload changes nothing', () => {
     expect(outcome.error?.message).toMatch(/restart/);
     expect(outcome.error?.message).not.toContain('/srv/');
     expect(h.localPath.transferRoot).toBe(from);
-    expect(snapshot(h)).toEqual(before);
+    expectUnchanged(h, before);
   });
 
   it('zero profiles', async () => {
@@ -262,7 +297,7 @@ describe('ConfigReloader: a refused reload changes nothing', () => {
 
     expect(outcome.ok).toBe(false);
     expect(outcome.error?.message).toContain('profiles (too_small)');
-    expect(snapshot(h)).toEqual(before);
+    expectUnchanged(h, before);
   });
 
   it("source: 'flags'", async () => {
@@ -273,7 +308,7 @@ describe('ConfigReloader: a refused reload changes nothing', () => {
 
     expect(outcome.ok).toBe(false);
     expect(outcome.error?.message).toBe('started from command-line flags; restart to use a config file');
-    expect(snapshot(h)).toEqual(before);
+    expectUnchanged(h, before);
   });
 
   it('audits a refusal as one config:reload deny with the error', async () => {
@@ -379,7 +414,20 @@ describe('ConfigReloader: an applied reload', () => {
     expect(status.sha256).toBe(expected);
     expect(status.source).toBe('file');
     expect(status.path).toBe(h.path);
-    expect(status.loadedAt).toBe(outcome.at);
+    expect(status.loadedAt).toBe(outcome.loadedAt);
+    expect(status.loadedAt).not.toBe(STARTED_AT);
+    expect(h.reloader.formatOutcome(outcome)).toContain(`loaded at ${outcome.loadedAt}`);
+    expect(h.reloader.formatOutcome(outcome)).toContain(`sha256 ${expected}`);
+  });
+
+  it('reports the startup hash and load time of a file-started server', async () => {
+    const h = await startFrom(BASE);
+    expect(h.reloader.status()).toMatchObject({
+      sha256: await sha256Of(h.path),
+      loadedAt: STARTED_AT,
+      source: 'file',
+      last: null,
+    });
   });
 
   it('never prints a value from the file', async () => {
@@ -518,15 +566,112 @@ describe('ConfigReloader: concurrency (Review Focus 3)', () => {
     expect(h.reloader.status().last).toBe(b);
   });
 
-  it('keeps serving after a reload rejects unexpectedly', async () => {
+});
+
+describe('ConfigReloader: a defect after the swap began', () => {
+  it('is audited, reported in status, and resolves rather than rejects', async () => {
     const h = await startFrom(BASE);
     vi.spyOn(h.registry, 'applyConfig').mockImplementationOnce(() => {
-      throw new Error('boom');
+      throw new TypeError(`boom ${CANARY}`);
     });
-    await dir.write(BASE);
-    await expect(h.reloader.reload('tool', 1)).rejects.toThrow('boom');
-    const outcome = await h.reloader.reload('tool', 2);
+    await dir.write(BASE.replace('user = "test"', 'user = "test"\nworkdir = "/w"'));
+
+    const outcome = await h.reloader.reload('sighup', 'req-d');
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error?.name).toBe('TypeError');
+    expect(outcome.error?.message).toMatch(/partially applied/);
+    expect(h.reloader.status().last).toBe(outcome);
+    expectNoCanary(h, outcome);
+
+    // The queue survives it.
+    expect((await h.reloader.reload('tool', 2)).ok).toBe(true);
+
+    const reloads = (await auditRecords(h)).filter((r) => r.binary === 'config:reload');
+    expect(reloads.map((r) => r.decision)).toEqual(['deny', 'allow']);
+    expect(reloads[0].mcpRequestId).toBe('req-d');
+    expect(reloads[0].error).toMatch(/TypeError: .*partially applied/);
+    expect(reloads[0].error).not.toContain(CANARY);
+  });
+
+  it('closes every connection when one cannot list or describe its sessions', async () => {
+    const h = await startFrom(profileToml('a') + profileToml('b') + profileToml('c'));
+    const closes: string[] = [];
+    plant(h, 'a', [], closes).listSessions = () => {
+      throw new Error('cannot list');
+    };
+    const b = plant(h, 'b', [], closes);
+    b.listSessions = () => [{ name: 's-b', toInfo: () => { throw new Error('cannot describe'); } }] as never;
+    plant(h, 'c', ['s-c'], closes);
+    await dir.write(profileToml('d'));
+
+    const outcome = await h.reloader.reload('tool', 1);
+
     expect(outcome.ok).toBe(true);
+    expect(closes.sort()).toEqual(['a', 'b', 'c']);
+    expect(outcome.closed).toEqual([
+      { profile: 'a', reason: 'removed', sessions: [] },
+      { profile: 'b', reason: 'removed', sessions: ['s-b'] },
+      { profile: 'c', reason: 'removed', sessions: ['s-c'] },
+    ]);
+    const commands = (await auditRecords(h)).filter((r) => r.binary === 'session:close').map((r) => r.command);
+    expect(commands.sort()).toEqual([
+      'session:close background s-c (reload)',
+      'session:close unknown s-b (reload)',
+    ]);
+  });
+});
+
+describe('ConfigReloader: the hash is of the bytes that were parsed', () => {
+  /**
+   * The read is stubbed to hand back different bytes from what is on disk. A reloader
+   * that hashed a read of its own would report the disk's hash while applying the stub's
+   * config, which is exactly the mismatch a write between two reads produces.
+   */
+  afterEach(() => {
+    vi.doUnmock('fs/promises');
+    vi.resetModules();
+  });
+
+  it('reads the file once and hashes that buffer', async () => {
+    const path = await dir.write(BASE);
+    const served = Buffer.from(BASE + profileToml('extra'), 'utf8');
+    const reads: string[] = [];
+
+    vi.resetModules();
+    vi.doMock('fs/promises', async () => {
+      const actual = await vi.importActual<typeof import('fs/promises')>('fs/promises');
+      const readFileStub = (async (p: unknown, ...rest: unknown[]) => {
+        if (p === path) {
+          reads.push(String(p));
+          return rest[0] === 'utf8' ? served.toString('utf8') : served;
+        }
+        return (actual.readFile as (...a: unknown[]) => unknown)(p, ...rest);
+      }) as typeof actual.readFile;
+      return { ...actual, default: { ...actual, readFile: readFileStub }, readFile: readFileStub };
+    });
+    const { ConfigReloader: Reloader } = await import('../../../src/config/reload.js');
+    const { ConnectionRegistry: Registry } = await import('../../../src/ssh/connection-registry.js');
+    const { PolicyEngine: Engine } = await import('../../../src/policy/engine.js');
+    const { AuditStore: Store } = await import('../../../src/audit/store.js');
+
+    const config: AppConfig = { defaults: defaultsFromArgv({}), profiles: [] };
+    const reloader = new Reloader({
+      argv: {},
+      registry: new Registry(config, 'insecure'),
+      policy: new Engine(),
+      audit: new Store(join(auditDir, 'audit.log')),
+      localPath: {},
+      startup: { config, source: 'unconfigured', path, sha256: null, loadedAt: STARTED_AT },
+    });
+
+    const outcome = await reloader.reload('tool', 1);
+
+    expect(outcome.ok).toBe(true);
+    expect(reads).toEqual([path]);
+    expect(outcome.diff?.added).toEqual(['dev', 'extra']);
+    expect(outcome.sha256).toBe(createHash('sha256').update(served).digest('hex'));
+    expect(outcome.sha256).not.toBe(await sha256Of(path));
   });
 });
 
@@ -602,7 +747,7 @@ describe('ConfigReloader: the argv ACL flags reach the loader (Review Focus 4)',
       policy: new Engine(),
       audit: new Store(join(auditDir, 'audit.log')),
       localPath: {},
-      startup: { config, source: 'unconfigured', path },
+      startup: { config, source: 'unconfigured', path, sha256: null, loadedAt: STARTED_AT },
     });
     return reloader.reload('tool', 1);
   }

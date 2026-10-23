@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createHash } from 'crypto';
+import { readFile } from 'fs/promises';
 import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from '../config/helpers.js';
 
 /**
@@ -27,7 +29,11 @@ async function withLoader(impl: (path?: string) => Promise<unknown>) {
     const actual = await vi.importActual<typeof import('../../../src/config/loader.js')>(
       '../../../src/config/loader.js',
     );
-    return { ...actual, loadConfig: vi.fn(impl) };
+    const load = vi.fn(impl);
+    return {
+      ...actual,
+      loadConfigWithDigest: async (path?: string) => ({ config: await load(path), sha256: 'stub' }),
+    };
   });
   const loader = await import('../../../src/config/loader.js');
   const cli = await import('../../../src/cli.js');
@@ -43,6 +49,8 @@ describe('loadAppConfig tags the config with its source', () => {
     expect(loaded.source).toBe('file');
     expect(loaded.path).toBe(path);
     expect(loaded.config.profiles.length).toBeGreaterThan(0);
+    expect(loaded.sha256).toBe(createHash('sha256').update(await readFile(path)).digest('hex'));
+    expect(Number.isNaN(Date.parse(loaded.loadedAt))).toBe(false);
   });
 
   it('reports the default-path file as source file', async () => {
@@ -59,6 +67,7 @@ describe('loadAppConfig tags the config with its source', () => {
     const loaded = await cli.loadAppConfig({ host: 'example.com', user: 'deploy' });
     expect(loaded.source).toBe('flags');
     expect(loaded.path).toBe(loader.getConfigPath());
+    expect(loaded.sha256).toBeNull();
     expect(loaded.config.profiles[0].host).toBe('example.com');
   });
 
@@ -71,6 +80,7 @@ describe('loadAppConfig tags the config with its source', () => {
     err.mockRestore();
     expect(loaded.source).toBe('unconfigured');
     expect(loaded.path).toBe(loader.getConfigPath());
+    expect(loaded.sha256).toBeNull();
     expect(loaded.config.profiles).toEqual([]);
   });
 
@@ -87,8 +97,9 @@ describe('loadConfigFile and aclOptionsFromArgv', () => {
     const path = await cfg.write(MINIMAL_CONFIG, 0o600);
     vi.resetModules();
     const { loadConfigFile } = await import('../../../src/cli.js');
-    const config = await loadConfigFile(path, {});
+    const { config, sha256 } = await loadConfigFile(path, {});
     expect(config.profiles.length).toBeGreaterThan(0);
+    expect(sha256).toBe(createHash('sha256').update(await readFile(path)).digest('hex'));
   });
 
   it('aclOptionsFromArgv reads the two ACL flags', async () => {

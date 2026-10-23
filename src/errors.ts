@@ -107,9 +107,13 @@ export class ConfigParseError extends OperatorError {
   }
 }
 
-/** One schema issue, by where it is and what kind it is: never the value received. */
+/**
+ * One schema issue, by where it is and what kind it is: never the value received. The
+ * path stays in segments, because some segments are keys the operator chose (role and
+ * group names) and a reader that must not repeat them has to know where one ends.
+ */
 export interface ConfigIssue {
-  path: string;
+  path: string[];
   code: string;
 }
 

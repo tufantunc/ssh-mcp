@@ -14,7 +14,7 @@
  * escape the boot gate to be testable.
  */
 
-import { loadConfig, getConfigPath } from './config/loader.js';
+import { loadConfigWithDigest, getConfigPath } from './config/loader.js';
 import { OperatorError, ConfigNotFoundError, UnconfiguredError } from './errors.js';
 import type { AclFinding, AclOptions } from './config/windows-acl.js';
 import { HOST_GROUPS } from './policy/engine.js';
@@ -280,6 +280,10 @@ export interface LoadedConfig {
   source: ConfigSource;
   /** The file that was read, or the default path for `unconfigured` and `flags`. */
   path: string;
+  /** Of the bytes that were parsed; null when no file was (`unconfigured`, `flags`). */
+  sha256: string | null;
+  /** When the config was loaded, as an ISO timestamp. */
+  loadedAt: string;
 }
 
 export function aclOptionsFromArgv(argv: Record<string, string | null>): AclOptions {
@@ -304,9 +308,15 @@ export function aclOptionsFromArgv(argv: Record<string, string | null>): AclOpti
   };
 }
 
-/** Loads a config file through the same validation startup uses. Reload calls this. */
-export function loadConfigFile(path: string, argv: Record<string, string | null>): Promise<AppConfig> {
-  return loadConfig(path, aclOptionsFromArgv(argv));
+/**
+ * Loads a config file through the same validation startup uses, with the sha256 of the
+ * bytes that were parsed. Reload calls this.
+ */
+export function loadConfigFile(
+  path: string,
+  argv: Record<string, string | null>,
+): Promise<{ config: AppConfig; sha256: string }> {
+  return loadConfigWithDigest(path, aclOptionsFromArgv(argv));
 }
 
 export async function buildAppConfig(argv: Record<string, string | null>): Promise<AppConfig> {
@@ -324,11 +334,12 @@ export async function loadAppConfig(argv: Record<string, string | null>): Promis
     if (argv.config === null || argv.config === '') {
       throw new OperatorError('--config needs a path: --config=<path>');
     }
-    return { config: await loadConfig(argv.config, aclOpts), source: 'file', path: argv.config };
+    const { config, sha256 } = await loadConfigWithDigest(argv.config, aclOpts);
+    return { config, source: 'file', path: argv.config, sha256, loadedAt: new Date().toISOString() };
   }
 
   try {
-    const fromFile = await loadConfig(undefined, aclOpts);
+    const { config: fromFile, sha256 } = await loadConfigWithDigest(undefined, aclOpts);
     // Before #138 every Windows config was rejected by the mode-bit check and
     // the rejection was swallowed, so an operator who also passed --host/--user
     // was silently running off the flags. Now that the file loads, it takes
@@ -340,7 +351,7 @@ export async function loadAppConfig(argv: Record<string, string | null>): Promis
         'Pass --config <path> to choose a different file.',
       );
     }
-    return { config: fromFile, source: 'file', path: getConfigPath() };
+    return { config: fromFile, source: 'file', path: getConfigPath(), sha256, loadedAt: new Date().toISOString() };
   } catch (err) {
     // Only "there is no file" means fall through. A file that exists and is
     // unusable — malformed TOML, a schema violation, a permission failure —
@@ -374,6 +385,8 @@ export async function loadAppConfig(argv: Record<string, string | null>): Promis
       config: { defaults: defaultsFromArgv(argv), profiles: [] },
       source: 'unconfigured',
       path: getConfigPath(),
+      sha256: null,
+      loadedAt: new Date().toISOString(),
     };
   }
 
@@ -411,5 +424,11 @@ export async function loadAppConfig(argv: Record<string, string | null>): Promis
     transferTimeoutMs: defaults.transferTimeoutMs,
   };
 
-  return { config: { defaults, profiles: [profile] }, source: 'flags', path: getConfigPath() };
+  return {
+    config: { defaults, profiles: [profile] },
+    source: 'flags',
+    path: getConfigPath(),
+    sha256: null,
+    loadedAt: new Date().toISOString(),
+  };
 }

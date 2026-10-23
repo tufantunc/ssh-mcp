@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { readFile, stat } from 'fs/promises';
 import { homedir, platform } from 'os';
 import { join, dirname } from 'path';
@@ -95,11 +96,23 @@ async function checkPosixMode(filePath: string): Promise<void> {
 }
 
 export async function loadConfig(customPath?: string, opts: AclOptions = {}): Promise<AppConfig> {
+  return (await loadConfigWithDigest(customPath, opts)).config;
+}
+
+/**
+ * `loadConfig`, plus the sha256 of the very buffer that was parsed. Hashing a second read
+ * would report bytes that were never applied whenever the file changed in between, and the
+ * hash is the operator's only content-free evidence of which config is live.
+ */
+export async function loadConfigWithDigest(
+  customPath?: string,
+  opts: AclOptions = {},
+): Promise<{ config: AppConfig; sha256: string }> {
   const configPath = getConfigPath(customPath);
 
-  let raw: string;
+  let bytes: Buffer;
   try {
-    raw = await readFile(configPath, 'utf8');
+    bytes = await readFile(configPath);
   } catch (err: any) {
     // Also for an explicit --config that points nowhere. That used to escape
     // as the raw system error ("ENOENT: no such file or directory, open ..."),
@@ -119,6 +132,9 @@ export async function loadConfig(customPath?: string, opts: AclOptions = {}): Pr
     );
   }
 
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const raw = bytes.toString('utf8');
+
   await checkPermissions(configPath, opts);
 
   let parsed: unknown;
@@ -137,17 +153,16 @@ export async function loadConfig(customPath?: string, opts: AclOptions = {}): Pr
     // A root-level issue has an empty path, which used to render as a bare
     // colon. Unreachable while the root schema accepted anything; an unknown
     // top-level section reaches it now.
-    const where = (path: readonly PropertyKey[]) => (path.length ? path.map(String).join('.') : '(root)');
     const issues = result.error.issues
-      .map((i) => `  ${where(i.path)}: ${i.message}`)
+      .map((i) => `  ${i.path.length ? i.path.map(String).join('.') : '(root)'}: ${i.message}`)
       .join('\n');
     throw new ConfigSchemaError(
       `Config validation error:\n${issues}`,
-      result.error.issues.map((i) => ({ path: where(i.path), code: i.code })),
+      result.error.issues.map((i) => ({ path: i.path.map(String), code: i.code })),
     );
   }
 
-  return normalizeConfig(result.data);
+  return { config: normalizeConfig(result.data), sha256 };
 }
 
 /**
