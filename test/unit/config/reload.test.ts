@@ -292,6 +292,21 @@ describe('ConfigReloader: a refused reload changes nothing', () => {
     expectUnchanged(h, before);
   });
 
+  it('duplicate profile names', async () => {
+    const h = await startFrom(BASE);
+    const before = snapshot(h);
+    // The duplicated name is the canary: the refusal names indices, never the value.
+    await dir.write(`${BASE}${BASE.replace('name = "dev"', `name = "${CANARY}"`)}${BASE.replace('name = "dev"', `name = "${CANARY}"`)}`);
+
+    const outcome = await h.reloader.reload('tool', 1);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error?.message).toContain('profiles[2].name');
+    expect(outcome.error?.message).toContain('profiles[1].name');
+    expectUnchanged(h, before);
+    expectNoCanary(h, outcome);
+  });
+
   it('zero profiles', async () => {
     const h = await startFrom(BASE);
     const before = snapshot(h);

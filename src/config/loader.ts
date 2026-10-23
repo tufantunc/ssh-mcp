@@ -162,7 +162,29 @@ export async function loadConfigWithDigest(
     );
   }
 
+  assertUniqueProfileNames(result.data.profiles, configPath);
   return { config: normalizeConfig(result.data), sha256 };
+}
+
+/**
+ * Two profiles with one name are refused, at startup and on a reload alike: this is the
+ * loader both run. They used to load, and then the name meant two things at once: a
+ * connection resolved the first entry (`getProfile` uses `find`) while a reload's diff and
+ * swap took the last (they key a Map by name). Named by index only, since the name is a
+ * value from the file.
+ */
+function assertUniqueProfileNames(profiles: { name: string }[], configPath: string): void {
+  const first = new Map<string, number>();
+  for (const [i, { name }] of profiles.entries()) {
+    const earlier = first.get(name);
+    if (earlier !== undefined) {
+      throw new OperatorError(
+        `Config validation error in ${configPath}: profiles[${i}].name repeats profiles[${earlier}].name; ` +
+        'every profile needs a name of its own.',
+      );
+    }
+    first.set(name, i);
+  }
 }
 
 /**

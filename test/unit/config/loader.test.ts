@@ -4,7 +4,7 @@ import { platform } from 'os';
 import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from './helpers.js';
 import { loadConfig, getProfile, checkPermissions } from '../../../src/config/loader.js';
 import type { AppConfig } from '../../../src/types.js';
-import { defaultsFromArgv } from '../../../src/cli.js';
+import { defaultsFromArgv, loadAppConfig } from '../../../src/cli.js';
 import { OperatorError } from '../../../src/errors.js';
 
 let cfg: ConfigDir;
@@ -247,6 +247,42 @@ sessionMaxPerConnection = 2
 `);
     const config = await loadConfig(path);
     expect(config.profiles[0].sessionMaxPerConnection).toBe(2);
+  });
+});
+
+/**
+ * Two profiles with one name used to load: the live connection used the first entry
+ * (getProfile's `find`) while a reload's diff and swap used the last (a Map), so the
+ * two disagreed about which host and user the name meant. Refused by the loader, which
+ * startup and reload both run, naming the indices and never the name.
+ */
+describe('duplicate profile names', () => {
+  const NAME = 'dup-name-7c1e';
+  const dupConfig = `
+[[profiles]]
+name = "${NAME}"
+host = "a.example.test"
+user = "test"
+
+[[profiles]]
+name = "other"
+host = "b.example.test"
+user = "test"
+
+[[profiles]]
+name = "${NAME}"
+host = "c.example.test"
+user = "test"
+`;
+
+  it('refuse to start, naming the field path and the index it repeats', async () => {
+    const path = await writeConfig(dupConfig);
+    const err: any = await loadAppConfig({ config: path }).catch((e) => e);
+    expect(err).toBeInstanceOf(OperatorError);
+    expect(err.message).toContain('profiles[2].name');
+    expect(err.message).toContain('profiles[0].name');
+    expect(err.message).toContain(path);
+    expect(err.message).not.toContain(NAME);
   });
 });
 

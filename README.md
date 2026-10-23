@@ -347,6 +347,11 @@ and tier names: every one you write under `[policy.roleBindings]` has to be
 reachable by some profile, and every profile's role and tier has to resolve to
 real bindings. Both directions are checked at startup and on every reload.
 
+Every profile needs a `name` of its own. Two profiles with the same name are a startup
+error, and a reload refuses them too; the error names the two entries by index
+(`profiles[2].name repeats profiles[0].name`), not by the name. Before this release such a
+config started, and the first of the two was used.
+
 ### Host-side identification
 
 Every command this server runs announces itself to the host as the environment
@@ -456,7 +461,8 @@ server re-read what the operator wrote; the file is the operator's consent.
 **All or nothing.** A reload runs the same checks as startup on the new file before anything
 changes: the permission check (mode bits on Linux and macOS, the ACL on Windows, with the
 `--strictConfigAcl` or `--allowUncheckedConfigAcl` the server started with), the TOML parse,
-the strict schema, the role and tier cross-check, and compiling the denylist. A file with no
+the strict schema, the check that no two profiles share a name, the role and tier
+cross-check, and compiling the denylist. A file with no
 profiles fails the schema, as at startup, so a reload cannot leave a server unconfigured.
 Two more refusals belong to reloading alone:
 

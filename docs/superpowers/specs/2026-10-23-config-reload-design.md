@@ -75,7 +75,7 @@ Run the same pipeline startup runs, into fresh objects:
 - read the file;
 - the permission check (POSIX mode bits; the Windows ACL check, with the same flags and
   waivers as startup, e.g. `--allowUncheckedConfigAcl`, `--strictConfigAcl`);
-- TOML parse, strict schema, normalize;
+- TOML parse, strict schema, unique profile names, normalize;
 - `resolvePolicyRules` (the cross-check);
 - `new PolicyEngine(...)` (compiles the denylist), with the argv OPA settings re-applied.
 
@@ -201,11 +201,18 @@ reaper must tolerate a missing profile, and the reload closes such connections a
 
 ## Config validation gaps the reload should not inherit
 
-The loader does not check that profile names are unique, that `via` names an existing
-profile (or has no cycle), or that `defaultProfile` exists. These fail at call time today.
-The builder decides whether to add these checks to the shared validation (startup and
-reload alike) in this PR. If added, they are cross-checks that refuse, consistent with
-`findPolicyProblems`, and the README's list of startup checks is updated.
+The loader does not check that `via` names an existing profile (or has no cycle), or that
+`defaultProfile` exists. These fail at call time today. The builder decides whether to add
+these checks to the shared validation (startup and reload alike) in this PR. If added, they
+are cross-checks that refuse, consistent with `findPolicyProblems`, and the README's list of
+startup checks is updated.
+
+Unique profile names are checked, by the loader, so startup and reload alike. Without it the
+name meant two profiles at once: a live connection resolved the first entry (`getProfile`
+uses `find`) while the reload's diff and swap took the last (they key a Map by name). The
+refusal names the two entries by index (`profiles[i].name`), never the name. This changes
+startup for such a config from "the first one wins" to a refusal; the changeset and README
+say so.
 
 ## Docs
 
