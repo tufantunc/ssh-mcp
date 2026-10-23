@@ -18,7 +18,11 @@ export function fcParams(numRuns: number): { numRuns: number; seed: number } {
   // A typo that silently fell back to the default would make a "new seed" run replay the
   // old one and report the space as explored.
   if (!/^-?\d+$/.test(raw)) throw new Error(`FC_SEED must be an integer, got ${JSON.stringify(raw)}`);
-  return { numRuns, seed: Number(raw) };
+  const seed = Number(raw);
+  // fast-check reduces the seed to a signed 32-bit integer, so a larger one silently
+  // replays another seed's inputs — the same failure as the typo above.
+  if ((seed | 0) !== seed) throw new Error(`FC_SEED must fit in a signed 32-bit integer, got ${raw}`);
+  return { numRuns, seed };
 }
 
 /**

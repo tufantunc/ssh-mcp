@@ -34,7 +34,10 @@ describe('classifyCommand invariants', () => {
     // Recursion is capped inside the classifier; this checks the cap holds well past it.
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 50 }), simpleCommand, (depth, inner) => {
-        expect(CLASSES).toContain(classOf(`${'echo $('.repeat(depth)}${inner}${')'.repeat(depth)}`));
+        const whole = classOf(`${'echo $('.repeat(depth)}${inner}${')'.repeat(depth)}`);
+        expect(CLASSES).toContain(whole);
+        // Carrying a command through substitutions never hides what it is, at any depth.
+        expect(atLeast(whole, classOf(inner)), `${depth} x ${inner}`).toBe(true);
       }),
       fcParams(200),
     );

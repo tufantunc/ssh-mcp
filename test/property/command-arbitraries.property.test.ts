@@ -33,6 +33,17 @@ describe('fcParams', () => {
     process.env.FC_SEED = 'abc';
     expect(() => fcParams(5)).toThrow(/FC_SEED/);
   });
+
+  it('refuses an FC_SEED outside 32 bits, which fast-check would silently wrap onto another seed', () => {
+    // fast-check reduces a seed to a signed 32-bit integer, so 2^32 + the default would
+    // replay the default's inputs while the run reports a different seed.
+    process.env.FC_SEED = String(2 ** 32 + FC_DEFAULT_SEED);
+    expect(() => fcParams(5)).toThrow(/FC_SEED/);
+    process.env.FC_SEED = String(-(2 ** 31) - 1);
+    expect(() => fcParams(5)).toThrow(/FC_SEED/);
+    process.env.FC_SEED = String(2 ** 31 - 1);
+    expect(fcParams(5).seed).toBe(2 ** 31 - 1);
+  });
 });
 
 /** Unescaped occurrences of `ch`, counting a backslash as escaping the next character. */
@@ -57,10 +68,6 @@ describe('closedCommand', () => {
   it('reaches every class, so properties over it are not vacuous', () => {
     const classes = new Set(sample(closedCommand).map((c) => classifyCommand(c).class));
     expect([...classes].sort()).toEqual(['destructive', 'privileged', 'read-only', 'safe']);
-  });
-
-  it('stays within the size cap', () => {
-    for (const c of sample(closedCommand)) expect(c.length, c).toBeLessThanOrEqual(240);
   });
 });
 

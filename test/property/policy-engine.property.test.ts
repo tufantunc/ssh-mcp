@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import fc from 'fast-check';
 import { PolicyEngine, DEFAULT_RULES } from '../../src/policy/engine.js';
 import { findForbiddenMatch } from '../../src/policy/classifier.js';
-import type { PolicyDecision, Profile } from '../../src/types.js';
+import type { PolicyDecision } from '../../src/types.js';
+import { makeProfile } from '../fixtures/profile.js';
 import { CLASS_RANK, fcParams } from './fc-seed.js';
 import { closedCommand } from './command-arbitraries.js';
 
@@ -13,33 +14,10 @@ import { closedCommand } from './command-arbitraries.js';
 
 const engine = new PolicyEngine(DEFAULT_RULES);
 
-function makeProfile(overrides: Partial<Profile> = {}): Profile {
-  return {
-    name: 'p',
-    group: 'dev',
-    host: 'localhost',
-    port: 22,
-    user: 'test',
-    auth: 'agent',
-    tty: false,
-    timeout: 60000,
-    maxChars: 5000,
-    maxOutputBytes: 1048576,
-    role: 'operator',
-    readOnly: false,
-    announceAgent: true,
-    approvalPolicy: 'ask-destructive',
-    cert: false,
-    sessionMaxPerConnection: 5,
-    sessionIdleTimeoutMs: 600000,
-    sessionBackgroundMaxMs: 3600000,
-    commandQuotaPerDay: 0,
-    transferMaxBytes: 268_435_456,
-    transferTimeoutMs: 300_000,
-    ...overrides,
-  };
-}
-
+/**
+ * Every combination of role, tier, approval policy and readOnly the default rules
+ * distinguish, so each property is checked across the whole matrix.
+ */
 const profile = fc
   .record({
     role: fc.constantFrom('admin', 'operator', 'viewer'),
@@ -93,7 +71,7 @@ describe('PolicyEngine invariants (default rules)', () => {
   });
 
   it('denies an SFTP write to a never-allowed path, whatever the role, tier or approval policy', () => {
-    // The README's never-allowed write paths, in the spellings the path readings resolve.
+    /** The README's never-allowed write paths, plain and in the `//` and `/./` spellings the path readings resolve. */
     const path = fc.tuple(
       fc.constantFrom('/etc/cron.d/job', '/etc/systemd/system/x.service', '/home/u/.ssh/authorized_keys', '/root/.ssh/authorized_keys'),
       fc.constantFrom('', '//', '/./'),
@@ -102,6 +80,10 @@ describe('PolicyEngine invariants (default rules)', () => {
       fc.property(profile, path, (p, remotePath) => {
         const result = engine.evaluate(`sftp:upload ${remotePath}`, p, { remotePath, remoteWrite: true });
         expect(result.decision, remotePath).toBe('deny');
+        // The upload classifies destructive, which a role binding or the approval policy
+        // already denies for many profiles. Checking the rule makes every run exercise
+        // the never-allowed path check rather than whichever deny came first.
+        expect(result.ruleId, remotePath).toBe('denylist');
       }),
       fcParams(200),
     );
@@ -111,10 +93,15 @@ describe('PolicyEngine invariants (default rules)', () => {
     const allows = allowCounter();
     fc.assert(
       fc.property(profile, closedCommand, (p, command) => {
-        const { decision } = engine.evaluate(command, p);
+        const { decision, commandClass } = engine.evaluate(command, p);
         allows.see(decision);
+        const gated = commandClass === 'destructive' || commandClass === 'privileged';
         if (p.approvalPolicy === 'auto' || p.approvalPolicy === 'deny') expect(decision, command).not.toBe('require-approval');
         if (p.approvalPolicy === 'ask-all') expect(decision, command).not.toBe('allow');
+        // `deny` and `ask-destructive` gate the same classes: one refuses them, the
+        // other asks. Neither lets one through unasked.
+        if (p.approvalPolicy === 'deny' && gated) expect(decision, command).toBe('deny');
+        if (p.approvalPolicy === 'ask-destructive' && gated) expect(decision, command).not.toBe('allow');
       }),
       fcParams(200),
     );

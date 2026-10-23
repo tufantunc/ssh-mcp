@@ -58,6 +58,7 @@ export const PRIVILEGE_PREFIXES = [
  */
 export const OPERAND_FREE_WRAPPERS = ['nohup', 'command', 'exec', 'setsid', 'time', 'env A=1', 'nice -5'];
 
+/** The ways a shell joins two commands into one line: sequence, both, either, pipe, newline. */
 export const separator = fc.constantFrom(';', '&&', '||', '|', '\n');
 
 /** One command with no separator, of any class except the never-allowed shapes. */
@@ -103,7 +104,11 @@ export const closedCommand = fc.oneof(
  */
 export const quotableWord = fc.stringMatching(/^[a-z][a-z0-9_.\/-]{0,11}$/);
 
-/** Anything at all, including control characters and lone surrogates, up to 200 units. */
+/**
+ * Arbitrary text up to 200 units: printable strings, any well-formed code point
+ * including control characters (fast-check's `binary` unit never yields a lone
+ * surrogate), and runs of the shell tokens the classifier splits on.
+ */
 export const anyString = fc.oneof(
   fc.string({ maxLength: 200 }),
   fc.string({ unit: 'binary', maxLength: 200 }),
