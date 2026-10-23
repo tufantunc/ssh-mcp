@@ -47,7 +47,7 @@
     "fast-check": "^4.9.0",
     "shx": "^0.4.0",
     "typescript": "^5.9.2",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.5"
   },
   "homepage": "https://github.com/tufantunc/ssh-mcp#readme",
   "repository": {
