@@ -103,8 +103,7 @@ async function auditRecords(h: Harness): Promise<AuditRecord[]> {
 function snapshot(h: Harness) {
   return {
     config: (h.registry as any).config,
-    rules: (h.policy as any).rules,
-    patterns: (h.policy as any).userPatterns,
+    compiled: (h.policy as any).compiled,
     localPath: h.localPath,
     transferRoot: h.localPath.transferRoot,
     generation: h.registry.generation,
@@ -120,8 +119,7 @@ function snapshot(h: Harness) {
 function expectUnchanged(h: Harness, before: ReturnType<typeof snapshot>) {
   const now = snapshot(h);
   expect(now.config).toBe(before.config);
-  expect(now.rules).toBe(before.rules);
-  expect(now.patterns).toBe(before.patterns);
+  expect(now.compiled).toBe(before.compiled);
   expect(now.localPath).toBe(before.localPath);
   expect(now.transferRoot).toBe(before.transferRoot);
   expect(now.generation).toBe(before.generation);
@@ -664,6 +662,55 @@ describe('ConfigReloader: a defect after the swap began', () => {
       'session:close background s-c (reload)',
       'session:close unknown s-b (reload)',
     ]);
+  });
+});
+
+describe('ConfigReloader: policyChanged is measured against the live rules', () => {
+  const DENY = '\n[policy]\ndenylist = ["^terraform"]\n';
+
+  it('is false when only a profile changed', async () => {
+    const h = await startFrom(BASE);
+    await dir.write(BASE.replace('user = "test"', 'user = "test"\nworkdir = "/w"'));
+    const outcome = await h.reloader.reload('tool', 1);
+    expect(outcome.ok).toBe(true);
+    expect(outcome.policyChanged).toBe(false);
+  });
+
+  it('is true when the denylist changed', async () => {
+    const h = await startFrom(BASE);
+    await dir.write(BASE + DENY);
+    expect((await h.reloader.reload('tool', 1)).policyChanged).toBe(true);
+  });
+
+  // The rules are swapped before the registry. A failure after that leaves the new rules
+  // live, so the next reload of the same file has no policy change to report; a baseline
+  // kept beside the engine said it had.
+  it('compares with the rules the engine runs on, even after a partial failure', async () => {
+    const h = await startFrom(BASE);
+    vi.spyOn(h.registry, 'applyConfig').mockImplementationOnce(() => {
+      throw new TypeError('boom');
+    });
+    await dir.write(BASE + DENY);
+    expect((await h.reloader.reload('tool', 1)).partial).toBe(true);
+    expect(h.policy.evaluate('terraform plan', h.registry.getProfile('dev')).ruleId).toBe('denylist');
+
+    const outcome = await h.reloader.reload('tool', 2);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.policyChanged).toBe(false);
+  });
+
+  it('compiles the rules once per reload and installs that compilation', async () => {
+    const h = await startFrom(BASE);
+    const compile = vi.spyOn(PolicyEngine, 'compile');
+    const replace = vi.spyOn(h.policy, 'replaceRules');
+    await dir.write(BASE + DENY);
+
+    expect((await h.reloader.reload('tool', 1)).ok).toBe(true);
+
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(replace.mock.calls[0]![0]).toBe(compile.mock.results[0]!.value);
   });
 });
 

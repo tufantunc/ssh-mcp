@@ -1,6 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { resolvePolicyRules } from '../policy/engine.js';
-import type { AppConfig, Profile } from '../types.js';
+import type { Profile } from '../types.js';
 
 /** Changing any of these invalidates the live connection: close it and its sessions. */
 export const CONNECTION_FIELDS: readonly (keyof Profile)[] = [
@@ -70,11 +69,4 @@ export function diffProfiles(prev: Profile[], next: Profile[]): ProfileDiff {
 
 export function disposition(change: ProfileChange): 'close' | 'swap' {
   return change.fields.some((f) => CONNECTION_FIELDS.includes(f)) ? 'close' : 'swap';
-}
-
-export function policyRulesChanged(prev: AppConfig, next: AppConfig): boolean {
-  return !isDeepStrictEqual(
-    resolvePolicyRules(prev.profiles, prev.policy),
-    resolvePolicyRules(next.profiles, next.policy),
-  );
 }

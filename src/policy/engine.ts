@@ -283,32 +283,49 @@ function compileDenylist(rules: PolicyRules): ReadonlyArray<{ exact: RegExp; cas
   });
 }
 
+/**
+ * Rules ready to run on: the rules as given, and the operator's denylist patterns
+ * compiled once — each twice: as written, and case-insensitively for the Windows
+ * reading of a remote path, where a case variant reaches the same file (#230). The
+ * built-ins live in classifier.ts.
+ */
+export interface CompiledRules {
+  readonly rules: PolicyRules;
+  readonly patterns: ReadonlyArray<{ exact: RegExp; caseInsensitive: RegExp }>;
+}
+
 export class PolicyEngine {
   private opaUrl: string | null = null;
   private opaFailClosed = false;
   private opaTimeoutMs = DEFAULT_OPA_TIMEOUT_MS;
   /** Rate-limits the fail-open warning so one outage can't flood stderr. */
   private lastOpaWarning = 0;
-  /**
-   * The operator's patterns, compiled once — each twice: as written, and
-   * case-insensitively for the Windows reading of a remote path, where a
-   * case variant reaches the same file (#230). The built-ins live in classifier.ts.
-   */
-  private userPatterns: ReadonlyArray<{ exact: RegExp; caseInsensitive: RegExp }>;
+  private compiled: CompiledRules;
 
-  constructor(private rules: PolicyRules = DEFAULT_RULES) {
-    this.userPatterns = compileDenylist(rules);
+  /**
+   * The fallible half of installing rules: throws on a denylist pattern that is not a
+   * valid regular expression. A reload calls it while validating, before anything is
+   * swapped, and hands the result to `replaceRules`.
+   */
+  static compile(rules: PolicyRules): CompiledRules {
+    return { rules, patterns: compileDenylist(rules) };
+  }
+
+  constructor(rules: PolicyRules = DEFAULT_RULES) {
+    this.compiled = PolicyEngine.compile(rules);
+  }
+
+  /** The rules the engine runs on now: what a reload compares new rules with. */
+  get rules(): PolicyRules {
+    return this.compiled.rules;
   }
 
   /**
-   * Swap in reloaded rules. The denylist compiles before anything is assigned, so an
-   * invalid pattern throws with the engine still on its old rules, never half of each.
-   * OPA settings are argv-only and stay as they are.
+   * Swap in reloaded rules, already compiled, in one assignment: it cannot throw, so the
+   * engine is never on half of each. OPA settings are argv-only and stay as they are.
    */
-  replaceRules(rules: PolicyRules): void {
-    const patterns = compileDenylist(rules);
-    this.rules = rules;
-    this.userPatterns = patterns;
+  replaceRules(compiled: CompiledRules): void {
+    this.compiled = compiled;
   }
 
   setOpaUrl(url: string | null, failClosed = false, timeoutMs = DEFAULT_OPA_TIMEOUT_MS): void {
@@ -642,7 +659,7 @@ export class PolicyEngine {
 
     // Nothing below can match: skip reading the path at all, which is the commonest
     // config — the defaults carry no denylist.
-    if (this.userPatterns.length === 0) return null;
+    if (this.compiled.patterns.length === 0) return null;
 
     // The path is tested on its own as well as inside the command string, because for the
     // SFTP tools that string is ours to lay out and a rule written for the path should not
@@ -652,7 +669,7 @@ export class PolicyEngine {
     const windows = remotePath === undefined ? undefined : normalizeRemotePathForWindows(remotePath);
     const fromConfig = 'a pattern from [policy].denylist in your config file. ' +
       'Remove or narrow it there to allow this command.';
-    for (const { exact, caseInsensitive } of this.userPatterns) {
+    for (const { exact, caseInsensitive } of this.compiled.patterns) {
       if (exact.test(command)) {
         return `Command matches /${exact.source}/, ${fromConfig}`;
       }

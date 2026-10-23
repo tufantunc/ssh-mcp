@@ -5,9 +5,8 @@ import {
   POLICY_FIELDS,
   diffProfiles,
   disposition,
-  policyRulesChanged,
 } from '../../../src/config/reload-diff.js';
-import type { AppConfig, Profile } from '../../../src/types.js';
+import type { Profile } from '../../../src/types.js';
 
 function fullProfile(overrides: Partial<Profile> = {}): Profile {
   return {
@@ -116,19 +115,3 @@ describe('disposition', () => {
   });
 });
 
-describe('policyRulesChanged', () => {
-  const base = (): AppConfig => ({
-    defaults: {} as AppConfig['defaults'],
-    profiles: [fullProfile()],
-  });
-
-  it('is false for identical config', () => {
-    expect(policyRulesChanged(base(), base())).toBe(false);
-  });
-
-  it('is true when the policy override changes the rules', () => {
-    const next = base();
-    next.policy = { roleBindings: { operator: { prod: ['read-only'] } } };
-    expect(policyRulesChanged(base(), next)).toBe(true);
-  });
-});

@@ -77,7 +77,9 @@ Run the same pipeline startup runs, into fresh objects:
   waivers as startup, e.g. `--allowUncheckedConfigAcl`, `--strictConfigAcl`);
 - TOML parse, strict schema, unique profile names, normalize;
 - `resolvePolicyRules` (the cross-check);
-- `new PolicyEngine(...)` (compiles the denylist), with the argv OPA settings re-applied.
+- `PolicyEngine.compile(rules)` (compiles the denylist, once; the swap installs that result,
+  so it cannot throw). Whether the policy changed is the new rules compared with the rules
+  the engine runs on now, not with a copy of the old config kept beside it.
 
 Then the reload-only checks:
 
@@ -104,7 +106,7 @@ untouched.
 In one synchronous step, so no tool call can observe a mix:
 
 - the registry's config;
-- the policy rules, with OPA settings preserved;
+- the policy rules, already compiled, with the argv OPA settings preserved;
 - for each **open connection**, by profile name:
   - **profile removed** → close the connection and its sessions;
   - **connection-relevant field changed** (`host`, `port`, `user`, `auth`, `keyRef`,

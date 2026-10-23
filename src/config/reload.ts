@@ -1,8 +1,9 @@
 import { loadConfigFile, type ConfigSource, type LoadedConfig } from '../cli.js';
 import { ConfigParseError, ConfigSchemaError, OperatorError } from '../errors.js';
-import { PolicyEngine, resolvePolicyRules, type PolicyRules } from '../policy/engine.js';
+import { isDeepStrictEqual } from 'node:util';
+import { PolicyEngine, resolvePolicyRules, type CompiledRules, type PolicyRules } from '../policy/engine.js';
 import { RELEASE } from '../tools/session-tools.js';
-import { policyRulesChanged, type ProfileChange, type ProfileDiff } from './reload-diff.js';
+import type { ProfileChange, ProfileDiff } from './reload-diff.js';
 import type { AuditStore } from '../audit/store.js';
 import type { ApplyResult, ConnectionRegistry } from '../ssh/connection-registry.js';
 import type { AppConfig } from '../types.js';
@@ -80,8 +81,9 @@ class Redacted extends Error {
 
 interface Validated {
   next: AppConfig;
-  rules: PolicyRules;
+  compiled: CompiledRules;
   sha256: string;
+  /** Against the rules the engine runs on now, so a partial failure leaves no stale baseline. */
   policyChanged: boolean;
 }
 
@@ -103,7 +105,6 @@ const CLOSE_REASONS: Record<string, string> = {
  */
 export class ConfigReloader {
   private readonly deps: ReloadDeps;
-  private current: AppConfig;
   private source: ConfigSource;
   private readonly path: string;
   private loadedAt: string;
@@ -116,7 +117,6 @@ export class ConfigReloader {
 
   constructor(deps: ReloadDeps) {
     this.deps = deps;
-    this.current = deps.startup.config;
     this.source = deps.startup.source;
     this.path = deps.startup.path;
     this.loadedAt = deps.startup.loadedAt;
@@ -204,24 +204,22 @@ export class ConfigReloader {
     } catch (err) {
       return this.finish({ ok: false, at, trigger, error: this.safeError(err) }, requestId, startedAt);
     }
-    const { next, rules, sha256, policyChanged } = validated;
+    const { next, compiled, sha256, policyChanged } = validated;
 
     // Validation passed, so from here on a throw is a defect, and it may leave the server
     // part old, part new. It is still audited and reported like any other attempt, and
     // the call resolves with that outcome rather than rejecting: a SIGHUP handler or a
     // tool reports it the same way, and nothing has to remember to catch.
     try {
-      // The swap: one synchronous block, no await, so no tool call observes a mix. Rules
-      // first: they were already compiled once above, and if they threw anyway nothing
-      // else has moved yet.
+      // The swap: one synchronous block, no await, so no tool call observes a mix. The
+      // rules were compiled while validating, so installing them cannot throw.
       const { registry, policy, localPath } = this.deps;
-      policy.replaceRules(rules);
+      policy.replaceRules(compiled);
       const applied = registry.applyConfig(next);
       if (localPath.transferRoot === undefined && next.defaults.transferRoot !== undefined) {
         localPath.transferRoot = next.defaults.transferRoot;
       }
       const loadedAt = new Date().toISOString();
-      this.current = next;
       this.source = 'file';
       this.loadedAt = loadedAt;
       this.sha256 = sha256;
@@ -278,8 +276,9 @@ export class ConfigReloader {
           'so they are not repeated here; startup prints them in full.',
       });
     }
+    let compiled: CompiledRules;
     try {
-      new PolicyEngine(rules);
+      compiled = PolicyEngine.compile(rules);
     } catch (err) {
       // The engine's message quotes the pattern.
       throw new Redacted({
@@ -298,7 +297,7 @@ export class ConfigReloader {
       );
     }
 
-    return { next, rules, sha256, policyChanged: policyRulesChanged(this.current, next) };
+    return { next, compiled, sha256, policyChanged: !isDeepStrictEqual(this.deps.policy.rules, rules) };
   }
 
   /**
