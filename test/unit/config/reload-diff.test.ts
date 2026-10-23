@@ -41,14 +41,44 @@ function fullProfile(overrides: Partial<Profile> = {}): Profile {
   };
 }
 
+// A Record, not a sample object: a Record<keyof Profile, true> literal fails typecheck for
+// any Profile key added without an entry here (optional ones included) and for any stale key,
+// whereas the keys of a hand-written Profile literal silently miss a new optional field.
+const ALL_PROFILE_KEYS: Record<keyof Profile, true> = {
+  name: true,
+  host: true,
+  port: true,
+  user: true,
+  auth: true,
+  keyRef: true,
+  keychainEntry: true,
+  via: true,
+  group: true,
+  workdir: true,
+  trustedHostKey: true,
+  tty: true,
+  timeout: true,
+  maxChars: true,
+  maxOutputBytes: true,
+  role: true,
+  readOnly: true,
+  approvalPolicy: true,
+  cert: true,
+  announceAgent: true,
+  sessionMaxPerConnection: true,
+  sessionIdleTimeoutMs: true,
+  sessionBackgroundMaxMs: true,
+  commandQuotaPerDay: true,
+  transferMaxBytes: true,
+  transferTimeoutMs: true,
+};
+
 describe('field classification', () => {
   it('puts every Profile key in exactly one list, or is name', () => {
     const lists = [CONNECTION_FIELDS, SESSION_FIXED_FIELDS, POLICY_FIELDS];
-    for (const key of Object.keys(fullProfile()) as (keyof Profile)[]) {
-      if (key === 'name') continue;
-      const hits = lists.filter((l) => l.includes(key)).length;
-      expect(hits, `field ${key}`).toBe(1);
-    }
+    const classified = lists.flat();
+    expect(new Set(classified).size, 'a field is in two lists').toBe(classified.length);
+    expect([...classified, 'name'].sort()).toEqual(Object.keys(ALL_PROFILE_KEYS).sort());
   });
 });
 
