@@ -24,7 +24,7 @@ import type { PolicyEvaluation } from '../types.js';
  * than the unaudited stop it replaced. The record was the part worth having; the veto was
  * not. `ruleId` says so, so the log distinguishes this from an engine `allow`.
  */
-const RELEASE: PolicyEvaluation = {
+export const RELEASE: PolicyEvaluation = {
   decision: 'allow',
   commandClass: 'safe',
   binary: 'session:close',

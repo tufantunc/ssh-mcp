@@ -93,6 +93,40 @@ export class UnconfiguredError extends OperatorError {
   }
 }
 
+/**
+ * The config file is not valid TOML.
+ *
+ * A type of its own so a reader that must not quote the file can still say where the
+ * problem is: the parser's message embeds a snippet of the source, and `line`/`column`
+ * locate it without one. The message is unchanged for startup, which prints it whole.
+ */
+export class ConfigParseError extends OperatorError {
+  constructor(message: string, readonly line?: number, readonly column?: number) {
+    super(message);
+    this.name = 'ConfigParseError';
+  }
+}
+
+/** One schema issue, by where it is and what kind it is: never the value received. */
+export interface ConfigIssue {
+  path: string;
+  code: string;
+}
+
+/**
+ * The config file parsed but does not match the schema.
+ *
+ * `issues` exists for the reason `ConfigParseError.line` does: a schema message can name
+ * what it received (an unknown key, a refinement's wording), and the reload report must
+ * not repeat anything from the file. Startup still prints the full message.
+ */
+export class ConfigSchemaError extends OperatorError {
+  constructor(message: string, readonly issues: ConfigIssue[]) {
+    super(message);
+    this.name = 'ConfigSchemaError';
+  }
+}
+
 /** Exit status for an operator error, so a supervisor can tell it from a crash. */
 export const EXIT_OPERATOR_ERROR = 2;
 /** Exit status for anything else. */

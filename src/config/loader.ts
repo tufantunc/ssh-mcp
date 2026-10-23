@@ -3,7 +3,13 @@ import { homedir, platform } from 'os';
 import { join, dirname } from 'path';
 import { parse as parseTOML } from 'smol-toml';
 import { configSchema, type RawConfig } from './schema.js';
-import { OperatorError, ConfigNotFoundError, UnconfiguredError } from '../errors.js';
+import {
+  OperatorError,
+  ConfigNotFoundError,
+  ConfigParseError,
+  ConfigSchemaError,
+  UnconfiguredError,
+} from '../errors.js';
 import { assertPrivateOnWindows, type AclOptions } from './windows-acl.js';
 import type { AppConfig, Profile, Defaults } from '../types.js';
 
@@ -119,7 +125,11 @@ export async function loadConfig(customPath?: string, opts: AclOptions = {}): Pr
   try {
     parsed = parseTOML(raw);
   } catch (err: any) {
-    throw new OperatorError(`Failed to parse TOML config at ${configPath}: ${err.message}`);
+    throw new ConfigParseError(
+      `Failed to parse TOML config at ${configPath}: ${err.message}`,
+      typeof err?.line === 'number' ? err.line : undefined,
+      typeof err?.column === 'number' ? err.column : undefined,
+    );
   }
 
   const result = configSchema.safeParse(parsed);
@@ -127,10 +137,14 @@ export async function loadConfig(customPath?: string, opts: AclOptions = {}): Pr
     // A root-level issue has an empty path, which used to render as a bare
     // colon. Unreachable while the root schema accepted anything; an unknown
     // top-level section reaches it now.
+    const where = (path: readonly PropertyKey[]) => (path.length ? path.map(String).join('.') : '(root)');
     const issues = result.error.issues
-      .map((i) => `  ${i.path.length ? i.path.join('.') : '(root)'}: ${i.message}`)
+      .map((i) => `  ${where(i.path)}: ${i.message}`)
       .join('\n');
-    throw new OperatorError(`Config validation error:\n${issues}`);
+    throw new ConfigSchemaError(
+      `Config validation error:\n${issues}`,
+      result.error.issues.map((i) => ({ path: where(i.path), code: i.code })),
+    );
   }
 
   return normalizeConfig(result.data);
