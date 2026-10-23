@@ -70,7 +70,11 @@ describe('exec carriers and privilege brokers (GHSA-cm4c-4q74-mgmj)', () => {
     ['make -f /tmp/pwn.mk', 'destructive'],
     ['make deploy', 'destructive'],
     ['make', 'destructive'],
-    ['flock make pwn', 'destructive'],
+    // flock takes a lockfile before the command it runs, so the wrapped
+    // form carries one (`flock make pwn` would lock a file named `make`
+    // and run `pwn` — the review of GHSA-5cjr-rc2p-f66f corrected the
+    // wrapper's operand reading here).
+    ['flock /tmp/lk make pwn', 'destructive'],
     ['ssh other-host id', 'destructive'],
     ['ssh other-host "sudo id"', 'privileged'],
   ])('%j classifies %s, not safe', (command, expected) => {

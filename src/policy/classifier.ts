@@ -633,8 +633,19 @@ const READ_ONLY_SYNTHETIC = new Set(['sftp:list', 'sftp:download']);
  * which never match the literal heads and so never trigger the restart.
  */
 const FORBIDDEN_PATTERNS: RegExp[] = [
-  /rm\s+-rf?\s+\/(\s|$)/,          // rm -rf / — the filesystem root itself
-  /mkfs\./,
+  // The four operation rules that used to live here — `rm -rf /`, `mkfs…`,
+  // `iptables -F`, `chmod -R 777 /` — are segment checks in FORBIDDEN_RULES
+  // now (GHSA-5cjr-rc2p-f66f): as text regexes each matched exactly one
+  // spelling, and `rm -fr /` or `mkfs -t ext4 /dev/sda1` classified `safe` —
+  // the one class the default approval policy never prompts on.
+  //
+  // The same move deliberately LOOSENS the old rules' mention side: a text
+  // regex refused any substring, so `echo 'rm -rf /'` and a grep quoting
+  // `iptables -F` were denied as though they were invocations. The
+  // head-gated rules refuse the operation and allow the mention, which is
+  // the direction this file's invocation-word machinery already chose (#91)
+  // — pinned in never-allowed-spellings.test.ts so the loosening is a
+  // decision on record rather than a surprise.
   />\s*\/dev\/sd/,
   // Fork bomb, with whitespace allowed at the five positions bash allows it and the old
   // pattern did not: before the parentheses, inside them, either side of the pipe, and
@@ -649,8 +660,6 @@ const FORBIDDEN_PATTERNS: RegExp[] = [
   // against the target host rather than against this server, which is not worth either
   // trade — but it is a hole, not a closed door.
   /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/,
-  /\biptables\s+-F\b/,
-  /\bchmod\s+-R\s+777\s+\//,
 ];
 
 /**
@@ -1804,16 +1813,165 @@ function writesToDevice(command: string, dialect: ShellDialect = 'posix'): boole
 }
 
 /**
+ * A recursive flag in any spelling a getopt-parsed binary accepts (GHSA-5cjr-
+ * rc2p-f66f): `-r`/`-R` alone or inside a short cluster (`-rf`, `-fr`, `-Rh`),
+ * separated (`-r -f`), or the long form down to its unambiguous `--rec`
+ * prefix. Which letters count is per-binary and the caller names them: rm
+ * takes both `-r` and `-R`, while chmod and chown take only `-R` — lowercase
+ * `-r` is a mode operation there, not recursion. A cluster carrying a letter
+ * the binary rejects errors on the host, so reading it as recursive only
+ * refuses a command that cannot run.
+ */
+function hasRecursiveFlag(args: string[], recursiveLetters: RegExp): boolean {
+  return args.some((arg) => /^--rec/.test(arg)
+    || (/^-[A-Za-z]+$/.test(arg) && recursiveLetters.test(arg)));
+}
+
+/**
+ * Whether an operand names the filesystem root once the shell resolves it:
+ * `/`, `//`, `///`, `/.`, `/..`, `/./`, `/etc/..` and `/tmp/../` all name
+ * `/`. Purely lexical — no filesystem is consulted, so a symlink to `/` is
+ * out of reach (documented residual). Measured in review: `chmod -R 777
+ * /etc/..` escaped the exact-equality target set the first cut used.
+ */
+function isRootTarget(target: string): boolean {
+  if (!target.startsWith('/')) return false;
+  let depth = 0;
+  for (const part of target.split('/').slice(1)) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    depth++;
+  }
+  return depth === 0;
+}
+
+/**
+ * Whether a chmod mode operand grants the world write access: the numeric
+ * spellings with the world-write bit set (`777`, `0777`, `7777`, `666`) and
+ * the symbolic ones whose class set includes other (or defaults/a = all)
+ * with `+`/`=` and a `w` (`a+rwx`, `+w`, `ugo+rwx`; `u+w` grants only the
+ * user and stays outside). Comma lists are read clause by clause.
+ */
+function isWorldWritableMode(arg: string): boolean {
+  for (const clause of arg.split(',')) {
+    if (/^0*[0-7]{3,4}$/.test(clause)) {
+      if ((parseInt(clause, 8) & 2) === 2) return true;
+      continue;
+    }
+    const symbolic = /^([augo]*)([+=])([rwx]*)$/.exec(clause);
+    if (symbolic !== null) {
+      const classes = symbolic[1];
+      const world = classes === '' || classes === 'a' || classes.includes('o');
+      if (world && symbolic[3].includes('w')) return true;
+    }
+  }
+  return false;
+}
+
+/** rm, recursive in any spelling, targeting the filesystem root itself. */
+function deletesRoot(command: string, dialect: ShellDialect = 'posix'): boolean {
+  return tokenizeSegments(command, dialect).some((words) => {
+    const idx = effectiveCommandIndex(words);
+    if (idx === -1 || stripPath(words[idx]) !== 'rm') return false;
+    const args = words.slice(idx + 1);
+    return hasRecursiveFlag(args, /[rR]/) && args.some(isRootTarget);
+  });
+}
+
+/**
+ * Device formatters and wipers: any `mkfs` spelling — `mkfs.ext4 /dev/sda1`
+ * and the subcommand form `mkfs -t ext4 /dev/sda1` are the same operation
+ * (the report's measured gap: the dot form matched a text regex, the `-t`
+ * form classified `safe`) — plus the sibling names that destroy a device's
+ * contents just as thoroughly: `mke2fs` is what `mkfs.ext4` symlinks to,
+ * `mkswap` rewrites a device as swap, `wipefs` erases its signatures.
+ */
+const DEVICE_FORMATTERS = /^(?:mkfs|mkswap|wipefs)/;
+const DEVICE_FORMATTER_NAMES = new Set(['mke2fs']);
+
+function formatsDevice(command: string, dialect: ShellDialect = 'posix'): boolean {
+  return tokenizeSegments(command, dialect).some((words) => {
+    const idx = effectiveCommandIndex(words);
+    if (idx === -1) return false;
+    const head = stripPath(words[idx]);
+    return DEVICE_FORMATTERS.test(head) || DEVICE_FORMATTER_NAMES.has(head);
+  });
+}
+
+/**
+ * Flushing the firewall: `iptables -F` / `--flush` (and ip6tables), the
+ * policy spelling `iptables -P <chain> ACCEPT` that opens the filter table
+ * just as thoroughly, and `nft flush …`, which deletes the whole ruleset.
+ */
+function flushesFirewall(command: string, dialect: ShellDialect = 'posix'): boolean {
+  return tokenizeSegments(command, dialect).some((words) => {
+    const idx = effectiveCommandIndex(words);
+    const head = idx === -1 ? '' : stripPath(words[idx]);
+    const args = words.slice(idx + 1);
+    if (head === 'iptables' || head === 'ip6tables') {
+      if (args.includes('-F') || args.includes('--flush')) return true;
+      const policy = args.indexOf('-P');
+      return policy !== -1 && args.slice(policy + 1).includes('ACCEPT');
+    }
+    if (head === 'nft') return args[0] === 'flush';
+    return false;
+  });
+}
+
+/**
+ * A recursive chmod making a path world-writable — `chmod -R 777 /` in any
+ * argument order. The target may be any absolute path, not only the root:
+ * the old text regex was unanchored and refused `chmod -R 777 /etc` too, and
+ * a recursive world-writable `/etc` is not meaningfully safer than a
+ * world-writable root. The mode is read as an operation, not a literal:
+ * every numeric spelling with the world-write bit (`777`, `0777`, `7777`,
+ * `666`) and the symbolic ones granting others write (`a+rwx`, `+w`) — see
+ * `isWorldWritableMode`. `chmod -R 755 /` and `chmod -R u+w /` stay outside.
+ */
+function worldWritableRoot(command: string, dialect: ShellDialect = 'posix'): boolean {
+  return tokenizeSegments(command, dialect).some((words) => {
+    const idx = effectiveCommandIndex(words);
+    if (idx === -1 || stripPath(words[idx]) !== 'chmod') return false;
+    const args = words.slice(idx + 1);
+    return hasRecursiveFlag(args, /R/) && args.some((a) => a.startsWith('/'))
+      && args.some(isWorldWritableMode);
+  });
+}
+
+/**
  * `chown -R … /` — a recursive chown whose target is the filesystem root.
  *
- * The last non-flag argument is the target; `chown -R app:app /srv/app` is
- * ordinary and stays allowed.
+ * Recursive in any spelling (was `-R` as an exact word only, so `--recursive`
+ * and the `-Rh` cluster escaped it — the same fragility as GHSA-5cjr-rc2p-f66f,
+ * measured in its verification), and the target may sit anywhere in the argv:
+ * chown chowns every operand it is given, so a root anywhere in the list is a
+ * root chown. `chown -R app:app /srv/app` is ordinary and stays allowed.
  */
 function chownsRoot(command: string, dialect: ShellDialect = 'posix'): boolean {
-  return parseSegments(command, dialect).some(({ head, args }) => {
-    if (head !== 'chown' || !args.includes('-R')) return false;
-    const positional = args.filter((a) => !a.startsWith('-'));
-    return positional[positional.length - 1] === '/';
+  return tokenizeSegments(command, dialect).some((words) => {
+    const idx = effectiveCommandIndex(words);
+    if (idx === -1 || stripPath(words[idx]) !== 'chown') return false;
+    const args = words.slice(idx + 1);
+    return hasRecursiveFlag(args, /R/) && args.some(isRootTarget);
+  });
+}
+
+/**
+ * The destructive floor under the refusal: rm, recursive in any spelling,
+ * against any absolute path. The regex this replaces (`/rm\s+-rf?\s+\//`)
+ * read one spelling, so `rm -fr /tmp/build` classified `safe` while
+ * `rm -r /tmp/build` classified `destructive` — the flag order decided the
+ * class (GHSA-5cjr-rc2p-f66f).
+ */
+function deletesAbsolutePath(command: string, dialect: ShellDialect = 'posix'): boolean {
+  return tokenizeSegments(command, dialect).some((words) => {
+    const idx = effectiveCommandIndex(words);
+    if (idx === -1 || stripPath(words[idx]) !== 'rm') return false;
+    const args = words.slice(idx + 1);
+    return hasRecursiveFlag(args, /[rR]/) && args.some((a) => a.startsWith('/'));
   });
 }
 
@@ -2089,6 +2247,16 @@ const FORBIDDEN_RULES: ForbiddenRule[] = [
   },
   { label: 'dd writing to a block device (of=/dev/…)', test: (c, dialect) => writesToDevice(c, dialect) },
   { label: 'a recursive chown of the filesystem root', test: (c, dialect) => chownsRoot(c, dialect) },
+  {
+    label: 'rm deleting the filesystem root, recursive in any flag spelling (rm -rf /)',
+    test: (c, dialect) => deletesRoot(c, dialect),
+  },
+  { label: 'formatting a device with any mkfs spelling', test: (c, dialect) => formatsDevice(c, dialect) },
+  { label: 'flushing the firewall rules (iptables/ip6tables -F or --flush)', test: (c, dialect) => flushesFirewall(c, dialect) },
+  {
+    label: 'chmod making the filesystem root world-writable (recursive 777 /)',
+    test: (c, dialect) => worldWritableRoot(c, dialect),
+  },
   ...(['/etc/cron', '/etc/systemd', 'authorized_keys'] as const).map((family) => ({
     label: neverAllowedWriteLabel(family),
     test: (command: string, dialect: ShellDialect) => findNeverAllowedWriteFamily(command, dialect) === family,
@@ -2154,23 +2322,20 @@ export function isForbidden(command: string, dialect: ShellDialect = 'posix'): b
  * Commands that are destructive but legitimate under approval — e.g.
  * `rm -rf /tmp/build`, which must NOT be confused with `rm -rf /`.
  */
-const DESTRUCTIVE_PATTERNS: RegExp[] = [
-  /rm\s+-rf?\s+\//,
-];
-
 /**
  * Everything that classifies as destructive: forbidden commands included.
  *
  * Goes through isForbidden() rather than the regex list, so a command caught by
  * an invocation rule is classified destructive too — and, just as importantly,
  * reading a log that mentions `reboot` is no longer classified destructive
- * either.
+ * either. The recursive-rm floor is a segment check for the same reason the
+ * refusal above it became one (GHSA-5cjr-rc2p-f66f): flag order must not
+ * decide the class. A future text-regex floor re-enters through
+ * matchesEitherForm, as FORBIDDEN_RULES still does for its two regex
+ * survivors, when one needs no tokenisation to read.
  */
 function isDestructive(command: string, dialect: ShellDialect = 'posix'): boolean {
-  return (
-    isForbidden(command, dialect) ||
-    matchesEitherForm(command, (form) => DESTRUCTIVE_PATTERNS.some((re) => re.test(form)), dialect)
-  );
+  return isForbidden(command, dialect) || deletesAbsolutePath(command, dialect);
 }
 
 const LEADING_PRIVILEGE_PREFIXES = [
@@ -2215,22 +2380,59 @@ function effectiveCommandWord(words: string[]): string | null {
  * Deriving the word from the index rather than searching for it afterwards is what keeps
  * `sh x sh -c 'sudo id'` from finding the wrong `sh`.
  */
+/**
+ * Wrappers that take positional words of their own before the command they
+ * run, and how many: flock's lockfile, chroot's directory, taskset's cpu
+ * mask (0x1, 0-3, a list), perf's subcommand. Without this the scan stops at
+ * the wrapper's operand and names it as the command — measured in review:
+ * `flock /tmp/lk rm -rf /` and `chroot /mnt rm -rf /` read `lk`/`mnt` as the
+ * head and the never-allowed rule never fired, where the old text regexes
+ * had caught the phrase. The skipped word is gone as a head on purpose:
+ * `flock rm -rf /` treats `rm` as the lockfile it creates, which is what
+ * real flock does with a lone operand.
+ */
+const WRAPPER_OPERAND_COUNTS: Record<string, number> = Object.assign(
+  Object.create(null) as Record<string, number>,
+  { flock: 1, chroot: 1, taskset: 1, perf: 1 },
+);
+
+/**
+ * Tracing wrappers whose own value-taking flags are not attached
+ * (`strace -o file cmd`, not `-ofile`). PREFIX_VALUE_FLAGS already covers
+ * the privilege prefixes' flags inside the same loop.
+ */
+const WRAPPER_VALUE_FLAGS: Record<string, Set<string>> = Object.assign(
+  Object.create(null) as Record<string, Set<string>>,
+  {
+    strace: new Set(['-o', '-e', '-p', '-s', '-S']),
+    ltrace: new Set(['-e', '-o', '-p', '-s']),
+  },
+);
+
 function effectiveCommandIndex(words: string[]): number {
   let i = 0;
+  let wrapperOperandsLeft = 0;
   while (i < words.length) {
     const raw = words[i];
     const word = stripPath(unquote(raw));
 
     if (PRIVILEGE_PREFIXES.has(word) || EXEC_WRAPPERS.has(word)) {
+      const valueFlags = WRAPPER_VALUE_FLAGS[word];
+      wrapperOperandsLeft = WRAPPER_OPERAND_COUNTS[word] ?? 0;
       i++;
       while (i < words.length && words[i].startsWith('-')) {
-        const consumesValue = PREFIX_VALUE_FLAGS.has(words[i]);
+        const consumesValue = PREFIX_VALUE_FLAGS.has(words[i]) || (valueFlags?.has(words[i]) ?? false);
         i++;
         if (consumesValue) i++;
       }
       continue;
     }
     if (ASSIGNMENT.test(raw) || raw.startsWith('-') || BARE_NUMERIC.test(raw)) {
+      i++;
+      continue;
+    }
+    if (wrapperOperandsLeft > 0) {
+      wrapperOperandsLeft--;
       i++;
       continue;
     }
