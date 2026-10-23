@@ -90,10 +90,11 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     span.setAttribute('tool.name', toolName);
     span.setAttribute('ssh.profile', profileName);
     try {
-      const conn = await resolveConn(profileName);
-      // Captured before evaluating: a reload from here on means the decision below was
-      // made under rules that are no longer the live ones.
+      // Captured before resolving the connection: a reload from here on means the
+      // decision below may have been made under rules that are no longer the live ones,
+      // or against a connection the reload has since closed.
       const genAtEval = registry.generation;
+      const conn = await resolveConn(profileName);
       const evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName, resource);
       span.setAttribute('policy.decision', evaluation.decision);
       span.setAttribute('command.class', evaluation.commandClass);
@@ -125,12 +126,15 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
             evaluation,
           );
         }
+        // Each grant is tagged with the generation its decision was checked under, not
+        // the one current when it is written: a reload landing in between then leaves a
+        // grant that never counts.
         if (registry.generation !== genAtEval) {
-          const current = await recheckAfterReload(conn, command, toolName, resource, evaluation);
-          grants.record(conn.profile.name, command, evaluation.commandClass);
-          return { conn, evaluation: current, approver: approval.approver };
+          const recheck = await recheckAfterReload(conn, command, toolName, resource, evaluation);
+          grants.record(conn.profile.name, command, evaluation.commandClass, undefined, recheck.generation);
+          return { conn, evaluation: recheck.evaluation, approver: approval.approver };
         }
-        grants.record(conn.profile.name, command, evaluation.commandClass);
+        grants.record(conn.profile.name, command, evaluation.commandClass, undefined, genAtEval);
         return { conn, evaluation, approver: approval.approver };
       }
 
@@ -149,7 +153,8 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
    *
    * Anything else refuses with `config-reloaded` rather than prompting again: a second
    * prompt for a call already in flight is a surprise, and a retry asks under the new
-   * rules from the start. Returns the new evaluation, which is what the audit records.
+   * rules from the start. Returns the new evaluation, which is what the audit records,
+   * and the generation it was checked under, which is what the grant is tagged with.
    */
   async function recheckAfterReload(
     conn: Awaited<ReturnType<typeof resolveConn>>,
@@ -157,12 +162,18 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     toolName: string,
     resource: PolicyResource,
     approved: PolicyEvaluation,
-  ): Promise<PolicyEvaluation> {
+  ): Promise<{ evaluation: PolicyEvaluation; generation: number }> {
     const refuse = (): never => {
       throw new PolicyRefusedError(
         'CONFIG_RELOADED: The configuration was reloaded while this command awaited approval, ' +
         'and the approval does not carry over to the new rules; retry the call.',
-        { ...approved, decision: 'deny', ruleId: 'config-reloaded' },
+        {
+          ...approved,
+          decision: 'deny',
+          ruleId: 'config-reloaded',
+          // Fixed: the approved evaluation's reason may quote the old config.
+          reason: 'The configuration was reloaded while waiting for approval; the command was not run.',
+        },
       );
     };
 
@@ -177,7 +188,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     if (registry.generation !== genAtRecheck) refuse();
     if (current.decision !== 'allow' && current.decision !== 'require-approval') refuse();
     if (current.commandClass !== approved.commandClass) refuse();
-    return current;
+    return { evaluation: current, generation: genAtRecheck };
   }
 
   async function auditResult(

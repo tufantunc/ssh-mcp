@@ -68,6 +68,21 @@ describe('ApprovalGrants', () => {
     expect(g.has('dev', 'rm -rf /tmp/x', 'destructive')).toBe(true);
   });
 
+  // The pipeline tags a grant with the generation its decision was checked under, which
+  // can be older than the current one if a reload lands in between.
+  it('does not honour a grant recorded with an explicit older generation', () => {
+    const now = Date.now();
+    let generation = 1;
+    const g = new ApprovalGrants(60_000, () => generation);
+    g.record('dev', 'rm -rf /tmp/x', 'destructive', now, 0);
+    expect(g.has('dev', 'rm -rf /tmp/x', 'destructive', now + 1)).toBe(false);
+
+    g.record('dev', 'rm -rf /tmp/x', 'destructive', now, 1);
+    expect(g.has('dev', 'rm -rf /tmp/x', 'destructive', now + 1)).toBe(true);
+    generation = 2;
+    expect(g.has('dev', 'rm -rf /tmp/x', 'destructive', now + 1)).toBe(false);
+  });
+
   // The TTL is read live, so a reload that turns grants on applies to the next record.
   it('reads the TTL at each record', () => {
     const now = Date.now();

@@ -63,11 +63,24 @@ export class ApprovalGrants {
     return true;
   }
 
-  /** Record an operator approval under the current generation. No-op when grants are disabled. */
-  record(profile: string, command: string, commandClass: CommandClass, now = Date.now()): void {
+  /**
+   * Record an operator approval. No-op when grants are disabled.
+   *
+   * @param generation The generation the approval was checked under; defaults to the
+   *   current one. A caller that awaited anything after its check passes the value it
+   *   checked, so a reload landing in that gap leaves a grant that never counts rather
+   *   than one tagged with rules nobody evaluated.
+   */
+  record(
+    profile: string,
+    command: string,
+    commandClass: CommandClass,
+    now = Date.now(),
+    generation = this.generation(),
+  ): void {
     const ttl = this.ttl();
     if (ttl <= 0) return;
-    this.grants.set(this.key(profile, command, commandClass), { expiry: now + ttl, generation: this.generation() });
+    this.grants.set(this.key(profile, command, commandClass), { expiry: now + ttl, generation });
     this.prune(now);
   }
 

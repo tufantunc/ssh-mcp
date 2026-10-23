@@ -73,6 +73,44 @@ describe('an approval that completes after a config reload', () => {
     expect(pipeline.grants.has(testProfile.name, COMMAND, 'destructive')).toBe(false);
   });
 
+  // The refusal carries a fixed reason, never one built from the old or new config.
+  it('refuses with a fixed reason', async () => {
+    const { registry, pipeline } = setup();
+    approve.mockImplementation(async () => {
+      registry.applyConfig(configOf({ ...testProfile, approvalPolicy: 'deny' }));
+      return { approved: true, approver: 'elicitation' };
+    });
+
+    const err: any = await pipeline.runAudited(
+      COMMAND,
+      { toolName: 'run-command', failureClass: 'safe', profile: testProfile.name, extra: {} },
+      pipeline.execAndReport(),
+    ).catch((e) => e);
+
+    expect(err.evaluation).toMatchObject({
+      decision: 'deny',
+      ruleId: 'config-reloaded',
+      reason: 'The configuration was reloaded while waiting for approval; the command was not run.',
+    });
+  });
+
+  // A reload that lands while the connection is being resolved has to trigger the
+  // re-check too: the evaluation that follows is not the one the reload would see.
+  it('is re-checked when the reload lands during connection resolution', async () => {
+    const { registry, conn, exec, records, run } = setup();
+    vi.spyOn(registry, 'getOrCreate').mockImplementation(async () => {
+      // The reload closes the very connection being handed back.
+      registry.applyConfig(configOf({ ...testProfile, host: 'elsewhere' }));
+      return conn;
+    });
+    approve.mockResolvedValue({ approved: true, approver: 'elicitation' });
+
+    await expect(run()).rejects.toThrow(/reloaded/i);
+
+    expect(exec).not.toHaveBeenCalled();
+    expect(records[0]).toMatchObject({ decision: 'deny', ruleId: 'config-reloaded' });
+  });
+
   it('proceeds when the posture is unchanged across the reload', async () => {
     const { registry, exec, records, pipeline, run } = setup();
     approve.mockImplementation(async () => {
@@ -161,6 +199,24 @@ describe('the re-check after a reload, against a scripted policy', () => {
     expect(records[0]).toMatchObject({ decision: 'allow', ruleId: 'new-rule', approver: 'elicitation' });
   });
 
+  it('does not run the command when the re-evaluation itself fails', async () => {
+    const evaluateWithOpa = vi.fn()
+      .mockResolvedValueOnce(asks('destructive'))
+      .mockRejectedValueOnce(new Error('OPA unreachable'));
+    const { registry, exec, records, pipeline, run } = setup(testProfile, { evaluateWithOpa } as any);
+    approve.mockImplementation(async () => {
+      registry.applyConfig(configOf({ ...testProfile }));
+      return { approved: true, approver: 'elicitation' };
+    });
+
+    await expect(run()).rejects.toThrow('OPA unreachable');
+
+    expect(exec).not.toHaveBeenCalled();
+    expect(pipeline.grants.has(testProfile.name, COMMAND, 'destructive')).toBe(false);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ decision: 'deny', error: 'OPA unreachable' });
+  });
+
   it('refuses when another reload lands during the re-evaluation', async () => {
     let registry!: ConnectionRegistry;
     const evaluateWithOpa = vi.fn()
@@ -180,6 +236,46 @@ describe('the re-check after a reload, against a scripted policy', () => {
 
     expect(h.exec).not.toHaveBeenCalled();
     expect(h.records[0]).toMatchObject({ decision: 'deny', ruleId: 'config-reloaded' });
+  });
+});
+
+describe('the generation a grant is tagged with', () => {
+  beforeEach(() => {
+    approve.mockReset();
+  });
+
+  /** Land a reload just before the grant is written, as if it arrived in that gap. */
+  function reloadBeforeGrantWrite(h: ReturnType<typeof setup>) {
+    const write = h.pipeline.grants.record.bind(h.pipeline.grants);
+    vi.spyOn(h.pipeline.grants, 'record').mockImplementation((...args) => {
+      h.registry.applyConfig(configOf({ ...testProfile }));
+      write(...args);
+    });
+  }
+
+  it('is the one the approval was evaluated under, on the plain path', async () => {
+    const h = setup();
+    approve.mockResolvedValue({ approved: true, approver: 'elicitation' });
+    reloadBeforeGrantWrite(h);
+
+    await h.run();
+
+    expect(h.exec).toHaveBeenCalledTimes(1);
+    expect(h.pipeline.grants.has(testProfile.name, COMMAND, 'destructive')).toBe(false);
+  });
+
+  it('is the one the re-check ran under, after a reload during approval', async () => {
+    const h = setup();
+    approve.mockImplementation(async () => {
+      h.registry.applyConfig(configOf({ ...testProfile }));
+      return { approved: true, approver: 'elicitation' };
+    });
+    reloadBeforeGrantWrite(h);
+
+    await h.run();
+
+    expect(h.exec).toHaveBeenCalledTimes(1);
+    expect(h.pipeline.grants.has(testProfile.name, COMMAND, 'destructive')).toBe(false);
   });
 });
 
