@@ -151,8 +151,13 @@ approval grants are tagged with the generation they were created under.
   rules that no longer exist, and re-adding a grant would undo the clear.
 - **A command or transfer already running** is left to finish. Interrupting a remote
   command midway is itself a half-applied action on the remote host. The next call is
-  evaluated under the new rules. An operator who needs a hard stop removes the profile,
-  which closes the connection. The README says this in one sentence.
+  evaluated under the new rules. Removing the profile closes the connection, but that is
+  not a hard stop for everything on it: a background session's command is signalled INT,
+  then TERM, then KILL, while a one-shot command (or one in an interactive session) is not
+  signalled (ending the client drops its channel, and dropping a channel was measured not
+  to stop a command, #146) and may keep running on the host. An operator stops such a
+  command with `signal-process` while the profile still reaches the host. The README says
+  this.
 
 ### Report
 

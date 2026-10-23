@@ -50,8 +50,10 @@ SSH MCP Server gives LLM agents the ability to execute shell commands on remote 
 
 ## Stopping a Command
 
-Seven things stop a command, and they all escalate the same way on the exec channel —
-`SIGINT` immediately, `SIGTERM` after 1s, `SIGKILL` after 2s, then the channel is closed:
+Seven things stop a command. Where one reaches a command's exec channel it escalates the
+same way — `SIGINT` immediately, `SIGTERM` after 1s, `SIGKILL` after 2s, then the channel is
+closed — but the last three rows reach less than their names suggest; see the note under the
+table:
 
 | trigger | policy check | audit record |
 |---|---|---|
@@ -59,9 +61,17 @@ Seven things stop a command, and they all escalate the same way on the exec chan
 | an MCP client cancelling the request | no | the failed command's own record |
 | a channel that arrives after the request already timed out | no | trace only (`ssh.exec.lateStop`) |
 | `close-session` on a background session | **no** | yes (`session:close …`, `ruleId session-release`) |
-| a config reload that closes the connection (profile removed, a connection field changed, or its bastion closing) | no | yes (`session:close … (reload)`, one per session) |
-| the session reaper (idle TTL, or `sessionBackgroundMaxMs`, 1h by default) | no | **no** |
-| connection teardown — shutdown, or the idle-connection reaper | no | **no** |
+| a config reload that closes the connection (profile removed, a connection field changed, or its bastion closing) — escalates background sessions only | no | yes (`session:close … (reload)`, one per session) |
+| the session reaper (idle TTL, or `sessionBackgroundMaxMs`, 1h by default) — escalates background sessions only | no | **no** |
+| connection teardown — shutdown, or the idle-connection reaper — escalates background sessions only | no | **no** |
+
+**A session or connection close escalates only a background session's command.** Closing an
+interactive session ends its shell and signals nothing remote. A config reload or connection
+teardown closes each of the connection's sessions as above and then ends the SSH client, and
+a one-shot command still running on that connection is not signalled at all: ending the
+client drops its channel, and dropping a channel was measured not to stop a command (#146).
+Such a command may keep running on the host until it ends by itself or is signalled there,
+for instance with `signal-process` through a profile that still reaches that host.
 
 **Nothing on that list is policy-gated, and two of them leave no record.** The first four
 are the server stopping something policy already authorised when it started, which is

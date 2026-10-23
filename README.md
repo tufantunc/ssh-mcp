@@ -488,7 +488,7 @@ a change to each of those profiles. `defaultProfile`, `connectionIdleReapMs` and
 `approvalGrantTtlMs` apply at once. Command quota counts are kept, so a new
 `commandQuotaPerDay` applies to what has already been spent. Host keys accepted on first use
 are kept too, because the connection registry is updated in place rather than rebuilt. A
-connection that was still being opened when the reload landed is discarded, and that call
+new connection that was still being opened when the reload landed is discarded, and that call
 fails with "The configuration was reloaded while connecting; retry the call."
 
 **Approvals.** Every applied reload, even of an unchanged file, retires every approval grant
@@ -499,8 +499,13 @@ Otherwise it is refused with `CONFIG_RELOADED` and no grant is recorded; retry t
 be asked under the new rules.
 
 **Already running.** A command or transfer that is running when the reload lands finishes
-under the rules it started with; the next call is checked under the new ones. To stop one
-hard, remove its profile and reload, which closes the connection it runs on.
+under the rules it started with, unless the reload closes its connection; the next call is
+checked under the new ones. Removing a profile and reloading closes its connection, but that
+stops less than it sounds: a background session's command is signalled `INT`, then `TERM`,
+then `KILL`, while a one-shot command, or one running in an interactive session, is not
+signalled at all and may keep running on the host. Stop such a command with
+`signal-process` first, while the profile still reaches the host (see
+[SECURITY.md](./SECURITY.md#stopping-a-command)).
 
 **Never reloaded.** Command-line flags keep the values the process started with: the
 transport and its HTTP options, `--hostKeyMode`, the OPA, audit and OpenTelemetry flags, the
@@ -518,9 +523,8 @@ a defect, not a refusal — the report says the reload failed after the swap beg
 partly applied; check `reload-config` status, and restart if it does not show the new config.
 
 **`SIGHUP` no longer stops the server.** Before, its default action ended the process
-without flushing the audit log. Now, everywhere but Windows, an HTTP-transport server
-started from a terminal keeps running when that terminal closes, and the hangup triggers a
-reload. A stdio server still exits when its client closes stdin.
+without flushing the audit log. Now, everywhere but Windows, it triggers a reload and the
+server keeps running. A stdio server still exits when its client closes stdin.
 
 ---
 
