@@ -96,9 +96,10 @@ describe('planReload', () => {
     ]);
   });
 
-  it('closes a profile whose old via named a closing bastion, and what runs through it', () => {
-    // Re-pointed away from the bastion: its own reason is the via change, and its live
-    // channel still ran over the old hop. The leaf behind it closes with it.
+  it('a dependent re-pointed away from a closing bastion closes for its own via change', () => {
+    // An old-only hop can never change the result: a profile whose via changed or was
+    // removed is already closing (via is a connection field; names are unique).
+    // `inner` closes for its via change; `leaf` through leaf -> inner, in both configs.
     const leaf = p('leaf', { via: 'inner' });
     const plan = planReload(
       [p('bastion'), p('elsewhere'), p('inner', { via: 'bastion' }), leaf],

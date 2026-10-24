@@ -98,8 +98,11 @@ export function planReload(prev: Profile[], next: Profile[], live: Iterable<stri
   for (const change of diff.changed) {
     if (disposition(change) === 'close') closing.set(change.name, 'connection-field');
   }
-  // What runs through a closing bastion closes with it, transitively. The old via is the
-  // hop a live channel actually runs over; the new one is what a dependent would use.
+  // What runs through a closing bastion closes with it, transitively, over the new via
+  // (what a dependent would use). The old via (the hop a live channel runs over) is walked
+  // too, as a safeguard: with today's CONNECTION_FIELDS (via among them) and unique names,
+  // a profile whose via changed or that was removed is already closing, so it never adds a
+  // closing profile beyond what the new via and the diff already close.
   const hops = [...prev, ...next].flatMap((p) => (p.via ? [[p.name, p.via] as const] : []));
   for (let grew = true; grew; ) {
     grew = false;
