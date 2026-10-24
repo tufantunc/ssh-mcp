@@ -4,10 +4,10 @@ import { PolicyEngine, resolvePolicyRules, type CompiledRules, type PolicyRules 
 import { RELEASE, sessionKind, sessionReleaseCommand } from '../audit/session-release.js';
 import { loadConfigWithDigest } from './loader.js';
 import type { ConfigSource, LoadedConfig } from './loaded.js';
-import type { ProfileChange, ProfileDiff } from './reload-diff.js';
+import type { CloseReason, ProfileChange, ProfileDiff } from './reload-diff.js';
 import type { AclOptions } from './windows-acl.js';
 import type { AuditStore } from '../audit/store.js';
-import type { ApplyResult, CloseReason, ConnectionRegistry } from '../ssh/connection-registry.js';
+import type { ApplyResult, ConnectionRegistry } from '../ssh/connection-registry.js';
 import type { AppConfig } from '../types.js';
 
 export interface ReloadDeps {

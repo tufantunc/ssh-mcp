@@ -6,9 +6,8 @@ import { SSHConnection } from './connection.js';
 import type { HostKeyMode } from './host-key.js';
 import type { ClientChannel } from 'ssh2';
 import {
-  diffProfiles,
-  disposition,
-  SESSION_FIXED_FIELDS,
+  planReload,
+  type CloseReason,
   type ProfileChange,
   type ProfileDiff,
 } from '../config/reload-diff.js';
@@ -16,12 +15,10 @@ import {
 export interface ApplyResult {
   diff: ProfileDiff;
   /** Already out of the registry; the caller closes them. */
-  toClose: { conn: SSHConnection; profile: string; reason: 'removed' | 'connection-field' | 'bastion-closed' }[];
+  toClose: { conn: SSHConnection; profile: string; reason: CloseReason }[];
   /** Profiles with an open connection, kept open, whose session-fixed fields changed: only those fields named. */
   sessionFieldsChanged: ProfileChange[];
 }
-
-export type CloseReason = ApplyResult['toClose'][number]['reason'];
 
 const RELOADED_WHILE_CONNECTING = 'The configuration was reloaded while connecting; retry the call.';
 
@@ -220,32 +217,15 @@ export class ConnectionRegistry {
    * through a bastion closing for either reason leaves the maps and comes back in
    * `toClose`, unclosed: closing awaits session kill ladders, and the caller does it after
    * the swap is committed. Every other open connection gets its new profile in place.
+   * planReload decides what closes and why; this carries it out.
    */
   applyConfig(next: AppConfig): ApplyResult {
-    const prev = this.config.profiles;
-    const diff = diffProfiles(prev, next.profiles);
+    const { diff, closing, sessionFieldsChanged } = planReload(
+      this.config.profiles,
+      next.profiles,
+      this.connections.keys(),
+    );
     const nextByName = new Map(next.profiles.map((p) => [p.name, p]));
-
-    const closing = new Map<string, CloseReason>();
-    for (const name of diff.removed) closing.set(name, 'removed');
-    for (const name of this.connections.keys()) {
-      if (!nextByName.has(name)) closing.set(name, 'removed');
-    }
-    for (const change of diff.changed) {
-      if (disposition(change) === 'close') closing.set(change.name, 'connection-field');
-    }
-    // What runs through a closing bastion closes with it, transitively. The old via is the
-    // hop a live channel actually runs over; the new one is what a dependent would use.
-    const hops = [...prev, ...next.profiles].flatMap((p) => (p.via ? [[p.name, p.via] as const] : []));
-    for (let grew = true; grew; ) {
-      grew = false;
-      for (const [name, via] of hops) {
-        if (closing.has(via) && !closing.has(name)) {
-          closing.set(name, 'bastion-closed');
-          grew = true;
-        }
-      }
-    }
 
     this.config = next;
     this.configGeneration++;
@@ -266,17 +246,13 @@ export class ConnectionRegistry {
       toClose.push({ conn, profile: name, reason });
     }
 
-    const sessionFieldsChanged: ProfileChange[] = [];
     for (const change of diff.changed) {
       if (closing.has(change.name)) continue;
-      // Only a profile with an open connection: there is nothing to swap otherwise, and a
-      // session-fixed change matters only where a session could have fixed it.
+      // Only a profile with an open connection: there is nothing to swap otherwise.
       const conn = this.connections.get(change.name);
       const profile = nextByName.get(change.name);
       if (!conn || !profile) continue;
       conn.replaceProfile(profile);
-      const fields = change.fields.filter((f) => SESSION_FIXED_FIELDS.includes(f));
-      if (fields.length > 0) sessionFieldsChanged.push({ name: change.name, fields });
     }
 
     return { diff, toClose, sessionFieldsChanged };

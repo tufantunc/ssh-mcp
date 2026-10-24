@@ -70,3 +70,55 @@ export function diffProfiles(prev: Profile[], next: Profile[]): ProfileDiff {
 export function disposition(change: ProfileChange): 'close' | 'swap' {
   return change.fields.some((f) => CONNECTION_FIELDS.includes(f)) ? 'close' : 'swap';
 }
+
+export type CloseReason = 'removed' | 'connection-field' | 'bastion-closed';
+
+export interface ReloadPlan {
+  diff: ProfileDiff;
+  /** Names whose connection closes, each with why, in the order the registry hands them back. */
+  closing: Map<string, CloseReason>;
+  /** Names in `live`, kept open, whose session-fixed fields changed: only those fields named. */
+  sessionFieldsChanged: ProfileChange[];
+}
+
+/**
+ * What a reload from `prev` to `next` closes and reports, given the names that have a
+ * connection open (`live`). Pure: ConnectionRegistry.applyConfig carries it out.
+ */
+export function planReload(prev: Profile[], next: Profile[], live: Iterable<string>): ReloadPlan {
+  const diff = diffProfiles(prev, next);
+  const nextNames = new Set(next.map((p) => p.name));
+  const liveNames = new Set(live);
+
+  const closing = new Map<string, CloseReason>();
+  for (const name of diff.removed) closing.set(name, 'removed');
+  for (const name of liveNames) {
+    if (!nextNames.has(name)) closing.set(name, 'removed');
+  }
+  for (const change of diff.changed) {
+    if (disposition(change) === 'close') closing.set(change.name, 'connection-field');
+  }
+  // What runs through a closing bastion closes with it, transitively. The old via is the
+  // hop a live channel actually runs over; the new one is what a dependent would use.
+  const hops = [...prev, ...next].flatMap((p) => (p.via ? [[p.name, p.via] as const] : []));
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const [name, via] of hops) {
+      if (closing.has(via) && !closing.has(name)) {
+        closing.set(name, 'bastion-closed');
+        grew = true;
+      }
+    }
+  }
+
+  const sessionFieldsChanged: ProfileChange[] = [];
+  for (const change of diff.changed) {
+    // Only a profile with an open connection that stays open: a session-fixed change
+    // matters only where a session could have fixed it.
+    if (closing.has(change.name) || !liveNames.has(change.name)) continue;
+    const fields = change.fields.filter((f) => SESSION_FIXED_FIELDS.includes(f));
+    if (fields.length > 0) sessionFieldsChanged.push({ name: change.name, fields });
+  }
+
+  return { diff, closing, sessionFieldsChanged };
+}
