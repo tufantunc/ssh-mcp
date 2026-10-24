@@ -2,7 +2,14 @@ import { describe, it, expect, afterEach } from 'vitest';
 import fc from 'fast-check';
 import { classifyCommand } from '../../src/policy/classifier.js';
 import { FC_DEFAULT_SEED, fcParams } from './fc-seed.js';
-import { closedCommand, quotableWord, simpleCommand } from './command-arbitraries.js';
+import {
+  closedCommand,
+  isQuotableWord,
+  quotableWord,
+  readerWithControlChar,
+  SHELL_CONTROL_CHARS,
+  simpleCommand,
+} from './command-arbitraries.js';
 
 // The classifier properties are only as strong as these generators. A generator that
 // never produces a privileged or a read-only command makes every "never lowers" property
@@ -56,6 +63,31 @@ function unescapedCount(s: string, ch: string): number {
   return n;
 }
 
+/** How many shell segments the command splits into outside quotes, `&&`/`||` counting once. */
+function countSegments(command: string): number {
+  let quote: string | null = null;
+  let escaped = false;
+  let boundary = false;
+  let segments = 1;
+  for (const ch of command) {
+    if (escaped) { escaped = false; boundary = false; continue; }
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      boundary = false;
+      continue;
+    }
+    if (ch === '\\') { escaped = true; boundary = false; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; boundary = false; continue; }
+    if (ch === ';' || ch === '&' || ch === '|' || ch === '\n') {
+      if (!boundary) segments++;
+      boundary = true;
+      continue;
+    }
+    boundary = false;
+  }
+  return segments;
+}
+
 describe('closedCommand', () => {
   it('closes every quote and substitution it opens', () => {
     for (const c of sample(closedCommand)) {
@@ -69,16 +101,56 @@ describe('closedCommand', () => {
     const classes = new Set(sample(closedCommand).map((c) => classifyCommand(c).class));
     expect([...classes].sort()).toEqual(['destructive', 'privileged', 'read-only', 'safe']);
   });
+
+  it('stays within two segments, so a composed pair stays within the four-segment cap', () => {
+    // The one never-allowed shape that is two segments by nature (a download piped into
+    // a shell) appears whole rather than inside a segment, so every sample counts its
+    // own segments and a property joining two samples cannot exceed four.
+    for (const c of sample(closedCommand)) expect(countSegments(c), c).toBeLessThanOrEqual(2);
+  });
+
+  it('keeps samples short enough that two joined with a separator stay near the 200-character cap', () => {
+    for (const c of sample(closedCommand)) expect(c.length, c).toBeLessThanOrEqual(100);
+  });
 });
 
 describe('simpleCommand', () => {
   it('is one segment: no separator outside quotes', () => {
-    for (const c of sample(simpleCommand)) expect(c, c).not.toMatch(/[;&|\n]/);
+    for (const c of sample(simpleCommand)) {
+      expect(c, c).not.toMatch(/[;&|\n]/);
+      expect(countSegments(c), c).toBe(1);
+    }
   });
 });
 
 describe('quotableWord', () => {
   it('never contains a character whose meaning changes when quoted', () => {
-    for (const w of sample(quotableWord)) expect(w, w).not.toMatch(/[*?[\]\s;&|<>`$\\=]|^~/);
+    for (const w of sample(quotableWord)) expect(isQuotableWord(w), w).toBe(true);
+  });
+
+  it('rejects the named exclusions: globs, assignments, tilde, substitution, escape, quotes', () => {
+    // Each line is a word quoting which really does change what the shell runs, or would
+    // leave the quoted variant's quotes unbalanced: `ls a*` expands, `A=1 cmd` stops
+    // being an assignment when quoted, `ls '~'` no longer expands the home directory.
+    for (const w of ['a*b', 'a?b', 'a[b', 'a b', 'a;b', 'a&b', 'a|b', 'a<b', 'a>b', 'a$b',
+      'a`b', 'a\\b', 'A=1', "'q'", '"q"', '~x']) {
+      expect(isQuotableWord(w), w).toBe(false);
+    }
+    expect(isQuotableWord(''), 'the empty word adds an argument when quoted').toBe(false);
+    expect(isQuotableWord('a~b'), 'a tilde that does not lead the word is just a letter').toBe(true);
+  });
+});
+
+describe('readerWithControlChar', () => {
+  it('carries exactly one control character from the copied set, and never classifies read-only', () => {
+    const seen = new Set<string>();
+    for (const { command, controlChar } of sample(readerWithControlChar)) {
+      expect(SHELL_CONTROL_CHARS, command).toContain(controlChar);
+      expect(command, command).toContain(controlChar);
+      expect(classifyCommand(command).class, command).not.toBe('read-only');
+      seen.add(controlChar);
+    }
+    // A character the samples never carry is a character the property never checks.
+    expect([...seen].sort()).toEqual([...SHELL_CONTROL_CHARS].sort());
   });
 });

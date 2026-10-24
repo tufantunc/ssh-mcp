@@ -59,15 +59,20 @@ describe('PolicyEngine invariants (default rules)', () => {
 
   it('denies anything on the never-allowed list, whatever the role, tier or approval policy', () => {
     let hits = 0;
+    let hitsWithBackslash = 0;
     fc.assert(
       fc.property(profile, closedCommand, (p, command) => {
         if (findForbiddenMatch(command) === null) return;
         hits++;
+        if (command.includes('\\')) hitsWithBackslash++;
         expect(engine.evaluate(command, p).decision, command).toBe('deny');
       }),
       fcParams(200),
     );
     expect(hits).toBeGreaterThan(0);
+    // The never-allowed check reads a command with a backslash both ways (POSIX and
+    // cmd.exe); some sampled matches carry one, so that reading is exercised here too.
+    expect(hitsWithBackslash).toBeGreaterThan(0);
   });
 
   it('denies an SFTP write to a never-allowed path, whatever the role, tier or approval policy', () => {
