@@ -13,6 +13,7 @@ import { AuditStore } from '../../../src/audit/store.js';
 import { CommandQuota } from '../../../src/policy/quota.js';
 import type { AppConfig, AuditRecord, Profile } from '../../../src/types.js';
 import { makeConfigDir, type ConfigDir } from './helpers.js';
+import { buildReloader, STARTED_AT } from './reload-rig.js';
 
 /** A value that lives only in the config file. Nothing the reloader prints may contain it. */
 const CANARY = 'canary-host-9f3a';
@@ -69,22 +70,11 @@ function build(
   source: ConfigSource = 'file',
   sha256: string | null = null,
 ): Harness {
-  const registry = new ConnectionRegistry(config, 'insecure');
-  const policy = new PolicyEngine(resolvePolicyRules(config.profiles, config.policy));
-  const audit = new AuditStore(join(auditDir, 'audit.log'));
   const localPath = { transferRoot: config.defaults.transferRoot };
-  const reloader = new ConfigReloader({
-    aclOptions: {},
-    registry,
-    policy,
-    audit,
-    localPath,
-    startup: { config, source, path, sha256, loadedAt: STARTED_AT },
-  });
-  return { path, registry, policy, audit, localPath, reloader };
+  const auditPath = join(auditDir, 'audit.log');
+  return { path, ...buildReloader({ config, path, auditPath, source, sha256, localPath }) };
 }
 
-const STARTED_AT = '2026-10-23T00:00:00.000Z';
 const sha256Of = async (path: string) => createHash('sha256').update(await readFile(path)).digest('hex');
 
 /** A server started from `toml`, loaded through the same loader the reload uses. */
@@ -843,19 +833,15 @@ describe('ConfigReloader: the hash is of the bytes that were parsed', () => {
       }) as typeof actual.readFile;
       return { ...actual, default: { ...actual, readFile: readFileStub }, readFile: readFileStub };
     });
-    const { ConfigReloader: Reloader } = await import('../../../src/config/reload.js');
-    const { ConnectionRegistry: Registry } = await import('../../../src/ssh/connection-registry.js');
-    const { PolicyEngine: Engine } = await import('../../../src/policy/engine.js');
-    const { AuditStore: Store } = await import('../../../src/audit/store.js');
+    // Imported after the mock, so the reloader it builds reads through the stub.
+    const { buildReloader: buildMocked } = await import('./reload-rig.js');
 
     const config: AppConfig = { defaults: defaultsFromArgv({}), profiles: [] };
-    const reloader = new Reloader({
-      aclOptions: {},
-      registry: new Registry(config, 'insecure'),
-      policy: new Engine(),
-      audit: new Store(join(auditDir, 'audit.log')),
-      localPath: {},
-      startup: { config, source: 'unconfigured', path, sha256: null, loadedAt: STARTED_AT },
+    const { reloader } = buildMocked({
+      config,
+      path,
+      auditPath: join(auditDir, 'audit.log'),
+      source: 'unconfigured',
     });
 
     const outcome = await reloader.reload('tool', 1);
@@ -928,28 +914,23 @@ describe('ConfigReloader: the ACL options from argv reach the loader (Review Foc
           })),
       };
     });
-    const { ConfigReloader: Reloader } = await import('../../../src/config/reload.js');
-    const { ConnectionRegistry: Registry } = await import('../../../src/ssh/connection-registry.js');
-    const { PolicyEngine: Engine } = await import('../../../src/policy/engine.js');
-    const { AuditStore: Store } = await import('../../../src/audit/store.js');
+    // Imported after the mocks, so the reloader it builds runs the stubbed ACL check.
+    const { buildReloader: buildMocked } = await import('./reload-rig.js');
 
     const path = await dir.write(BASE);
     const config: AppConfig = { defaults: defaultsFromArgv({}), profiles: [] };
-    const registry = new Registry(config, 'insecure');
-    const policy = new Engine();
-    const audit = new Store(join(auditDir, 'audit.log'));
-    const localPath = {};
-    const reloader = new Reloader({
-      aclOptions: aclOptionsFromArgv(argv),
-      registry,
-      policy,
-      audit,
-      localPath,
-      startup: { config, source: 'unconfigured', path, sha256: null, loadedAt: STARTED_AT },
-    });
-    const h: Harness = { path, registry, policy, audit, localPath, reloader };
+    const h: Harness = {
+      path,
+      ...buildMocked({
+        config,
+        path,
+        auditPath: join(auditDir, 'audit.log'),
+        source: 'unconfigured',
+        aclOptions: aclOptionsFromArgv(argv),
+      }),
+    };
     const before = snapshot(h);
-    return { h, before, outcome: await reloader.reload('tool', 1) };
+    return { h, before, outcome: await h.reloader.reload('tool', 1) };
   }
 
   it('passes with --allowUncheckedConfigAcl, and reports the finding', async () => {

@@ -3,10 +3,9 @@ import { requestApproval } from '../../../src/guard/elicitation.js';
 import { createPipeline } from '../../../src/tools/pipeline.js';
 import { PolicyEngine, DEFAULT_RULES } from '../../../src/policy/engine.js';
 import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
-import { SSHConnection } from '../../../src/ssh/connection.js';
-import { defaultsFromArgv } from '../../../src/cli.js';
 import type { AppConfig, PolicyEvaluation, Profile } from '../../../src/types.js';
 import { testProfile } from './harness.js';
+import { configWithDefaults, plant } from '../../helpers/registry.js';
 
 /**
  * A human approval can take minutes, and a config reload can land inside that wait.
@@ -22,21 +21,17 @@ const approve = vi.mocked(requestApproval);
 
 const COMMAND = 'rm -rf /tmp/build';
 
-const configOf = (profile: Profile): AppConfig => ({
-  defaults: { ...defaultsFromArgv({}), approvalGrantTtlMs: 60_000 },
-  profiles: [profile],
-});
+const configOf = (profile: Profile): AppConfig => configWithDefaults({ approvalGrantTtlMs: 60_000 }, profile);
 
 function setup(profile: Profile = testProfile, policy: PolicyEngine = new PolicyEngine(DEFAULT_RULES)) {
   const registry = new ConnectionRegistry(configOf(profile));
-  // A real SSHConnection, never connected, planted as if it were — the registry hands it
-  // out and swaps its profile on reload exactly as it would a live one.
-  const conn = new SSHConnection(profile, { password: 'x' } as never, new Map(), 'insecure');
+  // Planted as if connected: the registry hands it out and swaps its profile on reload
+  // exactly as it would a live one.
+  const conn = plant(registry, profile);
   vi.spyOn(conn, 'isConnected').mockReturnValue(true);
   const exec = vi.spyOn(conn, 'exec').mockImplementation(async (command: string) => ({
     stdout: '', stderr: '', exitCode: 0, durationMs: 1, profile: profile.name, command,
   }));
-  (registry as any).connections.set(profile.name, conn);
 
   const records: any[] = [];
   const pipeline = createPipeline({
@@ -309,7 +304,7 @@ describe('a grant from before a config reload', () => {
 
     // Grants switched off by the reload: the approval after it records nothing, so the
     // command after that prompts too.
-    registry.applyConfig({ ...configOf({ ...testProfile }), defaults: { ...defaultsFromArgv({}), approvalGrantTtlMs: 0 } });
+    registry.applyConfig(configWithDefaults({ approvalGrantTtlMs: 0 }, { ...testProfile }));
     await run();
     await run();
 

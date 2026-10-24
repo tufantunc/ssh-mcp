@@ -1,47 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
-import { SSHConnection } from '../../../src/ssh/connection.js';
-import { defaultsFromArgv } from '../../../src/cli.js';
-import type { AppConfig, Profile } from '../../../src/types.js';
+import type { SSHConnection } from '../../../src/ssh/connection.js';
+import type { Profile } from '../../../src/types.js';
+import { makeProfile as fixtureProfile } from '../../fixtures/profile.js';
+import { configOf, plant } from '../../helpers/registry.js';
 
-function makeProfile(name: string, overrides: Partial<Profile> = {}): Profile {
-  return {
-    name,
-    group: 'dev',
-    host: `${name}.example.test`,
-    port: 22,
-    user: 'deploy',
-    auth: 'agent',
-    tty: false,
-    timeout: 60000,
-    maxChars: 5000,
-    maxOutputBytes: 1048576,
-    role: 'operator',
-    readOnly: false,
-    announceAgent: true,
-    approvalPolicy: 'ask-destructive',
-    cert: false,
-    sessionMaxPerConnection: 5,
-    sessionIdleTimeoutMs: 600000,
-    sessionBackgroundMaxMs: 3600000,
-    commandQuotaPerDay: 0,
-    transferMaxBytes: 268_435_456,
-    transferTimeoutMs: 300_000,
-    ...overrides,
-  };
-}
-
-const configOf = (...profiles: Profile[]): AppConfig => ({
-  defaults: defaultsFromArgv({}),
-  profiles,
-});
-
-/** A real SSHConnection, never connected, planted in the registry's map. */
-function plant(registry: ConnectionRegistry, profile: Profile): SSHConnection {
-  const conn = new SSHConnection(profile, { password: 'x' } as never, new Map(), 'insecure');
-  (registry as any).connections.set(profile.name, conn);
-  return conn;
-}
+/** The fixture under `name`; `deploy` is the user the closed-keeps-its-profile case reads back. */
+const makeProfile = (name: string, overrides: Partial<Profile> = {}): Profile =>
+  fixtureProfile({ name, user: 'deploy', ...overrides });
 
 const reasons = (toClose: { profile: string; reason: string }[]) =>
   Object.fromEntries(toClose.map((c) => [c.profile, c.reason]));

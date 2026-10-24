@@ -1,30 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { PolicyEngine, DEFAULT_RULES } from '../../../src/policy/engine.js';
-import type { Profile } from '../../../src/types.js';
+import { makeProfile } from '../../fixtures/profile.js';
 
-const profile: Profile = {
-  name: 'dev',
-  group: 'dev',
-  host: 'localhost',
-  port: 22,
-  user: 'test',
-  auth: 'agent',
-  tty: false,
-  timeout: 60000,
-  maxChars: 5000,
-  maxOutputBytes: 1048576,
-  role: 'admin',
-  readOnly: false,
-  announceAgent: true,
-  approvalPolicy: 'auto',
-  cert: false,
-  sessionMaxPerConnection: 5,
-  sessionIdleTimeoutMs: 600000,
-  sessionBackgroundMaxMs: 3600000,
-  commandQuotaPerDay: 0,
-  transferMaxBytes: 268_435_456,
-  transferTimeoutMs: 300_000,
-};
+const profile = makeProfile({ approvalPolicy: 'auto' });
 
 /**
  * Reload compiles the rules once, in validation, and the swap installs the compiled

@@ -6,14 +6,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { ConnectionRegistry as Registry, type ConnectionRegistry } from '../../src/ssh/connection-registry.js';
+import type { ConnectionRegistry } from '../../src/ssh/connection-registry.js';
 import { SSHConnection } from '../../src/ssh/connection.js';
-import { PolicyEngine, resolvePolicyRules } from '../../src/policy/engine.js';
-import { AuditStore } from '../../src/audit/store.js';
-import { ConfigReloader } from '../../src/config/reload.js';
 import { loadConfigWithDigest } from '../../src/config/loader.js';
 import { registerTools } from '../../src/tools/registry.js';
 import { textOf } from '../unit/tools/harness.js';
+import { buildReloader } from '../unit/config/reload-rig.js';
 import type { AppConfig, AuditRecord } from '../../src/types.js';
 import { isSshServerUp, assertAvailable, SSH_HOST } from './helpers.js';
 import { PORTS, allServersUp, checkAllServers, createAppConfig, createRegistry, setupEnv } from './fixtures.js';
@@ -159,17 +157,7 @@ async function startLive(toml: string): Promise<Live> {
   await chmod(path, 0o600);
 
   const { config, sha256 } = await loadConfigWithDigest(path, {});
-  const registry = new Registry(config, 'insecure');
-  const policy = new PolicyEngine(resolvePolicyRules(config.profiles, config.policy));
-  const audit = new AuditStore(auditPath);
-  const reloader = new ConfigReloader({
-    aclOptions: {},
-    registry,
-    policy,
-    audit,
-    localPath: {},
-    startup: { config, source: 'file', path, sha256, loadedAt: new Date().toISOString() },
-  });
+  const { registry, policy, audit, reloader } = buildReloader({ config, path, auditPath, sha256 });
 
   const server = new McpServer({ name: 'test', version: '0.0.0' }, { capabilities: { tools: {} } });
   registerTools(server, registry, policy, audit, { reloader });

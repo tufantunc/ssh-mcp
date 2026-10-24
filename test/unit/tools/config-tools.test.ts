@@ -6,11 +6,10 @@ import { createHarness, textOf, type Harness } from './harness.js';
 import { ConfigReloader, type ReloadOutcome } from '../../../src/config/reload.js';
 import { defaultsFromArgv } from '../../../src/cli.js';
 import { loadConfigWithDigest } from '../../../src/config/loader.js';
-import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
-import { PolicyEngine, resolvePolicyRules } from '../../../src/policy/engine.js';
-import { AuditStore } from '../../../src/audit/store.js';
+import type { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
 import { TOOL_DESCRIPTIONS, getToolHashes } from '../../../src/tools/registry.js';
 import { makeConfigDir, type ConfigDir } from '../config/helpers.js';
+import { buildReloader } from '../config/reload-rig.js';
 
 /** A value that lives only in the config file. No tool result may contain it. */
 const CANARY = 'canary-host-41c7';
@@ -47,15 +46,7 @@ afterEach(async () => {
 async function startWithReloader(): Promise<{ path: string; reloader: ConfigReloader; registry: ConnectionRegistry }> {
   const path = await dir.write(TOML);
   const { config, sha256 } = await loadConfigWithDigest(path, {});
-  const registry = new ConnectionRegistry(config, 'insecure');
-  const reloader = new ConfigReloader({
-    aclOptions: {},
-    registry,
-    policy: new PolicyEngine(resolvePolicyRules(config.profiles, config.policy)),
-    audit: new AuditStore(auditPath),
-    localPath: {},
-    startup: { config, source: 'file', path, sha256, loadedAt: '2026-10-23T00:00:00.000Z' },
-  });
+  const { registry, reloader } = buildReloader({ config, path, auditPath, sha256 });
   h = await createHarness({}, { reloader });
   return { path, reloader, registry };
 }
@@ -196,15 +187,7 @@ describe('reload-config', () => {
     // is how such a server becomes configured (spec: unconfigured -> configured).
     const path = join(dir.dir, 'config.toml');
     const config = { defaults: defaultsFromArgv({}), profiles: [] };
-    const registry = new ConnectionRegistry(config, 'insecure');
-    const reloader = new ConfigReloader({
-      aclOptions: {},
-      registry,
-      policy: new PolicyEngine(),
-      audit: new AuditStore(auditPath),
-      localPath: {},
-      startup: { config, source: 'unconfigured', path, sha256: null, loadedAt: '2026-10-23T00:00:00.000Z' },
-    });
+    const { registry, reloader } = buildReloader({ config, path, auditPath, source: 'unconfigured' });
     h = await createHarness({}, { reloader });
 
     const status = textOf(await call());
