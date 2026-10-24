@@ -6,31 +6,9 @@ import { COULD_NOT_SIGNAL } from '../ssh/channel-signal.js';
 import { TOOL_DESCRIPTIONS as D } from './descriptions.js';
 import { syntheticSuccess, textResult } from './results.js';
 import type { ToolDeps, Pipeline } from './pipeline.js';
-import type { PolicyEvaluation } from '../types.js';
+import { RELEASE, sessionKind, sessionReleaseCommand } from '../audit/session-release.js';
 
 /** Connection and session discovery/lifecycle tools. */
-/**
- * The evaluation recorded for a session release.
- *
- * Releasing a session is audited but never refused, which is why this is a constant rather
- * than an engine call. The first version of this routed the close through `runAudited`, and
- * that made the stop *refusable*: `session:close <name>` classifies as `safe`, so a
- * `readOnly` profile — which can open a background session, because a `tail -f` classifies
- * `read-only` — was denied permission to close it, and had no other way to stop the
- * command for an hour. `ask-all` prompted on every close, and an exhausted
- * `commandQuotaPerDay` wedged the profile entirely.
- *
- * A control whose refusal mode is "the thing you asked me to stop keeps running" is worse
- * than the unaudited stop it replaced. The record was the part worth having; the veto was
- * not. `ruleId` says so, so the log distinguishes this from an engine `allow`.
- */
-const RELEASE: PolicyEvaluation = {
-  decision: 'allow',
-  commandClass: 'safe',
-  binary: 'session:close',
-  ruleId: 'session-release',
-  reason: 'A session release is audited but not policy-gated; see SECURITY.md.',
-};
 
 /** What to append to the caller's confirmation for each outcome. */
 const CLOSE_NOTES: Record<CloseOutcome, string> = {
@@ -158,21 +136,15 @@ export function registerSessionTools(
       // itself what failed.
       let profileName = profile ?? '(default)';
       const ctx = makeCtx(extra, profileName, cleanName);
-      let command = `session:close unknown ${cleanName}`;
+      let command = sessionReleaseCommand('unknown', cleanName);
       const startedAt = Date.now();
 
       try {
         profileName = defaultProfileName(profile);
         ctx.profile = profileName;
         const conn = await resolveConn(profile);
-        // Recorded with the session's kind, so a remote SIGKILL is greppable in the log and
-        // distinguishable from ending a local shell — `open-session` encodes its type the
-        // same way.
-        // Through `toInfo()` rather than an `instanceof` check: the type is public API, and a
-        // tool handler reaching for a constructor identity is the layer leak this repo's own
-        // rules call out.
-        const kind = conn.getSession(cleanName)?.toInfo().type ?? 'unknown';
-        command = `session:close ${kind} ${cleanName}`;
+        // Recorded with the session's kind, as `open-session` encodes its type.
+        command = sessionReleaseCommand(sessionKind(conn.getSession(cleanName)), cleanName);
         const outcome = await conn.closeSession(cleanName);
         await auditResult(ctx, profileName, command, RELEASE, {
           stdout: '',

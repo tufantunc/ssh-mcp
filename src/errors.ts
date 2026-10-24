@@ -8,10 +8,10 @@ import { inspect } from 'util';
  * The distinction exists because the two need to be *presented* differently.
  * `main()` used to hand every failure to `console.error('Fatal error:', error)`,
  * which prints an Error object — name, message and full stack. A missing
- * `--host` therefore reached the operator as a stack trace through
- * `buildAppConfig` and `main`, which reads as a crash. The three lines of
- * explanation we wrote for them were buried inside frames that only matter to
- * someone debugging this codebase. It is the first thing the reporter of #138
+ * `--host` therefore reached the operator as a stack trace through the startup
+ * config loader (`loadAppConfig` today) and `main`, which reads as a crash. The
+ * three lines of explanation we wrote for them were buried inside frames that
+ * only matter to someone debugging this codebase. It is the first thing the reporter of #138
  * pasted, and none of it pointed at their actual problem.
  *
  * `reportFatal` below is the other half of that rule and lives here rather than
@@ -40,9 +40,10 @@ export class OperatorError extends Error {
  *
  * Separated from every other config failure because it is the one case that is
  * not necessarily a problem: with no config file, `--host`/`--user` take over.
- * `buildAppConfig` expressed that with a bare `catch {}`, which also swallowed
- * "the file is there and unusable" — a malformed TOML, a schema violation, a
- * permission failure — and reported all of them as "No config file found".
+ * The startup loader (`loadAppConfig` today) used to express that with a bare
+ * `catch {}`, which also swallowed "the file is there and unusable" — a
+ * malformed TOML, a schema violation, a permission failure — and reported all
+ * of them as "No config file found".
  *
  * That is what made #138 unfindable. A Windows operator with a valid config in
  * the right place was told the file did not exist, while the real error (a
@@ -53,8 +54,8 @@ export class OperatorError extends Error {
  */
 export class ConfigNotFoundError extends OperatorError {
   /**
-   * Kept because `loadConfig(customPath)` used to reject with Node's own
-   * SystemError for a missing file, and `.code` was observable on it. Nothing
+   * Kept because the loader (`loadConfigWithDigest` today) used to reject with
+   * Node's own SystemError for a missing file, and `.code` was observable on it. Nothing
    * in this repo reads it, but a wrapper script plausibly might, and preserving
    * it costs one line.
    */
@@ -91,6 +92,52 @@ export class UnconfiguredError extends OperatorError {
     );
     this.name = 'UnconfiguredError';
   }
+}
+
+/**
+ * The config file is not valid TOML.
+ *
+ * A type of its own so a reader that must not quote the file can still say where the
+ * problem is: the parser's message embeds a snippet of the source, and `line`/`column`
+ * locate it without one. The message is unchanged for startup, which prints it whole.
+ */
+export class ConfigParseError extends OperatorError {
+  constructor(message: string, readonly line?: number, readonly column?: number) {
+    super(message);
+    this.name = 'ConfigParseError';
+  }
+}
+
+/**
+ * One schema issue, by where it is and what kind it is: never the value received. The
+ * path stays in segments, because some segments are keys the operator chose (role and
+ * group names) and a reader that must not repeat them has to know where one ends.
+ */
+export interface ConfigIssue {
+  path: string[];
+  code: string;
+}
+
+/**
+ * The config file parsed but does not match the schema.
+ *
+ * `issues` exists for the reason `ConfigParseError.line` does: a schema message can name
+ * what it received (an unknown key, a refinement's wording), and the reload report must
+ * not repeat anything from the file. Startup still prints the full message.
+ */
+export class ConfigSchemaError extends OperatorError {
+  constructor(message: string, readonly issues: ConfigIssue[]) {
+    super(message);
+    this.name = 'ConfigSchemaError';
+  }
+}
+
+/**
+ * An error's class name, or its `typeof` when it is not an Error. For reporting a failure
+ * whose message may quote something that must not be repeated, such as the config file.
+ */
+export function errorName(err: unknown): string {
+  return err instanceof Error ? err.name : typeof err;
 }
 
 /** Exit status for an operator error, so a supervisor can tell it from a crash. */

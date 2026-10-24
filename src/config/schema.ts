@@ -25,7 +25,7 @@ const bindingKeySchema = z.string().min(1);
  * The schema descends exactly two levels whatever the input looks like, but this
  * function follows the *data*, so without a bound it recurses as deep as the TOML
  * nests. `smol-toml` parses ten thousand levels happily, and the resulting
- * `RangeError` escapes `loadConfig` — `safeParse` throws rather than returning
+ * `RangeError` escapes `loadConfigWithDigest` — `safeParse` throws rather than returning
  * `{ success: false }`, and that call sits outside the loader's try/catch — so the
  * operator got a stack trace where zod 3 printed a validation error.
  */

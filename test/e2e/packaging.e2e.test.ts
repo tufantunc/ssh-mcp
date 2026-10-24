@@ -91,7 +91,7 @@ describe.skipIf(!serverBuilt)('E2E — packaging', () => {
    *
    * Every failure used to go through `console.error('Fatal error:', error)`,
    * which prints the Error object: name, message, and a stack through
-   * buildAppConfig and main. A mistyped flag therefore reached the operator
+   * the startup config loader and main. A mistyped flag therefore reached the operator
    * looking like a crash in our code, with the explanation we wrote for them
    * wrapped in frames that only matter to someone debugging this repo. It is
    * the first thing the reporter of #138 pasted, and it told them nothing.
@@ -101,7 +101,7 @@ describe.skipIf(!serverBuilt)('E2E — packaging', () => {
    */
   it('reports an invocation mistake as a message, with exit status 2', async () => {
     // --group is only validated on the no-config-file path — `resolveHostGroup` is called
-    // from the CLI-args branch of `buildAppConfig` — so the run cannot be pinned with
+    // from the CLI-args branch of `loadAppConfig` — so the run cannot be pinned with
     // --config; `runIsolated` points the home directory at an empty temp dir instead.
     const err = await runIsolated([SERVER_ENTRY, '--host=x', '--user=y', '--group=production'])
       .then(

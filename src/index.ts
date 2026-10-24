@@ -11,9 +11,12 @@ import { transferForbiddenDirs } from './tools/forbidden-dirs.js';
 import { initKeychain } from './config/credential-resolver.js';
 import { getConfigPath } from './config/loader.js';
 import { SERVER_VERSION } from './version.js';
+import { reapOnce } from './ssh/reaper.js';
+import { ConfigReloader, installSighupReload } from './config/reload.js';
 import {
   parseArgv,
-  buildAppConfig,
+  loadAppConfig,
+  aclOptionsFromArgv,
   checkRemovedFlags,
   flagEnabled,
   parseFailureLimit,
@@ -32,7 +35,12 @@ async function main() {
     return;
   }
 
-  const config = await buildAppConfig(argv);
+  // The whole of it, not just `config`: the reloader needs to know where the live config
+  // came from, its hash and when it was loaded.
+  // The ACL posture, once: startup's load and every reload check the file with it.
+  const aclOptions = aclOptionsFromArgv(argv);
+  const startup = await loadAppConfig(argv, aclOptions);
+  const { config } = startup;
   const hostKeyMode = resolveHostKeyMode(argv);
   const entropyScan = flagEnabled(argv, 'auditEntropyScan');
   const tamperEvident = flagEnabled(argv, 'auditTamperEvident');
@@ -70,6 +78,11 @@ async function main() {
     throw new OperatorError('--opaFailClosed does nothing without --opaUrl.');
   }
 
+  // One reloader for the process: every MCP server below (one under stdio, one per HTTP
+  // session) reloads the same registry, policy and transfer root, and the reloader
+  // serializes them.
+  const reloader = new ConfigReloader({ aclOptions, registry, policy, audit, localPath, startup });
+
   // An McpServer binds to a single transport, so HTTP needs one per session.
   const createMcpServer = (): McpServer => {
     // capabilities moved from serverInfo to ServerOptions in SDK 1.30.
@@ -77,10 +90,7 @@ async function main() {
       { name: 'SSH MCP Server', version: SERVER_VERSION },
       { capabilities: { tools: {}, resources: {} } },
     );
-    registerTools(server, registry, policy, audit, {
-      approvalGrantTtlMs: config.defaults.approvalGrantTtlMs,
-      localPath,
-    });
+    registerTools(server, registry, policy, audit, { localPath, reloader });
     registerResources(server, registry);
     return server;
   };
@@ -108,19 +118,8 @@ async function main() {
   }
 
   const reaperInterval = setInterval(() => {
-    // Session reaping is awaited before connection reaping, and that order is load-bearing:
-    // closing a background session now signals its command, and `reapIdleConnections` gates
-    // on `sessionCount`, which drops to zero as soon as a session is closed. Fired without
-    // awaiting, the connection was torn down microseconds after the first signal and the
-    // TERM and KILL rungs were discarded — so a command that ignores INT survived its own
-    // reaping.
-    void (async () => {
-      const conns = registry.listConnections()
-        .map((info) => registry.get(info.profile))
-        .filter((c): c is NonNullable<typeof c> => Boolean(c));
-      await Promise.all(conns.map((conn) => conn.reapExpiredSessions().catch(() => {})));
-      registry.reapIdleConnections();
-    })();
+    // Session-then-connection ordering (load-bearing) is documented in `reapOnce`.
+    void reapOnce(registry).catch((err) => console.error('reaper failed:', err));
   }, 60_000);
 
   /**
@@ -169,6 +168,9 @@ async function main() {
 
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
+  // Before this, SIGHUP's default action killed the process without flushing the audit
+  // log. Now it reloads the config, except on Windows; see installSighupReload.
+  installSighupReload(reloader);
 }
 
 const isTestMode = process.env.SSH_MCP_TEST === '1';

@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { readFile } from 'node:fs/promises';
-import { loadConfig } from '../../../src/config/loader.js';
+import { loadConfigWithDigest } from '../../../src/config/loader.js';
 import { makeConfigDir, enforceAcl, type ConfigDir } from './helpers.js';
 
 /**
@@ -8,7 +8,7 @@ import { makeConfigDir, enforceAcl, type ConfigDir } from './helpers.js';
  * profile that carries the line and verifies nothing is the worst outcome the
  * field has.
  *
- * This goes config file → loadConfig rather than testing the zod schema in
+ * This goes config file → loadConfigWithDigest rather than testing the zod schema in
  * isolation, for the reason max-chars.test.ts gives: the interesting failure is a
  * value that passes validation and then means something different downstream, and
  * that is invisible one step earlier.
@@ -28,7 +28,7 @@ ${line}
   const load = async (line: string) => {
     cfg = await makeConfigDir('ssh-mcp-pin-');
     const path = await cfg.write(profile(line));
-    return loadConfig(path, enforceAcl());
+    return (await loadConfigWithDigest(path, enforceAcl())).config;
   };
 
   it('accepts a fingerprint', async () => {
@@ -77,7 +77,7 @@ describe('the shipped config.default.toml', () => {
   it('parses, and arms no host key pin', async () => {
     const text = await readFile(new URL('../../../config.default.toml', import.meta.url), 'utf8');
     cfg = await makeConfigDir('ssh-mcp-default-');
-    const config = await loadConfig(await cfg.write(text), enforceAcl());
+    const { config } = await loadConfigWithDigest(await cfg.write(text), enforceAcl());
 
     expect(config.profiles.length).toBeGreaterThan(0);
     for (const profile of config.profiles) {

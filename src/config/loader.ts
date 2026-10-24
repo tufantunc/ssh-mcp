@@ -1,9 +1,16 @@
+import { createHash } from 'crypto';
 import { readFile, stat } from 'fs/promises';
 import { homedir, platform } from 'os';
 import { join, dirname } from 'path';
 import { parse as parseTOML } from 'smol-toml';
 import { configSchema, type RawConfig } from './schema.js';
-import { OperatorError, ConfigNotFoundError, UnconfiguredError } from '../errors.js';
+import {
+  OperatorError,
+  ConfigNotFoundError,
+  ConfigParseError,
+  ConfigSchemaError,
+  UnconfiguredError,
+} from '../errors.js';
 import { assertPrivateOnWindows, type AclOptions } from './windows-acl.js';
 import type { AppConfig, Profile, Defaults } from '../types.js';
 
@@ -88,12 +95,22 @@ async function checkPosixMode(filePath: string): Promise<void> {
   }
 }
 
-export async function loadConfig(customPath?: string, opts: AclOptions = {}): Promise<AppConfig> {
+/**
+ * Read, permission-check, parse, validate and normalize a config file, with the sha256 of
+ * the very buffer that was parsed. Startup and reload both load through this. Hashing a
+ * second read would report bytes that were never applied whenever the file changed in
+ * between, and the hash is the operator's only content-free evidence of which config is
+ * live.
+ */
+export async function loadConfigWithDigest(
+  customPath?: string,
+  opts: AclOptions = {},
+): Promise<{ config: AppConfig; sha256: string }> {
   const configPath = getConfigPath(customPath);
 
-  let raw: string;
+  let bytes: Buffer;
   try {
-    raw = await readFile(configPath, 'utf8');
+    bytes = await readFile(configPath);
   } catch (err: any) {
     // Also for an explicit --config that points nowhere. That used to escape
     // as the raw system error ("ENOENT: no such file or directory, open ..."),
@@ -113,13 +130,20 @@ export async function loadConfig(customPath?: string, opts: AclOptions = {}): Pr
     );
   }
 
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const raw = bytes.toString('utf8');
+
   await checkPermissions(configPath, opts);
 
   let parsed: unknown;
   try {
     parsed = parseTOML(raw);
   } catch (err: any) {
-    throw new OperatorError(`Failed to parse TOML config at ${configPath}: ${err.message}`);
+    throw new ConfigParseError(
+      `Failed to parse TOML config at ${configPath}: ${err.message}`,
+      typeof err?.line === 'number' ? err.line : undefined,
+      typeof err?.column === 'number' ? err.column : undefined,
+    );
   }
 
   const result = configSchema.safeParse(parsed);
@@ -128,12 +152,37 @@ export async function loadConfig(customPath?: string, opts: AclOptions = {}): Pr
     // colon. Unreachable while the root schema accepted anything; an unknown
     // top-level section reaches it now.
     const issues = result.error.issues
-      .map((i) => `  ${i.path.length ? i.path.join('.') : '(root)'}: ${i.message}`)
+      .map((i) => `  ${i.path.length ? i.path.map(String).join('.') : '(root)'}: ${i.message}`)
       .join('\n');
-    throw new OperatorError(`Config validation error:\n${issues}`);
+    throw new ConfigSchemaError(
+      `Config validation error:\n${issues}`,
+      result.error.issues.map((i) => ({ path: i.path.map(String), code: i.code })),
+    );
   }
 
-  return normalizeConfig(result.data);
+  assertUniqueProfileNames(result.data.profiles, configPath);
+  return { config: normalizeConfig(result.data), sha256 };
+}
+
+/**
+ * Two profiles with one name are refused, at startup and on a reload alike: this is the
+ * loader both run. They used to load, and then the name meant two things at once: a
+ * connection resolved the first entry (`getProfile` uses `find`) while a reload's diff and
+ * swap took the last (they key a Map by name). Named by index only, since the name is a
+ * value from the file.
+ */
+function assertUniqueProfileNames(profiles: { name: string }[], configPath: string): void {
+  const first = new Map<string, number>();
+  for (const [i, { name }] of profiles.entries()) {
+    const earlier = first.get(name);
+    if (earlier !== undefined) {
+      throw new OperatorError(
+        `Config validation error in ${configPath}: profiles[${i}].name repeats profiles[${earlier}].name; ` +
+        'every profile needs a name of its own.',
+      );
+    }
+    first.set(name, i);
+  }
 }
 
 /**
@@ -165,7 +214,7 @@ function normalizeConfig(raw: RawConfig): AppConfig {
   // survives anywhere in AppConfig. Leaving the raw value on `defaults` left one
   // object carrying two encodings of "unlimited" — `profile.maxChars` as
   // MAX_SAFE_INTEGER, `defaults.commandMaxChars` as 0 — with nothing in the
-  // types to tell them apart. buildAppConfig's quick-start path already copies it
+  // types to tell them apart. loadAppConfig's quick-start path already copies it
   // straight across (`maxChars: defaults.commandMaxChars`), and was correct only
   // because that path's value comes from parseMaxChars, which never returns 0.
   // Correct by

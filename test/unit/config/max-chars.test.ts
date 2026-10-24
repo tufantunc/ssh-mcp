@@ -2,11 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, writeFile, chmod, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { loadConfig, getProfile } from '../../../src/config/loader.js';
+import { loadConfigWithDigest, getProfile } from '../../../src/config/loader.js';
 import { sanitizeCommand } from '../../../src/guard/sanitizer.js';
 
 /**
- * These go config file → loadConfig → sanitizeCommand, because the bug in the
+ * These go config file → loadConfigWithDigest → sanitizeCommand, because the bug in the
  * middle of #123 is invisible one step earlier.
  *
  * `--maxChars=none` disabled the cap; the TOML schema was `positive()`, so the
@@ -47,7 +47,7 @@ group = "dev"
 const LONG_COMMAND = `echo ${'x'.repeat(6000)}`;
 
 async function maxCharsFor(toml: string): Promise<number> {
-  const config = await loadConfig(await writeConfig(toml));
+  const { config } = await loadConfigWithDigest(await writeConfig(toml));
   return getProfile(config, 'web').maxChars;
 }
 
@@ -91,7 +91,7 @@ maxChars = 0
    * which cannot tell a per-profile map from a global one.
    */
   it('uncaps only the profile that asked, not its siblings', async () => {
-    const config = await loadConfig(await writeConfig(`
+    const { config } = await loadConfigWithDigest(await writeConfig(`
 [defaults]
 commandMaxChars = 100
 
@@ -119,7 +119,7 @@ user = "deploy"
    * the failure this whole file exists to prevent, reached from the other side.
    */
   it('leaves no literal 0 anywhere in the resolved config', async () => {
-    const config = await loadConfig(await writeConfig(`
+    const { config } = await loadConfigWithDigest(await writeConfig(`
 [defaults]
 commandMaxChars = 0
 ${PROFILE}`));

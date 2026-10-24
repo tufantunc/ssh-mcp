@@ -45,7 +45,7 @@ describe.skipIf(!allServersUp(await checkAllServers()))('Concurrent sessions', (
 
   it('4th session exceeds sessionMaxPerConnection', async () => {
     const conn5 = await createConnection('admin');
-    (conn5 as any).profile = { ...(conn5 as any).profile, sessionMaxPerConnection: 2 };
+    conn5.replaceProfile({ ...conn5.profile, sessionMaxPerConnection: 2 });
     await conn5.openSession({ name: 'max-1', type: 'interactive' });
     await conn5.openSession({ name: 'max-2', type: 'interactive' });
     await expect(conn5.openSession({ name: 'max-3', type: 'interactive' })).rejects.toThrow(/limit/i);

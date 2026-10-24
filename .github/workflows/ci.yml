@@ -443,11 +443,14 @@ jobs:
       # the release existed to fix.
       - name: Smoke test the built image
         env:
-          # Kept in step with the three in test/ (introspection, http e2e, the
-          # registry unit test). Nothing links them, so adding a tool means
-          # editing four places and this is the one no local run catches: the
-          # whole suite went green with the image still expecting eleven.
-          TOOL_COUNT: '14'
+          # Kept in step with the tests that pin the tool surface: the counts in
+          # test/e2e/introspection.e2e.test.ts (TOOL_COUNT) and
+          # test/e2e/http.e2e.test.ts, and the sorted name lists in
+          # test/e2e/tools.e2e.test.ts and test/unit/tools/registry.test.ts.
+          # Nothing links them, so adding a tool means editing all of them, and
+          # this is the one no local run catches: the whole suite went green with
+          # the image still expecting eleven, and again with it expecting 14.
+          TOOL_COUNT: '15'
         run: |
           set -euo pipefail
           {

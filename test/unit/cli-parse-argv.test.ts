@@ -12,7 +12,7 @@ import { parseArgv } from '../../src/cli.js';
  * dropping the value from every `--key=value`.
  *
  * The null-for-a-bare-flag rule is the root of #91 and of the bare-`--config` bug, and
- * `flagEnabled`, `resolveHostKeyMode` and `buildAppConfig` all presuppose it. It was
+ * `flagEnabled`, `resolveHostKeyMode` and `loadAppConfig` all presuppose it. It was
  * documented in three prose comments and executed by nothing.
  */
 describe('parseArgv', () => {

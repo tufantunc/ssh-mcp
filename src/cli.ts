@@ -14,12 +14,13 @@
  * escape the boot gate to be testable.
  */
 
-import { loadConfig, getConfigPath } from './config/loader.js';
+import { loadConfigWithDigest, getConfigPath } from './config/loader.js';
 import { OperatorError, ConfigNotFoundError, UnconfiguredError } from './errors.js';
-import type { AclFinding } from './config/windows-acl.js';
+import type { AclFinding, AclOptions } from './config/windows-acl.js';
 import { HOST_GROUPS } from './policy/engine.js';
 import type { HostKeyMode } from './ssh/host-key.js';
 import type { AppConfig, Profile, Defaults } from './types.js';
+import type { ConfigSource, LoadedConfig } from './config/loaded.js';
 
 /**
  * Whether the operator asked for a quick start at all.
@@ -247,8 +248,9 @@ export function resolveHostGroup(argv: Record<string, string | null>): string {
 /**
  * The defaults a quick-start profile inherits, from flags alone.
  *
- * Named because an unconfigured start needs them too — `approvalGrantTtlMs` is read while
- * wiring the tools, long before any profile exists, so the two paths have to agree.
+ * Named because an unconfigured start needs them too — `approvalGrantTtlMs` is read from
+ * the registry's defaults, which exist long before any profile does, so the two paths have
+ * to agree.
  */
 export function defaultsFromArgv(argv: Record<string, string | null>): Defaults {
   return {
@@ -272,7 +274,7 @@ export function defaultsFromArgv(argv: Record<string, string | null>): Defaults 
   };
 }
 
-export async function buildAppConfig(argv: Record<string, string | null>): Promise<AppConfig> {
+export function aclOptionsFromArgv(argv: Record<string, string | null>): AclOptions {
   // The way past an ACL that could not be read, rather than an operator with no
   // exit. See assertPrivateOnWindows.
   // The sink is supplied here rather than left to the module's default, which is the
@@ -285,14 +287,28 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
   // act on them". Nothing ever read it, and this split made the claim impossible — main()
   // is in another module and the array was not exported. Re-adding a collection point is
   // one line when there is a consumer to write it against.
-  const aclOpts = {
+  return {
     enforce: flagEnabled(argv, 'strictConfigAcl'),
     allowUnchecked: flagEnabled(argv, 'allowUncheckedConfigAcl'),
     onFinding: (f: AclFinding) => {
       console.error(`Warning: ${f.message}`);
     },
   };
+}
 
+function loaded(config: AppConfig, source: ConfigSource, path: string, sha256: string | null): LoadedConfig {
+  return { config, source, path, sha256, loadedAt: new Date().toISOString() };
+}
+
+/**
+ * The startup config: from `--config`, the default path, or the quick-start flags, or
+ * none at all. `aclOpts` is the ACL posture from argv; main() computes it once and hands
+ * the same options to the reloader.
+ */
+export async function loadAppConfig(
+  argv: Record<string, string | null>,
+  aclOpts: AclOptions = aclOptionsFromArgv(argv),
+): Promise<LoadedConfig> {
   if (argv.config !== undefined) {
     // `parseArgv` stores null for a flag written without `=`, so a bare `--config` used to
     // be falsy here and fall into the default-path branch — which now refuses rather than
@@ -301,11 +317,12 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
     if (argv.config === null || argv.config === '') {
       throw new OperatorError('--config needs a path: --config=<path>');
     }
-    return loadConfig(argv.config, aclOpts);
+    const { config, sha256 } = await loadConfigWithDigest(argv.config, aclOpts);
+    return loaded(config, 'file', argv.config, sha256);
   }
 
   try {
-    const fromFile = await loadConfig(undefined, aclOpts);
+    const { config: fromFile, sha256 } = await loadConfigWithDigest(undefined, aclOpts);
     // Before #138 every Windows config was rejected by the mode-bit check and
     // the rejection was swallowed, so an operator who also passed --host/--user
     // was silently running off the flags. Now that the file loads, it takes
@@ -317,7 +334,7 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
         'Pass --config <path> to choose a different file.',
       );
     }
-    return fromFile;
+    return loaded(fromFile, 'file', getConfigPath(), sha256);
   } catch (err) {
     // Only "there is no file" means fall through. A file that exists and is
     // unusable — malformed TOML, a schema violation, a permission failure —
@@ -335,6 +352,8 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
   // no profiles: an MCP client or directory can then complete the handshake and read
   // `tools/list`, and every tool call is refused by `ConnectionRegistry` with the message
   // below — including `list-connections`, which resolves no profile and so had to be told.
+  // `reload-config` is the exception, by design: it reaches no profile, and writing the
+  // file then reloading is how a server started this way gets configured.
   //
   // Measured before this: `initialize` and `tools/list` against our own image drew no
   // JSON-RPC response at all — the process exited on this check first — so every directory
@@ -346,8 +365,8 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
   // softens — see `nothingRequested`, which tests for the flags being absent rather than
   // falsy so that a valueless or space-separated one stays a typo.
   if (nothingRequested(argv)) {
-    console.error(`Warning: starting unconfigured — every tool call will be refused.\n${new UnconfiguredError(getConfigPath()).message}`);
-    return { defaults: defaultsFromArgv(argv), profiles: [] };
+    console.error(`Warning: starting unconfigured — every tool call except reload-config will be refused until a config file is loaded.\n${new UnconfiguredError(getConfigPath()).message}`);
+    return loaded({ defaults: defaultsFromArgv(argv), profiles: [] }, 'unconfigured', getConfigPath(), null);
   }
 
   if (!argv.host || !argv.user) {
@@ -384,5 +403,5 @@ export async function buildAppConfig(argv: Record<string, string | null>): Promi
     transferTimeoutMs: defaults.transferTimeoutMs,
   };
 
-  return { defaults, profiles: [profile] };
+  return loaded({ defaults, profiles: [profile] }, 'flags', getConfigPath(), null);
 }

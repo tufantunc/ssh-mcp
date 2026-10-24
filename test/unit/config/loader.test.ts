@@ -2,9 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { chmod } from 'fs/promises';
 import { platform } from 'os';
 import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from './helpers.js';
-import { loadConfig, getProfile, checkPermissions } from '../../../src/config/loader.js';
+import { loadConfigWithDigest, getProfile, checkPermissions } from '../../../src/config/loader.js';
 import type { AppConfig } from '../../../src/types.js';
-import { defaultsFromArgv } from '../../../src/cli.js';
+import { defaultsFromArgv, loadAppConfig } from '../../../src/cli.js';
 import { OperatorError } from '../../../src/errors.js';
 
 let cfg: ConfigDir;
@@ -21,7 +21,7 @@ afterEach(async () => {
 
 const writeConfig = (content: string, mode = 0o600): Promise<string> => cfg.write(content, mode);
 
-describe('loadConfig', () => {
+describe('loadConfigWithDigest', () => {
   it('loads a valid config with defaults applied', async () => {
     const path = await writeConfig(`
 [defaults]
@@ -34,7 +34,7 @@ port = 2222
 user = "test"
 auth = "password"
 `);
-    const config = await loadConfig(path);
+    const { config } = await loadConfigWithDigest(path);
     expect(config.defaults.defaultProfile).toBe('dev');
     expect(config.defaults.sessionMaxPerConnection).toBe(5);
     expect(config.profiles).toHaveLength(1);
@@ -64,7 +64,7 @@ name = "dev"
 host = "localhost"
 user = "test"
 `);
-    const config = await loadConfig(path);
+    const { config } = await loadConfigWithDigest(path);
     const p = config.profiles[0];
     expect(p.approvalPolicy).toBe('ask-all');
     expect(p.timeout).toBe(30000);
@@ -80,7 +80,7 @@ user = "test"
   describe('the streaming transfer settings', () => {
     it('defaults to a byte cap and an idle budget that are coherent with each other', async () => {
       const path = await writeConfig(MINIMAL_CONFIG);
-      const config = await loadConfig(path);
+      const { config } = await loadConfigWithDigest(path);
       // 256 MiB and a 5-minute *idle* budget. The pairing is the point of #206:
       // an earlier proposal shipped a 1 GiB cap against a 60s wall-clock
       // timeout, which demanded 17.9 MB/s sustained to be reachable at all.
@@ -95,7 +95,7 @@ user = "test"
       // Absence is the refusal: the streaming file tools have no "anywhere"
       // setting, so an operator who did not choose a directory has not
       // consented to those tools touching local disk.
-      expect((await loadConfig(path)).defaults.transferRoot).toBeUndefined();
+      expect((await loadConfigWithDigest(path)).config.defaults.transferRoot).toBeUndefined();
     });
 
     it('reads a transferRoot from [defaults]', async () => {
@@ -103,7 +103,7 @@ user = "test"
 [defaults]
 transferRoot = "/srv/ssh-mcp-transfers"
 `);
-      expect((await loadConfig(path)).defaults.transferRoot).toBe('/srv/ssh-mcp-transfers');
+      expect((await loadConfigWithDigest(path)).config.defaults.transferRoot).toBe('/srv/ssh-mcp-transfers');
     });
 
     it('lets a profile override the cap and the budget but not the root', async () => {
@@ -120,12 +120,12 @@ user = "test"
 transferMaxBytes = 512
 transferTimeoutMs = 60000
 `);
-      const config = await loadConfig(path);
+      const { config } = await loadConfigWithDigest(path);
       expect(config.profiles[0].transferMaxBytes).toBe(512);
       expect(config.profiles[0].transferTimeoutMs).toBe(60_000);
       // transferRoot names a directory on this machine, not anything about a
       // host, so it is refused on a profile rather than quietly ignored.
-      await expect(loadConfig(await writeConfig(`
+      await expect(loadConfigWithDigest(await writeConfig(`
 [[profiles]]
 name = "dev"
 host = "localhost"
@@ -139,7 +139,7 @@ transferRoot = "/tmp/elsewhere"
       // this same file. It must not mean that here, where it would remove the
       // only bound on how much a single call writes to local disk.
       for (const value of ['0', '-1']) {
-        await expect(loadConfig(await writeConfig(`
+        await expect(loadConfigWithDigest(await writeConfig(`
 [defaults]
 transferMaxBytes = ${value}
 
@@ -165,7 +165,7 @@ user = "test"
 approvalPolicy = "auto"
 timeout = 5000
 `);
-    const config = await loadConfig(path);
+    const { config } = await loadConfigWithDigest(path);
     expect(config.profiles[0].approvalPolicy).toBe('auto');
     expect(config.profiles[0].timeout).toBe(5000);
   });
@@ -177,7 +177,7 @@ name = "dev"
 host = "localhost"
 user = "test"
 `);
-    const config = await loadConfig(path);
+    const { config } = await loadConfigWithDigest(path);
     const p = config.profiles[0];
     expect(p.approvalPolicy).toBe('ask-destructive');
     expect(p.timeout).toBe(60_000);
@@ -194,7 +194,7 @@ hostFingerprint = "SHA256:abc"
 `);
     // hostFingerprint was accepted-but-unimplemented; a user pinning with it
     // got plain TOFU. Unknown keys must now fail loudly.
-    await expect(loadConfig(path)).rejects.toThrow(/hostFingerprint|Config validation/);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/hostFingerprint|Config validation/);
   });
 
   it('rejects config with no profiles', async () => {
@@ -202,7 +202,7 @@ hostFingerprint = "SHA256:abc"
 [defaults]
 defaultProfile = "dev"
 `);
-    await expect(loadConfig(path)).rejects.toThrow(/profiles/);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/profiles/);
   });
 
   it('rejects invalid approval mode', async () => {
@@ -213,7 +213,7 @@ host = "localhost"
 user = "test"
 approvalPolicy = "yolo"
 `);
-    await expect(loadConfig(path)).rejects.toThrow();
+    await expect(loadConfigWithDigest(path)).rejects.toThrow();
   });
 
   // POSIX only. Windows has no mode bits — Node synthesises 0o666 for every
@@ -226,12 +226,12 @@ name = "dev"
 host = "localhost"
 user = "test"
 `, 0o644);
-    await expect(loadConfig(path)).rejects.toThrow(/group\/world accessible/);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/group\/world accessible/);
   });
 
   it('rejects malformed TOML', async () => {
     const path = await writeConfig(`this is not = valid = toml [[[[`);
-    await expect(loadConfig(path)).rejects.toThrow(/Failed to parse TOML/);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/Failed to parse TOML/);
   });
 
   it('applies per-profile overrides for session limits', async () => {
@@ -245,8 +245,44 @@ host = "prod.example.com"
 user = "deploy"
 sessionMaxPerConnection = 2
 `);
-    const config = await loadConfig(path);
+    const { config } = await loadConfigWithDigest(path);
     expect(config.profiles[0].sessionMaxPerConnection).toBe(2);
+  });
+});
+
+/**
+ * Two profiles with one name used to load: the live connection used the first entry
+ * (getProfile's `find`) while a reload's diff and swap used the last (a Map), so the
+ * two disagreed about which host and user the name meant. Refused by the loader, which
+ * startup and reload both run, naming the indices and never the name.
+ */
+describe('duplicate profile names', () => {
+  const NAME = 'dup-name-7c1e';
+  const dupConfig = `
+[[profiles]]
+name = "${NAME}"
+host = "a.example.test"
+user = "test"
+
+[[profiles]]
+name = "other"
+host = "b.example.test"
+user = "test"
+
+[[profiles]]
+name = "${NAME}"
+host = "c.example.test"
+user = "test"
+`;
+
+  it('refuse to start, naming the field path and the index it repeats', async () => {
+    const path = await writeConfig(dupConfig);
+    const err: any = await loadAppConfig({ config: path }).catch((e) => e);
+    expect(err).toBeInstanceOf(OperatorError);
+    expect(err.message).toContain('profiles[2].name');
+    expect(err.message).toContain('profiles[0].name');
+    expect(err.message).toContain(path);
+    expect(err.message).not.toContain(NAME);
   });
 });
 
@@ -268,7 +304,7 @@ name = "prod"
 host = "prod.example.com"
 user = "deploy"
 `);
-    config = await loadConfig(path);
+    ({ config } = await loadConfigWithDigest(path));
   });
 
   it('returns default profile when no name given', () => {
@@ -293,7 +329,7 @@ user = "deploy"
       const path = await writeConfig(
         names.map((n) => `\n[[profiles]]\nname = "${n}"\nhost = "${n}.example.com"\nuser = "test"\n`).join(''),
       );
-      return loadConfig(path);
+      return (await loadConfigWithDigest(path)).config;
     }
 
     it('refuses to guess between several profiles', async () => {
@@ -333,7 +369,7 @@ describe('checkPermissions', () => {
     // not the check ran at all.
     const { inspectAcl } = await import('../../../src/config/windows-acl.js');
     expect((await inspectAcl(path)).status).toBe('restricted');
-    expect((await loadConfig(path)).profiles[0].host).toBe('localhost');
+    expect((await loadConfigWithDigest(path)).config.profiles[0].host).toBe('localhost');
   });
 
   it('passes for 0600 file', async () => {

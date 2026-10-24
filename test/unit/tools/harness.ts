@@ -10,8 +10,13 @@ import type { CloseOutcome } from '../../../src/ssh/session.js';
 import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
 import { defaultsFromArgv } from '../../../src/cli.js';
 import type { ToolDeps } from '../../../src/tools/pipeline.js';
+import { makeProfile } from '../../fixtures/profile.js';
 
-type ToolOpts = Omit<ToolDeps, 'server' | 'registry' | 'policy' | 'audit'>;
+/**
+ * `approvalGrantTtlMs` is a config default, read live from the registry; it is accepted
+ * here and served from the stub registry's `currentDefaults()`.
+ */
+type ToolOpts = Omit<ToolDeps, 'server' | 'registry' | 'policy' | 'audit'> & { approvalGrantTtlMs?: number };
 
 /**
  * In-process MCP client + server over InMemoryTransport, with the SSH layer
@@ -20,28 +25,7 @@ type ToolOpts = Omit<ToolDeps, 'server' | 'registry' | 'policy' | 'audit'>;
  * every per-request security decision lives and which had no tests at all.
  */
 
-export const testProfile: Profile = {
-  name: 'dev',
-  group: 'dev',
-  host: 'stub',
-  port: 22,
-  user: 'tester',
-  auth: 'password',
-  tty: false,
-  timeout: 5000,
-  maxChars: 5000,
-  maxOutputBytes: 1_048_576,
-  role: 'admin',
-  readOnly: false,
-  announceAgent: true,
-  approvalPolicy: 'ask-destructive',
-  cert: false,
-  sessionMaxPerConnection: 5,
-  sessionIdleTimeoutMs: 60_000,
-  sessionBackgroundMaxMs: 3_600_000,
-  commandQuotaPerDay: 0,
-  transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,
-};
+export const testProfile: Profile = makeProfile();
 
 export interface ExecCall {
   command: string;
@@ -71,7 +55,7 @@ export interface Harness {
 
 export async function createHarness(
   overrides: Partial<Profile> = {},
-  toolOpts: ToolOpts = {},
+  { approvalGrantTtlMs = 0, ...toolOpts }: ToolOpts = {},
   rules: PolicyRules = DEFAULT_RULES,
 ): Promise<Harness> {
   const profile: Profile = { ...testProfile, ...overrides };
@@ -129,6 +113,8 @@ export async function createHarness(
     getProfile: () => profile,
     listConnections: () => [conn.toInfo()],
     listAllProfiles: () => [profile],
+    currentDefaults: () => ({ ...defaultsFromArgv({}), approvalGrantTtlMs }),
+    generation: 0,
   };
 
   // Capture audit records instead of writing to disk.

@@ -27,7 +27,10 @@ npm install -g ssh-mcp
 
 Without a config the server still starts, so a client or directory can complete the MCP
 handshake and read `tools/list` — but **every tool call is refused** until you configure it,
-with a message naming the path below. Nothing runs on a host until this step is done.
+with a message naming the path below. Nothing runs on a host until this step is done. The
+one exception is `reload-config`: write the file, then call it with `action: "reload"` (or
+restart the server) to configure a server that is already running — see
+[Reloading](#reloading).
 
 Create the config file at the path for your platform:
 
@@ -106,9 +109,9 @@ that matched on `1` to detect a startup problem should match on `2` as well.
 
 Starting with nothing configured is **not** an exit-2 condition, as of the release that
 added introspection without a config: the server starts so it can be described, and
-refuses each tool call instead. A supervisor that used a non-zero exit to catch an
-unconfigured deployment should watch for `starting unconfigured` on stderr, or read
-`configured` from `GET /health` when running the HTTP transport.
+refuses each tool call instead, except `reload-config`. A supervisor that used a non-zero
+exit to catch an unconfigured deployment should watch for `starting unconfigured` on
+stderr, or read `configured` from `GET /health` when running the HTTP transport.
 
 ### 3. Set credentials via environment variables
 
@@ -143,7 +146,7 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 
 ---
 
-## Tools (14)
+## Tools (15)
 
 | Tool | Purpose | readOnly | destructive |
 |------|---------|:--------:|:----------:|
@@ -161,6 +164,7 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 | `sftp-upload-file` | Stream a local file to the remote host, never through model context | — | ✅ |
 | `sftp-download-file` | Stream a remote file to local disk, never through model context | — | ✅ |
 | `signal-process` | Send INT/TERM/KILL to a remote PID | — | ✅ |
+| `reload-config` | Show the config file's status, or re-read and apply it without a restart (see [Reloading](#reloading)) | — | ✅ |
 
 ### Streaming file transfer
 
@@ -341,7 +345,12 @@ Unknown sections and keys are a startup error, not a warning, so a typo cannot
 leave you running defaults you thought you had overridden. That extends to role
 and tier names: every one you write under `[policy.roleBindings]` has to be
 reachable by some profile, and every profile's role and tier has to resolve to
-real bindings. Both directions are checked at startup.
+real bindings. Both directions are checked at startup and on every reload.
+
+Every profile needs a `name` of its own. Two profiles with the same name are a startup
+error, and a reload refuses them too; the error names the two entries by index
+(`profiles[2].name repeats profiles[0].name`), not by the name. Before this release such a
+config started, and the first of the two was used.
 
 ### Host-side identification
 
@@ -427,6 +436,126 @@ The certificate file is auto-detected using OpenSSH convention (`keyRef` + `-cer
 
 **Never CLI arguments.** v2 removes `--password`, `--sudoPassword`, `--suPassword` entirely.
 
+### Reloading
+
+The config file is read at startup, and again only when you ask: through the
+`reload-config` tool with `action: "reload"`, or by sending the process `SIGHUP`
+(`kill -HUP <pid>`) on every platform but Windows. On Windows `SIGHUP` means the console
+is closing, so it does not reload there; use the tool. Nothing watches the file, so a
+half-written file never becomes live policy. A reload reads the same path the server
+started with: `--config`, or the default path for your platform.
+
+`reload-config` takes one argument, `action`:
+
+- `"status"` (the default) reports the config path, where the live config came from (`file`,
+  `unconfigured` or `flags`), when it was loaded, the sha256 of the bytes it was parsed
+  from, and the result of the last reload. It never shows the file's contents.
+- `"reload"` re-reads the file, applies it if every check passes, and reports what changed:
+  profiles added, removed and changed (by name and field), whether the policy rules changed,
+  and which connections it closed, why, and with which sessions. The same report goes to
+  stderr.
+
+The tool asks for no approval and spends no command quota. A caller can only make the
+server re-read what the operator wrote; the file is the operator's consent.
+
+**All or nothing.** A reload runs the same checks as startup on the new file before anything
+changes: the permission check (mode bits on Linux and macOS, the ACL on Windows, with the
+`--strictConfigAcl` or `--allowUncheckedConfigAcl` the server started with), the TOML parse,
+the strict schema, the check that no two profiles share a name, the role and tier
+cross-check, and compiling the denylist. A file with no
+profiles fails the schema, as at startup, so a reload cannot leave a server unconfigured.
+Two more refusals belong to reloading alone:
+
+- **`defaults.transferRoot` changed or removed.** A transfer in flight holds the old root,
+  so this needs a restart. Adding a `transferRoot` where there was none is allowed: with no
+  root there can be no transfer in flight.
+- **The server was started from `--host`/`--user` flags.** Swapping the flag-built profile
+  for whatever file sits at the default path would change where the server's trust comes
+  from without the operator choosing it. Restart with a config file instead.
+
+A refused reload changes nothing: the config, the policy, connections, sessions and approval
+grants stay as they were. The refusal names the error class and the path, and for a schema
+error the field paths and issue codes; it never quotes a value from the file.
+
+**What applies when.** Once every check passes, the new config replaces the old in one step,
+so no tool call sees part of each. For each open connection, by profile name:
+
+| Changed on the profile | What happens |
+|---|---|
+| `role`, `group`, `approvalPolicy`, `readOnly`, `commandQuotaPerDay`, `maxChars`, `transferMaxBytes`, `transferTimeoutMs`, or the `[policy]` section | The connection stays open; the change applies from its next command |
+| `workdir`, `tty`, `timeout`, `maxOutputBytes`, `announceAgent`, `sessionMaxPerConnection`, `sessionIdleTimeoutMs`, `sessionBackgroundMaxMs` | The connection stays open; the new values apply to new sessions and commands, and the report names these fields |
+| `host`, `port`, `user`, `auth`, `keyRef`, `keychainEntry`, `cert`, `via`, `trustedHostKey` | The connection closes with its sessions; the next call connects with the new profile |
+| the profile was removed | The connection closes with its sessions |
+
+A connection that runs through a bastion that is closing closes too, and so does anything
+running through it in turn; dependents close before the bastion they run through. A
+`[defaults]` value reaches every profile that does not set its own, so changing it counts as
+a change to each of those profiles. `defaultProfile`, `connectionIdleReapMs` and
+`approvalGrantTtlMs` apply at once. Command quota counts are kept, so a new
+`commandQuotaPerDay` applies to what has already been spent. Host keys accepted on first use
+are kept too, because the connection registry is updated in place rather than rebuilt. A
+new connection that was still being opened when the reload landed is discarded only if the
+reload closes its profile (removed, a connection field changed, or its bastion closing); that
+call fails with "The configuration was reloaded while connecting; retry the call." Any other
+is kept, with the profile as the reload left it, so reloading an unchanged file does not fail
+other calls' connects.
+
+**Approvals.** Every applied reload, even of an unchanged file, retires every approval grant
+made before it, so the next run of a granted command asks again. An approval answered after
+a reload landed is re-checked against the new rules: the command runs only if its connection
+is still open and the new rules still allow it or ask for it, in the same command class.
+Otherwise it is refused with `CONFIG_RELOADED` and no grant is recorded; retry the call to
+be asked under the new rules. A decision that needed no prompt is re-checked the same way
+when a reload lands while it is being made (while the connection is resolved, or during an
+OPA round-trip): a command the old rules allowed, or a grant reuse, runs only if its
+connection is still open and the new rules allow it outright, in the same class; otherwise
+it is refused with `CONFIG_RELOADED`. The command quota is charged against the profile as
+the reload left it.
+
+**Already running.** A command or transfer that is running when the reload lands finishes
+under the rules it started with, unless the reload closes its connection; the next call is
+checked under the new ones. Removing a profile and reloading closes its connection, but that
+stops less than it sounds: a background session's command is signalled `INT`, then `TERM`,
+then `KILL`, while a one-shot command, or one running in an interactive session, is not
+signalled at all and may keep running on the host. Stop such a command with
+`signal-process` first, while the profile still reaches the host (see
+[SECURITY.md](./SECURITY.md#stopping-a-command)).
+
+**Never reloaded.** Command-line flags keep the values the process started with: the
+transport and its HTTP options, `--hostKeyMode`, the OPA, audit and OpenTelemetry flags, the
+ACL flags and `--config` itself. The flags that stand in for `[defaults]` (`--timeout`,
+`--maxChars`, `--sessionMax`, `--sessionTtl`, `--commandQuota`, `--approvalGrantTtl`) apply
+only while no file is loaded, as at startup, so a server that started unconfigured takes its
+defaults from the file once a reload loads one.
+
+**Audit.** Every reload that runs writes one `config:reload` record, in one of three forms:
+
+| Outcome | `decision` | `ruleId` | `error` |
+|---|---|---|---|
+| applied | `allow` | `config-reload` | unset |
+| refused: a check failed, nothing changed | `deny` | `config-reload` | the refusal |
+| failed after the swap began, so possibly partly applied | `deny` | `config-reload-partial` | the error class, and that it may be partly applied |
+
+The other fields are fixed: `command` and `binary` are `config:reload`, `commandClass` is
+`safe`, `profile` and `user` are `-`, and `mcpRequestId` is the tool call's request id, or
+`sighup` for a reload the signal triggered. Each session a reload closes also writes a
+`session:close … (reload)` record, as the `close-session` tool does. A connection that fails
+to close is reported, not rolled back: the new config is already in effect.
+
+Reloads run one at a time: one asked for while another is running waits for it and then
+reads the file afresh, and any asked for while that one is still waiting join it and share
+its report and its record, so a burst of requests or `SIGHUP`s costs at most two reloads.
+If something fails after the checks have passed (a defect, not a refusal), the report says
+the reload failed after the swap began and may be partly applied; check `reload-config`
+status, and restart if it does not show the new config.
+
+**`SIGHUP` no longer stops the server.** Before, its default action ended the process
+without flushing the audit log. Now, everywhere but Windows, it triggers a reload and the
+server keeps running. A stdio server still exits when its client closes stdin. An HTTP
+server started from a terminal is no longer stopped when that terminal closes, since the
+hangup it sends is now handled as a reload: stop it with `SIGTERM` or `SIGINT`, or run it
+under a supervisor.
+
 ---
 
 ## Policy Engine
@@ -463,7 +592,7 @@ group = "dev"
 ### Configuring the matrix
 
 The table above is the default, not a limit. An optional `[policy]` section is
-merged over it at startup, so granting sudo on a host you have honestly
+merged over it at startup and on every reload, so granting sudo on a host you have honestly
 labelled `prod` is a reviewable line in a config file rather than a relabelling:
 
 ```toml
@@ -850,7 +979,8 @@ Endpoints: `POST /` (MCP Streamable HTTP), `GET /status`, `GET /health`
 `GET /health` answers `{"healthy": true, "configured": <bool>}`. It stays `200` either way —
 `healthy` is liveness — while `configured` is false when no profile is set, which is the
 case of a config bind mount that silently did not attach: the server binds the port and
-refuses every tool call. `GET /status` carries the profile list itself and stays behind the
+refuses every tool call except `reload-config`. `configured` turns true once a reload has
+loaded a file. `GET /status` carries the profile list itself and stays behind the
 bearer token.
 
 `--rateLimit` is a budget per client, keyed the same way as the failed-auth budget below,

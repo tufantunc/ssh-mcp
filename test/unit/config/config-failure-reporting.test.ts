@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { chmod } from 'fs/promises';
 import { platform } from 'os';
 import { join } from 'path';
-import { loadConfig, getConfigPath } from '../../../src/config/loader.js';
+import { loadConfigWithDigest, getConfigPath } from '../../../src/config/loader.js';
 import { ConfigNotFoundError, OperatorError } from '../../../src/errors.js';
 import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from './helpers.js';
 
@@ -19,10 +19,10 @@ import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from './helpers.js';
  *
  * #138: a Windows operator put a valid config at the documented path and was
  * told "No config file found". The file was there. `checkPermissions` rejected
- * it over POSIX mode bits that Windows does not have, and `buildAppConfig`'s
+ * it over POSIX mode bits that Windows does not have, and the startup loader's
  * bare `catch {}` relabelled that as a missing file.
  *
- * Two separate defects, so two separate groups of tests: what `loadConfig`
+ * Two separate defects, so two separate groups of tests: what `loadConfigWithDigest`
  * reports, and what the caller does with it. The bug needed both to be wrong.
  */
 
@@ -43,41 +43,41 @@ afterEach(async () => {
 
 const writeConfig = (content: string, mode = 0o600): Promise<string> => cfg.write(content, mode);
 
-describe('loadConfig distinguishes "absent" from "unusable"', () => {
+describe('loadConfigWithDigest distinguishes "absent" from "unusable"', () => {
   it('reports a missing file as ConfigNotFoundError', async () => {
     const missing = join(tempDir, 'nope.toml');
-    await expect(loadConfig(missing)).rejects.toBeInstanceOf(ConfigNotFoundError);
+    await expect(loadConfigWithDigest(missing)).rejects.toBeInstanceOf(ConfigNotFoundError);
   });
 
   it('names the path it actually looked in', async () => {
     const missing = join(tempDir, 'nope.toml');
-    await expect(loadConfig(missing)).rejects.toThrow(missing);
+    await expect(loadConfigWithDigest(missing)).rejects.toThrow(missing);
   });
 
   // Each of these is a file that exists. Reporting any of them as "not found"
   // sends the operator to re-create a file they already have.
   it('does not report malformed TOML as not-found', async () => {
     const path = await writeConfig('this is not = valid = toml [[[[');
-    await expect(loadConfig(path)).rejects.not.toBeInstanceOf(ConfigNotFoundError);
-    await expect(loadConfig(path)).rejects.toThrow(/Failed to parse TOML/);
+    await expect(loadConfigWithDigest(path)).rejects.not.toBeInstanceOf(ConfigNotFoundError);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/Failed to parse TOML/);
   });
 
   it('does not report a schema violation as not-found', async () => {
     const path = await writeConfig('[defaults]\ndefaultProfile = "dev"\n');
-    await expect(loadConfig(path)).rejects.not.toBeInstanceOf(ConfigNotFoundError);
+    await expect(loadConfigWithDigest(path)).rejects.not.toBeInstanceOf(ConfigNotFoundError);
   });
 
   it.skipIf(platform() === 'win32')('does not report a permission failure as not-found', async () => {
     const path = await writeConfig(MINIMAL_CONFIG, 0o644);
-    await expect(loadConfig(path)).rejects.not.toBeInstanceOf(ConfigNotFoundError);
-    await expect(loadConfig(path)).rejects.toThrow(/accessible/);
+    await expect(loadConfigWithDigest(path)).rejects.not.toBeInstanceOf(ConfigNotFoundError);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/accessible/);
   });
 
   // Every config failure is the operator's file, not our bug, so none of them
   // should reach them as a stack trace.
   it('marks config failures as operator errors', async () => {
     const path = await writeConfig('nope = = =');
-    await expect(loadConfig(path)).rejects.toBeInstanceOf(OperatorError);
+    await expect(loadConfigWithDigest(path)).rejects.toBeInstanceOf(OperatorError);
   });
 
   // The neighbouring case to #138: a config that exists but cannot be opened.
@@ -89,9 +89,9 @@ describe('loadConfig distinguishes "absent" from "unusable"', () => {
       const path = await writeConfig(MINIMAL_CONFIG);
       await chmod(path, 0o000);
       try {
-        await expect(loadConfig(path)).rejects.toBeInstanceOf(OperatorError);
-        await expect(loadConfig(path)).rejects.toThrow(path);
-        await expect(loadConfig(path)).rejects.not.toBeInstanceOf(ConfigNotFoundError);
+        await expect(loadConfigWithDigest(path)).rejects.toBeInstanceOf(OperatorError);
+        await expect(loadConfigWithDigest(path)).rejects.toThrow(path);
+        await expect(loadConfigWithDigest(path)).rejects.not.toBeInstanceOf(ConfigNotFoundError);
       } finally {
         await chmod(path, 0o600);
       }
@@ -99,10 +99,10 @@ describe('loadConfig distinguishes "absent" from "unusable"', () => {
   );
 });
 
-describe('buildAppConfig only falls through when the file is absent', () => {
+describe('loadAppConfig only falls through when the file is absent', () => {
   /**
    * Driven through a mocked loader rather than a real file: the fall-through
-   * branch calls `loadConfig()` with no argument, so it reads
+   * branch calls `loadConfigWithDigest()` with no argument, so it reads
    * `getConfigPath()`, and on macOS that path is not redirectable by any env
    * var. Mocking the module tests the branch itself, which is the part that
    * was wrong.
@@ -127,10 +127,14 @@ describe('buildAppConfig only falls through when the file is absent', () => {
         '../../../src/config/loader.js',
       );
       loadConfigMock = vi.fn().mockRejectedValue(err);
-      return { ...actual, loadConfig: loadConfigMock };
+      // cli.ts loads through loadConfigWithDigest; the mock stands in for the parse.
+      return {
+        ...actual,
+        loadConfigWithDigest: async (...a: unknown[]) => ({ config: await (loadConfigMock as (...b: unknown[]) => unknown)(...a), sha256: 'stub' }),
+      };
     });
-    const { buildAppConfig } = await import('../../../src/cli.js');
-    return buildAppConfig(argv);
+    const { loadAppConfig } = await import('../../../src/cli.js');
+    return (await loadAppConfig(argv)).config;
   }
 
   it('falls through to --host/--user when there is no config file', async () => {
@@ -139,7 +143,7 @@ describe('buildAppConfig only falls through when the file is absent', () => {
       user: 'deploy',
     });
     expect(config.profiles[0].host).toBe('example.com');
-    // Without this the test would also pass if buildAppConfig stopped consulting
+    // Without this the test would also pass if loadAppConfig stopped consulting
     // the config file at all.
     expect(loadConfigMock).toHaveBeenCalledTimes(1);
   });
@@ -254,13 +258,13 @@ describe('buildAppConfig only falls through when the file is absent', () => {
   });
 });
 
-describe('buildAppConfig threads --allowUncheckedConfigAcl to the loader', () => {
+describe('loadAppConfig threads --allowUncheckedConfigAcl to the loader', () => {
   /**
    * The escape hatch, tested at its wiring rather than below it.
    *
    * Both halves of this were mutation survivors on *every* platform: replacing
    * `flagEnabled(argv, 'allowUncheckedConfigAcl')` with `false`, and dropping the
-   * options argument from either `loadConfig` call, left the whole suite green.
+   * options argument from either loader call, left the whole suite green.
    * That matters more here than for any other flag, because it is the only way out
    * of a startup the server is already refusing — an operator whose ACL cannot be
    * read would be locked out with no exit, which is the shape of #138.
@@ -277,10 +281,14 @@ describe('buildAppConfig threads --allowUncheckedConfigAcl to the loader', () =>
         defaults: { defaultProfile: 'p' },
         profiles: [{ name: 'p', host: 'h', user: 'u' }],
       });
-      return { ...actual, loadConfig: loadConfigMock };
+      // cli.ts loads through loadConfigWithDigest; the mock stands in for the parse.
+      return {
+        ...actual,
+        loadConfigWithDigest: async (...a: unknown[]) => ({ config: await (loadConfigMock as (...b: unknown[]) => unknown)(...a), sha256: 'stub' }),
+      };
     });
-    const { buildAppConfig } = await import('../../../src/cli.js');
-    await buildAppConfig(argv);
+    const { loadAppConfig } = await import('../../../src/cli.js');
+    await loadAppConfig(argv);
     return loadConfigMock;
   }
 

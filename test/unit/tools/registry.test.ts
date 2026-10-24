@@ -16,7 +16,7 @@ describe('MCP tool surface', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'close-session', 'list-connections', 'list-sessions', 'open-session',
       'privileged-command', 'read-command', 'read-session-output',
-      'run-command', 'sftp-download', 'sftp-download-file', 'sftp-list',
+      'reload-config', 'run-command', 'sftp-download', 'sftp-download-file', 'sftp-list',
       'sftp-upload', 'sftp-upload-file', 'signal-process',
     ]);
   });
