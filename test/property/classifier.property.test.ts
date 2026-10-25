@@ -8,6 +8,7 @@ import {
   closedCommand,
   isQuotableWord,
   operandFreeWrapper,
+  operandWrapper,
   privilegePrefix,
   readerWithControlChar,
   separator,
@@ -85,6 +86,32 @@ describe('classifyCommand invariants', () => {
     fc.assert(
       fc.property(operandFreeWrapper, simpleCommand, (wrapper, command) => {
         expect(atLeast(classOf(`${wrapper} ${command}`), classOf(command)), `${wrapper} ${command}`).toBe(true);
+      }),
+      fcParams(1000),
+    );
+  });
+
+  it('never lowers a command by running it through a wrapper with its own operand and flags', () => {
+    fc.assert(
+      fc.property(operandWrapper, simpleCommand, (wrapper, command) => {
+        expect(atLeast(classOf(`${wrapper} ${command}`), classOf(command)), `${wrapper} ${command}`).toBe(true);
+        if (isForbidden(command)) expect(isForbidden(`${wrapper} ${command}`), `${wrapper} ${command}`).toBe(true);
+      }),
+      fcParams(1000),
+    );
+  });
+
+  it('never lowers a command by spelling its command word with a Windows suffix or in upper case', () => {
+    const fold = (word: string, how: number) => (how === 0 ? `${word}.exe` : how === 1 ? word.toUpperCase() : `${word.toUpperCase()}.EXE`);
+    fc.assert(
+      fc.property(simpleCommand, fc.integer({ min: 0, max: 2 }), (command, how) => {
+        const [head, ...rest] = command.split(' ');
+        if (!/^[a-z][a-z0-9_-]*$/.test(head)) return;
+        const folded = [fold(head, how), ...rest].join(' ');
+        if (isForbidden(command)) expect(isForbidden(folded), folded).toBe(true);
+        if (CLASS_RANK[classOf(command)] >= CLASS_RANK.destructive) {
+          expect(atLeast(classOf(folded), classOf(command)), folded).toBe(true);
+        }
       }),
       fcParams(1000),
     );

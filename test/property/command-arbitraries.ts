@@ -150,6 +150,24 @@ export const privilegePrefix = fc
 /** One operand-free wrapper spelling, from the classifier's own wrapper set. */
 export const operandFreeWrapper = fc.constantFrom(...OPERAND_FREE_WRAPPERS);
 
+/**
+ * Wrappers spelled with the words they take before the command they run: an operand
+ * (a lockfile, a directory, a mask, a subcommand, a duration) and the flags whose value
+ * is a word of its own. The words are ordinary ones, so the invariant is the same as for
+ * the operand-free set: what runs behind them classifies at least as high as it does alone.
+ */
+export const OPERAND_WRAPPERS = [
+  'flock /tmp/lk', 'flock -x /tmp/lk', 'flock -w 5 /tmp/lk', 'flock --wait 5 /tmp/lk', 'flock -E 1 /tmp/lk',
+  'chroot /mnt', 'chroot --userspec root /mnt', 'chroot --groups 10 /mnt',
+  'taskset 0x1', 'taskset -c 0', 'taskset -c 0-3', 'perf stat', 'perf record',
+  'timeout 5', 'timeout 2m30s', 'timeout -s KILL 5', 'timeout -k 5 10',
+  'strace -o /tmp/t', 'strace -u root', 'ltrace -u root', 'env -u HOME', 'env -C /tmp',
+  'ionice -c idle', 'xargs -I {}', 'xargs -p', 'xargs -r', 'time -p', 'nice -n 5',
+];
+
+/** One wrapper-with-operand spelling. */
+export const operandWrapper = fc.constantFrom(...OPERAND_WRAPPERS);
+
 /** One argument a command word might take, with no substitution in it. */
 const plainArg = fc.oneof(
   { weight: 3, arbitrary: fc.constantFrom(...PATHS) },

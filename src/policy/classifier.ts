@@ -1439,30 +1439,23 @@ interface Segment {
 function parseSegments(command: string, dialect: ShellDialect = 'posix'): Segment[] {
   const segments: Segment[] = [];
   for (const words of tokenizeSegments(command, dialect)) {
-    const segment = parseWords(words);
-    if (segment !== null) segments.push(segment);
+    segments.push(...parseWords(words));
   }
   return segments;
 }
 
-/** The same, for callers that already hold the tokenised words. */
-function parseWords(words: string[]): Segment | null {
-  {
-    let i = 0;
-    while (i < words.length && PRIVILEGE_PREFIXES.has(stripPath(words[i]))) {
-      i++;
-      while (i < words.length && words[i].startsWith('-')) {
-        const consumesValue = PREFIX_VALUE_FLAGS.has(words[i]);
-        i++;
-        if (consumesValue) i++;
-      }
-    }
-
-    if (i < words.length) {
-      return { head: stripPath(words[i]), args: words.slice(i + 1) };
-    }
-  }
-  return null;
+/**
+ * The same, for callers that already hold the tokenised words: one segment per
+ * reading of where the command word is (`commandHeads`).
+ *
+ * The head is read past a wrapper — and the words a wrapper takes before the
+ * command it runs — so a wrapper no longer hides what the segment executes:
+ * `env shutdown -h now` used to name `env`, and the forbidden-invocation rule
+ * never heard `shutdown`. The head is also folded (`commandWord`), so
+ * `systemctl.exe reboot` names the multiplexer.
+ */
+function parseWords(words: string[]): Segment[] {
+  return commandHeads(words).map(({ index, head }) => ({ head, args: words.slice(index + 1) }));
 }
 
 /**
@@ -1479,44 +1472,28 @@ function parseWords(words: string[]): Segment | null {
  * command. Reaching a privilege prefix before that is elevation; reaching
  * anything else is not, which is what keeps `grep sudo /var/log/auth.log` a
  * mention rather than an invocation.
+ *
+ * "Not yet the command" includes the words a wrapper takes before the command
+ * it runs: the wrapper's operand (`flock /tmp/lk sudo id`, `chroot /mnt sudo
+ * id`), the value a wrapper's flag carries as its own word (`strace -o FILE`,
+ * `xargs -I {}`), and the subcommand `perf` runs. Until this scan learned them,
+ * the wrapper's operand was the first "real command" it saw — so `flock /tmp/lk
+ * sudo id` stopped at the lockfile and classified `safe` while `flock /tmp/lk
+ * rm -rf /` was already refused. It now walks the same readings as every rule
+ * (`commandReadings`), so the two can no longer disagree about where the
+ * command is; a segment elevates if any reading of it does.
  */
 function elevatedBinary(words: string[]): string | null {
-  let i = 0;
-  let prefix: string | null = null;
-
-  while (i < words.length) {
-    const raw = words[i];
-    const word = stripPath(unquote(raw));
-
-    if (PRIVILEGE_PREFIXES.has(word)) {
-      prefix ??= word;
-      i++;
-      // The prefix's own options, some of which swallow the next word.
-      while (i < words.length && words[i].startsWith('-')) {
-        const consumesValue = PREFIX_VALUE_FLAGS.has(words[i]);
-        i++;
-        if (consumesValue) i++;
-      }
-      continue;
-    }
-
-    // Words that are not yet the command: an assignment, a wrapper, an option,
-    // or the bare number `timeout`/`nice` take before theirs.
-    if (ASSIGNMENT.test(raw) || EXEC_WRAPPERS.has(word)
-      || raw.startsWith('-') || BARE_NUMERIC.test(raw)) {
-      i++;
-      continue;
-    }
-
-    // A real command. Before any prefix it means the segment does not elevate —
-    // which is what keeps `grep sudo /var/log/auth.log` a mention. After one, it
-    // is what actually runs as root.
-    return prefix === null ? null : word;
+  for (const { index, prefix } of commandReadings(words)) {
+    if (prefix === null) continue;
+    // `sudo`, or `sudo -u root`, with nothing after it: the prefix is all there
+    // is to name. Otherwise the binary as spelled, which is what the audit
+    // record and OPA's input have always carried.
+    return index === -1 ? prefix : stripPath(unquote(words[index]));
   }
-
-  // `sudo`, or `sudo -u root`, with nothing after it: the prefix is all there is
-  // to name.
-  return prefix;
+  // A real command reached before any prefix, under every reading — which is
+  // what keeps `grep sudo /var/log/auth.log` a mention.
+  return null;
 }
 
 /**
@@ -1559,18 +1536,28 @@ function foldCommandWord(word: string): string {
   return word.replace(WINDOWS_EXE_SUFFIX, '').toLowerCase();
 }
 
-/** The segment's command word, folded for the tables below, or null. */
-function foldedHeadOf(words: string[]): string | null {
-  const idx = effectiveCommandIndex(words);
-  return idx === -1 ? null : foldCommandWord(stripPath(unquote(words[idx])));
+/**
+ * The name a command word names, however it was spelled: directory part
+ * removed, a Windows executable suffix removed, case folded. `/sbin/reboot`,
+ * `C:\Windows\reboot.exe`, `REBOOT` and `reboot` are the same invocation, and
+ * every table that keys on a command word — prefixes, wrappers,
+ * multiplexers, forbidden invocations, the segment rules — answers through
+ * this rather than through the exact spelling, for the same reason the
+ * interpreter table already did (see `resolveInterpreter`): a spelling the
+ * table does not know is a name the check never hears of.
+ */
+function commandWord(word: string): string {
+  return foldCommandWord(stripPath(word));
 }
 
 function sqliteShellPrograms(words: string[]): string[] {
-  if (foldedHeadOf(words) !== 'sqlite3') return [];
   const programs: string[] = [];
-  for (let i = effectiveCommandIndex(words) + 1; i < words.length; i++) {
-    const match = SQLITE_SHELL_DOT_COMMAND.exec(words[i]);
-    if (match) programs.push(match[1]);
+  for (const { index, head } of commandHeads(words)) {
+    if (head !== 'sqlite3') continue;
+    for (let i = index + 1; i < words.length; i++) {
+      const match = SQLITE_SHELL_DOT_COMMAND.exec(words[i]);
+      if (match) programs.push(match[1]);
+    }
   }
   return programs;
 }
@@ -1591,18 +1578,19 @@ const TAR_CHECKPOINT_EXEC_ATTACHED = /^--checkpoint-a[a-z-]*=exec=(.+)$/;
 const TAR_CHECKPOINT_ACTION_EXEC = /^exec=(.+)$/;
 
 function tarCheckpointExecPrograms(words: string[]): string[] {
-  if (foldedHeadOf(words) !== 'tar') return [];
-  const start = effectiveCommandIndex(words) + 1;
   const programs: string[] = [];
-  for (let i = start; i < words.length; i++) {
-    const attached = TAR_CHECKPOINT_EXEC_ATTACHED.exec(words[i]);
-    if (attached) {
-      programs.push(attached[1]);
-      continue;
-    }
-    if (TAR_CHECKPOINT_FLAG.test(words[i])) {
-      const detached = TAR_CHECKPOINT_ACTION_EXEC.exec(words[i + 1] ?? '');
-      if (detached) programs.push(detached[1]);
+  for (const { index, head } of commandHeads(words)) {
+    if (head !== 'tar') continue;
+    for (let i = index + 1; i < words.length; i++) {
+      const attached = TAR_CHECKPOINT_EXEC_ATTACHED.exec(words[i]);
+      if (attached) {
+        programs.push(attached[1]);
+        continue;
+      }
+      if (TAR_CHECKPOINT_FLAG.test(words[i])) {
+        const detached = TAR_CHECKPOINT_ACTION_EXEC.exec(words[i + 1] ?? '');
+        if (detached) programs.push(detached[1]);
+      }
     }
   }
   return programs;
@@ -1649,10 +1637,14 @@ function isPrivilegedFlag(word: string): boolean {
  * operator's everyday `docker run -e FOO=bar img`.
  */
 function brokeredElevation(words: string[]): string | null {
-  const head = foldedHeadOf(words);
-  if (head === null) return null;
-  const args = words.slice(effectiveCommandIndex(words) + 1);
+  for (const { index, head } of commandHeads(words)) {
+    const found = brokeredElevationAt(head, words.slice(index + 1));
+    if (found !== null) return found;
+  }
+  return null;
+}
 
+function brokeredElevationAt(head: string, args: string[]): string | null {
   if (head === 'docker') {
     // Global flags first — an operator aiming at a remote daemon writes
     // `-H tcp://…` or `--context prod` before the subcommand.
@@ -1735,22 +1727,14 @@ function brokeredElevationOf(command: string, dialect: ShellDialect = 'posix'): 
 /**
  * An allowlisted binary carrying a flag that makes it write or execute.
  *
- * Keyed on `effectiveCommandIndex`, not `parseSegments`. `parseSegments`
- * (`parseWords`) only steps over a privilege prefix (`sudo`, `su`, …), not an
- * exec wrapper (`env`, `nohup`, `timeout`, …), so `env sort
- * --compress-program=X` read `head` as `"env"` — not in `DISQUALIFYING_ARGS`
- * — and the flag went unnoticed. `effectiveCommandIndex` already reads past
- * both, which is what `operandsAreData` and `readsProgramFromStdin` use it
- * for. Deliberately not fixed by changing `parseWords` itself:
- * `invokedWords` also reads it, and widening what counts as "the command"
- * there is a different, larger change this fix does not take on.
+ * Read past a wrapper (`commandHeads`), so `env sort --compress-program=X`
+ * names `sort` rather than `env` — which is not in `DISQUALIFYING_ARGS`, and
+ * the flag went unnoticed.
  */
 function hasDisqualifyingArgs(command: string, dialect: ShellDialect = 'posix'): boolean {
-  return tokenizeSegments(command, dialect).some((words) => {
-    const idx = effectiveCommandIndex(words);
-    if (idx === -1) return false;
-    const rule = DISQUALIFYING_ARGS[stripPath(words[idx])];
-    return rule !== undefined && words.slice(idx + 1).some((arg) => rule.test(arg));
+  return anySegmentRuns(command, dialect, (head, args) => {
+    const rule = DISQUALIFYING_ARGS[head];
+    return rule !== undefined && args.some((arg) => rule.test(arg));
   });
 }
 
@@ -1764,7 +1748,7 @@ function invokedWords(command: string, dialect: ShellDialect = 'posix'): string[
     // named after a power action is rare enough that erring towards refusal
     // here costs little.
     if (ACTION_MULTIPLEXERS.has(head)) {
-      invoked.push(...args.filter((w) => !w.startsWith('-')).map(stripPath));
+      invoked.push(...args.filter((w) => !w.startsWith('-')).map(commandWord));
     }
   }
 
@@ -1788,28 +1772,38 @@ function pipesDownloadIntoShell(command: string, dialect: ShellDialect = 'posix'
   // bash build.sh` — download, then run a local script — match a rule whose label says
   // "piping a download into a shell", on a list that cannot be switched off.
   const segments = tokenizeSegmentsDetailed(command, true, dialect);
-  const heads = segments
+  const stages = segments
     .filter((segment, i) => i === 0 || segment.sep === '|')
-    .map((segment) => parseWords(segment.words)?.head);
-  const firstDownload = heads.findIndex((h) => h !== undefined && DOWNLOADERS.has(h));
+    .map((segment) => parseWords(segment.words).map((s) => s.head));
+  const firstDownload = stages.findIndex((heads) => heads.some((h) => DOWNLOADERS.has(h)));
   if (firstDownload === -1) return false;
-  return heads.slice(firstDownload + 1).some((h) => h !== undefined && SHELLS.has(h));
+  return stages.slice(firstDownload + 1).some((heads) => heads.some((h) => SHELLS.has(h)));
+}
+
+/**
+ * Whether some segment, under some reading of where its command word is
+ * (`commandHeads`), runs a command `test` matches. The one way the segment rules
+ * below read a head, so a reading or a spelling one of them learns, they all do.
+ */
+function anySegmentRuns(
+  command: string, dialect: ShellDialect, test: (head: string, args: string[]) => boolean,
+): boolean {
+  return tokenizeSegments(command, dialect).some((words) =>
+    commandHeads(words).some(({ index, head }) => test(head, words.slice(index + 1))));
 }
 
 /**
  * `dd … of=/dev/sda` — writing an image straight onto a block device.
  *
- * Head via `effectiveCommandIndex`, not `parseSegments`: the privilege-prefix-only
- * machine missed a wrapped `env dd of=/dev/sda` (measured in review) while the
- * never-allowed write scan next door caught `env cp` — two dd readers two rules
- * apart must not answer through different head-extraction machines.
+ * Head via `commandHeads`, not the privilege-prefix-only walk an earlier
+ * `parseSegments` used: that missed a wrapped `env dd of=/dev/sda` (measured in
+ * review) while the never-allowed write scan next door caught `env cp` — two dd
+ * readers two rules apart must not answer through different head-extraction
+ * machines.
  */
 function writesToDevice(command: string, dialect: ShellDialect = 'posix'): boolean {
-  return tokenizeSegments(command, dialect).some((words) => {
-    const idx = effectiveCommandIndex(words);
-    return idx !== -1 && stripPath(words[idx]) === 'dd'
-      && words.slice(idx + 1).some((a) => a.startsWith('of=/dev/'));
-  });
+  return anySegmentRuns(command, dialect, (head, args) =>
+    head === 'dd' && args.some((a) => a.startsWith('of=/dev/')));
 }
 
 /**
@@ -1873,12 +1867,8 @@ function isWorldWritableMode(arg: string): boolean {
 
 /** rm, recursive in any spelling, targeting the filesystem root itself. */
 function deletesRoot(command: string, dialect: ShellDialect = 'posix'): boolean {
-  return tokenizeSegments(command, dialect).some((words) => {
-    const idx = effectiveCommandIndex(words);
-    if (idx === -1 || stripPath(words[idx]) !== 'rm') return false;
-    const args = words.slice(idx + 1);
-    return hasRecursiveFlag(args, /[rR]/) && args.some(isRootTarget);
-  });
+  return anySegmentRuns(command, dialect, (head, args) =>
+    head === 'rm' && hasRecursiveFlag(args, /[rR]/) && args.some(isRootTarget));
 }
 
 /**
@@ -1893,12 +1883,8 @@ const DEVICE_FORMATTERS = /^(?:mkfs|mkswap|wipefs)/;
 const DEVICE_FORMATTER_NAMES = new Set(['mke2fs']);
 
 function formatsDevice(command: string, dialect: ShellDialect = 'posix'): boolean {
-  return tokenizeSegments(command, dialect).some((words) => {
-    const idx = effectiveCommandIndex(words);
-    if (idx === -1) return false;
-    const head = stripPath(words[idx]);
-    return DEVICE_FORMATTERS.test(head) || DEVICE_FORMATTER_NAMES.has(head);
-  });
+  return anySegmentRuns(command, dialect, (head) =>
+    DEVICE_FORMATTERS.test(head) || DEVICE_FORMATTER_NAMES.has(head));
 }
 
 /**
@@ -1907,10 +1893,7 @@ function formatsDevice(command: string, dialect: ShellDialect = 'posix'): boolea
  * just as thoroughly, and `nft flush …`, which deletes the whole ruleset.
  */
 function flushesFirewall(command: string, dialect: ShellDialect = 'posix'): boolean {
-  return tokenizeSegments(command, dialect).some((words) => {
-    const idx = effectiveCommandIndex(words);
-    const head = idx === -1 ? '' : stripPath(words[idx]);
-    const args = words.slice(idx + 1);
+  return anySegmentRuns(command, dialect, (head, args) => {
     if (head === 'iptables' || head === 'ip6tables') {
       if (args.includes('-F') || args.includes('--flush')) return true;
       const policy = args.indexOf('-P');
@@ -1932,13 +1915,9 @@ function flushesFirewall(command: string, dialect: ShellDialect = 'posix'): bool
  * `isWorldWritableMode`. `chmod -R 755 /` and `chmod -R u+w /` stay outside.
  */
 function worldWritableRoot(command: string, dialect: ShellDialect = 'posix'): boolean {
-  return tokenizeSegments(command, dialect).some((words) => {
-    const idx = effectiveCommandIndex(words);
-    if (idx === -1 || stripPath(words[idx]) !== 'chmod') return false;
-    const args = words.slice(idx + 1);
-    return hasRecursiveFlag(args, /R/) && args.some((a) => a.startsWith('/'))
-      && args.some(isWorldWritableMode);
-  });
+  return anySegmentRuns(command, dialect, (head, args) =>
+    head === 'chmod' && hasRecursiveFlag(args, /R/) && args.some((a) => a.startsWith('/'))
+      && args.some(isWorldWritableMode));
 }
 
 /**
@@ -1951,12 +1930,8 @@ function worldWritableRoot(command: string, dialect: ShellDialect = 'posix'): bo
  * root chown. `chown -R app:app /srv/app` is ordinary and stays allowed.
  */
 function chownsRoot(command: string, dialect: ShellDialect = 'posix'): boolean {
-  return tokenizeSegments(command, dialect).some((words) => {
-    const idx = effectiveCommandIndex(words);
-    if (idx === -1 || stripPath(words[idx]) !== 'chown') return false;
-    const args = words.slice(idx + 1);
-    return hasRecursiveFlag(args, /R/) && args.some(isRootTarget);
-  });
+  return anySegmentRuns(command, dialect, (head, args) =>
+    head === 'chown' && hasRecursiveFlag(args, /R/) && args.some(isRootTarget));
 }
 
 /**
@@ -1967,12 +1942,8 @@ function chownsRoot(command: string, dialect: ShellDialect = 'posix'): boolean {
  * class (GHSA-5cjr-rc2p-f66f).
  */
 function deletesAbsolutePath(command: string, dialect: ShellDialect = 'posix'): boolean {
-  return tokenizeSegments(command, dialect).some((words) => {
-    const idx = effectiveCommandIndex(words);
-    if (idx === -1 || stripPath(words[idx]) !== 'rm') return false;
-    const args = words.slice(idx + 1);
-    return hasRecursiveFlag(args, /[rR]/) && args.some((a) => a.startsWith('/'));
-  });
+  return anySegmentRuns(command, dialect, (head, args) =>
+    head === 'rm' && hasRecursiveFlag(args, /[rR]/) && args.some((a) => a.startsWith('/')));
 }
 
 /** A forbidden rule, paired with wording a refusal can quote back. */
@@ -2067,40 +2038,12 @@ function redirectTargets(command: string, dialect: ShellDialect): string[] {
 }
 
 /**
- * xargs's own value-taking flags — one tool's option set, enumerable the way
- * `PREFIX_VALUE_FLAGS` holds sudo's. `effectiveCommandIndex` steps a wrapper's
- * flags with *sudo's* set, so `xargs -I {}` leaves `{}` looking like the command
- * and the verb xargs really runs hides behind it (measured in review:
- * `xargs -I {} cp {} /root/.ssh/authorized_keys` passed).
+ * xargs's own value-taking short flags (GNU and BSD), part of its entry in
+ * `WRAPPER_OPTIONS`. Read with sudo's table instead, `xargs -I {}` left `{}`
+ * looking like the command and the verb xargs really runs hid behind it
+ * (measured in review: `xargs -I {} cp {} /root/.ssh/authorized_keys` passed).
  */
-const XARGS_VALUE_FLAGS = new Set(['-I', '-J', '-d', '-E', '-n', '-s', '-P', '-R', '-L', '-S']);
-
-/**
- * The command index for a segment whose wrapper may be `xargs`, which the plain
- * `effectiveCommandIndex` cannot step past. Same walk, one addition; runs
- * alongside the plain index so nothing else changes.
- */
-function indexPastXargsFlags(words: string[]): number {
-  let i = 0;
-  while (i < words.length) {
-    const raw = words[i];
-    const word = stripPath(unquote(raw));
-
-    if (word === 'xargs') {
-      i++;
-      while (i < words.length && words[i].startsWith('-')) {
-        const consumesValue = XARGS_VALUE_FLAGS.has(words[i]);
-        i++;
-        if (consumesValue) i++;
-      }
-      continue;
-    }
-    if (PRIVILEGE_PREFIXES.has(word) || EXEC_WRAPPERS.has(word)) { i++; continue; }
-    if (ASSIGNMENT.test(raw) || raw.startsWith('-') || BARE_NUMERIC.test(raw)) { i++; continue; }
-    return i;
-  }
-  return -1;
-}
+const XARGS_VALUE_FLAGS = ['-I', '-J', '-d', '-E', '-n', '-s', '-P', '-R', '-L', '-S'];
 
 /**
  * The positional operands of the copy family, with every option spelling that
@@ -2149,16 +2092,13 @@ function copyPositionals(args: string[]): string[] {
  * these forms and names the rest as governed by class and approval instead.
  *
  * `env cp …`, `sudo cp …`, `timeout 5 cp …` and `xargs -I {} cp …` reach the
- * verb through `effectiveCommandIndex` and its xargs-stepping sibling.
+ * verb through `commandHeads`, every reading of it.
  */
 function writeVerbTargets(command: string, dialect: ShellDialect): string[] {
   const targets: string[] = [];
   for (const words of tokenizeSegments(command, dialect)) {
-    const heads = [effectiveCommandIndex(words), indexPastXargsFlags(words)]
-      .filter((i, idx, all) => i !== -1 && all.indexOf(i) === idx);
-    for (const idx of heads) {
-      const head = stripPath(words[idx]);
-      const args = words.slice(idx + 1);
+    for (const { index, head } of commandHeads(words)) {
+      const args = words.slice(index + 1);
 
       if (head === 'tee') {
         targets.push(...args.filter((a) => !a.startsWith('-')));
@@ -2363,82 +2303,276 @@ export function extractBinary(command: string, dialect: ShellDialect = 'posix'):
 }
 
 /**
- * The word a segment will actually execute, read past anything that is not it.
- *
- * Distinct from `elevatedBinary`, which answers "does this ask for elevation".
- * This answers "what is the name of the thing that runs", so it can be asked
- * whether that name is knowable at all.
+ * Wrappers that take positional words of their own before the command they
+ * run, and how many: flock's lockfile, chroot's directory, taskset's cpu
+ * mask (0x1, 0-3, a list), perf's subcommand, timeout's duration. Without
+ * this the scan stops at the wrapper's operand and names it as the command —
+ * measured in review: `flock /tmp/lk rm -rf /` and `chroot /mnt rm -rf /` read
+ * `lk`/`mnt` as the head and the never-allowed rule never fired, where the old
+ * text regexes had caught the phrase. The skipped word is gone as a head on
+ * purpose: `flock rm -rf /` treats `rm` as the lockfile it creates, which is
+ * what real flock does with a lone operand.
  */
-function effectiveCommandWord(words: string[]): string | null {
-  const i = effectiveCommandIndex(words);
-  return i === -1 ? null : words[i];
+const WRAPPER_OPERAND_COUNTS: Record<string, number> = Object.assign(
+  Object.create(null) as Record<string, number>,
+  { flock: 1, chroot: 1, taskset: 1, perf: 1, timeout: 1 },
+);
+
+/**
+ * One tool's option words, split by whether each takes the next word as its
+ * value. A word in neither set is one this file does not know, and the scan
+ * reads it both ways (`commandReadings`).
+ */
+interface OptionGrammar {
+  takesValue: ReadonlySet<string>;
+  takesNone: ReadonlySet<string>;
+}
+
+function options(takesValue: string[], takesNone: string[]): OptionGrammar {
+  return { takesValue: new Set(takesValue), takesNone: new Set(takesNone) };
 }
 
 /**
- * The position of that word, for callers that need to read its arguments.
+ * Each wrapper's own options, from its own manual: coreutils 9.5 (env, nice,
+ * stdbuf, timeout, chroot, nohup), util-linux 2.40 (flock, taskset, ionice,
+ * chrt, setsid), findutils 4.9 (xargs), procps-ng 4 (watch), GNU time 1.9, strace
+ * 6 and ltrace 0.7, plus the BSD spellings where they differ (`env -P`,
+ * `chroot -u/-g/-G`, `xargs -J/-R/-S`) and bash's `command`/`exec` builtins.
+ * A wrapper's flags are its own: `-p` is sudo's prompt and takes a value, while
+ * xargs's and time's `-p` take none, and reading one as the other swallowed the
+ * command word (`xargs -p rm -rf /`).
+ *
+ * Long options attached with `=` never take the next word and need no entry.
+ * Optional-argument options (`xargs -i`, `watch -d`) only ever attach theirs,
+ * so they are listed as taking none.
+ */
+const WRAPPER_OPTIONS: Record<string, OptionGrammar> = Object.assign(
+  Object.create(null) as Record<string, OptionGrammar>,
+  {
+    env: options(
+      ['-u', '--unset', '-C', '--chdir', '-S', '--split-string', '-P'],
+      ['-i', '--ignore-environment', '-0', '--null', '-v', '--debug', '-'],
+    ),
+    nice: options(['-n', '--adjustment'], []),
+    ionice: options(
+      ['-c', '--class', '-n', '--classdata', '-p', '--pid', '-P', '--pgid', '-u', '--uid'],
+      ['-t', '--ignore'],
+    ),
+    command: options([], ['-p']),
+    exec: options(['-a'], ['-c', '-l']),
+    setsid: options([], ['-c', '--ctty', '-f', '--fork', '-w', '--wait']),
+    stdbuf: options(['-i', '--input', '-o', '--output', '-e', '--error'], []),
+    timeout: options(
+      ['-s', '--signal', '-k', '--kill-after'],
+      ['-v', '--verbose', '-f', '--foreground', '-p', '--preserve-status'],
+    ),
+    chrt: options(
+      ['-T', '--sched-runtime', '-P', '--sched-period', '-D', '--sched-deadline'],
+      ['-a', '--all-tasks', '-b', '--batch', '-d', '--deadline', '-e', '--ext', '-f', '--fifo',
+        '-i', '--idle', '-o', '--other', '-r', '--rr', '-R', '--reset-on-fork', '-m', '--max',
+        '-p', '--pid', '-v', '--verbose'],
+    ),
+    // `-c`/`--cpu-list` only changes how the mask operand is read; it takes
+    // none of its own, and the mask still fills taskset's one operand slot.
+    taskset: options([], ['-a', '--all-tasks', '-p', '--pid', '-c', '--cpu-list']),
+    xargs: options(
+      [...XARGS_VALUE_FLAGS, '-a', '--arg-file', '--delimiter', '--max-args', '--max-procs',
+        '--max-chars', '--process-slot-var'],
+      ['-0', '--null', '-p', '--interactive', '-r', '--no-run-if-empty', '-t', '--verbose',
+        '-x', '--exit', '-o', '--open-tty', '--show-limits', '-e', '-i', '-l'],
+    ),
+    watch: options(
+      ['-n', '--interval', '-q', '--equexit'],
+      ['-b', '--beep', '-c', '--color', '-C', '--no-color', '-d', '--differences', '-e',
+        '--errexit', '-g', '--chgexit', '-p', '--precise', '-t', '--no-title', '-w',
+        '--no-wrap', '-x', '--exec', '-r', '--no-rerun'],
+    ),
+    strace: options(
+      ['-o', '-e', '-p', '-s', '-S', '-u', '-U', '-a', '-b', '-I', '-X', '-P', '-E', '-O'],
+      ['-c', '-C', '-d', '-D', '-f', '-F', '-h', '-i', '-k', '-n', '-q', '-r', '-t', '-T',
+        '-v', '-V', '-w', '-x', '-y', '-z', '-Z', '-ff', '-tt', '-ttt', '-qq', '-xx', '-yy'],
+    ),
+    ltrace: options(
+      ['-a', '-A', '-D', '-e', '-F', '-l', '-n', '-o', '-p', '-s', '-u', '-w', '-x'],
+      ['-b', '-c', '-C', '-d', '-f', '-h', '-i', '-L', '-r', '-S', '-t', '-tt', '-ttt', '-T', '-V'],
+    ),
+    valgrind: options([], ['-h', '-v', '-q', '-d', '--help', '--version']),
+    flock: options(
+      ['-w', '--wait', '--timeout', '-E', '--conflict-exit-code'],
+      ['-s', '--shared', '-x', '-e', '--exclusive', '-u', '--unlock', '-n', '--nb',
+        '--nonblock', '-o', '--close', '-F', '--no-fork', '--verbose', '-h', '--help',
+        '-V', '--version'],
+    ),
+    chroot: options(['--userspec', '--groups', '-u', '-g', '-G'], ['--skip-chdir']),
+    time: options(
+      ['-o', '--output', '-f', '--format'],
+      ['-p', '--portability', '-a', '--append', '-v', '--verbose', '-q', '--quiet'],
+    ),
+  },
+);
+
+/** `command -v NAME`, `command -V NAME`, `command -pv NAME`: a lookup that runs nothing. */
+const COMMAND_LOOKUP = /^-[pvV]*[vV][pvV]*$/;
+
+/** Whether an option word takes the next word as its value: yes, no, or not known here. */
+function optionTakesValue(owner: string, word: string): boolean | undefined {
+  // `--name=value` carries its own value; `--` ends the options.
+  if (word === '--' || (word.startsWith('--') && word.includes('='))) return false;
+  // The prefixes keep the one shared table they have always been read with.
+  // Reading their other flags both ways would have `sudo -E grep reboot x`
+  // refused outright, as though `-E` took `grep` and `reboot` ran.
+  if (PRIVILEGE_PREFIXES.has(owner)) return PREFIX_VALUE_FLAGS.has(word);
+  const grammar = WRAPPER_OPTIONS[owner];
+  if (grammar === undefined) return undefined;
+  if (grammar.takesValue.has(word)) return true;
+  if (grammar.takesNone.has(word)) return false;
+  if (word.startsWith('--')) return undefined;
+  // `nice -5`, `head -5`: a number as the option itself.
+  if (/^-\d+$/.test(word)) return false;
+  // A short-option cluster, read the way getopt reads it: switches until the
+  // first flag that takes a value, which takes the rest of the word if there is
+  // any (`stdbuf -oL`, `timeout -s9`) and the next word if not (`flock -nw 5`).
+  for (let k = 1; k < word.length; k++) {
+    const flag = `-${word[k]}`;
+    if (grammar.takesValue.has(flag)) return k === word.length - 1;
+    if (!grammar.takesNone.has(flag)) return undefined;
+  }
+  return false;
+}
+
+/**
+ * One way of reading a segment's words: where its command word is (-1 when the
+ * words run out first, or the wrapper runs nothing), and the first privilege
+ * prefix stepped over on the way there, as spelled.
+ */
+interface CommandReading {
+  index: number;
+  prefix: string | null;
+}
+
+interface ScanState {
+  i: number;
+  /** Positional words the last wrapper still takes before its command. */
+  operandsLeft: number;
+  /** The prefix or wrapper whose option words a `-` word belongs to. */
+  owner: string | null;
+  prefix: string | null;
+}
+
+/**
+ * Every reading of where a segment's command word is. The likelier branch at
+ * each fork is walked first, so a reading that guessed "likelier" throughout
+ * comes out before the others that end at a later word.
+ *
+ * Two questions about the words between a wrapper and what it runs have no
+ * answer in the words themselves, and each wrong answer used to lose a command
+ * the never-allowed rules refuse:
+ *
+ *  - whether a wrapper option this file does not know takes the next word as
+ *    its value (`flock --wai 5 /tmp/lk …`, `perf stat -e cycles …`);
+ *  - whether a word sitting in a wrapper's operand slot is the operand or what
+ *    runs (`flock sudo rm -rf /` runs `rm` with `sudo` as the lockfile, where
+ *    earlier releases read `sudo` as the prefix; `timeout rm -rf /` has no
+ *    duration, and earlier releases read `rm` as the command).
+ *
+ * Every answer is followed, and callers ask whether *any* reading runs something
+ * a rule refuses or elevates — so a guess can only add a refusal, never hide
+ * one. The walk is breadth-bounded: a state is a word position plus a little
+ * context, each is visited once, and positions only move forward.
+ *
+ * A bare number fills a pending operand slot (`timeout 5`, `taskset 3`), and is
+ * otherwise skipped as the numeric argument `nice`/`chrt` take before theirs.
+ */
+function commandReadings(words: string[]): CommandReading[] {
+  const readings: CommandReading[] = [];
+  const seen = new Set<string>();
+  const stack: ScanState[] = [];
+  // Pushed last is walked first: each fork pushes its likelier branch last, so
+  // the first reading out is the one that guessed "likelier" at every fork.
+  const push = (state: ScanState): void => {
+    const key = `${state.i}\u0000${state.operandsLeft}\u0000${state.owner}\u0000${state.prefix}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    stack.push(state);
+  };
+  const finish = (index: number, prefix: string | null): void => {
+    if (!readings.some((r) => r.index === index && r.prefix === prefix)) readings.push({ index, prefix });
+  };
+
+  push({ i: 0, operandsLeft: 0, owner: null, prefix: null });
+  while (stack.length > 0) {
+    const s = stack.pop()!;
+    if (s.i >= words.length) {
+      finish(-1, s.prefix);
+      continue;
+    }
+    const raw = words[s.i];
+    const spelled = stripPath(unquote(raw));
+    const word = foldCommandWord(spelled);
+    const next = { ...s, i: s.i + 1 };
+
+    if (raw.startsWith('-')) {
+      if (s.owner === 'command' && COMMAND_LOOKUP.test(raw)) {
+        finish(-1, s.prefix);
+        continue;
+      }
+      const takesValue = s.owner === null ? false : optionTakesValue(s.owner, raw);
+      const consumed = { ...s, i: s.i + 2 };
+      if (takesValue === undefined) {
+        push(consumed);
+        push(next);
+      } else {
+        push(takesValue ? consumed : next);
+      }
+      continue;
+    }
+
+    if (s.operandsLeft > 0) {
+      const asOperand = { ...next, operandsLeft: s.operandsLeft - 1 };
+      // A bare number is the operand (`timeout 5`, `taskset 3`). Any other word
+      // may be the operand or what runs: `flock rm -rf /` has real flock open
+      // `rm` and try to run `-rf`, which only refuses a command that cannot run.
+      if (!BARE_NUMERIC.test(raw)) readWord({ ...s, operandsLeft: 0 }, raw, spelled, word);
+      push(asOperand);
+      continue;
+    }
+    readWord(s, raw, spelled, word);
+  }
+  return readings;
+
+  /** A word that is no wrapper's option or operand: a prefix, a wrapper, a skipped word, or the command. */
+  function readWord(s: ScanState, raw: string, spelled: string, word: string): void {
+    if (PRIVILEGE_PREFIXES.has(word)) {
+      push({ i: s.i + 1, operandsLeft: 0, owner: word, prefix: s.prefix ?? spelled });
+    } else if (EXEC_WRAPPERS.has(word)) {
+      push({ i: s.i + 1, operandsLeft: WRAPPER_OPERAND_COUNTS[word] ?? 0, owner: word, prefix: s.prefix });
+    } else if (ASSIGNMENT.test(raw) || BARE_NUMERIC.test(raw)) {
+      push({ ...s, i: s.i + 1 });
+    } else {
+      finish(s.i, s.prefix);
+    }
+  }
+}
+
+/**
+ * A segment's command word under every reading, with its position — for callers
+ * that read its arguments — and its name folded for the tables (`commandWord`).
  *
  * Deriving the word from the index rather than searching for it afterwards is what keeps
  * `sh x sh -c 'sudo id'` from finding the wrong `sh`.
  */
-/**
- * Wrappers that take positional words of their own before the command they
- * run, and how many: flock's lockfile, chroot's directory, taskset's cpu
- * mask (0x1, 0-3, a list), perf's subcommand. Without this the scan stops at
- * the wrapper's operand and names it as the command — measured in review:
- * `flock /tmp/lk rm -rf /` and `chroot /mnt rm -rf /` read `lk`/`mnt` as the
- * head and the never-allowed rule never fired, where the old text regexes
- * had caught the phrase. The skipped word is gone as a head on purpose:
- * `flock rm -rf /` treats `rm` as the lockfile it creates, which is what
- * real flock does with a lone operand.
- */
-const WRAPPER_OPERAND_COUNTS: Record<string, number> = Object.assign(
-  Object.create(null) as Record<string, number>,
-  { flock: 1, chroot: 1, taskset: 1, perf: 1 },
-);
+interface CommandHead {
+  index: number;
+  head: string;
+}
 
-/**
- * Tracing wrappers whose own value-taking flags are not attached
- * (`strace -o file cmd`, not `-ofile`). PREFIX_VALUE_FLAGS already covers
- * the privilege prefixes' flags inside the same loop.
- */
-const WRAPPER_VALUE_FLAGS: Record<string, Set<string>> = Object.assign(
-  Object.create(null) as Record<string, Set<string>>,
-  {
-    strace: new Set(['-o', '-e', '-p', '-s', '-S']),
-    ltrace: new Set(['-e', '-o', '-p', '-s']),
-  },
-);
-
-function effectiveCommandIndex(words: string[]): number {
-  let i = 0;
-  let wrapperOperandsLeft = 0;
-  while (i < words.length) {
-    const raw = words[i];
-    const word = stripPath(unquote(raw));
-
-    if (PRIVILEGE_PREFIXES.has(word) || EXEC_WRAPPERS.has(word)) {
-      const valueFlags = WRAPPER_VALUE_FLAGS[word];
-      wrapperOperandsLeft = WRAPPER_OPERAND_COUNTS[word] ?? 0;
-      i++;
-      while (i < words.length && words[i].startsWith('-')) {
-        const consumesValue = PREFIX_VALUE_FLAGS.has(words[i]) || (valueFlags?.has(words[i]) ?? false);
-        i++;
-        if (consumesValue) i++;
-      }
-      continue;
-    }
-    if (ASSIGNMENT.test(raw) || raw.startsWith('-') || BARE_NUMERIC.test(raw)) {
-      i++;
-      continue;
-    }
-    if (wrapperOperandsLeft > 0) {
-      wrapperOperandsLeft--;
-      i++;
-      continue;
-    }
-    return i;
+function commandHeads(words: string[]): CommandHead[] {
+  const heads: CommandHead[] = [];
+  for (const { index } of commandReadings(words)) {
+    if (index === -1 || heads.some((h) => h.index === index)) continue;
+    heads.push({ index, head: commandWord(unquote(words[index])) });
   }
-  return -1;
+  return heads;
 }
 
 /**
@@ -2450,11 +2584,14 @@ function effectiveCommandIndex(words: string[]): number {
  * program flag. An allowlisted command is one this file already vouches for as reading
  * rather than running, so its arguments are subjects, not commands — the positive form of
  * the mention-vs-invocation rule at #91. `find` keeps its `-exec` scan, which is separate.
+ *
+ * This answer relaxes a scan rather than adding a refusal, so it needs every reading
+ * of the segment to agree: one that lands on something other than a reader keeps
+ * the carrier scan on.
  */
 function operandsAreData(words: string[]): boolean {
-  const idx = effectiveCommandIndex(words);
-  if (idx === -1) return false;
-  return READERS[stripPath(unquote(words[idx]))]?.operandsAreData === true;
+  const heads = commandHeads(words);
+  return heads.length > 0 && heads.every(({ head }) => READERS[head]?.operandsAreData === true);
 }
 
 /**
@@ -2503,7 +2640,12 @@ function isFlagValue(words: string[], i: number, flags: string[], caseInsensitiv
   if (i === 0) return false;
   const previous = words[i - 1];
   if (!(previous.length > 1 && previous.startsWith('-'))) return false;
-  return flags.some((f) => sameFlag(previous, f, caseInsensitive));
+  if (!flags.some((f) => sameFlag(previous, f, caseInsensitive))) return false;
+  // The flag in front may be a wrapper's own, spelled like the interpreter's:
+  // `xargs -p node -e …` and `time -p node -p …` run `node`, and reading it as
+  // the value of node's `-p` lost the program that follows. A word that is the
+  // command under some reading is invoked there, not handed over as a value.
+  return !commandHeads(words).some(({ index }) => index === i);
 }
 
 /**
@@ -2550,8 +2692,8 @@ interface FlaggedProgram {
  *   whole command line looking for named parameters it recognises and does not stop at
  *   an unrecognised one's value (`-ExecutionPolicy Bypass`) the way a POSIX interpreter
  *   stops at its first positional argument. Only takes effect when `from` is the
- *   segment's *effective* command word — `effectiveCommandIndex(words)`, which reads
- *   past a privilege prefix or an exec wrapper (`env`, `nohup`, `timeout`, …), not merely
+ *   segment's *effective* command word under some reading — `commandHeads(words)`, which
+ *   reads past a privilege prefix or an exec wrapper (`env`, `nohup`, `timeout`, …), not merely
  *   position 0. `from === 0` missed exactly the shape those wrappers exist to describe:
  *   `env pwsh -ExecutionPolicy Bypass -EncodedCommand …` put `pwsh` at index 1, the
  *   tolerance never engaged, and the interpreter loop's own flag-walk gave up at
@@ -2567,7 +2709,8 @@ function programAfterFlag(
   words: string[], from: number, flags: string[], caseInsensitive = false,
   tolerateUnknownWordsAtHead = false,
 ): FlaggedProgram | null {
-  const tolerateUnknownWords = tolerateUnknownWordsAtHead && from === effectiveCommandIndex(words);
+  const tolerateUnknownWords = tolerateUnknownWordsAtHead
+    && commandHeads(words).some(({ index }) => index === from);
   for (let j = from + 1; j < words.length; j++) {
     const word = words[j];
     const exact = flags.find((f) => sameFlag(word, f, caseInsensitive));
@@ -2688,8 +2831,10 @@ const STDIN_PATHS = new Set(['-', '/dev/stdin', '/dev/fd/0', '/proc/self/fd/0'])
  * app.py` out of it: there the pipe carries data, not a program.
  */
 function readsProgramFromStdin(words: string[]): boolean {
-  const idx = effectiveCommandIndex(words);
-  if (idx === -1) return false;
+  return commandHeads(words).some(({ index }) => readsProgramFromStdinAt(words, index));
+}
+
+function readsProgramFromStdinAt(words: string[], idx: number): boolean {
   const bin = stripPath(words[idx]);
   // Interpreters only. awk's one program-from-stdin form is `awk -f -`, already gated as a
   // file flag; every other piped awk reads data, not a program.
@@ -2728,25 +2873,35 @@ function readsProgramFromStdin(words: string[]): boolean {
 /**
  * What this segment's awk program does, or null when it runs no awk program.
  *
- * Keyed on `effectiveCommandIndex` — the word that actually runs — never on any
- * word that happens to say "awk". `readlink -f /usr/bin/awk` and `man awk` name
- * an interpreter without invoking one, and an earlier attempt that scanned every
- * word classified both destructive.
+ * Keyed on `commandHeads` — the word that actually runs — never on any word
+ * that happens to say "awk". `readlink -f /usr/bin/awk` and `man awk` name an
+ * interpreter without invoking one, and an earlier attempt that scanned every
+ * word classified both destructive. When more than one reading lands on awk,
+ * their findings are merged, so the strictest reading's program counts.
  */
 function awkFindings(words: string[]): AwkFindings | null {
-  const idx = effectiveCommandIndex(words);
-  if (idx === -1) return null;
-  if (!AWK_NAMES.has(stripPath(unquote(words[idx])))) return null;
-  // No second `unquote`. `tokenizeSegmentsDetailed` has already resolved shell
-  // quoting, and inside single quotes a backslash is literal — so the program
-  // word arrives exactly as awk will see it. Unquoting again ran
-  // `.replace(/\\(.)/g, '$1')` over the *awk program*, which deleted the
-  // backslash of every escape it contains. Measured, all three ways that broke:
-  // `system("\163udo id")` became `system("163udo id")` and classified `safe`;
-  // `s="\""` collapsed and re-paired the string delimiters so the code between
-  // them was read as string content; and `print "\\"` became an unterminated
-  // string, gating ordinary awk as unreadable.
-  return readAwkInvocation(words.slice(idx + 1));
+  let merged: AwkFindings | null = null;
+  for (const { index, head } of commandHeads(words)) {
+    if (!AWK_NAMES.has(head)) continue;
+    // No second `unquote`. `tokenizeSegmentsDetailed` has already resolved shell
+    // quoting, and inside single quotes a backslash is literal — so the program
+    // word arrives exactly as awk will see it. Unquoting again ran
+    // `.replace(/\\(.)/g, '$1')` over the *awk program*, which deleted the
+    // backslash of every escape it contains. Measured, all three ways that broke:
+    // `system("\163udo id")` became `system("163udo id")` and classified `safe`;
+    // `s="\""` collapsed and re-paired the string delimiters so the code between
+    // them was read as string content; and `print "\\"` became an unterminated
+    // string, gating ordinary awk as unreadable.
+    const findings = readAwkInvocation(words.slice(index + 1));
+    if (findings === null) continue;
+    merged = merged === null ? findings : {
+      commands: [...merged.commands, ...findings.commands],
+      pipedInto: [...merged.pipedInto, ...findings.pipedInto],
+      writesFile: merged.writesFile || findings.writesFile,
+      unreadable: merged.unreadable || findings.unreadable,
+    };
+  }
+  return merged;
 }
 
 /**
@@ -2794,10 +2949,8 @@ function hasUnreadableProgram(command: string, dialect: ShellDialect = 'posix'):
     //    checkpoint `exec=` action spawn a shell for text the helpers emit
     //    into `nestedCommands`, which is what puts an inner elevation above
     //    `destructive`.
-    const cmdIdx = effectiveCommandIndex(words);
-    if (cmdIdx !== -1) {
-      const head = foldCommandWord(stripPath(unquote(words[cmdIdx])));
-      const operands = words.slice(cmdIdx + 1);
+    for (const { index, head } of commandHeads(words)) {
+      const operands = words.slice(index + 1);
       if (RECIPE_RUNNERS.has(head)) return true;
       if (head === 'ssh' && operands.some((w) => !w.startsWith('-'))) return true;
     }
@@ -2839,8 +2992,7 @@ function hasUnreadableProgram(command: string, dialect: ShellDialect = 'posix'):
  */
 function hasUnnameableCommand(command: string, dialect: ShellDialect = 'posix'): boolean {
   for (const words of tokenizeSegments(command, dialect)) {
-    const head = effectiveCommandWord(words);
-    if (head !== null && /[$`]/.test(head)) return true;
+    if (commandHeads(words).some(({ index }) => /[$`]/.test(words[index]))) return true;
   }
   return false;
 }

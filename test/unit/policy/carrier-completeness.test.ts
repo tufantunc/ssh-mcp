@@ -543,7 +543,7 @@ describe('fix round 4: the pwsh tolerance reaches past an exec wrapper, not just
 
   it('does not reopen mention-vs-invocation: pwsh as an unrelated flag value stays safe', () => {
     // The exact shape `from === 0` used to protect, now protected by
-    // `from === effectiveCommandIndex(words)` instead: `pwsh` here is a VALUE
+    // `from` being a reading's command index (`commandHeads`) instead: `pwsh` here is a VALUE
     // of `customtool`'s own `--search` flag, never actually invoked, and
     // `customtool` — not `pwsh` — is the effective command word.
     const command = `customtool --search pwsh -ExecutionPolicy Bypass -EncodedCommand ${encode('sudo id')}`;
