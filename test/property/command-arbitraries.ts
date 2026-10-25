@@ -79,16 +79,15 @@ export const PRIVILEGE_PREFIXES = [
 ];
 
 /**
- * Wrappers in spellings where nothing of the wrapped command is consumed: wrappers whose
- * plain two-word form would take the command as their own operand appear with that
- * operand spelled out (`timeout 5s`, `chrt 10`), and `env`/`stdbuf` also show their
- * assignment/flag forms. A wrapper that needs a free-form operand of its own before the
- * command is outside this vocabulary: the invariant's premise — prefix the command with
- * an exec wrapper that takes no operand — does not hold for that shape.
+ * Wrappers that take no operand before the command they run; `env`/`nice`/`stdbuf` also
+ * show their assignment/flag forms. A wrapper that needs an operand of its own before
+ * the command (a duration, a priority, a path) is outside this vocabulary: the
+ * invariant's premise — prefix the command with an exec wrapper that takes no operand —
+ * does not hold for that shape.
  */
 export const OPERAND_FREE_WRAPPERS = [
   'env', 'env A=1', 'nohup', 'nice', 'nice -5', 'ionice', 'command', 'exec', 'setsid',
-  'stdbuf', 'stdbuf -oL', 'timeout 5s', 'chrt 10', 'xargs', 'watch', 'busybox',
+  'stdbuf', 'stdbuf -oL', 'xargs', 'watch', 'busybox',
   'strace', 'ltrace', 'valgrind', 'time',
 ];
 
@@ -102,20 +101,25 @@ export const SHELL_CONTROL_CHARS = [...';&|<>`$(){}\n\r'];
  * The characters that make quoting a word change what the shell runs, or what this
  * classifier reads: glob characters (quoting stops the expansion), whitespace and the
  * separators (the word stops being split or sequenced), `$` and backtick (substitution),
- * a backslash (escape), `=` (a quoted `NAME=value` is no longer an assignment), and the
- * quote characters themselves (wrapping a word that already carries one would leave the
- * variant's quotes unbalanced). A leading `~` is excluded by the word check: quoted, it
- * is no longer expanded.
+ * parentheses and braces (a word ending in a substitution's `)` would swallow its closer),
+ * a backslash (escape), `=` (a quoted `NAME=value` is no longer an assignment; any `=` is
+ * excluded, which also leaves `--flag=value` unquoted), and the quote characters
+ * themselves (wrapping a word that already carries one would leave the variant's quotes
+ * unbalanced). A leading `~` is excluded by the word check: quoted, it is no longer
+ * expanded.
  */
-const UNQUOTABLE_IN_WORD = /[*?[\]\s;&|<>`$\\='"]/;
+const UNQUOTABLE_IN_WORD = /[*?[\]\s;&|<>`$(){}\\='"]/;
 
 /** Whether quoting `word` cannot change what the shell runs; one definition shared by the generator and the property. */
 export function isQuotableWord(word: string): boolean {
   return word.length > 0 && !word.startsWith('~') && !UNQUOTABLE_IN_WORD.test(word);
 }
 
-/** Characters a free word may be built from; none of them opens a quote or a substitution. */
-const WORD_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./#%@+:-'.split('');
+/**
+ * Characters a free word may be built from; none of them opens a quote or a substitution,
+ * and `#` is left out because a word starting with it begins a shell comment.
+ */
+const WORD_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./%@+:-'.split('');
 
 /** Characters that additionally make a word a glob pattern. */
 const GLOB_CHARS = [...WORD_CHARS, '*', '?', '[', ']'];
@@ -253,12 +257,15 @@ const neverAllowedTemplates = fc.oneof(
 /**
  * Never-allowed shapes whose backslash is the point: a target shell may read it as a
  * path separator (cmd.exe), and the never-allowed check reads both ways. Each entry
- * matches `findForbiddenMatch` on this machine, closed quotes or none.
+ * matches `findForbiddenMatch`. The first group matches under the POSIX reading too;
+ * the second (a Windows path to the binary) matches only under the cmd.exe reading,
+ * so that reading is what catches it.
  */
 const neverAllowedBackslash = fc.constantFrom(
   '\\shutdown -h now', '\\reboot', '\\halt', '\\poweroff',
   '\\\\shutdown -h now', '\\\\reboot', '\\\\iptables -F', '\\\\mkfs.ext4 /dev/sdb1',
   'mkfs.ext4 \\\\dev\\\\sdb1',
+  'tools\\shutdown -h now', 'C:\\bin\\reboot', 'D:\\x\\mkfs.ext4 /dev/sdb1',
 );
 
 /** A single-segment command from the never-allowed list, plain or backslash-spelled. */

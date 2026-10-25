@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import fc from 'fast-check';
 import { PolicyEngine, DEFAULT_RULES } from '../../src/policy/engine.js';
-import { findForbiddenMatch } from '../../src/policy/classifier.js';
+import { findForbiddenMatch, isForbidden } from '../../src/policy/classifier.js';
 import type { PolicyDecision } from '../../src/types.js';
 import { makeProfile } from '../fixtures/profile.js';
 import { CLASS_RANK, fcParams } from './fc-seed.js';
@@ -59,20 +59,21 @@ describe('PolicyEngine invariants (default rules)', () => {
 
   it('denies anything on the never-allowed list, whatever the role, tier or approval policy', () => {
     let hits = 0;
-    let hitsWithBackslash = 0;
+    let windowsOnlyHits = 0;
     fc.assert(
       fc.property(profile, closedCommand, (p, command) => {
         if (findForbiddenMatch(command) === null) return;
         hits++;
-        if (command.includes('\\')) hitsWithBackslash++;
+        if (!isForbidden(command, 'posix')) windowsOnlyHits++;
         expect(engine.evaluate(command, p).decision, command).toBe('deny');
       }),
       fcParams(200),
     );
     expect(hits).toBeGreaterThan(0);
     // The never-allowed check reads a command with a backslash both ways (POSIX and
-    // cmd.exe); some sampled matches carry one, so that reading is exercised here too.
-    expect(hitsWithBackslash).toBeGreaterThan(0);
+    // cmd.exe); some sampled matches only the cmd.exe reading catches, so it is
+    // exercised here too.
+    expect(windowsOnlyHits).toBeGreaterThan(0);
   });
 
   it('denies an SFTP write to a never-allowed path, whatever the role, tier or approval policy', () => {

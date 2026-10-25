@@ -15,7 +15,9 @@ import {
 // never produces a privileged or a read-only command makes every "never lowers" property
 // pass while asserting nothing, so its reach is a test of its own.
 
-const sample = <T>(arb: fc.Arbitrary<T>) => fc.sample(arb, { numRuns: 300, seed: FC_DEFAULT_SEED });
+// Seeded like the properties, so a private FC_SEED run checks the generators' reach on
+// that seed too.
+const sample = <T>(arb: fc.Arbitrary<T>) => fc.sample(arb, fcParams(300));
 
 describe('fcParams', () => {
   const saved = process.env.FC_SEED;
@@ -133,7 +135,7 @@ describe('quotableWord', () => {
     // leave the quoted variant's quotes unbalanced: `ls a*` expands, `A=1 cmd` stops
     // being an assignment when quoted, `ls '~'` no longer expands the home directory.
     for (const w of ['a*b', 'a?b', 'a[b', 'a b', 'a;b', 'a&b', 'a|b', 'a<b', 'a>b', 'a$b',
-      'a`b', 'a\\b', 'A=1', "'q'", '"q"', '~x']) {
+      'a`b', 'a\\b', 'A=1', "'q'", '"q"', '~x', '/tmp)', 'a(b', '{a}']) {
       expect(isQuotableWord(w), w).toBe(false);
     }
     expect(isQuotableWord(''), 'the empty word adds an argument when quoted').toBe(false);

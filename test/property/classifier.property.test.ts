@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import fc from 'fast-check';
-import { classifyCommand, findForbiddenMatch } from '../../src/policy/classifier.js';
+import { classifyCommand, findForbiddenMatch, isForbidden } from '../../src/policy/classifier.js';
 import type { CommandClass } from '../../src/types.js';
 import { atLeast, CLASS_RANK, fcParams } from './fc-seed.js';
 import {
@@ -120,23 +120,23 @@ describe('classifyCommand invariants', () => {
 
   it('classifies anything on the never-allowed list at least destructive', () => {
     let hits = 0;
-    let hitsWithBackslash = 0;
+    let windowsOnlyHits = 0;
     let runs = 0;
     fc.assert(
       fc.property(closedCommand, (command) => {
         runs++;
         if (findForbiddenMatch(command) === null) return;
         hits++;
-        if (command.includes('\\')) hitsWithBackslash++;
+        if (!isForbidden(command, 'posix')) windowsOnlyHits++;
         expect(atLeast(classOf(command), 'destructive'), command).toBe(true);
       }),
       fcParams(1000),
     );
-    // Without matches this property asserts nothing; the generator weights them in. The
-    // backslash shapes are counted separately so the second reading of a command with a
-    // backslash (cmd.exe's) is exercised too, not only the POSIX default.
+    // Without matches this property asserts nothing; the generator weights them in.
+    // Matches only the cmd.exe reading catches are counted separately, so that reading
+    // is exercised too, not only the POSIX default.
     expect(hits / runs).toBeGreaterThanOrEqual(0.01);
-    expect(hitsWithBackslash).toBeGreaterThan(0);
+    expect(windowsOnlyHits).toBeGreaterThan(0);
   });
 
   it('never classifies a command containing a shell control character as read-only', () => {
