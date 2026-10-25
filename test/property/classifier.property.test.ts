@@ -34,9 +34,12 @@ describe('classifyCommand invariants', () => {
   });
 
   it('never throws on deeply nested substitutions', () => {
-    // Recursion is capped inside the classifier; this checks the cap holds well past it.
+    // Recursion is capped inside the classifier (depth 8); this checks the cap holds well
+    // past it. Cost grows linearly with depth even past the cap (about 5 ms per sample at
+    // 50 locally, ten times that on a loaded CI runner), so 20 is the ceiling: past the
+    // cap, inside vitest's per-test timeout.
     fc.assert(
-      fc.property(fc.integer({ min: 1, max: 50 }), simpleCommand, (depth, inner) => {
+      fc.property(fc.integer({ min: 1, max: 20 }), simpleCommand, (depth, inner) => {
         const whole = classOf(`${'echo $('.repeat(depth)}${inner}${')'.repeat(depth)}`);
         expect(CLASSES).toContain(whole);
         // Carrying a command through substitutions never hides what it is, at any depth.
