@@ -257,14 +257,19 @@ const neverAllowedTemplates = fc.oneof(
 /**
  * Never-allowed shapes whose backslash is the point: a target shell may read it as a
  * path separator (cmd.exe), and the never-allowed check reads both ways. Each entry
- * matches `findForbiddenMatch`. The first group matches under the POSIX reading too;
- * the second (a Windows path to the binary) matches only under the cmd.exe reading,
- * so that reading is what catches it.
+ * matches `findForbiddenMatch`, and the POSIX reading catches these too.
  */
 const neverAllowedBackslash = fc.constantFrom(
   '\\shutdown -h now', '\\reboot', '\\halt', '\\poweroff',
   '\\\\shutdown -h now', '\\\\reboot', '\\\\iptables -F', '\\\\mkfs.ext4 /dev/sdb1',
   'mkfs.ext4 \\\\dev\\\\sdb1',
+);
+
+/**
+ * Never-allowed commands named by a Windows path to the binary: only the cmd.exe reading
+ * catches these, so a property that counts them shows that reading is exercised.
+ */
+const neverAllowedWindowsPath = fc.constantFrom(
   'tools\\shutdown -h now', 'C:\\bin\\reboot', 'D:\\x\\mkfs.ext4 /dev/sdb1',
 );
 
@@ -272,6 +277,7 @@ const neverAllowedBackslash = fc.constantFrom(
 const neverAllowedSegment = fc.oneof(
   { weight: 6, arbitrary: neverAllowedTemplates },
   { weight: 3, arbitrary: neverAllowedBackslash },
+  { weight: 3, arbitrary: neverAllowedWindowsPath },
 );
 
 /** A command that carries another through `$(…)`, backticks or a quoted `$(…)`, one level deep. */
