@@ -6,6 +6,10 @@
 
 - [`a66f429`](https://github.com/tufantunc/ssh-mcp/commit/a66f4298983ea366f2b3173ec2baebdcd2864e89) Thanks [@tufantunc](https://github.com/tufantunc)! - `fix(policy)`: the command classifier reads a command word the same way whether it carries a directory part, a Windows executable suffix or a different case, and reads past the words an exec wrapper takes before the command it runs, using each wrapper's own options. Where those words can be read more than one way, the strictest reading decides. A command that relied on the previous defaults may now prompt for approval, or be refused outright under a profile that does not grant the class it earns. `command -v NAME` and `command -V NAME` are read as the lookups they are and no longer take the class of `NAME`.
 
+### Security
+
+- Fixed [GHSA-x567-334m-mr3c](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-x567-334m-mr3c): a privilege prefix or a never-allowed command placed after an exec wrapper's own operands (the lockfile of `flock`, the directory of `chroot`, the cpu mask of `taskset`, a flag value such as `strace -o FILE`), or a command word spelled with a Windows `.exe` suffix or in another case, classified `safe` — the one class the default `ask-destructive` policy never prompts on — so it ran with no approval. The classifier now reads past each wrapper's own words in one shared walk, takes the strictest reading where those words are ambiguous, and folds the directory part, the `.exe` suffix and case before every table lookup. Found internally through property testing. Affected: `<= 2.21.0`.
+
 ## 2.21.0
 
 ### Minor Changes
