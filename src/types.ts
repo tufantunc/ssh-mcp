@@ -2,6 +2,9 @@
 
 export type AuthMethod = 'agent' | 'key' | 'password' | 'keychain';
 export type ApprovalMode = 'auto' | 'ask-destructive' | 'ask-all' | 'deny' | 'client-tool';
+
+/** See Profile.keyboardInteractive. */
+export type KeyboardInteractiveMode = 'off' | 'empty' | 'password';
 /** Which end of a command's output survives the `maxOutputBytes` cap. */
 export type OutputTruncation = 'head' | 'tail';
 
@@ -28,6 +31,27 @@ export interface Profile {
   readOnly: boolean;
   approvalPolicy: ApprovalMode;
   cert: boolean;
+  /**
+   * Whether to offer the `keyboard-interactive` method, and what to answer. Unset means `off`.
+   *
+   * - `off`: never offered. ssh2 only tries the method when asked, and a profile that does not
+   *   need it should not send an extra attempt to a server that counts failed logins.
+   * - `empty`: offered, every prompt answered with `''`. For a server that accepts the password
+   *   with partial success and then runs one more round with no prompts (Dell iDRAC7/8). A real
+   *   question gets `''`, so the login fails at once instead of waiting for a person.
+   * - `password`: as `empty`, except that a round of exactly one hidden prompt that asks for a
+   *   password is answered with the profile's password, once per login. For a server that takes
+   *   passwords only through keyboard-interactive, such as VMware ESXi with
+   *   `PasswordAuthentication no`. Anything else (a one-time code, several prompts, a prompt that
+   *   echoes, a second password round) still gets `''`, so the password never reaches a question
+   *   it was not meant for and a wrong one is not retried.
+   */
+  keyboardInteractive?: KeyboardInteractiveMode;
+  /**
+   * Ceiling, in milliseconds, on connecting and logging in. Defaults to 20000. Raise it for a
+   * host with a slow login: an iDRAC7 took 10 to 40 s to accept one.
+   */
+  connectTimeoutMs?: number;
   /**
    * Send `AI_AGENT=ssh-mcp` to this host on every channel opened for a command.
    *

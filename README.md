@@ -325,6 +325,8 @@ readOnly = false
 approvalPolicy = "ask-all"
 cert = false                        # SSH CA cert auth — auto-detects keyRef-cert.pub
 announceAgent = true                # Send AI_AGENT=ssh-mcp to this host (see below); clear it for a host you do not control
+keyboardInteractive = "off"         # "empty": answer keyboard-interactive rounds with '' (Dell iDRAC7/8); "password": also answer one hidden Password prompt with the password (VMware ESXi with PasswordAuthentication no)
+connectTimeoutMs = 20000            # ceiling on connecting and logging in; raise it for a host with a slow login
 sessionMaxPerConnection = 3         # per-profile override
 sessionIdleTimeoutMs = 300000       # stricter for prod
 commandQuotaPerDay = 200            # per-profile override
@@ -500,7 +502,7 @@ so no tool call sees part of each. For each open connection, by profile name:
 |---|---|
 | `role`, `group`, `approvalPolicy`, `readOnly`, `commandQuotaPerDay`, `maxChars`, `transferMaxBytes`, `transferTimeoutMs`, or the `[policy]` section | The connection stays open; the change applies from its next command |
 | `workdir`, `tty`, `timeout`, `maxOutputBytes`, `outputTruncation`, `announceAgent`, `sessionMaxPerConnection`, `sessionIdleTimeoutMs`, `sessionBackgroundMaxMs` | The connection stays open; the new values apply to new sessions and commands, and the report names these fields |
-| `host`, `port`, `user`, `auth`, `keyRef`, `keychainEntry`, `cert`, `via`, `trustedHostKey` | The connection closes with its sessions; the next call connects with the new profile |
+| `host`, `port`, `user`, `auth`, `keyRef`, `keychainEntry`, `cert`, `via`, `trustedHostKey`, `keyboardInteractive`, `connectTimeoutMs` | The connection closes with its sessions; the next call connects with the new profile |
 | the profile was removed | The connection closes with its sessions |
 
 A connection that runs through a bastion that is closing closes too, and so does anything

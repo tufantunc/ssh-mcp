@@ -12,6 +12,8 @@ export const CONNECTION_FIELDS: readonly (keyof Profile)[] = [
   'cert',
   'via',
   'trustedHostKey',
+  'keyboardInteractive',
+  'connectTimeoutMs',
 ];
 
 /** Fixed when a session opens: the connection survives, the change is reported by name. */

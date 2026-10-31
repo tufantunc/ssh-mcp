@@ -12,6 +12,7 @@ import { openWithRetry } from './channel-retry.js';
 import { terminateChannel, COULD_NOT_SIGNAL } from './channel-signal.js';
 import { appendCapped, finalizeCapped } from './output-buffer.js';
 import { OperatorError } from '../errors.js';
+import { keyboardInteractiveAnswers } from './keyboard-interactive.js';
 
 /** Fixed text: a reload-closed connection's refusal names nothing from the config. */
 export const RETIRED_BY_RELOAD = 'This connection was closed by a configuration reload; retry the call.';
@@ -99,6 +100,9 @@ export function stopAndDescribe(
   span.setAttribute('ssh.unstopped', !dispatched);
   return dispatched ? '' : COULD_NOT_SIGNAL;
 }
+
+/** How long connecting and logging in may take unless the profile says otherwise. */
+const DEFAULT_CONNECT_TIMEOUT_MS = 20_000;
 
 export class SSHConnection {
   /** Replaced in place by a config reload; see replaceProfile. */
@@ -268,13 +272,14 @@ export class SSHConnection {
         fn();
       };
 
+      const connectTimeoutMs = this.profile.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
       const timeoutId = setTimeout(() => {
         settle(() => {
           try { client.end(); } catch { /* already gone */ }
           if (isCurrent()) this.client = null;
           reject(new Error('SSH connection timeout'));
         });
-      }, 20000);
+      }, connectTimeoutMs);
 
       client.on('ready', () => {
         settle(() => {
@@ -310,6 +315,23 @@ export class SSHConnection {
       client.on('end', onDisconnect('ended'));
       client.on('close', onDisconnect('closed'));
 
+      const kbdMode = this.profile.keyboardInteractive ?? 'off';
+      if (kbdMode !== 'off') {
+        // See Profile.keyboardInteractive. The password goes out at most once per login: a second
+        // password round means the first answer was refused, and retrying it only burns attempts
+        // against the server's failed-login limit.
+        let passwordSent = false;
+        client.on('keyboard-interactive', (_name, _instructions, _lang, prompts, finish) => {
+          const answers = keyboardInteractiveAnswers(
+            kbdMode,
+            prompts,
+            passwordSent ? undefined : this.credentials.password,
+          );
+          if (answers.length === 1 && answers[0] !== '') passwordSent = true;
+          finish(answers);
+        });
+      }
+
       const connectConfig: ConnectConfig = {
         host: this.profile.host,
         port: this.profile.port,
@@ -332,7 +354,8 @@ export class SSHConnection {
             this.profile.trustedHostKey,
           );
         },
-        readyTimeout: 20000,
+        readyTimeout: connectTimeoutMs,
+        tryKeyboard: kbdMode !== 'off',
         keepaliveInterval: 15000,
         keepaliveCountMax: 3,
       };

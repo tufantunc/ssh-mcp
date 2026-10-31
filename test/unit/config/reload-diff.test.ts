@@ -58,6 +58,8 @@ const FIELD_CLASS: Record<keyof Profile, { cls: FieldClass; changed: unknown }> 
   keyRef: { cls: 'connection', changed: 'k2' },
   keychainEntry: { cls: 'connection', changed: 'kc2' },
   cert: { cls: 'connection', changed: true },
+  keyboardInteractive: { cls: 'connection', changed: 'password' },
+  connectTimeoutMs: { cls: 'connection', changed: 90000 },
   via: { cls: 'connection', changed: 'jump2' },
   trustedHostKey: { cls: 'connection', changed: 'SHA256:def' },
   workdir: { cls: 'session', changed: '/srv/app' },

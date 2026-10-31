@@ -31,6 +31,52 @@ auth = "password"
     expect(config.profiles[0].sessionMaxPerConnection).toBe(5);
   });
 
+  it('reads keyboardInteractive and connectTimeoutMs per profile, unset by default', async () => {
+    const path = await cfg.write(`
+[[profiles]]
+name = "plain"
+host = "a"
+user = "u"
+
+[[profiles]]
+name = "bmc"
+host = "b"
+user = "u"
+keyboardInteractive = "password"
+connectTimeoutMs = 90000
+`);
+    const { config } = await loadConfigWithDigest(path);
+    const [plain, bmc] = config.profiles;
+    expect(plain.keyboardInteractive).toBeUndefined();
+    expect(plain.connectTimeoutMs).toBeUndefined();
+    expect(bmc.keyboardInteractive).toBe('password');
+    expect(bmc.connectTimeoutMs).toBe(90000);
+  });
+
+  it('refuses a keyboardInteractive mode it does not know, and the old boolean', async () => {
+    for (const value of ['"always"', 'true']) {
+      const path = await cfg.write(`
+[[profiles]]
+name = "dev"
+host = "localhost"
+user = "u"
+keyboardInteractive = ${value}
+`);
+      await expect(loadConfigWithDigest(path)).rejects.toThrow();
+    }
+  });
+
+  it('refuses a connectTimeoutMs that cannot work', async () => {
+    const path = await cfg.write(`
+[[profiles]]
+name = "dev"
+host = "localhost"
+user = "u"
+connectTimeoutMs = 0
+`);
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/connectTimeoutMs/);
+  });
+
   // Regression: [defaults] used to be validated but only two session keys were
   // ever merged into profiles, so a documented default silently did nothing —
   // an approvalMode that never applies is a security downgrade, not a papercut.

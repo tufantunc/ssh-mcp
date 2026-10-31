@@ -182,6 +182,12 @@ export const profileSchema = z.object({
   role: z.string().default('operator'),
   readOnly: z.boolean().default(false),
   cert: z.boolean().default(false),
+  // Opt-in and left unset by default (= 'off'), so a profile that does not need it never sends an
+  // extra attempt to a server that counts failed logins. See Profile.keyboardInteractive.
+  keyboardInteractive: z.enum(['off', 'empty', 'password']).optional(),
+  // Per profile rather than in [defaults]: how long a login takes is a property of the host.
+  // Capped at 2^31-1, the largest delay `setTimeout` honours.
+  connectTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
   // A schema-level default rather than a [defaults] entry, like tty/readOnly/cert
   // above: which hosts an operator trusts with the announcement is a property of
   // the individual host, not something worth setting globally and overriding per
