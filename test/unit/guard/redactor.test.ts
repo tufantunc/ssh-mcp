@@ -122,3 +122,108 @@ describe('literal secrets (GHSA-9m75-x2ch-j4jr)', () => {
     expect(result).toBe('cat dog');
   });
 });
+
+describe('assignment masking (GHSA-95pj-qcm9-m3m9)', () => {
+  it('masks short low-entropy credentials under sensitive field names', () => {
+    // The reported gap: every value-keyed layer (token shapes, entropy,
+    // literals) whiffs on a 6-char value; only the field name says "secret".
+    expect(redactText('webhook_token=abc123', { entropyScan: true }))
+      .toBe('webhook_token=[REDACTED:assignment:6]');
+    expect(redactText('password="demo123"', { entropyScan: true }))
+      .toBe('password="[REDACTED:assignment:7]"');
+    expect(redactText("option wifi_psk 'sample123'", { entropyScan: true }))
+      .toBe("option wifi_psk '[REDACTED:assignment:9]'");
+  });
+
+  it('masks env-style and spaced assignments, preserving surroundings', () => {
+    const input = [
+      '# deployment config',
+      'export DB_PASSWORD=hunter2',
+      'listen=127.0.0.1',
+      "client_secret = 'shhh'",
+    ].join('\n');
+    const expected = [
+      '# deployment config',
+      'export DB_PASSWORD=[REDACTED:assignment:7]',
+      'listen=127.0.0.1',
+      "client_secret = '[REDACTED:assignment:4]'",
+    ].join('\n');
+    expect(redactText(input)).toBe(expected);
+  });
+
+  it('masks UCI option/list lines and the exact wifi key name', () => {
+    expect(redactText("option key 'wpa-passphrase'", { entropyScan: true }))
+      .toBe("option key '[REDACTED:assignment:14]'");
+    expect(redactText("option 'password' 'quoted-name'", { entropyScan: true }))
+      .toBe("option 'password' '[REDACTED:assignment:11]'");
+    expect(redactText("list server_password 'v@lue!'", { entropyScan: true }))
+      .toBe("list server_password '[REDACTED:assignment:6]'");
+    expect(redactText('option channel 36')).toBe('option channel 36');
+  });
+
+  it('masks known key compounds but not arbitrary key-suffixed settings', () => {
+    expect(redactText('private_key="short1"')).toBe('private_key="[REDACTED:assignment:6]"');
+    expect(redactText('api-key=topsecret')).toBe('api-key=[REDACTED:assignment:9]');
+    expect(redactText('persist_key=no')).toBe('persist_key=no');
+    expect(redactText('cache_key=v1')).toBe('cache_key=v1');
+  });
+
+  it('masks the field after uci-show dotted paths', () => {
+    expect(redactText("wireless.default_radio0.key='secret123'"))
+      .toBe("wireless.default_radio0.key='[REDACTED:assignment:9]'");
+    expect(redactText("dhcp.lan.password_min_length=8"))
+      .toBe("dhcp.lan.password_min_length=8");
+  });
+
+  it('masks token query parameters without touching the rest of the URL', () => {
+    expect(redactText('https://x.example/cb?token=abc123&state=xyz'))
+      .toBe('https://x.example/cb?token=[REDACTED:assignment:6]&state=xyz');
+  });
+
+  it('keeps trailing list separators out of the mask', () => {
+    expect(redactText('password=abc123, reconnect=true'))
+      .toBe('password=[REDACTED:assignment:6], reconnect=true');
+  });
+
+  it('leaves advisory-listed false positives untouched', () => {
+    const input = [
+      'password_min=8',
+      'passwordauth=yes',
+      'PasswordAuthentication=yes',
+      'smtp_sasl_password_maps=hash:/etc/postfix/sasl_passwd',
+    ].join('\n');
+    expect(redactText(input, { entropyScan: true })).toBe(input);
+  });
+
+  it('leaves ordinary config and prose untouched', () => {
+    const input = [
+      'server_name=example.com',
+      "list listen_addr '0.0.0.0'",
+      'ssl_verify=on',
+      'max_tokens=4096',
+      'The option list contains four items.',
+    ].join('\n');
+    expect(redactText(input, { entropyScan: true })).toBe(input);
+  });
+
+  it('skips empty values', () => {
+    expect(redactText('password=')).toBe('password=');
+    expect(redactText('password=""')).toBe('password=""');
+  });
+
+  it('does not double-mask values already caught by earlier layers', () => {
+    const patternResult = redactText('api_key = "0123456789abcdef0123456789"');
+    expect(patternResult).toContain('[REDACTED:generic-api-key');
+    expect(patternResult).not.toContain('assignment');
+
+    const entropyResult = redactText('api_token=xK7pQ2mNvR4wL8jF3hB6cY1dZ5aG0tS9eU', { entropyScan: true });
+    expect(entropyResult).toBe('[REDACTED:entropy:44]');
+  });
+
+  it('runs after literal secrets so prose occurrences stay masked', () => {
+    // If assignment masking ran first, it would hide the only findable copy of
+    // the secret and the literal layer would miss the prose mention.
+    const result = redactText('password=hunter2 and prose hunter2', { literalSecrets: ['hunter2'] });
+    expect(result).toBe('password=[REDACTED:secret:7] and prose [REDACTED:secret:7]');
+  });
+});

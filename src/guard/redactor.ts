@@ -17,6 +17,71 @@ const REGEX_PATTERNS: { name: string; pattern: RegExp }[] = [
   { name: 'generic-api-key', pattern: /(?:api[_-]?key|api[_-]?secret)["'\s]*[:=]\s*["']([A-Za-z0-9_\-]{20,})["']/gi },
 ];
 
+// Field-name-indicated secrets in plaintext assignments (GHSA-95pj-qcm9-m3m9).
+// Every layer above keys off the VALUE's shape (token form, entropy, known
+// literal), so a short low-entropy value slipped through unless the profile
+// happened to list it. These key off the NAME instead: `name=value` in
+// env/INI/UCI-set style (quoted or bare) and OpenWrt `option|list name 'value'`
+// lines are masked when the field name itself indicates a secret.
+const ASSIGNMENT_EQ_PATTERN =
+  /(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9_.-]{0,63})\s*=\s*(?:"([^"\n]*)"|'([^'\n]*)'|([^\s"'#&\n]+))/g;
+const ASSIGNMENT_UCI_PATTERN =
+  /\b(?:option|list)\s+['"]?([A-Za-z][A-Za-z0-9_.-]{0,63})['"]?\s+(?:"([^"\n]*)"|'([^'\n]*)'|([^\s'"&\n]+))/gi;
+
+// A name is sensitive when its last `_`/`-` segment is a bare secret word
+// (`db_pass`, `wifi_psk`, `client_secret`) or when the whole name is a known
+// key compound (`private_key`, `api-key`). Suffix-matching `key` itself is
+// deliberately avoided: `persist_key`, `cache_key`, `primary_key` are ordinary
+// settings, and their FP risk outweighs the rare real secret they'd catch.
+const ASSIGNMENT_SECRET_SEGMENTS = new Set([
+  'password', 'passwd', 'pass', 'passphrase', 'secret', 'token', 'psk',
+]);
+const ASSIGNMENT_SECRET_NAMES = new Set([
+  'key', 'apikey', 'accesskey', 'privatekey', 'secretkey', 'clientkey',
+  'sharedkey', 'authkey', 'signingkey', 'masterkey', 'encryptionkey',
+  'presharedkey', 'wifikey', 'wpakey',
+]);
+
+function isSensitiveAssignmentName(name: string): boolean {
+  // Dots are namespace separators (uci-show `wireless.radio0.key`), not part
+  // of the field name; only the tail names the field.
+  const field = name.slice(name.lastIndexOf('.') + 1);
+  const segments = field.toLowerCase().split(/[_.-]+/).filter(Boolean);
+  if (segments.length === 0) return false;
+  if (ASSIGNMENT_SECRET_SEGMENTS.has(segments[segments.length - 1])) return true;
+  return ASSIGNMENT_SECRET_NAMES.has(segments.join(''));
+}
+
+function maskAssignmentMatch(
+  full: string,
+  name: string,
+  doubleQuoted: string | undefined,
+  singleQuoted: string | undefined,
+  bare: string | undefined,
+): string {
+  const quoted = doubleQuoted !== undefined ? doubleQuoted : singleQuoted;
+  const raw = quoted !== undefined ? quoted : bare ?? '';
+  if (!raw || raw.startsWith('[REDACTED:') || !isSensitiveAssignmentName(name)) {
+    return full;
+  }
+  // A trailing `,`/`;` in a bare value is list syntax, not part of the secret.
+  const value = quoted !== undefined ? raw : raw.replace(/[,;]+$/, '');
+  if (!value) return full;
+  const valueStart = quoted !== undefined ? full.length - raw.length - 1 : full.length - raw.length;
+  return full.slice(0, valueStart) + `[REDACTED:assignment:${value.length}]` +
+    full.slice(valueStart + value.length);
+}
+
+function maskSensitiveAssignments(text: string): string {
+  const apply = (...args: unknown[]) => {
+    const [full, name, dq, sq, bare] = args as [string, string, string | undefined, string | undefined, string | undefined];
+    return maskAssignmentMatch(full, name, dq, sq, bare);
+  };
+  return text
+    .replace(ASSIGNMENT_EQ_PATTERN, apply)
+    .replace(ASSIGNMENT_UCI_PATTERN, apply);
+}
+
 function shannonEntropy(str: string): number {
   if (!str || str.length < 20) return 0;
   const freq = new Map<string, number>();
@@ -72,6 +137,10 @@ export function redactText(text: string, opts: RedactOptions = {}): string {
       result = result.split(secret).join(`[REDACTED:secret:${secret.length}]`);
     }
   }
+
+  // Last: masking an assignment's value before the literal layer would hide
+  // the only findable copy of a configured secret and spare prose mentions.
+  result = maskSensitiveAssignments(result);
 
   return result;
 }
