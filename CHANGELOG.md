@@ -1,5 +1,11 @@
 # ssh-mcp
 
+## 2.22.2
+
+### Patch Changes
+
+- [`c8040ff`](https://github.com/tufantunc/ssh-mcp/commit/c8040ffec63c363f61f76bb10715168cee7c91ce) Thanks [@tufantunc](https://github.com/tufantunc)! - Mask short, low-entropy credentials in plaintext configuration assignments (`name=value`, UCI `option name 'value'`) during output redaction when the field name indicates a secret.
+
 ## 2.22.1
 
 ### Patch Changes
