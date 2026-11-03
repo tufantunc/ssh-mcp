@@ -6,6 +6,10 @@
 
 - [`c8040ff`](https://github.com/tufantunc/ssh-mcp/commit/c8040ffec63c363f61f76bb10715168cee7c91ce) Thanks [@tufantunc](https://github.com/tufantunc)! - Mask short, low-entropy credentials in plaintext configuration assignments (`name=value`, UCI `option name 'value'`) during output redaction when the field name indicates a secret.
 
+### Security
+
+- Fixed [GHSA-95pj-qcm9-m3m9](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-95pj-qcm9-m3m9): every redaction layer keyed off the value's shape — known token patterns, the entropy scan, configured literal secrets — so a short, low-entropy credential under a sensitive field name (`webhook_token=abc123`, `password="demo123"`, OpenWrt `option wifi_psk 'sample123'`) passed `redactText()` unchanged into file reads, command output, session output and audit logs. Plaintext assignments whose field name indicates a secret — the last `_`/`-` segment is `password`, `passwd`, `pass`, `passphrase`, `secret`, `token` or `psk`, or the name is a known key compound (`key`, `private_key`, `api-key`, …), covering UCI `option`/`list` lines and the dotted tails of `uci show` — are now masked, while `password_min`, `PasswordAuthentication`, `persist_key` and `smtp_sasl_password_maps` stay untouched. Reported by @jbdaddy04. Affected: `<= 2.22.1`.
+
 ## 2.22.1
 
 ### Patch Changes
