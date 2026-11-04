@@ -6,6 +6,10 @@
 
 - [`d930b2f`](https://github.com/tufantunc/ssh-mcp/commit/d930b2ff58e1d05d5fa2b3812fc520e5fdb69bb9) Thanks [@tufantunc](https://github.com/tufantunc)! - `fix(policy)`: the command classifier reads option values and environment assignments that carry a command — `git -c`, `apt -o`, `scp -o`, `rsync --rsync-path=`, `tar --use-compress-program=` and `GIT_SSH_COMMAND`-style prefixes — whether the value is attached with `=`, quoted, or glued to its key. A command that relied on the previous default may now prompt for approval, or be refused outright under a profile that does not grant the class it earns.
 
+### Security
+
+- Fixed [GHSA-5m7x-xwpc-pp79](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-5m7x-xwpc-pp79): twenty spellings reached class `safe` — the one class the default ask-destructive policy never prompts on, and the one an `operator` holds on `prod` — through an option value: `git -c core.pager="sudo id"`, `apt -o Dpkg::Pre-Invoke::=`, `scp -o ProxyCommand=`, `less +"!…"`, `cpan -e`, the attached `--flag=value` spellings of `rsync --rsync-path`/`--rsh` and `tar --use-compress-program`/`--to-command`, and command-bearing environment prefixes (`GIT_SSH_COMMAND="sudo id" git fetch`, `EDITOR=… crontab -e`). Each hands `sudo …` to something that runs it, while the separated spellings of the same options already classified `privileged`. The operand scan now strips a key glued to its payload, reads a value attached with `=` under the same rule as the separated one, and — for the variable names a documented consumer execs — reads the value as the command it names; an assignment under any other name stays data. Reported by @eliteaja11-dev. Affected: `<= 2.22.2`.
+
 ## 2.22.2
 
 ### Patch Changes
