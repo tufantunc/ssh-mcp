@@ -246,3 +246,96 @@ describe('exec carriers and privilege brokers (GHSA-cm4c-4q74-mgmj)', () => {
     expect(b).toBeLessThan(Math.max(a * 300, 100));
   });
 });
+
+/**
+ * GHSA-5m7x-xwpc-pp79: elevation reached class `safe` through an option
+ * VALUE. Twenty payloads across git, apt/apt-get, scp, sftp, less, cpan,
+ * rsync, tar and four environment variables — each hands `sudo …` to
+ * something that runs it (git runs core.pager, alias.*, credential.helper
+ * through the shell; apt runs Pre-Invoke hooks through /bin/sh; rsync execs
+ * --rsync-path remotely and --rsh locally; tar execs its compress and
+ * to-command programs; less +!cmd is a shell-out; an EDITOR/PAGER name is
+ * exec'd by the tool that consults it).
+ *
+ * Two causes, both in how a value is read:
+ *
+ *  - the operand reach of nestedCommands() pushed the payload with the
+ *    carrier's key still glued to its first word — `core.pager=sudo id`,
+ *    `+!sudo id`, `system("sudo id")` — and every reading of that word named
+ *    a binary that does not exist, so the nested classification settled at
+ *    `safe`. The push now strips the glue, so the nested command is the text
+ *    the carrier would run;
+ *  - a value attached with `=` — `--rsync-path="sudo rsync"` — starts with
+ *    `-`, which the operand scan skipped, so the attached spelling of a
+ *    value-taking option carried nothing while its separated spelling
+ *    classified `privileged`. The scan now reads the attached value too;
+ *
+ * plus the environment-assignment prefix `GIT_SSH_COMMAND="sudo id" git
+ * fetch`: a head-position assignment is skipped by the readings walk (it is
+ * not a command) and the operand scan starts after the head, so nothing ever
+ * read the value. For the variable names a documented consumer execs, the
+ * value is now read as the command it names.
+ */
+describe('option-value elevation (GHSA-5m7x-xwpc-pp79)', () => {
+  it.each([
+    // Cause A: the key, prompt escape or call syntax glued to the payload.
+    ['git -c core.pager="sudo id" log'],
+    ['git -c core.editor="sudo id" commit'],
+    ['git -c core.sshCommand="sudo id" fetch'],
+    ['git -c credential.helper="!sudo id" fetch'],
+    ['git -c alias.p="!sudo id" p'],
+    ['git --config core.pager="sudo id" log'],
+    ['apt-get -o APT::Update::Pre-Invoke::="sudo id" update'],
+    ['apt -o Dpkg::Pre-Invoke::="sudo id" install x'],
+    ['scp -o ProxyCommand="sudo id" a host:/tmp/'],
+    ['sftp -o ProxyCommand="sudo id" host'],
+    ['less +"!sudo id" /etc/hosts'],
+    ['cpan -e \'system("sudo id")\''],
+    // Cause B: the attached --flag=value spelling of a value-taking option.
+    ['rsync --rsync-path="sudo rsync" a host:/tmp/'],
+    ['rsync --rsh="sudo id" a host:/tmp/'],
+    ['tar --use-compress-program="sudo id" -cf /dev/null .'],
+    ['tar --to-command="sudo id" -xf x.tar'],
+    // An environment assignment whose variable a consumer execs.
+    ['GIT_SSH_COMMAND="sudo id" git fetch'],
+    ['GIT_EDITOR="sudo id" git commit'],
+    ['PAGER="sudo id" git log'],
+    ['EDITOR="sudo id" crontab -e'],
+  ] as const)('classifies %j privileged', (command) => {
+    expect(classifyCommand(command).class, command).toBe('privileged');
+  });
+
+  it.each([
+    ['rsync --rsync-path "sudo rsync" a host:/tmp/'],
+    ['rsync -e "sudo id" a host:/tmp/'],
+    ['tar --use-compress-program "sudo id" -cf /dev/null .'],
+    ['tar -I "sudo id" -cf /dev/null .'],
+    ['tar -cf /dev/null --checkpoint-action=exec="sudo id" .'],
+    ['env SUDO_ASKPASS=/tmp/x sudo -A id'],
+  ] as const)('keeps the separated spelling it always read privileged: %j', (command) => {
+    expect(classifyCommand(command).class, command).toBe('privileged');
+  });
+
+  it.each([
+    // An assignment under any other name is data, at the head or under env:
+    // FOO="sudo id" cmd runs cmd, not sudo.
+    ['FOO="sudo id" cmd'],
+    // A benign value under a command-bearing name is still just a command
+    // shape, classified as itself.
+    ['EDITOR="vim -f" crontab -e'],
+    ['GIT_EXTERNAL_DIFF="difftool --inline" git show'],
+    // A single-word option value is a path or a setting, not a command shape.
+    ['git -c color.ui=auto log'],
+    ['rsync --rsync-path=rsync a host:/tmp/'],
+    ['docker run -e FOO=bar img'],
+  ] as const)('does not over-read benign assignments: %j stays safe', (command) => {
+    expect(classifyCommand(command).class, command).toBe('safe');
+  });
+
+  it('reads an environment value as the command it names, not always privileged', () => {
+    // A real ssh in GIT_SSH_COMMAND makes git hand operands to a shell on
+    // another host — the `ssh host cmd` answer the cm4c round set, which is
+    // `destructive`, not elevation.
+    expect(classifyCommand('GIT_SSH_COMMAND="ssh -p 2222" git fetch').class).toBe('destructive');
+  });
+});

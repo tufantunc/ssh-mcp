@@ -1233,10 +1233,40 @@ export function nestedCommands(command: string, speculativeOperands = true, dial
       // classification that names the elevated binary, reporting `awk` where `id`
       // was correct.
       if (speculativeOperands && awk === null) {
+        // A command-bearing environment assignment at the head is the one
+        // head-position word this loop may read. Every other head word IS the
+        // command, and an assignment under any other name is data: FOO="sudo id"
+        // cmd runs cmd, not sudo. GIT_SSH_COMMAND="sudo id" git fetch runs sudo,
+        // because git execs what that variable names — and so does every other
+        // variable in the set below, each through a documented consumer
+        // (GHSA-5m7x-xwpc-pp79).
+        const headAssignment = ENV_COMMAND_ASSIGNMENT.exec(words[0] ?? '');
+        if (headAssignment !== null && /\s/.test(headAssignment[2])) {
+          found.push(headAssignment[2]);
+        }
         for (let i = 1; i < words.length; i++) {
           if (consumedOperands.has(i)) continue;
-          if (words[i].startsWith('-')) continue;
-          if (/\s/.test(words[i])) found.push(words[i]);
+          const word = words[i];
+          if (word.startsWith('-')) {
+            // A value attached with `=` is still a value: the separated spelling
+            // `--rsync-path "sudo rsync"` reached the push below as an ordinary
+            // operand, but the attached `--rsync-path="sudo rsync"` starts with
+            // `-` and was skipped whole, so the attached spelling of a
+            // value-taking option carried nothing while its separated spelling
+            // classified `privileged` (GHSA-5m7x-xwpc-pp79).
+            const eq = word.lastIndexOf('=');
+            if (eq !== -1 && /\s/.test(word.slice(eq + 1))) found.push(word.slice(eq + 1));
+            continue;
+          }
+          // A carrier's value arrives with the key still glued to the command
+          // it runs — `core.pager=sudo id` (git -c), `+!sudo id` (less),
+          // `system("sudo id")` (cpan) — and the nested classification read
+          // `core.pager=sudo` as a binary that does not exist, settling at
+          // `safe`. Push the command the carrier would run, not the glue
+          // (GHSA-5m7x-xwpc-pp79). Ordinary operands carry none of this glue
+          // and push exactly as they always have.
+          const inner = stripGluedCommandPrefix(word);
+          if (/\s/.test(inner)) found.push(inner);
         }
       }
     }
@@ -1382,6 +1412,44 @@ const DISQUALIFYING_ARGS: Record<string, RegExp> = Object.assign(
 
 /** A leading `NAME=value`, which a shell treats as an assignment, not a command. */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * An assignment at the head whose value a documented consumer execs: the git
+ * variables git hands to the shell, the editor and pager names every
+ * terminal tool spawns, the browser an HTML page can ask to open, and the
+ * askpass programs ssh and sudo run to obtain a password. `NAME=` anchored
+ * and captured separately so the value cannot reach back into the name
+ * (`GIT_SSH_COMMAND-X=…` is not that variable).
+ */
+const ENV_COMMAND_ASSIGNMENT =
+  /^(GIT_SSH_COMMAND|GIT_EDITOR|GIT_SEQUENCE_EDITOR|GIT_PAGER|GIT_EXTERNAL_DIFF|SSH_ASKPASS|SUDO_ASKPASS|EDITOR|VISUAL|PAGER|BROWSER)=(.*)$/;
+
+/**
+ * The command inside an operand whose key or call syntax is still glued to
+ * its first word: everything through the last `=` (git -c `core.pager=`, apt
+ * -o `Dpkg::Pre-Invoke::=`, an attached `--flag=`) or `(` (cpan
+ * `system(…)`), then the prompt escapes less puts in front of `+!cmd`
+ * (GHSA-5m7x-xwpc-pp79). A word carrying none of
+ * that glue is returned unchanged, so the speculative-operand push keeps its
+ * exact pre-existing behaviour for ordinary multi-word operands. A quote can
+ * follow the cut — cpan's system("…") leaves `"sudo id")` — and would keep
+ * the whole payload one token to the nested classification, so quotes strip
+ * with the escapes.
+ */
+function stripGluedCommandPrefix(word: string): string {
+  // `$(…)`, `<(…)`, `>(…)`: the substitution scan already reads the inside
+  // from the raw command, and cutting here would push the substituted command
+  // behind a head the operand scan may recognise (`printf $(sudo id)`), whose
+  // data-operand rule would hide the elevation the whole-word push used to
+  // find. Walk back past substitution opens to the `system(` style of paren.
+  const eq = word.lastIndexOf('=');
+  let paren = word.lastIndexOf('(');
+  while (paren > 0 && '$<>'.includes(word[paren - 1])) {
+    paren = word.lastIndexOf('(', paren - 1);
+  }
+  const cut = Math.max(eq, paren);
+  return (cut <= 0 ? word : word.slice(cut + 1)).replace(/^[+!"']+/, '');
+}
 
 /** `timeout 5s`, `nice 10` — a bare argument some wrappers take before the command. */
 const BARE_NUMERIC = /^\d+(\.\d+)?[smhd]?$/;
