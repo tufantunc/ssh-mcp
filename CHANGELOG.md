@@ -1,5 +1,11 @@
 # ssh-mcp
 
+## 2.23.0
+
+### Minor Changes
+
+- [`d930b2f`](https://github.com/tufantunc/ssh-mcp/commit/d930b2ff58e1d05d5fa2b3812fc520e5fdb69bb9) Thanks [@tufantunc](https://github.com/tufantunc)! - `fix(policy)`: the command classifier reads option values and environment assignments that carry a command — `git -c`, `apt -o`, `scp -o`, `rsync --rsync-path=`, `tar --use-compress-program=` and `GIT_SSH_COMMAND`-style prefixes — whether the value is attached with `=`, quoted, or glued to its key. A command that relied on the previous default may now prompt for approval, or be refused outright under a profile that does not grant the class it earns.
+
 ## 2.22.2
 
 ### Patch Changes
