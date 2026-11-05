@@ -1,17 +1,18 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { checkAllServers, allServersUp, setupEnv, createConnection, type ServerStatus } from './fixtures.js';
 import type { SSHConnection } from '../../src/ssh/connection.js';
+import { goneWithin, treeSize, killMarkers } from './process-table.js';
 
 /**
  * #146: a timed-out or cancelled exec must not leave the command running on the host.
  *
- * The existing cancellation test asserts that the promise rejects with "timed out",
- * which it always did — the defect was never in the error, it was in what happened
+ * A test that asserts only that the promise rejects with "timed out" always passed —
+ * the defect was never in the error, it was in what happened
  * on the other end of the connection. So every assertion here is about the remote
  * process table, observed over a second channel.
  *
- * Distinctive sleep durations act as process names: `pgrep -f "^sleep 4711"` matches
- * the command and nothing else, including not the shell that sshd wraps it in.
+ * How the process table is read, and why an unreadable one throws rather than reading
+ * as "gone", is in ./process-table.ts.
  */
 let status: ServerStatus;
 let env: ReturnType<typeof setupEnv>;
@@ -33,37 +34,8 @@ afterAll(async () => { await conn?.close(); env?.restore(); });
 afterEach(async () => {
   // A leaked process would otherwise sit in the container for its full duration and
   // make the next run's count wrong rather than the next run's *behaviour* wrong.
-  await conn?.exec('pkill -9 -f "^sleep 47" || true', { timeoutMs: 5000 }).catch(() => {});
+  await killMarkers(conn, [TIMEOUT_MARKER, ABORT_MARKER, PRE_ABORT_MARKER]);
 });
-
-/** How many copies of the marker command are running, seen over a fresh channel. */
-async function running(marker: number): Promise<number> {
-  const { stdout } = await conn.exec(`pgrep -f "^sleep ${marker}" | wc -l`, { timeoutMs: 5000 });
-  return Number(stdout.trim());
-}
-
-/**
- * Polls, because the kill ladder is asynchronous by design: INT now, TERM at +1s, KILL
- * at +2s, the channel closed at +3s. The 8000ms budget below covers all three gaps plus
- * polling.
- */
-async function goneWithin(marker: number, ms: number): Promise<boolean> {
-  const deadline = Date.now() + ms;
-  for (;;) {
-    // The deadline is checked before the next round trip, not after, so the loop cannot
-    // overrun its budget by a full `running()` timeout and surface as an opaque vitest
-    // timeout instead of the assertion that was actually failing.
-    if (await treeSize(marker) === 0) return true;
-    if (Date.now() > deadline) return false;
-    await new Promise((r) => setTimeout(r, 250));
-  }
-}
-
-/** Every process mentioning the marker, wrapper shells included. */
-async function treeSize(marker: number): Promise<number> {
-  const { stdout } = await conn.exec(`ps -ef | grep -c "[s]leep ${marker}"`, { timeoutMs: 5000 });
-  return Number(stdout.trim());
-}
 
 describe.skipIf(!allServersUp(await checkAllServers()))('a stopped exec stops on the host too', () => {
   it('kills the remote process when the command times out', async () => {
@@ -73,7 +45,7 @@ describe.skipIf(!allServersUp(await checkAllServers()))('a stopped exec stops on
     // rejection, so by the time a second channel is open the process is already
     // gone — and a `0` there is indistinguishable from a marker that never matched.
     await new Promise((r) => setTimeout(r, 400));
-    expect(await running(TIMEOUT_MARKER), 'the marker never matched the running command')
+    expect(await treeSize(conn, TIMEOUT_MARKER), 'the marker never matched the running command')
       .toBeGreaterThan(0);
 
     const err = await started.then(() => null, (e: Error) => e);
@@ -82,14 +54,14 @@ describe.skipIf(!allServersUp(await checkAllServers()))('a stopped exec stops on
     // on every timeout would be as useless as the silence it replaced.
     expect(err?.message).not.toMatch(/may still be running/);
 
-    expect(await goneWithin(TIMEOUT_MARKER, 8000), 'the remote process outlived the timeout').toBe(true);
+    expect(await goneWithin(conn, TIMEOUT_MARKER, 8000), 'the remote process outlived the timeout').toBe(true);
   }, 30000);
 
   it('kills the remote process when the caller aborts', async () => {
     const ac = new AbortController();
     const started = conn.exec(`sleep ${ABORT_MARKER}`, { timeoutMs: 60000, abortSignal: ac.signal });
     await new Promise((r) => setTimeout(r, 400));
-    expect(await running(ABORT_MARKER), 'the marker never matched the running command')
+    expect(await treeSize(conn, ABORT_MARKER), 'the marker never matched the running command')
       .toBeGreaterThan(0);
 
     ac.abort();
@@ -97,7 +69,7 @@ describe.skipIf(!allServersUp(await checkAllServers()))('a stopped exec stops on
     expect(err?.message).toMatch(/abort/i);
     expect(err?.message).not.toMatch(/may still be running/);
 
-    expect(await goneWithin(ABORT_MARKER, 8000), 'the remote process outlived the cancellation').toBe(true);
+    expect(await goneWithin(conn, ABORT_MARKER, 8000), 'the remote process outlived the cancellation').toBe(true);
   }, 30000);
 
   it('kills the remote process when the signal was already aborted', async () => {
@@ -115,7 +87,7 @@ describe.skipIf(!allServersUp(await checkAllServers()))('a stopped exec stops on
 
     // No in-flight sample here — the command may never become visible — so this asserts
     // only that nothing is left behind.
-    expect(await goneWithin(PRE_ABORT_MARKER, 8000), 'the remote process outlived the cancellation').toBe(true);
+    expect(await goneWithin(conn, PRE_ABORT_MARKER, 8000), 'the remote process outlived the cancellation').toBe(true);
   }, 30000);
 });
 
@@ -136,30 +108,24 @@ describe.skipIf(!allServersUp(await checkAllServers()))('a command that ignores 
    */
   const MARKER = 4718;
 
-  /** Every process in the tree. The bracket keeps the searching shell out of its own count. */
-  async function alive(): Promise<number> {
-    const { stdout } = await conn.exec(`ps -ef | grep -c "[s]leep ${MARKER}"`, { timeoutMs: 5000 });
-    return Number(stdout.trim());
-  }
-
   afterEach(async () => {
-    // `kill -9`, not the default: anything left here inherited SIG_IGN for TERM from the
-    // trap, so `pkill` without `-9` reports success and reaps nothing — which is how a
-    // single red run used to poison the fixture for the marker's full duration.
-    await conn?.exec(`pkill -9 -f "sleep ${MARKER}" || true`, { timeoutMs: 5000 }).catch(() => {});
+    // Anything left here inherited SIG_IGN for TERM from the trap, which is why
+    // `killMarkers` sends KILL: a single red run used to poison the fixture for the
+    // marker's full duration.
+    await killMarkers(conn, [MARKER]);
   });
 
   it('kills the whole process group, trap or no trap', async () => {
     const started = conn.exec(`sh -c 'trap "" INT TERM; sleep ${MARKER}; true'`, { timeoutMs: 1500 });
     await new Promise((r) => setTimeout(r, 400));
-    expect(await alive(), 'the two-process tree never appeared').toBe(2);
+    expect(await treeSize(conn, MARKER), 'the two-process tree never appeared').toBe(2);
 
     const err = await started.then(() => null, (e: Error) => e);
     expect(err?.message).toMatch(/timed out/i);
     expect(err?.message).not.toMatch(/may still be running/);
 
     // INT and TERM are trapped, so nothing happens until KILL at +2s.
-    expect(await goneWithin(MARKER, 8000), 'the trapping command outlived the ladder').toBe(true);
-    expect(await alive(), 'a member of the process group survived').toBe(0);
+    expect(await goneWithin(conn, MARKER, 8000), 'the trapping command outlived the ladder').toBe(true);
+    expect(await treeSize(conn, MARKER), 'a member of the process group survived').toBe(0);
   }, 30000);
 });

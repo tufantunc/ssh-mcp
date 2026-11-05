@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { checkAllServers, allServersUp, setupEnv, createConnection, type ServerStatus } from './fixtures.js';
 import type { SSHConnection } from '../../src/ssh/connection.js';
 import { BackgroundSession } from '../../src/ssh/session.js';
+import { treeSize, killMarkers } from './process-table.js';
 
 let status: ServerStatus;
 let env: ReturnType<typeof setupEnv>;
@@ -94,23 +95,17 @@ describe.skipIf(!allServersUp(await checkAllServers()))('closing a background se
    * `status: 'closed'` while the command kept running on the host: the same false claim
    * `exec` stopped making, in the sibling path the fix did not reach.
    *
-   * A distinctive `sleep` duration acts as the process name; `grep "[s]leep N"` so the
-   * shell that runs the check does not match its own command line.
+   * How the process table is read and cleared is in ./process-table.ts.
    */
   const MARKER = 4820;
-
-  async function alive(): Promise<number> {
-    const { stdout } = await conn.exec(`ps -ef | grep -c "[s]leep ${MARKER}"`, { timeoutMs: 5000 });
-    return Number(stdout.trim());
-  }
+  const TRAPPING_MARKER = 4821;
 
   afterEach(async () => {
-    // `kill -9`, unanchored, covering both markers: a failed run used to leave a `sleep` in
-    // the fixture for its full 80 minutes, and nothing reaped it. Unanchored so the trapping
-    // wrapper shell is matched too, and in the hook rather than an in-body `finally` —
+    // Both markers: a failed run used to leave a `sleep` in the fixture for its full 80
+    // minutes, and nothing reaped it. In the hook rather than an in-body `finally` —
     // measured, a vitest test *timeout* runs the hook and skips the `finally`, which is
     // exactly how one red run poisons every later one.
-    await conn?.exec('pkill -9 -f "sleep 48" || true', { timeoutMs: 5000 }).catch(() => {});
+    await killMarkers(conn, [MARKER, TRAPPING_MARKER]);
   });
 
   it('waits for the escalation instead of tearing the transport down mid-ladder', async () => {
@@ -119,7 +114,7 @@ describe.skipIf(!allServersUp(await checkAllServers()))('closing a background se
     // — `SSHConnection.close()` calling `client.end()`, or the process exiting — cancelled
     // the rest of the ladder and the command survived. That is the case KILL exists for, so
     // it is the case worth testing.
-    const trapping = 4821;
+    const trapping = TRAPPING_MARKER;
     {
       await conn.openSession({
         name: 'bg-trap',
@@ -127,13 +122,11 @@ describe.skipIf(!allServersUp(await checkAllServers()))('closing a background se
         command: `sh -c 'trap "" INT TERM; sleep ${trapping}; true'`,
       });
       await new Promise((r) => setTimeout(r, 400));
-      const { stdout: before } = await conn.exec(`ps -ef | grep -c "[s]leep ${trapping}"`, { timeoutMs: 5000 });
-      expect(Number(before.trim()), 'the trapping tree never appeared').toBe(2);
+      expect(await treeSize(conn, trapping), 'the trapping tree never appeared').toBe(2);
 
       await conn.closeSession('bg-trap');
 
-      const { stdout: after } = await conn.exec(`ps -ef | grep -c "[s]leep ${trapping}"`, { timeoutMs: 5000 });
-      expect(Number(after.trim()), 'the trapping command outlived close-session').toBe(0);
+      expect(await treeSize(conn, trapping), 'the trapping command outlived close-session').toBe(0);
     }
   }, 30000);
 
@@ -141,7 +134,7 @@ describe.skipIf(!allServersUp(await checkAllServers()))('closing a background se
     const session = await conn.openSession({ name: 'bg-kill', type: 'background', command: `sleep ${MARKER}` });
     expect(session).toBeInstanceOf(BackgroundSession);
     await new Promise((r) => setTimeout(r, 400));
-    expect(await alive(), 'the background command never started').toBeGreaterThan(0);
+    expect(await treeSize(conn, MARKER), 'the background command never started').toBeGreaterThan(0);
 
     const started = Date.now();
     const outcome = await conn.closeSession('bg-kill');
@@ -156,7 +149,7 @@ describe.skipIf(!allServersUp(await checkAllServers()))('closing a background se
     // outcome is under 3.5s (the ladder's own bound), so a 5000ms ceiling discriminated
     // nothing, while 500ms still leaves a 100x margin and fails the moment this command
     // starts surviving to the TERM rung at +1s.
-    expect(await alive(), 'the background command outlived close-session').toBe(0);
+    expect(await treeSize(conn, MARKER), 'the background command outlived close-session').toBe(0);
     expect(elapsed, 'the command survived INT and had to be escalated').toBeLessThan(500);
   }, 30000);
 });
