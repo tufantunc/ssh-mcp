@@ -1,9 +1,10 @@
+import { beforeEach, afterEach, expect } from 'vitest';
 import { mkdtemp, writeFile, chmod, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
 /**
- * The tempdir + writeConfig lifecycle three config test files need.
+ * The tempdir + writeConfig lifecycle the config test files need.
  *
  * Extracted because it existed twice verbatim, along with two copies of the
  * minimal valid config under two names. The next change to the schema that makes
@@ -38,6 +39,41 @@ export async function makeConfigDir(prefix = 'ssh-mcp-test-'): Promise<ConfigDir
       await rm(dir, { recursive: true, force: true });
     },
   };
+}
+
+/**
+ * A fresh config dir for every test in the calling file, created and removed by hooks it
+ * registers itself. Four files spelled out the same `let tempDir` / `beforeEach` /
+ * `afterEach` / `writeConfig` shim around `makeConfigDir` or a copy of it.
+ */
+export function useConfigDir(prefix?: string): ConfigDir {
+  let current: ConfigDir | undefined;
+  beforeEach(async () => { current = await makeConfigDir(prefix); });
+  afterEach(async () => { await current?.cleanup(); current = undefined; });
+  const live = (): ConfigDir => {
+    if (!current) throw new Error('useConfigDir: used outside a test');
+    return current;
+  };
+  return {
+    get dir() { return live().dir; },
+    write: (content, mode) => live().write(content, mode),
+    cleanup: () => live().cleanup(),
+  };
+}
+
+/**
+ * Awaits a refusal and names the behaviour when there isn't one. `.catch(e => e)` leaves
+ * `undefined` on the success path, so the assertion after it fails with "cannot read
+ * properties of undefined" — which points at the test rather than at "the check accepted
+ * a file granted to Everyone", on a job a reviewer may not be able to reproduce locally.
+ */
+export async function refusal(
+  pending: Promise<unknown>,
+  type: abstract new (...args: never[]) => Error = Error,
+): Promise<Error> {
+  const err = await pending.then(() => null, (e: unknown) => e);
+  expect(err, 'expected a refusal, but the call resolved').toBeInstanceOf(type);
+  return err as Error;
 }
 
 /**

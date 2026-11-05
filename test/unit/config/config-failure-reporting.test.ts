@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { chmod } from 'fs/promises';
 import { platform } from 'os';
 import { join } from 'path';
 import { loadConfigWithDigest, getConfigPath } from '../../../src/config/loader.js';
 import { ConfigNotFoundError, OperatorError } from '../../../src/errors.js';
-import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from './helpers.js';
+import { useConfigDir, MINIMAL_CONFIG } from './helpers.js';
 
 /**
  * These import `src/cli.ts`, not `src/index.ts`. That is the whole reason `cli.ts` exists:
@@ -26,16 +26,9 @@ import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from './helpers.js';
  * reports, and what the caller does with it. The bug needed both to be wrong.
  */
 
-let cfg: ConfigDir;
-let tempDir: string;
-
-beforeEach(async () => {
-  cfg = await makeConfigDir('ssh-mcp-fail-');
-  tempDir = cfg.dir;
-});
+const cfg = useConfigDir('ssh-mcp-fail-');
 
 afterEach(async () => {
-  await cfg.cleanup();
   vi.unstubAllEnvs();
   vi.resetModules();
   vi.doUnmock('../../../src/config/loader.js');
@@ -43,14 +36,42 @@ afterEach(async () => {
 
 const writeConfig = (content: string, mode = 0o600): Promise<string> => cfg.write(content, mode);
 
+type Errors = typeof import('../../../src/errors.js');
+
+/**
+ * cli.ts's `loadAppConfig`, freshly imported, with the loader's parse replaced by the mock
+ * `makeParse` returns. Two suites below built this by hand, line for line.
+ *
+ * `makeParse` receives the post-reset instance of errors.js on purpose. Some checks under
+ * test are `instanceof`, and a class imported before `resetModules` is a different object
+ * from the one cli.ts resolves afterwards — the test would fail on the module registry
+ * rather than on the behaviour.
+ */
+async function withMockedParse(makeParse: (E: Errors) => ReturnType<typeof vi.fn>) {
+  vi.resetModules();
+  const parse = makeParse(await import('../../../src/errors.js'));
+  vi.doMock('../../../src/config/loader.js', async () => {
+    const actual = await vi.importActual<typeof import('../../../src/config/loader.js')>(
+      '../../../src/config/loader.js',
+    );
+    // cli.ts loads through loadConfigWithDigest; the mock stands in for the parse.
+    return {
+      ...actual,
+      loadConfigWithDigest: async (...a: unknown[]) => ({ config: await (parse as (...b: unknown[]) => unknown)(...a), sha256: 'stub' }),
+    };
+  });
+  const { loadAppConfig } = await import('../../../src/cli.js');
+  return { loadAppConfig, parse };
+}
+
 describe('loadConfigWithDigest distinguishes "absent" from "unusable"', () => {
   it('reports a missing file as ConfigNotFoundError', async () => {
-    const missing = join(tempDir, 'nope.toml');
+    const missing = join(cfg.dir, 'nope.toml');
     await expect(loadConfigWithDigest(missing)).rejects.toBeInstanceOf(ConfigNotFoundError);
   });
 
   it('names the path it actually looked in', async () => {
-    const missing = join(tempDir, 'nope.toml');
+    const missing = join(cfg.dir, 'nope.toml');
     await expect(loadConfigWithDigest(missing)).rejects.toThrow(missing);
   });
 
@@ -107,33 +128,14 @@ describe('loadAppConfig only falls through when the file is absent', () => {
    * var. Mocking the module tests the branch itself, which is the part that
    * was wrong.
    */
-  type Errors = typeof import('../../../src/errors.js');
-
   let loadConfigMock: ReturnType<typeof vi.fn>;
 
   async function buildWith(
     makeErr: (E: Errors) => Error,
     argv: Record<string, string | null>,
   ) {
-    vi.resetModules();
-    // Built from the post-reset instance of errors.js on purpose. The check
-    // under test is `instanceof`, and a class imported before resetModules is a
-    // different object from the one cli.ts resolves afterwards — the test
-    // would fail on the module registry rather than on the behaviour.
-    const E = await import('../../../src/errors.js');
-    const err = makeErr(E);
-    vi.doMock('../../../src/config/loader.js', async () => {
-      const actual = await vi.importActual<typeof import('../../../src/config/loader.js')>(
-        '../../../src/config/loader.js',
-      );
-      loadConfigMock = vi.fn().mockRejectedValue(err);
-      // cli.ts loads through loadConfigWithDigest; the mock stands in for the parse.
-      return {
-        ...actual,
-        loadConfigWithDigest: async (...a: unknown[]) => ({ config: await (loadConfigMock as (...b: unknown[]) => unknown)(...a), sha256: 'stub' }),
-      };
-    });
-    const { loadAppConfig } = await import('../../../src/cli.js');
+    const { loadAppConfig, parse } = await withMockedParse((E) => vi.fn().mockRejectedValue(makeErr(E)));
+    loadConfigMock = parse;
     return (await loadAppConfig(argv)).config;
   }
 
@@ -269,27 +271,13 @@ describe('loadAppConfig threads --allowUncheckedConfigAcl to the loader', () => 
    * of a startup the server is already refusing — an operator whose ACL cannot be
    * read would be locked out with no exit, which is the shape of #138.
    */
-  let loadConfigMock: ReturnType<typeof vi.fn>;
-
   async function build(argv: Record<string, string | null>) {
-    vi.resetModules();
-    vi.doMock('../../../src/config/loader.js', async () => {
-      const actual = await vi.importActual<typeof import('../../../src/config/loader.js')>(
-        '../../../src/config/loader.js',
-      );
-      loadConfigMock = vi.fn().mockResolvedValue({
-        defaults: { defaultProfile: 'p' },
-        profiles: [{ name: 'p', host: 'h', user: 'u' }],
-      });
-      // cli.ts loads through loadConfigWithDigest; the mock stands in for the parse.
-      return {
-        ...actual,
-        loadConfigWithDigest: async (...a: unknown[]) => ({ config: await (loadConfigMock as (...b: unknown[]) => unknown)(...a), sha256: 'stub' }),
-      };
-    });
-    const { loadAppConfig } = await import('../../../src/cli.js');
+    const { loadAppConfig, parse } = await withMockedParse(() => vi.fn().mockResolvedValue({
+      defaults: { defaultProfile: 'p' },
+      profiles: [{ name: 'p', host: 'h', user: 'u' }],
+    }));
     await loadAppConfig(argv);
-    return loadConfigMock;
+    return parse;
   }
 
   it('passes allowUnchecked on the --config branch', async () => {

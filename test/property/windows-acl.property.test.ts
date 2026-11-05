@@ -147,14 +147,23 @@ describe('parseDacl invariants', () => {
     // instrumenting showed fired on 101 of 2000 runs against five distinct strings
     // — so 1899 runs asserted nothing at all. The five honest cases are now an
     // explicit table below, which is stronger and instant.
+    //
+    // Half the cuts land anywhere; the other half land on an ACE boundary after at least
+    // one complete ACE. Uniform cuts alone, instrumented over 2000 runs, put 1868 in
+    // `unknown` and reached the `broad` branch — the only one that checks no principal
+    // survives the cut that the prefix does not name — 40 times. The mix reaches it 168
+    // times in 500 runs.
     fc.assert(
       fc.property(
         fc.array(ace(grantingType, strangerTrustee), { minLength: 1, maxLength: 4 }),
         daclFlags,
         fc.nat(),
-        (aces, flags, cut) => {
+        fc.boolean(),
+        (aces, flags, cut, onBoundary) => {
           const full = render(flags, aces);
-          const prefixLength = 1 + (cut % (full.length - 1));
+          const prefixLength = onBoundary && aces.length > 1
+            ? render(flags, aces.slice(0, 1 + (cut % (aces.length - 1)))).length
+            : 1 + (cut % (full.length - 1));
           const truncated = full.slice(0, prefixLength);
           const verdict = parseDacl(truncated, ALLOWED);
 
@@ -175,7 +184,7 @@ describe('parseDacl invariants', () => {
           }
         },
       ),
-      { numRuns: 2000 },
+      { numRuns: 500 },
     );
   });
 

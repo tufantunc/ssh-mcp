@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { join } from 'path';
 import { parseDacl, aclIdentity, type AclVerdict } from '../../../src/config/sddl.js';
 // Stays behind the cut: classifying an icacls failure is the platform half's vocabulary.
-import { classifyReadFailure } from '../../../src/config/windows-acl.js';
+import { classifyReadFailure, verdictFromSaved } from '../../../src/config/windows-acl.js';
 
 /**
  * The SDDL parser, which runs everywhere, so it is tested everywhere. The
@@ -357,6 +357,35 @@ describe('classifyReadFailure — what a failed descriptor read means', () => {
     // An ENOENT on the temp file rather than on the executable is not the tool missing.
     expect(classifyReadFailure(enoent('C:\\Temp\\acl.sddl'), () => false))
       .toMatchObject({ failure: 'read-refused' });
+  });
+});
+
+describe('verdictFromSaved — which line of the saved file is the descriptor', () => {
+  // `icacls /save` writes UTF-16LE: the target's last path component on one line, its
+  // descriptor on the next. Measured on Windows 11: `cfg.toml` for `C:cfg.toml`, `.` for
+  // `.`, and an empty name line for a bare `C:` — the directory of a drive-relative
+  // `--config C:cfg.toml`. This step ran only inside `inspectAcl`, after a subprocess,
+  // so only the advisory Windows job reached it.
+  const saved = (...lines: string[]) => Buffer.from(lines.join('\r\n'), 'utf16le');
+
+  it('reads the descriptor line, not the name line', () => {
+    expect(verdictFromSaved(saved('cfg.toml', DRIVE_ROOT, ''), ALLOWED).status).toBe('broad');
+    expect(verdictFromSaved(saved('cfg.toml', NARROW, ''), ALLOWED).status).toBe('restricted');
+  });
+
+  it('reads the descriptor after the empty name line a bare drive saves', () => {
+    expect(verdictFromSaved(saved('', DRIVE_ROOT, ''), ALLOWED).status).toBe('broad');
+  });
+
+  it('accepts a descriptor that opens with its owner and group', () => {
+    // The first version required `D:` at the start of the line while the parser accepts
+    // `O:`/`G:` before it, and that disagreement resolved to "unchecked".
+    expect(verdictFromSaved(saved('cfg.toml', 'O:BAG:BAD:(A;;FR;;;WD)', ''), ALLOWED).status).toBe('broad');
+  });
+
+  it('calls a file with no descriptor line unparsable rather than restricted', () => {
+    expect(verdictFromSaved(saved('cfg.toml', ''), ALLOWED))
+      .toMatchObject({ status: 'unknown', reason: 'unparsable' });
   });
 });
 

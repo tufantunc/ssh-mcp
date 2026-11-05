@@ -12,6 +12,7 @@ import {
   type Grant,
   type UnknownReason,
   type AclVerdict,
+  type AclIdentity,
 } from './sddl.js';
 
 const run = promisify(execFile);
@@ -176,10 +177,10 @@ async function currentUserSid(signal?: AbortSignal): Promise<string | null> {
 }
 
 /**
- * Every line of the security descriptor file `icacls /save` writes.
+ * The security descriptor file `icacls /save` writes, as bytes.
  *
  * The saved file is UTF-16LE and holds the item's name on one line and its
- * descriptor on the next. Which line is which is not guessed here — the caller
+ * descriptor on the next. Which line is which is not guessed here — `verdictFromSaved`
  * hands each line to the parser and keeps the first that parses, so the reader
  * and the parser cannot disagree about what a descriptor looks like. They did
  * in the first version: the reader required a line *starting* with `D:` while
@@ -236,14 +237,13 @@ export function classifyReadFailure(
 async function readDescriptor(
   path: string,
   signal?: AbortSignal,
-): Promise<{ lines: string[] } | { failure: UnknownReason; detail: string }> {
+): Promise<{ saved: Buffer } | { failure: UnknownReason; detail: string }> {
   let dir: string | undefined;
   try {
     dir = await mkdtemp(join(tmpdir(), 'ssh-mcp-acl-'));
     const saved = join(dir, 'acl.sddl');
     await run(ICACLS, [path, '/save', saved], { signal, windowsHide: true, env: CHILD_ENV });
-    const text = await readFile(saved, { encoding: 'utf16le', signal });
-    return { lines: text.split(/\r?\n/) };
+    return { saved: await readFile(saved, { signal }) };
   } catch (err: any) {
     return classifyReadFailure(err);
   } finally {
@@ -295,15 +295,27 @@ export async function inspectAcl(path: string, signal?: AbortSignal): Promise<Ac
 
   const read = await readDescriptor(path, signal);
   if ('failure' in read) return { status: 'unknown', reason: read.failure, detail: read.detail };
+  return verdictFromSaved(read.saved, identity);
+}
 
+/**
+ * The verdict carried by the file `icacls /save` wrote: UTF-16LE, the item's name on one
+ * line and its descriptor on the next.
+ *
+ * Separate from the subprocess so the line selection runs on every platform — it is
+ * where the first version read the wrong line, and a step reachable only on Windows was
+ * asserted only by the advisory Windows job.
+ */
+export function verdictFromSaved(saved: Buffer, identity: AclIdentity): AclVerdict {
   // The reader does not decide which line is the descriptor; the parser does.
   let lastDetail = 'no line parsed as a security descriptor';
-  for (const line of read.lines) {
+  for (const line of saved.toString('utf16le').split(/\r?\n/)) {
     const trimmed = line.trim();
-    // A descriptor opens with one of its components. Without this, "first line that
-    // parses" let an item-name line stand in for the descriptor: `parseDacl('D:')` is a
-    // legitimately empty DACL and therefore `restricted`, and `icacls D: /save` for a
-    // drive-relative `--config D:config.toml` writes a name line of exactly `D:`.
+    // A descriptor opens with one of its components. The name line is the target's last
+    // path component — measured on Windows 11: `cfg.toml` for `C:cfg.toml`, `.` for `.`,
+    // and an empty line for a bare `C:` — so it never starts like one today. The check
+    // stays because "first line that parses" is all that stands between a name line and
+    // the verdict, and `parseDacl('D:')` is a legitimately empty DACL: `restricted`.
     if (!/^[OGDS]:/.test(trimmed)) continue;
     const verdict = parseDacl(trimmed, identity);
     if (verdict.status !== 'unknown') return verdict;

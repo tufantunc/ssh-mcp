@@ -1,7 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, writeFile, chmod, rm } from 'fs/promises';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { describe, it, expect } from 'vitest';
+import { useConfigDir } from './helpers.js';
 import { loadConfigWithDigest, getProfile } from '../../../src/config/loader.js';
 import { sanitizeCommand } from '../../../src/guard/sanitizer.js';
 
@@ -17,22 +15,8 @@ import { sanitizeCommand } from '../../../src/guard/sanitizer.js';
  * against exactly that.
  */
 
-let tempDir: string;
-
-beforeEach(async () => {
-  tempDir = await mkdtemp(join(tmpdir(), 'ssh-mcp-maxchars-'));
-});
-
-afterEach(async () => {
-  await rm(tempDir, { recursive: true, force: true });
-});
-
-async function writeConfig(content: string): Promise<string> {
-  const path = join(tempDir, 'config.toml');
-  await writeFile(path, content, 'utf8');
-  await chmod(path, 0o600);
-  return path;
-}
+const cfg = useConfigDir('ssh-mcp-maxchars-');
+const writeConfig = (content: string): Promise<string> => cfg.write(content);
 
 const PROFILE = `
 [[profiles]]

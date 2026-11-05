@@ -1,24 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { chmod } from 'fs/promises';
 import { platform } from 'os';
-import { makeConfigDir, MINIMAL_CONFIG, type ConfigDir } from './helpers.js';
+import { useConfigDir, MINIMAL_CONFIG } from './helpers.js';
 import { loadConfigWithDigest, getProfile, checkPermissions } from '../../../src/config/loader.js';
 import type { AppConfig } from '../../../src/types.js';
 import { defaultsFromArgv, loadAppConfig } from '../../../src/cli.js';
 import { OperatorError } from '../../../src/errors.js';
 
-let cfg: ConfigDir;
-let tempDir: string;
-
-beforeEach(async () => {
-  cfg = await makeConfigDir();
-  tempDir = cfg.dir;
-});
-
-afterEach(async () => {
-  await cfg.cleanup();
-});
-
+const cfg = useConfigDir();
 const writeConfig = (content: string, mode = 0o600): Promise<string> => cfg.write(content, mode);
 
 describe('loadConfigWithDigest', () => {
@@ -384,14 +373,14 @@ describe('checkPermissions', () => {
 
   it.skipIf(platform() === 'win32')('fails for world-readable directory', async () => {
     const cfgPath = await writeConfig('', 0o600);
-    await chmod(tempDir, 0o777);
+    await chmod(cfg.dir, 0o777);
     try {
       await expect(checkPermissions(cfgPath)).rejects.toThrow(/directory.*accessible/i);
       // A directory nobody can chmod is the Docker case: the message has to say
       // what to do when tightening it is not an option.
       await expect(checkPermissions(cfgPath)).rejects.toThrow(/bind-mount|--config/);
     } finally {
-      await chmod(tempDir, 0o700);
+      await chmod(cfg.dir, 0o700);
     }
   });
 });
