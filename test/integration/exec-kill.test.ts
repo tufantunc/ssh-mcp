@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { checkAllServers, allServersUp, setupEnv, createConnection, type ServerStatus } from './fixtures.js';
 import type { SSHConnection } from '../../src/ssh/connection.js';
-import { running, goneWithin, treeSize, killMarkers } from './process-table.js';
+import { goneWithin, treeSize, killMarkers } from './process-table.js';
 
 /**
  * #146: a timed-out or cancelled exec must not leave the command running on the host.
@@ -45,7 +45,7 @@ describe.skipIf(!allServersUp(await checkAllServers()))('a stopped exec stops on
     // rejection, so by the time a second channel is open the process is already
     // gone — and a `0` there is indistinguishable from a marker that never matched.
     await new Promise((r) => setTimeout(r, 400));
-    expect(await running(conn, TIMEOUT_MARKER), 'the marker never matched the running command')
+    expect(await treeSize(conn, TIMEOUT_MARKER), 'the marker never matched the running command')
       .toBeGreaterThan(0);
 
     const err = await started.then(() => null, (e: Error) => e);
@@ -61,7 +61,7 @@ describe.skipIf(!allServersUp(await checkAllServers()))('a stopped exec stops on
     const ac = new AbortController();
     const started = conn.exec(`sleep ${ABORT_MARKER}`, { timeoutMs: 60000, abortSignal: ac.signal });
     await new Promise((r) => setTimeout(r, 400));
-    expect(await running(conn, ABORT_MARKER), 'the marker never matched the running command')
+    expect(await treeSize(conn, ABORT_MARKER), 'the marker never matched the running command')
       .toBeGreaterThan(0);
 
     ac.abort();
@@ -109,10 +109,10 @@ describe.skipIf(!allServersUp(await checkAllServers()))('a command that ignores 
   const MARKER = 4718;
 
   afterEach(async () => {
-    // `kill -9`, not the default: anything left here inherited SIG_IGN for TERM from the
-    // trap, so `pkill` without `-9` reports success and reaps nothing — which is how a
-    // single red run used to poison the fixture for the marker's full duration.
-    await conn?.exec(`pkill -9 -f "sleep ${MARKER}" || true`, { timeoutMs: 5000 }).catch(() => {});
+    // Anything left here inherited SIG_IGN for TERM from the trap, which is why
+    // `killMarkers` sends KILL: a single red run used to poison the fixture for the
+    // marker's full duration.
+    await killMarkers(conn, [MARKER]);
   });
 
   it('kills the whole process group, trap or no trap', async () => {

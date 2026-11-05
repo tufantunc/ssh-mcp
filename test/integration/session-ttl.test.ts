@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { checkAllServers, allServersUp, setupEnv, createConnection, type ServerStatus } from './fixtures.js';
 import type { SSHConnection } from '../../src/ssh/connection.js';
+import { treeSize, killMarkers } from './process-table.js';
 
 let status: ServerStatus;
 let env: ReturnType<typeof setupEnv>;
@@ -52,11 +53,10 @@ describe.skipIf(!allServersUp(await checkAllServers()))('Session TTL and idle re
 
       // Checked immediately after the await: if the reaper did not wait for the ladder,
       // the command is still running here.
-      const { stdout } = await conn.exec(`ps -ef | grep -c "[s]leep ${marker}"`, { timeoutMs: 5000 });
-      expect(Number(stdout.trim()), 'the reaped command outlived its own reaping').toBe(0);
+      expect(await treeSize(conn, marker), 'the reaped command outlived its own reaping').toBe(0);
       expect(conn.getSession('reap-bg')).toBeUndefined();
     } finally {
-      await conn.exec(`pkill -9 -f "sleep ${marker}" || true`, { timeoutMs: 5000 }).catch(() => {});
+      await killMarkers(conn, [marker]);
     }
   }, 30000);
 

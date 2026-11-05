@@ -1,49 +1,44 @@
 import type { SSHConnection } from '../../src/ssh/connection.js';
 
 /**
- * Reading the remote process table for the kill tests (#146).
+ * Reading and clearing the remote process table for the tests that check a stopped
+ * command is gone from the host (#146).
  *
- * Every count here answers "is it still running?", and those tests pass on `0`. So a
- * table that could not be read must not come back as `0`: `pgrep … | wc -l` printed
- * `0` when pgrep was missing, and `ps -ef | grep -c` printed `0` when ps failed, which
- * read as "the process is gone" — a leak test that passes because it saw nothing.
- * Each command here keeps the exit status of the step that reads the table, and a
- * status that is not "matched" or "matched nothing" throws.
+ * A distinctive `sleep` duration acts as the process name, and one matcher serves both
+ * counting and killing, so what a test kills is what it counted:
  *
- * Distinctive sleep durations act as process names: `^sleep 4711` matches the command
- * and nothing else, including not the shell that sshd wraps it in.
+ *  - `[s]leep` keeps the shell running the check out of its own match. An unbracketed
+ *    `pkill -f "sleep N"` matches that shell too and kills it (exit 137).
+ *  - `([^0-9]|$)` ends the number, so `sleep 4713` is not reached by a cleanup for
+ *    `sleep 471` and a marker cannot collide with another that starts the same way.
+ *  - Unanchored at the front, so a wrapper such as `sh -c 'trap "" INT TERM; sleep N;
+ *    true'` is counted and killed along with its child.
+ *
+ * The leak checks pass on a count of 0, so a table that could not be read must not come
+ * back as 0. `ps -ef | grep -c` printed 0 when ps failed, because a pipe reports only
+ * grep's status, which read as "the process is gone": a leak test that passed because it
+ * saw nothing. The count here keeps ps's status and throws on anything that is not a
+ * count.
  */
-
-/** Exit status the tree count uses for "ps itself failed". */
-const PS_FAILED = 90;
-
-/** How many copies of `sleep <marker>` are running, seen over a fresh channel. */
-export async function running(conn: SSHConnection, marker: number): Promise<number> {
-  // pgrep: 0 = matched, 1 = matched nothing, anything else = could not look.
-  const { stdout, stderr, exitCode } = await conn.exec(`pgrep -f "^sleep ${marker}"`, { timeoutMs: 5000 });
-  if (exitCode !== 0 && exitCode !== 1) {
-    throw new Error(`pgrep could not read the process table (exit ${exitCode}): ${stderr.trim()}`);
-  }
-  return stdout.split('\n').filter((line) => line.trim() !== '').length;
+function matcher(marker: number): string {
+  return `[s]leep ${marker}([^0-9]|$)`;
 }
 
-/**
- * Every process mentioning `sleep <marker>`, wrapper shells included. The bracket
- * keeps the searching shell out of its own count.
- */
+/** Every process running `sleep <marker>`, wrapper shells included. */
 export async function treeSize(conn: SSHConnection, marker: number): Promise<number> {
-  // grep -c: 0 = matched, 1 = matched nothing, 2 = error; ps's own failure is mapped
-  // to PS_FAILED, because a pipe would otherwise report only grep's status.
+  // ps's own failure exits 90 before grep runs; grep -c exits 0 (matched), 1 (matched
+  // nothing) or 2 (error). Only the first two carry a count.
   const { stdout, stderr, exitCode } = await conn.exec(
-    `out=$(ps -ef) || exit ${PS_FAILED}; printf '%s\\n' "$out" | grep -c "[s]leep ${marker}"`,
+    `out=$(ps -ef) || exit 90; printf '%s\\n' "$out" | grep -cE "${matcher(marker)}"`,
     { timeoutMs: 5000 },
   );
-  if (exitCode !== 0 && exitCode !== 1) {
-    throw new Error(`ps could not read the process table (exit ${exitCode}): ${stderr.trim()}`);
+  const text = stdout.trim();
+  if ((exitCode !== 0 && exitCode !== 1) || !/^\d+$/.test(text)) {
+    throw new Error(
+      `could not read the process table (exit ${exitCode}, stdout ${JSON.stringify(stdout)}): ${stderr.trim()}`,
+    );
   }
-  const count = Number(stdout.trim());
-  if (!Number.isInteger(count)) throw new Error(`unreadable process count: ${JSON.stringify(stdout)}`);
-  return count;
+  return Number(text);
 }
 
 /**
@@ -64,11 +59,11 @@ export async function goneWithin(conn: SSHConnection, marker: number, ms: number
 }
 
 /**
- * Kills exactly these markers. One `pkill` per marker, anchored at both ends, so a
- * prefix such as `^sleep 47` cannot reach another file's marker (4713 belongs to
- * exec-unstoppable) — `fileParallelism: false` was the only thing keeping that safe.
+ * Kills everything `treeSize` would count for these markers. `-9`, because a command
+ * that trapped INT and TERM survives anything gentler, and a survivor sits in the
+ * fixture for its full duration and corrupts the next run's count.
  */
 export async function killMarkers(conn: SSHConnection | undefined, markers: number[]): Promise<void> {
-  const script = markers.map((m) => `pkill -9 -f "^sleep ${m}$"`).join('; ');
+  const script = markers.map((m) => `pkill -9 -f "${matcher(m)}"`).join('; ');
   await conn?.exec(`${script}; true`, { timeoutMs: 5000 }).catch(() => {});
 }
