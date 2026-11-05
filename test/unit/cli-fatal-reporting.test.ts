@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import {
@@ -8,6 +8,8 @@ import {
   EXIT_OPERATOR_ERROR,
   EXIT_DEFECT,
   writeAllSync,
+  stderrSink,
+  STDERR_DRAIN_MS,
 } from '../../src/errors.js';
 
 /**
@@ -144,32 +146,78 @@ describe('writeAllSync', () => {
 
   it('retries a full pipe rather than dropping the rest', () => {
     const p = pipe(4, [eagain, eagain]);
-    writeAllSync(2, 'abcdefgh', p.write);
+    writeAllSync(2, 'abcdefgh', p.write, () => 0);
     expect(p.text()).toBe('abcdefgh');
   });
 
-  it('gives up on a pipe that never drains, saying how much went out', () => {
-    // A reader that stopped reading must not keep the process from exiting.
+  /**
+   * A writer that takes 4 bytes once and then nothing, on a clock that advances 1ms a
+   * read. Counting its calls pins the window: the first read sets the deadline, and the
+   * loop gives up on the first stall read strictly past it.
+   */
+  function stuckAfterFour(failure: () => Error | 0) {
     let t = 0;
     let calls = 0;
     const write = (_fd: number, _buf: Buffer, offset: number): number => {
       // The loop is synchronous, so a missing deadline would hang the worker rather than
       // time the test out; this turns that into a failure.
-      if (++calls > 100) throw new Error('still retrying after 100 attempts');
-      if (offset >= 4) throw eagain();
-      return 4;
+      if (++calls > STDERR_DRAIN_MS + 10) throw new Error('still retrying past the window');
+      if (offset < 4) return 4;
+      const f = failure();
+      if (f === 0) return 0;
+      throw f;
     };
-    const err = (() => {
-      try { writeAllSync(2, 'abcdefgh', write, () => (t += 500)); } catch (e) { return e as Error & { written?: number }; }
-      return null;
-    })();
-    expect(err?.message).toBe('EAGAIN');
-    expect(err?.written).toBe(4);
+    const run = (): Error & { written?: number } => {
+      try { writeAllSync(2, 'abcdefgh', write, () => t++); } catch (e) { return e as Error & { written?: number }; }
+      throw new Error('writeAllSync returned on a pipe that never drained');
+    };
+    return { run, calls: () => calls };
+  }
+
+  it('gives up on a pipe that never drains, after the window and not before', () => {
+    // A reader that stopped reading must not keep the process from exiting, and a full
+    // pipe that drains within the window must not lose the rest.
+    const s = stuckAfterFour(eagain);
+    const err = s.run();
+    expect(err.message).toBe('EAGAIN');
+    expect(err.written).toBe(4);
+    // Deadline read at t=0 → 2000: the two seconds the changeset promises, so written out
+    // rather than read back from the constant. One write that succeeds, then stalls read
+    // at t=1…2001.
+    expect(s.calls()).toBe(2002);
+  });
+
+  it('treats a write that takes nothing as a stall, so it cannot spin forever', () => {
+    const s = stuckAfterFour(() => 0);
+    const err = s.run();
+    expect(err.written).toBe(4);
+    expect(s.calls()).toBe(2002);
   });
 
   it('does not retry anything but a full pipe', () => {
     const p = pipe(4, [() => Object.assign(new Error('EBADF'), { code: 'EBADF' })]);
     expect(() => writeAllSync(2, 'abcdefgh', p.write, () => 0)).toThrow('EBADF');
     expect(p.text()).toBe('');
+  });
+});
+
+describe('stderrSink — when the write fails', () => {
+  const ebadf = () => Object.assign(new Error('EBADF'), { code: 'EBADF' });
+
+  it('falls back to console.error with the whole line when nothing went out', () => {
+    const fallback = vi.fn();
+    stderrSink(() => { throw ebadf(); }, fallback, () => 0)('Invalid --group=x.');
+    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(fallback).toHaveBeenCalledWith('Invalid --group=x.');
+  });
+
+  it('does not fall back after part of the line went out, which would print its head twice', () => {
+    const fallback = vi.fn();
+    const write = (_fd: number, _buf: Buffer, offset: number): number => {
+      if (offset === 0) return 4;
+      throw ebadf();
+    };
+    stderrSink(write, fallback, () => 0)('abcdefgh');
+    expect(fallback).not.toHaveBeenCalled();
   });
 });
