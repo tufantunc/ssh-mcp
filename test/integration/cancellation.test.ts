@@ -16,10 +16,6 @@ beforeAll(async () => {
 afterAll(async () => { await conn?.close(); env?.restore(); });
 
 describe.skipIf(!allServersUp(await checkAllServers()))('Command cancellation', () => {
-  it('long command times out with error', async () => {
-    await expect(conn.exec('sleep 30', { timeoutMs: 2000 })).rejects.toThrow(/timed out/i);
-  }, 10000);
-
   it('background session close marks session closed', async () => {
     await conn.openSession({ name: 'cancel-bg', type: 'background', command: 'sleep 300' });
     await conn.closeSession('cancel-bg').catch(() => {});

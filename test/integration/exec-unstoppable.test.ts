@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { checkAllServers, allServersUp, setupEnv, createConnection, type ServerStatus } from './fixtures.js';
 import type { SSHConnection } from '../../src/ssh/connection.js';
+import { goneWithin, killMarkers } from './process-table.js';
 
 /**
  * The other half of #146: what the caller is told when the command *cannot* be
@@ -13,9 +14,10 @@ import type { SSHConnection } from '../../src/ssh/connection.js';
  * same class of defect one layer up.
  *
  * It is forced here rather than waited for: the real `terminateChannel` still runs,
- * so the command is really killed and nothing leaks, but it reports failure. That
- * makes this a test of the message, which is the only part a real ssh2 change would
- * leave to us.
+ * so the command is really killed, but it reports failure. That makes this a test of
+ * the message, which is the only part a real ssh2 change would leave to us. "Really
+ * killed" is asserted, not assumed: if the mock stopped delegating, every run would
+ * leave a `sleep 4713` behind and the message tests would still pass.
  */
 vi.mock('../../src/ssh/channel-signal.js', async () => {
   const actual = await vi.importActual<typeof import('../../src/ssh/channel-signal.js')>(
@@ -23,6 +25,8 @@ vi.mock('../../src/ssh/channel-signal.js', async () => {
   );
   return { ...actual, terminateChannel: (channel: never) => { actual.terminateChannel(channel); return false; } };
 });
+
+const MARKER = 4713;
 
 let status: ServerStatus;
 let env: ReturnType<typeof setupEnv>;
@@ -36,25 +40,27 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await conn?.exec('pkill -f "^sleep 4713" || true', { timeoutMs: 5000 }).catch(() => {});
+  await killMarkers(conn, [MARKER]);
   await conn?.close();
   env?.restore();
 });
 
 describe.skipIf(!allServersUp(await checkAllServers()))('when the command cannot be signalled', () => {
   it('says so instead of reporting a bare timeout', async () => {
-    const err = await conn.exec('sleep 4713', { timeoutMs: 1000 }).then(() => null, (e: Error) => e);
+    const err = await conn.exec(`sleep ${MARKER}`, { timeoutMs: 1000 }).then(() => null, (e: Error) => e);
     expect(err?.message).toMatch(/timed out/i);
     expect(err?.message).toMatch(/may still be running on the host/);
+    expect(await goneWithin(conn, MARKER, 8000), 'the forced failure leaked the command').toBe(true);
   }, 30000);
 
   it('says so instead of reporting a bare cancellation', async () => {
     const ac = new AbortController();
-    const started = conn.exec('sleep 4713', { timeoutMs: 60000, abortSignal: ac.signal });
+    const started = conn.exec(`sleep ${MARKER}`, { timeoutMs: 60000, abortSignal: ac.signal });
     await new Promise((r) => setTimeout(r, 300));
     ac.abort();
     const err = await started.then(() => null, (e: Error) => e);
     expect(err?.message).toMatch(/abort/i);
     expect(err?.message).toMatch(/may still be running on the host/);
+    expect(await goneWithin(conn, MARKER, 8000), 'the forced failure leaked the command').toBe(true);
   }, 30000);
 });
