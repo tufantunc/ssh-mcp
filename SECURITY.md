@@ -142,24 +142,31 @@ dressed as a cleanup. There is no mode that overrides a pin, and the refusal doe
 one.
 
 **`ask-destructive` gates less than the name suggests, and `kill` is one example rather
-than the exception.** Outside the never-allowed list, five things produce the `destructive`
-class: the pattern `/rm\s+-rf?\s+\//`, a disqualifying argument on an otherwise allowlisted
-binary (`find … -delete`, `find … -exec`), a command word this process cannot resolve
-statically (`$VAR` as the command), a program handed to an interpreter this process cannot
-read (`python3 -c`, `perl -e`, `node -e`, `php -r`, and a program arriving on a pipe), and
-the two commands this server synthesises that act on the target (`sftp:upload`,
-`session:open`). **`awk` is not among them**: its program is read by none of this, so
-`awk 'BEGIN{system("...")}'` classifies `safe` exactly as it does on 2.5.1.
+than the exception.** Outside the never-allowed list, these produce the `destructive` class:
+
+- a recursive `rm` (`-r`, `-R` or `--recursive`, in any flag order) against an absolute path;
+- a disqualifying argument on an otherwise allowlisted binary (`find … -delete`, `find … -exec`);
+- a command word this process cannot resolve statically (`$VAR` as the command);
+- a program this process cannot read: one handed to an interpreter (`python3 -c`, `perl -e`,
+  `node -e`, `php -r`), one arriving on a pipe, the recipes `make` reads from a file, and the
+  remote command of `ssh`;
+- an `awk` program that writes a file, prints into a shell, or cannot be located (`-f
+  progfile`, or an option the awk implementations disagree on);
+- the two commands this server synthesises that act on the target (`sftp:upload`,
+  `session:open`).
+
+A command handed to a shell from inside another one, such as an awk `system()` call, is also
+classified as itself, so `awk 'BEGIN{system("sudo id")}'` comes out `privileged`.
 Elevation classifies `privileged` rather than `destructive`; this mode gates both. Ordinary write verbs are in none of these. Measured against the shipped classifier, all of these are `safe`,
 and `safe` raises no prompt in this mode:
 
 ```
 rm -f /etc/passwd          mv /etc/passwd /tmp/x       truncate -s0 /etc/passwd
-rm -r -f /                 rm --recursive --force /    rm -rf ~
-shred /dev/sda             systemctl stop nginx        kill -9 <pid>
+rm -rf ~                   rm -rf ./build              shred /dev/sda
+systemctl stop nginx       kill -9 <pid>
 ```
 
-So `ask-destructive` buys a prompt on elevation and on `rm -rf /path`. It does not buy one
+So `ask-destructive` buys a prompt on elevation and on a recursive `rm` of an absolute path. It does not buy one
 on writes, deletions spelled another way, service control, or signals. **`ask-all` is the
 mode that gates writes**, and it is the right default for a profile pointed at anything that
 matters. A `readOnly` profile, or a role whose bindings exclude `safe`, are the other two

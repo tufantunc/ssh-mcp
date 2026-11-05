@@ -750,11 +750,13 @@ startup rather than degrading silently.
 
 - `auto` — no prompts (dev only!)
 - `ask-destructive` — prompt for destructive/privileged (default). Narrower than it sounds:
-  outside the never-allowed list, `destructive` is one `rm -rf /path` pattern, `find` with a
-  write/exec flag, an unresolvable command word, a program handed to an interpreter this
-  server cannot read (`python3 -c`, `perl -e`, `node -e`, a program arriving on a pipe —
-  but not `awk`, whose program is not read), and `sftp-upload`/interactive `open-session` — elevation classifies `privileged`, which also
-  prompts. Ordinary writes, service control and signals do not. See
+  outside the never-allowed list, `destructive` is a recursive `rm` of an absolute path, `find`
+  with a write/exec flag, an unresolvable command word, a program this server cannot read
+  (`python3 -c`, `perl -e`, `node -e`, a program arriving on a pipe, a `make` recipe, the
+  remote command of `ssh`), an `awk` program that writes a file or cannot be read, and
+  `sftp-upload`/interactive `open-session` — elevation classifies `privileged`, which also
+  prompts, including elevation inside an awk `system()` call. Ordinary writes, service control
+  and signals do not. See
   [SECURITY.md](./SECURITY.md) before relying on this in production.
 - `ask-all` — prompt for every command
 - `deny` — reject destructive/privileged commands outright (no prompt)
