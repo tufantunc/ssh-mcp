@@ -147,15 +147,23 @@ describe('parseDacl invariants', () => {
     // instrumenting showed fired on 101 of 2000 runs against five distinct strings
     // — so 1899 runs asserted nothing at all. The five honest cases are now an
     // explicit table below, which is stronger and instant.
+    //
+    // Two kinds of cut, drawn evenly: anywhere, or on an ACE boundary after at least one
+    // complete ACE. Uniform cuts alone, instrumented over 2000 runs on five seeds, put
+    // 1842-1875 in `unknown` and reached the `broad` branch — the only one that checks no
+    // principal survives the cut that the prefix does not name — 27-51 times. The mix
+    // keeps 900-954 arbitrary cuts and reaches `broad` 999-1048 times.
+    const anywhere = fc.tuple(fc.array(ace(grantingType, strangerTrustee), { minLength: 1, maxLength: 4 }), daclFlags, fc.nat())
+      .map(([aces, flags, cut]) => {
+        const full = render(flags, aces);
+        return full.slice(0, 1 + (cut % (full.length - 1)));
+      });
+    const onBoundary = fc.tuple(fc.array(ace(grantingType, strangerTrustee), { minLength: 2, maxLength: 4 }), daclFlags, fc.nat())
+      .map(([aces, flags, cut]) => render(flags, aces.slice(0, 1 + (cut % (aces.length - 1)))));
     fc.assert(
       fc.property(
-        fc.array(ace(grantingType, strangerTrustee), { minLength: 1, maxLength: 4 }),
-        daclFlags,
-        fc.nat(),
-        (aces, flags, cut) => {
-          const full = render(flags, aces);
-          const prefixLength = 1 + (cut % (full.length - 1));
-          const truncated = full.slice(0, prefixLength);
+        fc.oneof(anywhere, onBoundary),
+        (truncated) => {
           const verdict = parseDacl(truncated, ALLOWED);
 
           // A prefix that stops before the first ACE is a syntactically complete

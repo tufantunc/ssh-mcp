@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { join } from 'path';
 import { parseDacl, aclIdentity, type AclVerdict } from '../../../src/config/sddl.js';
-// Stays behind the cut: classifying an icacls failure is the platform half's vocabulary.
-import { classifyReadFailure } from '../../../src/config/windows-acl.js';
+// Stay behind the cut: reading what icacls returned is the platform half's vocabulary.
+import { classifyReadFailure, verdictFromSaved } from '../../../src/config/windows-acl.js';
 
 /**
  * The SDDL parser, which runs everywhere, so it is tested everywhere. The
@@ -90,8 +90,9 @@ describe('parseDacl — the openings the first version reported as safe', () => 
   });
 
   it('reports a drive path that merely looks like a descriptor as unknown', () => {
-    // The item-name line of `icacls /save` output. Selecting it instead of the
-    // descriptor used to yield "clean".
+    // Stand-ins for a line that looks like a descriptor and is not one. They are not what
+    // `icacls /save` writes as its name line — that is the last path component, measured
+    // on Windows 11 — but selecting a line like them used to yield "clean".
     expect(parse('D:\\')).toMatchObject({ status: 'unknown' });
     expect(parse('D:\\cfg\\config.toml')).toMatchObject({ status: 'unknown' });
   });
@@ -357,6 +358,50 @@ describe('classifyReadFailure — what a failed descriptor read means', () => {
     // An ENOENT on the temp file rather than on the executable is not the tool missing.
     expect(classifyReadFailure(enoent('C:\\Temp\\acl.sddl'), () => false))
       .toMatchObject({ failure: 'read-refused' });
+  });
+});
+
+describe('verdictFromSaved — which line of the saved file is the descriptor', () => {
+  // `icacls /save` writes UTF-16LE: the target's last path component on one line, its
+  // descriptor on the next. Measured on Windows 11: `cfg.toml` for `C:cfg.toml`, `Users`
+  // for `C:\Users`, `.` for `.`, and an empty name line for a bare `C:` (the directory of
+  // a drive-relative `--config C:cfg.toml`) and for the drive root `C:\`. This step ran
+  // only inside `inspectAcl`, after a subprocess, so only the advisory Windows job
+  // reached it.
+  const saved = (...lines: string[]) => Buffer.from(lines.join('\r\n'), 'utf16le');
+
+  it('reads the descriptor line, not the name line', () => {
+    expect(verdictFromSaved(saved('cfg.toml', DRIVE_ROOT, ''), ALLOWED).status).toBe('broad');
+    expect(verdictFromSaved(saved('cfg.toml', NARROW, ''), ALLOWED).status).toBe('restricted');
+  });
+
+  it('reads the descriptor after the empty name line a bare drive saves', () => {
+    expect(verdictFromSaved(saved('', DRIVE_ROOT, ''), ALLOWED).status).toBe('broad');
+  });
+
+  it('accepts a descriptor that opens with its owner and group', () => {
+    // The first version required `D:` at the start of the line while the parser accepts
+    // `O:`/`G:` before it, and that disagreement resolved to "unchecked".
+    expect(verdictFromSaved(saved('cfg.toml', 'O:BAG:BAD:(A;;FR;;;WD)', ''), ALLOWED).status).toBe('broad');
+  });
+
+  it('does not take a line that merely contains a DACL component for the descriptor', () => {
+    // Synthetic: no measured name line contains one. It pins the guard — `parseDacl`
+    // finds `D:` anywhere in a line, and `xD:(A;;FA;;;SY)` alone reads `restricted`, so
+    // without the guard this file would read that ahead of its broad descriptor.
+    expect(verdictFromSaved(saved('xD:(A;;FA;;;SY)', DRIVE_ROOT, ''), ALLOWED).status).toBe('broad');
+  });
+
+  it('calls a file with no descriptor line unparsable rather than restricted', () => {
+    expect(verdictFromSaved(saved('cfg.toml', ''), ALLOWED))
+      .toMatchObject({ status: 'unknown', reason: 'unparsable' });
+  });
+
+  it("reports the parser's reason for a descriptor line it could not read", () => {
+    // Not the generic "no line parsed" text: the operator should see what was wrong.
+    const parsed = parseDacl('D:(A;;FA;;', ALLOWED);
+    expect(parsed.status).toBe('unknown');
+    expect(verdictFromSaved(saved('cfg.toml', 'D:(A;;FA;;', ''), ALLOWED)).toEqual(parsed);
   });
 });
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { join, parse } from 'path';
+import { mkdirSync, realpathSync, symlinkSync } from 'fs';
 import {
   inspectAcl,
   type AclOptions,
@@ -9,8 +10,7 @@ import {
 // The verdict vocabulary belongs to the parser, so these come from the other side of the
 // cut — which is the dependency the split exists to make visible.
 import type { AclVerdict, Grant, UnknownReason } from '../../../src/config/sddl.js';
-import { OperatorError } from '../../../src/errors.js';
-import { enforceAcl } from './helpers.js';
+import { enforceAcl, refusal, useConfigDir } from './helpers.js';
 
 /**
  * What the Windows branch *decides*, as opposed to what the parser reads.
@@ -51,7 +51,6 @@ const unknown = (reason: UnknownReason, detail = 'x'): AclVerdict =>
 
 const broad = (...grants: Grant[]): AclVerdict => ({ status: 'broad', grants });
 
-/** Awaits the refusal and names the behaviour if there isn't one. */
 /** The default posture: report, do not refuse. */
 function warned(): { events: AclFinding[]; warnings: string[]; opts: AclOptions } {
   const events: AclFinding[] = [];
@@ -66,12 +65,6 @@ function warned(): { events: AclFinding[]; warnings: string[]; opts: AclOptions 
 
 /** Refusal is opt-in now, so every refusal test says so. */
 const strict = enforceAcl;
-
-async function refusal(p: Promise<void>): Promise<Error> {
-  const err = await p.then(() => null, (e: Error) => e);
-  expect(err, 'expected a refusal, but the check accepted the path').toBeInstanceOf(OperatorError);
-  return err as Error;
-}
 
 beforeEach(() => vi.stubEnv('USERPROFILE', PROFILE));
 
@@ -265,6 +258,58 @@ describe('assertPrivateOnWindows — a broad ACL', () => {
     );
     expect(err.message).toMatch(/Move the config/);
   });
+
+  it.each([
+    ['the working directory', 'config.toml', '.'],
+    ['the parent directory', join('..', 'config.toml'), '..'],
+  ])('relocates rather than prescribes for %s even inside the profile', async (_, file, dir) => {
+    // With the profile stubbed outside the working directory, the profile check alone
+    // answered "relocate" and the `.`/`..` arm was never what decided it. A profile that
+    // contains everything leaves the arm as the only thing between these directories and
+    // `/inheritance:d` on them.
+    vi.stubEnv('USERPROFILE', ROOT);
+    const err = await refusal(assertPrivateOnWindows(file, strict(), only(dir, broad(EVERYONE))));
+    expect(err.message).toMatch(/Move the config/);
+  });
+});
+
+describe('assertPrivateOnWindows — the profile comparison', () => {
+  /**
+   * Whether a directory is inside the profile is decided on the form the filesystem
+   * uses, lowercased, on both sides — and both steps were asserted only by the Windows
+   * job. Every fixture path here was nonexistent, so both ends took the lexical fallback
+   * and agreed whatever `canonical()` did.
+   */
+  const BU = grant('BUILTIN\\Users', 'BU', 'S-1-5-32-545');
+  const tmp = useConfigDir('ssh-mcp-canon-');
+
+  it('counts a directory reached through a link as inside the profile it resolves into', async () => {
+    // A junction on Windows, a symlink elsewhere: two spellings of one directory that only
+    // the filesystem can reconcile. This pins that both sides go through realpath; that it
+    // is `realpathSync.native`, the one that also expands an 8.3 short name, only the
+    // Windows live job can see.
+    const base = realpathSync(tmp.dir);
+    const profile = join(base, 'profile');
+    mkdirSync(join(profile, 'cfg'), { recursive: true });
+    const alias = join(base, 'alias');
+    symlinkSync(profile, alias, 'junction');
+    vi.stubEnv('USERPROFILE', profile);
+
+    const dir = join(alias, 'cfg');
+    const err = await refusal(assertPrivateOnWindows(join(dir, 'config.toml'), strict(), only(dir, broad(BU))));
+    expect(err.message).not.toMatch(/Move the config/);
+    expect(err.message).toContain('/remove:g *S-1-5-32-545');
+  });
+
+  it('compares the two sides without regard to case', async () => {
+    // Nonexistent on purpose, so both sides take the lexical fallback and the lowercasing
+    // is the only thing that can make them agree. This catches its removal on the POSIX
+    // legs only: on Windows `path.win32.relative` already compares without case.
+    vi.stubEnv('USERPROFILE', PROFILE.toUpperCase());
+    const err = await refusal(assertPrivateOnWindows(FILE, strict(), only(DIR, broad(BU))));
+    expect(err.message).not.toMatch(/Move the config/);
+    expect(err.message).toContain('/remove:g *S-1-5-32-545');
+  });
 });
 
 describe('assertPrivateOnWindows — a NULL DACL', () => {
@@ -440,16 +485,17 @@ describe('when the platform will not name the current account', () => {
       };
     });
     const acl = await import('../../../src/config/windows-acl.js');
-    const err = await acl
-      .assertPrivateOnWindows(FILE, { enforce: true }, async (p) =>
+    try {
+      // `Error`: this OperatorError comes from the post-reset module, not the one helpers.ts holds.
+      const err = await refusal(acl.assertPrivateOnWindows(FILE, { enforce: true }, async (p) =>
         p === FILE ? { status: 'broad', grants: [EVERYONE] } : { status: 'restricted' },
-      )
-      .then(() => null, (e: Error) => e);
-    vi.doUnmock('os');
-    vi.unstubAllEnvs();
-    vi.resetModules();
-    expect(err, 'expected a refusal, not a resolve').toBeInstanceOf(Error);
-    return (err as Error).message;
+      ), Error);
+      return err.message;
+    } finally {
+      vi.doUnmock('os');
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
   }
 
   it('still produces the finding instead of escaping as a crash', async () => {

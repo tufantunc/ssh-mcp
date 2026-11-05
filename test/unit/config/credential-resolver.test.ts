@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'fs/promises';
-import { tmpdir } from 'os';
+import { writeFile } from 'fs/promises';
 import { join } from 'path';
+import { useConfigDir } from './helpers.js';
 import { resolveCredentials } from '../../../src/config/credential-resolver.js';
 import type { Profile } from '../../../src/types.js';
 
-let tempDir: string;
+const cfg = useConfigDir('ssh-mcp-cred-');
 let savedEnv: NodeJS.ProcessEnv;
 
 function makeProfile(overrides: Partial<Profile> = {}): Profile {
@@ -34,13 +34,11 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
 }
 
 beforeEach(async () => {
-  tempDir = await mkdtemp(join(tmpdir(), 'ssh-mcp-cred-'));
   savedEnv = { ...process.env };
 });
 
 afterEach(async () => {
   process.env = savedEnv;
-  await rm(tempDir, { recursive: true, force: true });
 });
 
 describe('resolveCredentials', () => {
@@ -78,14 +76,14 @@ describe('resolveCredentials', () => {
   });
 
   it('resolves private key from keyRef path', async () => {
-    const keyPath = join(tempDir, 'id_ed25519');
+    const keyPath = join(cfg.dir, 'id_ed25519');
     await writeFile(keyPath, '-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n');
     const creds = await resolveCredentials(makeProfile({ auth: 'key', keyRef: keyPath }));
     expect(creds.privateKey).toContain('BEGIN PRIVATE KEY');
   });
 
   it('resolves private key from env var path', async () => {
-    const keyPath = join(tempDir, 'env_key');
+    const keyPath = join(cfg.dir, 'env_key');
     await writeFile(keyPath, 'key-content');
     process.env.SSH_MCP_TEST_KEY = keyPath;
     const creds = await resolveCredentials(makeProfile());

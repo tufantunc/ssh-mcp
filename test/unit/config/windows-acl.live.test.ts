@@ -6,7 +6,7 @@ import { tmpdir, platform } from 'os';
 import { join } from 'path';
 import { checkPermissions } from '../../../src/config/loader.js';
 import { inspectAcl } from '../../../src/config/windows-acl.js';
-import { MINIMAL_CONFIG, enforceAcl } from './helpers.js';
+import { MINIMAL_CONFIG, enforceAcl, refusal } from './helpers.js';
 
 const run = promisify(execFile);
 const shell = promisify(exec);
@@ -48,19 +48,6 @@ describe.runIf(onWindows)('Windows ACL check, against real ACLs', () => {
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
   });
-
-  /**
-   * Awaits a refusal and names the behaviour when there isn't one. `.catch(e => e)`
-   * leaves `undefined` on the success path, so the assertion after it fails with
-   * "cannot read properties of undefined" — which points at the test rather than
-   * at "checkPermissions accepted a file granted to Everyone", on a job a
-   * reviewer cannot reproduce locally.
-   */
-  async function refusal(promise: Promise<void>): Promise<Error> {
-    const err = await promise.then(() => null, (e: Error) => e);
-    expect(err, 'expected checkPermissions to refuse, but it resolved').toBeInstanceOf(Error);
-    return err as Error;
-  }
 
   it('accepts a file that only its owner can reach', async () => {
     await expect(checkPermissions(file, enforceAcl())).resolves.toBeUndefined();
