@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { defaultsFromArgv } from '../../../src/cli.js';
 import type { AppConfig, Profile } from '../../../src/types.js';
+import { completedChannel } from '../../helpers/fake-channel.js';
 
 /**
  * A connection a reload closes must never dial again.
@@ -18,16 +19,6 @@ import type { AppConfig, Profile } from '../../../src/types.js';
 
 let clients: EventEmitter[];
 
-/** A channel that completes immediately with exit code 0. */
-function fakeStream() {
-  const stream = Object.assign(new EventEmitter(), {
-    stderr: new EventEmitter(),
-    write: vi.fn(), end: vi.fn(), close: vi.fn(), signal: vi.fn(),
-  });
-  setTimeout(() => stream.emit('close', 0, null), 0);
-  return stream;
-}
-
 beforeEach(() => {
   clients = [];
   vi.resetModules();
@@ -39,7 +30,7 @@ beforeEach(() => {
       }
       connect() { setTimeout(() => this.emit('ready'), 0); return this; }
       exec(_cmd: string, _opts: unknown, cb: (err: Error | undefined, stream: unknown) => void) {
-        setTimeout(() => cb(undefined, fakeStream()), 0);
+        setTimeout(() => cb(undefined, completedChannel()), 0);
       }
       end() { /* nothing to tear down */ }
     }

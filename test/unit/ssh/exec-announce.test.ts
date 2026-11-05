@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import type { Profile } from '../../../src/types.js';
+import { completedChannel } from '../../helpers/fake-channel.js';
 
 /**
  * Every channel `SSHConnection` opens for a command announces the tool as
@@ -21,16 +22,6 @@ import type { Profile } from '../../../src/types.js';
 let execOpts: Array<Record<string, unknown> | undefined>;
 /** What reached `client.shell`, per call: the window options and the options object. */
 let shellCalls: Array<{ window: unknown; options: Record<string, unknown> | undefined }>;
-
-/** A channel that completes immediately with exit code 0. */
-function fakeStream() {
-  const stream = Object.assign(new EventEmitter(), {
-    stderr: new EventEmitter(),
-    write: vi.fn(), end: vi.fn(), close: vi.fn(), signal: vi.fn(),
-  });
-  setTimeout(() => stream.emit('close', 0, null), 0);
-  return stream;
-}
 
 /**
  * A channel that behaves enough like a POSIX shell to complete the session
@@ -83,7 +74,7 @@ beforeEach(() => {
         // two-argument form as `undefined` is what makes a missing declaration visible.
         const cb = typeof optsOrCb === 'function' ? optsOrCb : maybeCb!;
         execOpts.push(typeof optsOrCb === 'function' ? undefined : optsOrCb);
-        setTimeout(() => cb(undefined, fakeStream()), 0);
+        setTimeout(() => cb(undefined, completedChannel()), 0);
       }
       shell(
         windowOrOpts: Record<string, unknown> | ((err: Error | undefined, stream: unknown) => void),
