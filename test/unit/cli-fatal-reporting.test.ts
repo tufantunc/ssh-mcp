@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import { inspect } from 'util';
 import {
   reportFatal,
   OperatorError,
@@ -209,6 +210,17 @@ describe('stderrSink — when the write fails', () => {
     stderrSink(() => { throw ebadf(); }, fallback, () => 0)('Invalid --group=x.');
     expect(fallback).toHaveBeenCalledTimes(1);
     expect(fallback).toHaveBeenCalledWith('Invalid --group=x.');
+  });
+
+  it('reports a value whose formatting throws instead of throwing while reporting', () => {
+    // `util.inspect` does not catch a throwing `[util.inspect.custom]`, and a throw here
+    // used to escape main()'s catch as an unhandled rejection that printed nothing.
+    const fallback = vi.fn();
+    const write = vi.fn(() => 0);
+    const hostile = { [inspect.custom]: () => { throw new Error('no'); } };
+    stderrSink(write, fallback, () => 0)('Fatal error:', hostile);
+    expect(write).not.toHaveBeenCalled();
+    expect(fallback).toHaveBeenCalledWith('Fatal error: <unprintable object>');
   });
 
   it('does not fall back after part of the line went out, which would print its head twice', () => {
