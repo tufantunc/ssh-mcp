@@ -43,9 +43,11 @@ interface ChannelState {
  * outgoing.state === 'open'`, and otherwise returns having sent nothing. A fake that
  * recorded the call instead would pass on the broken code — calling `signal()` was
  * exactly the problem in #146. So there is one observation point, `wire`, and it means
- * "this actually left the client": the public method and the `_protocol` fallback both end
- * there whatever the options, because the transport and protocol are options rather than
- * fields a test replaces.
+ * "this actually left the client": with the default `protocol: 'records'` and no `signal`
+ * override, the public method and the `_protocol` fallback both end there, because the
+ * transport is an option rather than a field a test replaces. `throws`, `absent` and
+ * `client: false` record nothing on purpose, and a replaced `signal` records only what
+ * the replacement does.
  *
  * `end()` and `close()` perform the transitions ssh2 does, and `stdinClosed` goes through
  * `end()`, so a test exercises the resulting shape rather than a hardcoded guess at it.

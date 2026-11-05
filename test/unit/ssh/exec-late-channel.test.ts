@@ -29,7 +29,7 @@ import { recordingTracer, type RecordedSpan } from '../../helpers/spans.js';
  *   after end():          writable=false outgoing.state=eof
  *
  * `fakeSsh2Channel` starts in the first shape and its `end()` performs the transition, and
- * every route a request can take ends in its `wire`.
+ * with its default protocol every route a request can take ends in its `wire`.
  */
 
 const profile = {
