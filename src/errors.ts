@@ -186,10 +186,47 @@ function writeStderr(...args: unknown[]): void {
     // `[util.inspect.custom]`, so formatting could throw while reporting a throw, which
     // escaped main()'s catch as an unhandled rejection and printed nothing at all.
     line = args.map((a) => (typeof a === 'string' ? a : inspect(a))).join(' ');
-    writeSync(2, `${line}\n`);
-  } catch {
-    // EAGAIN on a non-blocking pipe, or a closed fd. Better a lost line than an
-    // exception thrown while reporting an exception.
-    console.error(line || `Fatal error: <unprintable ${typeof args[args.length - 1]}>`);
+    writeAllSync(2, `${line}\n`);
+  } catch (err) {
+    // A closed fd, or a reader that stopped draining. Better a lost tail than an
+    // exception thrown while reporting an exception — and only a line that never
+    // started goes to the fallback, which would otherwise print its head twice.
+    const written = (err as { written?: number } | undefined)?.written ?? 0;
+    if (written === 0) console.error(line || `Fatal error: <unprintable ${typeof args[args.length - 1]}>`);
+  }
+}
+
+/** How long `writeAllSync` keeps retrying a pipe that is full before giving up. */
+const STDERR_DRAIN_MS = 2_000;
+
+/**
+ * Write all of `text` to `fd`, synchronously. A failure is rethrown carrying `written`,
+ * the bytes that did go out.
+ *
+ * One `writeSync` is not one write. Once anything has touched `process.stderr` — and in
+ * a running server something always has — Node puts a pipe on fd 2 into non-blocking
+ * mode on macOS, and each call then takes at most what the pipe has room for: measured,
+ * 65536 bytes, returned as a count rather than thrown. The single call this replaces cut
+ * every message at 64KB. A full pipe answers EAGAIN until the reader drains it, so that
+ * is retried, for a bounded time: a reader that never drains must not stop the process
+ * from exiting. `write` and `now` are parameters so both are testable without a pipe.
+ */
+export function writeAllSync(
+  fd: number,
+  text: string,
+  write: (fd: number, buf: Buffer, offset: number) => number = writeSync,
+  now: () => number = Date.now,
+): void {
+  const buf = Buffer.from(text);
+  const deadline = now() + STDERR_DRAIN_MS;
+  let offset = 0;
+  while (offset < buf.length) {
+    try {
+      offset += write(fd, buf, offset);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EAGAIN' || now() > deadline) {
+        throw Object.assign(err as Error, { written: offset });
+      }
+    }
   }
 }

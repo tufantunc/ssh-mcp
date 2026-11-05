@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 import {
   reportFatal,
   OperatorError,
   ConfigNotFoundError,
   EXIT_OPERATOR_ERROR,
   EXIT_DEFECT,
+  writeAllSync,
 } from '../../src/errors.js';
 
 /**
@@ -75,5 +78,98 @@ describe('reportFatal', () => {
     // Error is ours until someone says otherwise, and gets the stack.
     const calls = capture(new Error('unexpected'));
     expect(calls[0][0]).toBe('Fatal error:');
+  });
+});
+
+describe('reportFatal — the default sink', () => {
+  /**
+   * Every test above injects its own sink, so the default — a synchronous write to fd 2 —
+   * ran under no test, and reverting it to `console.error` kept the suite green on every
+   * platform. What it protects only shows across a process boundary: stderr is a pipe the
+   * MCP client owns, Node writes to a pipe asynchronously on macOS, and `main()` calls
+   * `process.exit` on the next line. So the child reports a message larger than a pipe
+   * buffer and exits at once, and the parent counts what arrived.
+   *
+   * On Linux and Windows a pipe write is synchronous either way, so this discriminates
+   * only on the macOS job — which is the platform the sink exists for.
+   */
+  const CHILD = fileURLToPath(new URL('./fixtures/report-fatal-child.mjs', import.meta.url));
+  const SIZE = 200_000;
+
+  function runChild(): Promise<{ stderr: string; code: number | null }> {
+    return new Promise((resolve, reject) => {
+      // `--experimental-transform-types` because errors.ts has parameter properties, which
+      // type stripping alone refuses; `--no-warnings` keeps the flag's notice off the
+      // stream being measured.
+      const child = spawn(process.execPath, ['--experimental-transform-types', '--no-warnings', CHILD, String(SIZE)], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      let stderr = '';
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+      child.on('error', reject);
+      child.on('close', (code) => resolve({ stderr, code }));
+    });
+  }
+
+  it('delivers the whole message before the process exits', async () => {
+    const { stderr, code } = await runChild();
+    expect(code).toBe(EXIT_OPERATOR_ERROR);
+    expect(stderr.length, 'the message was cut off by the exit').toBe(SIZE + 1);
+  });
+});
+
+describe('writeAllSync', () => {
+  const eagain = () => Object.assign(new Error('EAGAIN'), { code: 'EAGAIN' });
+
+  /** A writer that takes at most `chunk` bytes a call, recording what arrived. */
+  function pipe(chunk: number, failures: Array<() => Error> = []) {
+    const received: Buffer[] = [];
+    const write = (_fd: number, buf: Buffer, offset: number): number => {
+      const failure = failures.shift();
+      if (failure) throw failure();
+      const end = Math.min(buf.length, offset + chunk);
+      received.push(buf.subarray(offset, end));
+      return end - offset;
+    };
+    return { write, text: () => Buffer.concat(received).toString() };
+  }
+
+  it('keeps writing until a partial write has gone out in full', () => {
+    // What a non-blocking pipe does on macOS: each call takes 65536 bytes and says so.
+    const p = pipe(65_536);
+    writeAllSync(2, 'x'.repeat(200_000), p.write);
+    expect(p.text()).toHaveLength(200_000);
+  });
+
+  it('retries a full pipe rather than dropping the rest', () => {
+    const p = pipe(4, [eagain, eagain]);
+    writeAllSync(2, 'abcdefgh', p.write);
+    expect(p.text()).toBe('abcdefgh');
+  });
+
+  it('gives up on a pipe that never drains, saying how much went out', () => {
+    // A reader that stopped reading must not keep the process from exiting.
+    let t = 0;
+    let calls = 0;
+    const write = (_fd: number, _buf: Buffer, offset: number): number => {
+      // The loop is synchronous, so a missing deadline would hang the worker rather than
+      // time the test out; this turns that into a failure.
+      if (++calls > 100) throw new Error('still retrying after 100 attempts');
+      if (offset >= 4) throw eagain();
+      return 4;
+    };
+    const err = (() => {
+      try { writeAllSync(2, 'abcdefgh', write, () => (t += 500)); } catch (e) { return e as Error & { written?: number }; }
+      return null;
+    })();
+    expect(err?.message).toBe('EAGAIN');
+    expect(err?.written).toBe(4);
+  });
+
+  it('does not retry anything but a full pipe', () => {
+    const p = pipe(4, [() => Object.assign(new Error('EBADF'), { code: 'EBADF' })]);
+    expect(() => writeAllSync(2, 'abcdefgh', p.write, () => 0)).toThrow('EBADF');
+    expect(p.text()).toBe('');
   });
 });
