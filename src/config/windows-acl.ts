@@ -177,27 +177,6 @@ async function currentUserSid(signal?: AbortSignal): Promise<string | null> {
 }
 
 /**
- * The security descriptor file `icacls /save` writes, as bytes.
- *
- * The saved file is UTF-16LE and holds the item's name on one line and its
- * descriptor on the next. Which line is which is not guessed here — `verdictFromSaved`
- * hands each line to the parser and keeps the first that parses, so the reader
- * and the parser cannot disagree about what a descriptor looks like. They did
- * in the first version: the reader required a line *starting* with `D:` while
- * the parser accepted an `O:`/`G:` prefix, and the disagreement resolved to
- * "unchecked".
- *
- * SDDL via `/save` rather than PowerShell's `Get-Acl`, whose descriptor would carry an
- * `O:` owner component and save the second subprocess: measured at 8-22ms against
- * 740-830ms, on a check that runs at every start. And rather than plain `icacls` output,
- * which prints account names that depend on the installed language. That reasoning lived
- * only in the changeset, which is deleted at release.
- *
- * Microsoft documents `/save` against a directory; the single-file form is
- * undocumented but real, and windows-acl.live.test.ts covers it by asserting a
- * refusal that is only reachable if a descriptor came back parseable.
- */
-/**
  * What a failed descriptor read means.
  *
  * Pure apart from the injected existence check, because the branch that matters most
@@ -234,6 +213,19 @@ export function classifyReadFailure(
   return { failure: 'read-refused', detail: String(err?.message ?? err).split('\n')[0] };
 }
 
+/**
+ * The security descriptor file `icacls /save` writes, as bytes; `verdictFromSaved` reads it.
+ *
+ * SDDL via `/save` rather than PowerShell's `Get-Acl`, whose descriptor would carry an
+ * `O:` owner component and save the second subprocess: measured at 8-22ms against
+ * 740-830ms, on a check that runs at every start. And rather than plain `icacls` output,
+ * which prints account names that depend on the installed language. That reasoning lived
+ * only in the changeset, which is deleted at release.
+ *
+ * Microsoft documents `/save` against a directory; the single-file form is
+ * undocumented but real, and windows-acl.live.test.ts covers it by asserting a
+ * refusal that is only reachable if a descriptor came back parseable.
+ */
 async function readDescriptor(
   path: string,
   signal?: AbortSignal,
@@ -302,20 +294,26 @@ export async function inspectAcl(path: string, signal?: AbortSignal): Promise<Ac
  * The verdict carried by the file `icacls /save` wrote: UTF-16LE, the item's name on one
  * line and its descriptor on the next.
  *
- * Separate from the subprocess so the line selection runs on every platform — it is
- * where the first version read the wrong line, and a step reachable only on Windows was
- * asserted only by the advisory Windows job.
+ * Which line is which is not guessed: each line that opens like a descriptor goes to the
+ * parser, and the first that parses wins, so this and the parser cannot disagree about
+ * what a descriptor looks like. They did in the first version: the reader required a
+ * line *starting* with `D:` while the parser accepted an `O:`/`G:` prefix, and the
+ * disagreement resolved to "unchecked".
+ *
+ * Separate from the subprocess so the line selection runs on every platform; inside
+ * `inspectAcl` only the advisory Windows job reached it.
  */
 export function verdictFromSaved(saved: Buffer, identity: AclIdentity): AclVerdict {
-  // The reader does not decide which line is the descriptor; the parser does.
   let lastDetail = 'no line parsed as a security descriptor';
   for (const line of saved.toString('utf16le').split(/\r?\n/)) {
     const trimmed = line.trim();
-    // A descriptor opens with one of its components. The name line is the target's last
-    // path component — measured on Windows 11: `cfg.toml` for `C:cfg.toml`, `.` for `.`,
-    // and an empty line for a bare `C:` — so it never starts like one today. The check
-    // stays because "first line that parses" is all that stands between a name line and
-    // the verdict, and `parseDacl('D:')` is a legitimately empty DACL: `restricted`.
+    // A descriptor opens with one of its components. `parseDacl` finds a `D:` anywhere in
+    // a line, so without this a line that merely contains one would be read as the
+    // descriptor. It does not stop a name line that *is* a descriptor — `D:` alone is a
+    // legitimately empty DACL, `restricted` — and what keeps that from happening is the
+    // layout: the name line is the target's last path component, measured on Windows 11
+    // as `cfg.toml` for `C:cfg.toml` and for a full path, `Users` for `C:\Users`, `.` for
+    // `.`, and an empty line for a bare `C:` and for the drive root `C:\`.
     if (!/^[OGDS]:/.test(trimmed)) continue;
     const verdict = parseDacl(trimmed, identity);
     if (verdict.status !== 'unknown') return verdict;

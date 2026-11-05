@@ -16,7 +16,6 @@ import { sanitizeCommand } from '../../../src/guard/sanitizer.js';
  */
 
 const cfg = useConfigDir('ssh-mcp-maxchars-');
-const writeConfig = (content: string): Promise<string> => cfg.write(content);
 
 const PROFILE = `
 [[profiles]]
@@ -31,7 +30,7 @@ group = "dev"
 const LONG_COMMAND = `echo ${'x'.repeat(6000)}`;
 
 async function maxCharsFor(toml: string): Promise<number> {
-  const { config } = await loadConfigWithDigest(await writeConfig(toml));
+  const { config } = await loadConfigWithDigest(await cfg.write(toml));
   return getProfile(config, 'web').maxChars;
 }
 
@@ -75,7 +74,7 @@ maxChars = 0
    * which cannot tell a per-profile map from a global one.
    */
   it('uncaps only the profile that asked, not its siblings', async () => {
-    const { config } = await loadConfigWithDigest(await writeConfig(`
+    const { config } = await loadConfigWithDigest(await cfg.write(`
 [defaults]
 commandMaxChars = 100
 
@@ -103,7 +102,7 @@ user = "deploy"
    * the failure this whole file exists to prevent, reached from the other side.
    */
   it('leaves no literal 0 anywhere in the resolved config', async () => {
-    const { config } = await loadConfigWithDigest(await writeConfig(`
+    const { config } = await loadConfigWithDigest(await cfg.write(`
 [defaults]
 commandMaxChars = 0
 ${PROFILE}`));

@@ -8,11 +8,10 @@ import { defaultsFromArgv, loadAppConfig } from '../../../src/cli.js';
 import { OperatorError } from '../../../src/errors.js';
 
 const cfg = useConfigDir();
-const writeConfig = (content: string, mode = 0o600): Promise<string> => cfg.write(content, mode);
 
 describe('loadConfigWithDigest', () => {
   it('loads a valid config with defaults applied', async () => {
-    const path = await writeConfig(`
+    const path = await cfg.write(`
 [defaults]
 defaultProfile = "dev"
 
@@ -36,7 +35,7 @@ auth = "password"
   // ever merged into profiles, so a documented default silently did nothing —
   // an approvalMode that never applies is a security downgrade, not a papercut.
   it('cascades every [defaults] key into profiles that omit it', async () => {
-    const path = await writeConfig(`
+    const path = await cfg.write(`
 [defaults]
 approvalMode = "ask-all"
 commandTimeoutMs = 30000
@@ -68,7 +67,7 @@ user = "test"
 
   describe('the streaming transfer settings', () => {
     it('defaults to a byte cap and an idle budget that are coherent with each other', async () => {
-      const path = await writeConfig(MINIMAL_CONFIG);
+      const path = await cfg.write(MINIMAL_CONFIG);
       const { config } = await loadConfigWithDigest(path);
       // 256 MiB and a 5-minute *idle* budget. The pairing is the point of #206:
       // an earlier proposal shipped a 1 GiB cap against a 60s wall-clock
@@ -80,7 +79,7 @@ user = "test"
     });
 
     it('has no transferRoot unless the operator wrote one', async () => {
-      const path = await writeConfig(MINIMAL_CONFIG);
+      const path = await cfg.write(MINIMAL_CONFIG);
       // Absence is the refusal: the streaming file tools have no "anywhere"
       // setting, so an operator who did not choose a directory has not
       // consented to those tools touching local disk.
@@ -88,7 +87,7 @@ user = "test"
     });
 
     it('reads a transferRoot from [defaults]', async () => {
-      const path = await writeConfig(`${MINIMAL_CONFIG}
+      const path = await cfg.write(`${MINIMAL_CONFIG}
 [defaults]
 transferRoot = "/srv/ssh-mcp-transfers"
 `);
@@ -96,7 +95,7 @@ transferRoot = "/srv/ssh-mcp-transfers"
     });
 
     it('lets a profile override the cap and the budget but not the root', async () => {
-      const path = await writeConfig(`
+      const path = await cfg.write(`
 [defaults]
 transferRoot = "/srv/transfers"
 transferMaxBytes = 4096
@@ -114,7 +113,7 @@ transferTimeoutMs = 60000
       expect(config.profiles[0].transferTimeoutMs).toBe(60_000);
       // transferRoot names a directory on this machine, not anything about a
       // host, so it is refused on a profile rather than quietly ignored.
-      await expect(loadConfigWithDigest(await writeConfig(`
+      await expect(loadConfigWithDigest(await cfg.write(`
 [[profiles]]
 name = "dev"
 host = "localhost"
@@ -128,7 +127,7 @@ transferRoot = "/tmp/elsewhere"
       // this same file. It must not mean that here, where it would remove the
       // only bound on how much a single call writes to local disk.
       for (const value of ['0', '-1']) {
-        await expect(loadConfigWithDigest(await writeConfig(`
+        await expect(loadConfigWithDigest(await cfg.write(`
 [defaults]
 transferMaxBytes = ${value}
 
@@ -142,7 +141,7 @@ user = "test"
   });
 
   it('lets an explicit profile value override [defaults]', async () => {
-    const path = await writeConfig(`
+    const path = await cfg.write(`
 [defaults]
 approvalMode = "ask-all"
 commandTimeoutMs = 30000
@@ -160,7 +159,7 @@ timeout = 5000
   });
 
   it('falls back to schema defaults when [defaults] is absent', async () => {
-    const path = await writeConfig(`
+    const path = await cfg.write(`
 [[profiles]]
 name = "dev"
 host = "localhost"
@@ -174,7 +173,7 @@ user = "test"
   });
 
   it('rejects unknown profile keys instead of silently dropping them', async () => {
-    const path = await writeConfig(`
+    const path = await cfg.write(`
 [[profiles]]
 name = "dev"
 host = "localhost"
@@ -187,7 +186,7 @@ hostFingerprint = "SHA256:abc"
   });
 
   it('rejects config with no profiles', async () => {
-    const path = await writeConfig(`
+    const path = await cfg.write(`
 [defaults]
 defaultProfile = "dev"
 `);
@@ -195,7 +194,7 @@ defaultProfile = "dev"
   });
 
   it('rejects invalid approval mode', async () => {
-    const path = await writeConfig(`
+    const path = await cfg.write(`
 [[profiles]]
 name = "dev"
 host = "localhost"
@@ -209,7 +208,7 @@ approvalPolicy = "yolo"
   // file there, chmod cannot change it, and the check is skipped as a result
   // (#138). Running the assertion on Windows would test the emulation layer.
   it.skipIf(platform() === 'win32')('rejects world-readable config', async () => {
-    const path = await writeConfig(`
+    const path = await cfg.write(`
 [[profiles]]
 name = "dev"
 host = "localhost"
@@ -219,12 +218,12 @@ user = "test"
   });
 
   it('rejects malformed TOML', async () => {
-    const path = await writeConfig(`this is not = valid = toml [[[[`);
+    const path = await cfg.write(`this is not = valid = toml [[[[`);
     await expect(loadConfigWithDigest(path)).rejects.toThrow(/Failed to parse TOML/);
   });
 
   it('applies per-profile overrides for session limits', async () => {
-    const path = await writeConfig(`
+    const path = await cfg.write(`
 [defaults]
 sessionMaxPerConnection = 5
 
@@ -265,7 +264,7 @@ user = "test"
 `;
 
   it('refuse to start, naming the field path and the index it repeats', async () => {
-    const path = await writeConfig(dupConfig);
+    const path = await cfg.write(dupConfig);
     const err: any = await loadAppConfig({ config: path }).catch((e) => e);
     expect(err).toBeInstanceOf(OperatorError);
     expect(err.message).toContain('profiles[2].name');
@@ -279,7 +278,7 @@ describe('getProfile', () => {
   let config: AppConfig;
 
   beforeEach(async () => {
-    const path = await writeConfig(`
+    const path = await cfg.write(`
 [defaults]
 defaultProfile = "dev"
 
@@ -315,7 +314,7 @@ user = "deploy"
   // and typically the first host written down, which tends to be production.
   describe('ambiguous selection', () => {
     async function configWithoutDefault(...names: string[]): Promise<AppConfig> {
-      const path = await writeConfig(
+      const path = await cfg.write(
         names.map((n) => `\n[[profiles]]\nname = "${n}"\nhost = "${n}.example.com"\nuser = "test"\n`).join(''),
       );
       return (await loadConfigWithDigest(path)).config;
@@ -350,7 +349,7 @@ describe('checkPermissions', () => {
   // is the exact shape of config that used to be rejected there — a normal
   // file, created normally, in the documented location.
   it.runIf(platform() === 'win32')('accepts an ordinary Windows file', async () => {
-    const path = await writeConfig(MINIMAL_CONFIG);
+    const path = await cfg.write(MINIMAL_CONFIG);
     await expect(checkPermissions(path)).resolves.toBeUndefined();
     // Asserts the config was actually parsed, and — via inspectAcl — that the ACL
     // check produced a verdict rather than being waved through. `toBeTruthy()`
@@ -362,17 +361,17 @@ describe('checkPermissions', () => {
   });
 
   it('passes for 0600 file', async () => {
-    const path = await writeConfig(``, 0o600);
+    const path = await cfg.write(``, 0o600);
     await expect(checkPermissions(path)).resolves.not.toThrow();
   });
 
   it.skipIf(platform() === 'win32')('fails for 0644 file', async () => {
-    const path = await writeConfig(``, 0o644);
+    const path = await cfg.write(``, 0o644);
     await expect(checkPermissions(path)).rejects.toThrow(/accessible/);
   });
 
   it.skipIf(platform() === 'win32')('fails for world-readable directory', async () => {
-    const cfgPath = await writeConfig('', 0o600);
+    const cfgPath = await cfg.write('', 0o600);
     await chmod(cfg.dir, 0o777);
     try {
       await expect(checkPermissions(cfgPath)).rejects.toThrow(/directory.*accessible/i);

@@ -1,15 +1,13 @@
-import { beforeEach, afterEach, expect } from 'vitest';
+import { beforeEach, afterEach, expect, onTestFinished, vi, type Mock } from 'vitest';
 import { mkdtemp, writeFile, chmod, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { OperatorError } from '../../../src/errors.js';
 
 /**
- * The tempdir + writeConfig lifecycle the config test files need.
- *
- * Extracted because it existed twice verbatim, along with two copies of the
- * minimal valid config under two names. The next change to the schema that makes
- * this TOML invalid should break one place, not leave a second copy passing for
- * the wrong reason — the same argument test/integration/helpers.ts already makes.
+ * A minimal valid config, in one place. The next change to the schema that makes this
+ * TOML invalid should break one place, not leave a second copy passing for the wrong
+ * reason — the same argument test/integration/helpers.ts already makes.
  */
 export const MINIMAL_CONFIG = `
 [[profiles]]
@@ -42,9 +40,9 @@ export async function makeConfigDir(prefix = 'ssh-mcp-test-'): Promise<ConfigDir
 }
 
 /**
- * A fresh config dir for every test in the calling file, created and removed by hooks it
- * registers itself. Four files spelled out the same `let tempDir` / `beforeEach` /
- * `afterEach` / `writeConfig` shim around `makeConfigDir` or a copy of it.
+ * A fresh temp dir for every test in the calling file or `describe`, created and removed
+ * by hooks this registers itself, so no caller writes its own lifecycle. `write` puts
+ * `config.toml` in it.
  */
 export function useConfigDir(prefix?: string): ConfigDir {
   let current: ConfigDir | undefined;
@@ -69,7 +67,9 @@ export function useConfigDir(prefix?: string): ConfigDir {
  */
 export async function refusal(
   pending: Promise<unknown>,
-  type: abstract new (...args: never[]) => Error = Error,
+  // OperatorError is what every check under test refuses with. `Error` is for the caller
+  // that imports the module after `resetModules`, whose OperatorError is another class.
+  type: abstract new (...args: never[]) => Error = OperatorError,
 ): Promise<Error> {
   const err = await pending.then(() => null, (e: unknown) => e);
   expect(err, 'expected a refusal, but the call resolved').toBeInstanceOf(type);
@@ -86,3 +86,35 @@ export async function refusal(
  */
 export const enforceAcl = <T extends object>(extra: T = {} as T) =>
   ({ ...extra, enforce: true as const });
+
+type Errors = typeof import('../../../src/errors.js');
+
+/**
+ * cli.ts, freshly imported, with the loader's parse replaced by the mock `makeParse`
+ * returns — for the branches that read `getConfigPath()`, which on macOS no env var can
+ * redirect. The mock is undone when the test finishes.
+ *
+ * `makeParse` receives the post-reset instance of errors.js on purpose. Some checks under
+ * test are `instanceof`, and a class imported before `resetModules` is a different object
+ * from the one cli.ts resolves afterwards — the test would fail on the module registry
+ * rather than on the behaviour.
+ */
+export async function withMockedLoader(makeParse: (E: Errors) => Mock<(...a: unknown[]) => unknown>) {
+  vi.resetModules();
+  const E = await import('../../../src/errors.js');
+  const parse = makeParse(E);
+  vi.doMock('../../../src/config/loader.js', async () => {
+    const actual = await vi.importActual<typeof import('../../../src/config/loader.js')>(
+      '../../../src/config/loader.js',
+    );
+    // cli.ts loads through loadConfigWithDigest; the mock stands in for the parse.
+    return { ...actual, loadConfigWithDigest: async (...a: unknown[]) => ({ config: await parse(...a), sha256: 'stub' }) };
+  });
+  onTestFinished(() => {
+    vi.doUnmock('../../../src/config/loader.js');
+    vi.resetModules();
+  });
+  const loader = await import('../../../src/config/loader.js');
+  const { loadAppConfig } = await import('../../../src/cli.js');
+  return { E, loader, loadAppConfig, parse };
+}

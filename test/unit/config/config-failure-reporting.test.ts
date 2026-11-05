@@ -1,10 +1,10 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, vi, type Mock } from 'vitest';
 import { chmod } from 'fs/promises';
 import { platform } from 'os';
 import { join } from 'path';
 import { loadConfigWithDigest, getConfigPath } from '../../../src/config/loader.js';
 import { ConfigNotFoundError, OperatorError } from '../../../src/errors.js';
-import { useConfigDir, MINIMAL_CONFIG } from './helpers.js';
+import { useConfigDir, withMockedLoader, MINIMAL_CONFIG } from './helpers.js';
 
 /**
  * These import `src/cli.ts`, not `src/index.ts`. That is the whole reason `cli.ts` exists:
@@ -28,41 +28,11 @@ import { useConfigDir, MINIMAL_CONFIG } from './helpers.js';
 
 const cfg = useConfigDir('ssh-mcp-fail-');
 
-afterEach(async () => {
+afterEach(() => {
   vi.unstubAllEnvs();
-  vi.resetModules();
-  vi.doUnmock('../../../src/config/loader.js');
 });
 
-const writeConfig = (content: string, mode = 0o600): Promise<string> => cfg.write(content, mode);
-
 type Errors = typeof import('../../../src/errors.js');
-
-/**
- * cli.ts's `loadAppConfig`, freshly imported, with the loader's parse replaced by the mock
- * `makeParse` returns. Two suites below built this by hand, line for line.
- *
- * `makeParse` receives the post-reset instance of errors.js on purpose. Some checks under
- * test are `instanceof`, and a class imported before `resetModules` is a different object
- * from the one cli.ts resolves afterwards — the test would fail on the module registry
- * rather than on the behaviour.
- */
-async function withMockedParse(makeParse: (E: Errors) => ReturnType<typeof vi.fn>) {
-  vi.resetModules();
-  const parse = makeParse(await import('../../../src/errors.js'));
-  vi.doMock('../../../src/config/loader.js', async () => {
-    const actual = await vi.importActual<typeof import('../../../src/config/loader.js')>(
-      '../../../src/config/loader.js',
-    );
-    // cli.ts loads through loadConfigWithDigest; the mock stands in for the parse.
-    return {
-      ...actual,
-      loadConfigWithDigest: async (...a: unknown[]) => ({ config: await (parse as (...b: unknown[]) => unknown)(...a), sha256: 'stub' }),
-    };
-  });
-  const { loadAppConfig } = await import('../../../src/cli.js');
-  return { loadAppConfig, parse };
-}
 
 describe('loadConfigWithDigest distinguishes "absent" from "unusable"', () => {
   it('reports a missing file as ConfigNotFoundError', async () => {
@@ -78,18 +48,18 @@ describe('loadConfigWithDigest distinguishes "absent" from "unusable"', () => {
   // Each of these is a file that exists. Reporting any of them as "not found"
   // sends the operator to re-create a file they already have.
   it('does not report malformed TOML as not-found', async () => {
-    const path = await writeConfig('this is not = valid = toml [[[[');
+    const path = await cfg.write('this is not = valid = toml [[[[');
     await expect(loadConfigWithDigest(path)).rejects.not.toBeInstanceOf(ConfigNotFoundError);
     await expect(loadConfigWithDigest(path)).rejects.toThrow(/Failed to parse TOML/);
   });
 
   it('does not report a schema violation as not-found', async () => {
-    const path = await writeConfig('[defaults]\ndefaultProfile = "dev"\n');
+    const path = await cfg.write('[defaults]\ndefaultProfile = "dev"\n');
     await expect(loadConfigWithDigest(path)).rejects.not.toBeInstanceOf(ConfigNotFoundError);
   });
 
   it.skipIf(platform() === 'win32')('does not report a permission failure as not-found', async () => {
-    const path = await writeConfig(MINIMAL_CONFIG, 0o644);
+    const path = await cfg.write(MINIMAL_CONFIG, 0o644);
     await expect(loadConfigWithDigest(path)).rejects.not.toBeInstanceOf(ConfigNotFoundError);
     await expect(loadConfigWithDigest(path)).rejects.toThrow(/accessible/);
   });
@@ -97,7 +67,7 @@ describe('loadConfigWithDigest distinguishes "absent" from "unusable"', () => {
   // Every config failure is the operator's file, not our bug, so none of them
   // should reach them as a stack trace.
   it('marks config failures as operator errors', async () => {
-    const path = await writeConfig('nope = = =');
+    const path = await cfg.write('nope = = =');
     await expect(loadConfigWithDigest(path)).rejects.toBeInstanceOf(OperatorError);
   });
 
@@ -107,7 +77,7 @@ describe('loadConfigWithDigest distinguishes "absent" from "unusable"', () => {
   it.skipIf(platform() === 'win32' || process.getuid?.() === 0)(
     'reports an unreadable file as an operator error naming the path',
     async () => {
-      const path = await writeConfig(MINIMAL_CONFIG);
+      const path = await cfg.write(MINIMAL_CONFIG);
       await chmod(path, 0o000);
       try {
         await expect(loadConfigWithDigest(path)).rejects.toBeInstanceOf(OperatorError);
@@ -128,13 +98,13 @@ describe('loadAppConfig only falls through when the file is absent', () => {
    * var. Mocking the module tests the branch itself, which is the part that
    * was wrong.
    */
-  let loadConfigMock: ReturnType<typeof vi.fn>;
+  let loadConfigMock: Mock<(...a: unknown[]) => unknown>;
 
   async function buildWith(
     makeErr: (E: Errors) => Error,
     argv: Record<string, string | null>,
   ) {
-    const { loadAppConfig, parse } = await withMockedParse((E) => vi.fn().mockRejectedValue(makeErr(E)));
+    const { loadAppConfig, parse } = await withMockedLoader((E) => vi.fn().mockRejectedValue(makeErr(E)));
     loadConfigMock = parse;
     return (await loadAppConfig(argv)).config;
   }
@@ -272,7 +242,7 @@ describe('loadAppConfig threads --allowUncheckedConfigAcl to the loader', () => 
    * read would be locked out with no exit, which is the shape of #138.
    */
   async function build(argv: Record<string, string | null>) {
-    const { loadAppConfig, parse } = await withMockedParse(() => vi.fn().mockResolvedValue({
+    const { loadAppConfig, parse } = await withMockedLoader(() => vi.fn().mockResolvedValue({
       defaults: { defaultProfile: 'p' },
       profiles: [{ name: 'p', host: 'h', user: 'u' }],
     }));

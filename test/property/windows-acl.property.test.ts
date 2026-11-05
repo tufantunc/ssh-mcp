@@ -148,23 +148,22 @@ describe('parseDacl invariants', () => {
     // — so 1899 runs asserted nothing at all. The five honest cases are now an
     // explicit table below, which is stronger and instant.
     //
-    // Half the cuts land anywhere; the other half land on an ACE boundary after at least
-    // one complete ACE. Uniform cuts alone, instrumented over 2000 runs, put 1868 in
-    // `unknown` and reached the `broad` branch — the only one that checks no principal
-    // survives the cut that the prefix does not name — 40 times. The mix reaches it 168
-    // times in 500 runs.
+    // Two kinds of cut, drawn evenly: anywhere, or on an ACE boundary after at least one
+    // complete ACE. Uniform cuts alone, instrumented over 2000 runs on five seeds, put
+    // 1842-1875 in `unknown` and reached the `broad` branch — the only one that checks no
+    // principal survives the cut that the prefix does not name — 27-51 times. The mix
+    // keeps 900-954 arbitrary cuts and reaches `broad` 999-1048 times.
+    const anywhere = fc.tuple(fc.array(ace(grantingType, strangerTrustee), { minLength: 1, maxLength: 4 }), daclFlags, fc.nat())
+      .map(([aces, flags, cut]) => {
+        const full = render(flags, aces);
+        return full.slice(0, 1 + (cut % (full.length - 1)));
+      });
+    const onBoundary = fc.tuple(fc.array(ace(grantingType, strangerTrustee), { minLength: 2, maxLength: 4 }), daclFlags, fc.nat())
+      .map(([aces, flags, cut]) => render(flags, aces.slice(0, 1 + (cut % (aces.length - 1)))));
     fc.assert(
       fc.property(
-        fc.array(ace(grantingType, strangerTrustee), { minLength: 1, maxLength: 4 }),
-        daclFlags,
-        fc.nat(),
-        fc.boolean(),
-        (aces, flags, cut, onBoundary) => {
-          const full = render(flags, aces);
-          const prefixLength = onBoundary && aces.length > 1
-            ? render(flags, aces.slice(0, 1 + (cut % (aces.length - 1)))).length
-            : 1 + (cut % (full.length - 1));
-          const truncated = full.slice(0, prefixLength);
+        fc.oneof(anywhere, onBoundary),
+        (truncated) => {
           const verdict = parseDacl(truncated, ALLOWED);
 
           // A prefix that stops before the first ACE is a syntactically complete
@@ -184,7 +183,7 @@ describe('parseDacl invariants', () => {
           }
         },
       ),
-      { numRuns: 500 },
+      { numRuns: 2000 },
     );
   });
 

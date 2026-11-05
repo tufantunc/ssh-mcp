@@ -1,8 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { join, parse } from 'path';
 import { mkdirSync, realpathSync, symlinkSync } from 'fs';
-import { mkdtemp, rm } from 'fs/promises';
-import { tmpdir } from 'os';
 import {
   inspectAcl,
   type AclOptions,
@@ -12,8 +10,7 @@ import {
 // The verdict vocabulary belongs to the parser, so these come from the other side of the
 // cut — which is the dependency the split exists to make visible.
 import type { AclVerdict, Grant, UnknownReason } from '../../../src/config/sddl.js';
-import { OperatorError } from '../../../src/errors.js';
-import { enforceAcl, refusal } from './helpers.js';
+import { enforceAcl, refusal, useConfigDir } from './helpers.js';
 
 /**
  * What the Windows branch *decides*, as opposed to what the parser reads.
@@ -69,7 +66,6 @@ function warned(): { events: AclFinding[]; warnings: string[]; opts: AclOptions 
 /** Refusal is opt-in now, so every refusal test says so. */
 const strict = enforceAcl;
 
-const refused = (p: Promise<void>): Promise<Error> => refusal(p, OperatorError);
 
 beforeEach(() => vi.stubEnv('USERPROFILE', PROFILE));
 
@@ -112,7 +108,7 @@ describe('assertPrivateOnWindows — a clean ACL', () => {
 
 describe('assertPrivateOnWindows — a broad ACL', () => {
   it('refuses and names the principals', async () => {
-    const err = await refused(
+    const err = await refusal(
       assertPrivateOnWindows(FILE, strict(), only(FILE, broad(
         grant('BUILTIN\\Users', 'BU', 'S-1-5-32-545'),
         grant('Authenticated Users', 'AU', 'S-1-5-11'),
@@ -127,13 +123,13 @@ describe('assertPrivateOnWindows — a broad ACL', () => {
     // 1337 having done nothing — and DU is what a descriptor on a domain-joined
     // host, the case this check exists for, actually spells. So the fixture uses
     // the realistic alias trustee and the assertion demands a SID in the command.
-    const err = await refused(assertPrivateOnWindows(FILE, strict(), only(FILE, broad(EVERYONE))));
+    const err = await refusal(assertPrivateOnWindows(FILE, strict(), only(FILE, broad(EVERYONE))));
     expect(err.message).toMatch(/\/remove:g \*S-1-[0-9-]+\b/);
     expect(err.message).not.toMatch(/\/remove:g \*[A-Z]{2,3}\b/);
   });
 
   it('removes exactly the trustees it found, for a mix of spellings', async () => {
-    const err = await refused(
+    const err = await refusal(
       assertPrivateOnWindows(FILE, strict(), only(FILE, broad(
         EVERYONE,
         grant('S-1-5-21-1-2-3-513', 'S-1-5-21-1-2-3-513', 'S-1-5-21-1-2-3-513'),
@@ -152,7 +148,7 @@ describe('assertPrivateOnWindows — a broad ACL', () => {
     // does not cover a broad verdict. Aliases outside the table (AC on C:\Program Files,
     // OW on redirected profiles) and every domain-relative one on a host with no account
     // domain land here.
-    const err = await refused(
+    const err = await refusal(
       assertPrivateOnWindows(FILE, strict(), only(FILE, broad(grant('OW', 'OW', null)))),
     );
     expect(err.message).not.toMatch(/\/remove:g \*[A-Z]{2,3}\b/);
@@ -161,7 +157,7 @@ describe('assertPrivateOnWindows — a broad ACL', () => {
   });
 
   it('still removes the entries it can name when only one is unresolvable', async () => {
-    const err = await refused(
+    const err = await refusal(
       assertPrivateOnWindows(FILE, strict(), only(FILE, broad(EVERYONE, grant('OW', 'OW', null)))),
     );
     expect(err.message).toContain('/remove:g *S-1-1-0');
@@ -172,14 +168,14 @@ describe('assertPrivateOnWindows — a broad ACL', () => {
     // %USERNAME% is cmd.exe syntax. Pasted into PowerShell — the default shell on
     // Windows 11 — icacls receives it literally, reports "Failed processing 1
     // files", and changes nothing. Measured. That is `chmod 600` one shell over.
-    const err = await refused(assertPrivateOnWindows(FILE, strict(), only(FILE, broad(EVERYONE))));
+    const err = await refusal(assertPrivateOnWindows(FILE, strict(), only(FILE, broad(EVERYONE))));
     expect(err.message).not.toContain('%USERNAME%');
     expect(err.message).toMatch(/\/grant:r "[^"%]+:/);
   });
 
   it('uses inheritable rights for a directory and plain rights for a file', async () => {
-    const onFile = await refused(assertPrivateOnWindows(FILE, strict(), only(FILE, broad(EVERYONE))));
-    const onDir = await refused(assertPrivateOnWindows(FILE, strict(), only(DIR, broad(EVERYONE))));
+    const onFile = await refusal(assertPrivateOnWindows(FILE, strict(), only(FILE, broad(EVERYONE))));
+    const onDir = await refusal(assertPrivateOnWindows(FILE, strict(), only(DIR, broad(EVERYONE))));
     expect(onFile.message).toContain(':F"');
     expect(onFile.message).not.toContain('(OI)(CI)');
     expect(onDir.message).toContain('(OI)(CI)F');
@@ -190,7 +186,7 @@ describe('assertPrivateOnWindows — a broad ACL', () => {
     // first version printed `icacls "C:\" /inheritance:d` plus a `/remove:g` of
     // BUILTIN\Users — which, run as printed, takes the volume away from every
     // non-administrator account.
-    const err = await refused(
+    const err = await refusal(
       assertPrivateOnWindows(join(ROOT, 'config.toml'), strict(), only(ROOT, broad(
         grant('BUILTIN\\Users', 'BU', 'S-1-5-32-545'),
       ))),
@@ -207,7 +203,7 @@ describe('assertPrivateOnWindows — a broad ACL', () => {
     // `--config config.toml` is documented usage, and it makes the directory
     // subject `.` — the working directory, which belongs to whichever MCP client
     // spawned us, not to the operator. Same destructive shape as the root case.
-    const err = await refused(
+    const err = await refusal(
       assertPrivateOnWindows('config.toml', strict(), only('.', broad(EVERYONE))),
     );
     expect(err.message.indexOf('Move the config')).toBeLessThan(err.message.indexOf('icacls'));
@@ -220,7 +216,7 @@ describe('assertPrivateOnWindows — a broad ACL', () => {
     // advice for the commonest real case — a config under C:\sshcfg — worse than
     // what it replaced.
     const outsideFile = join(ROOT, 'sshcfg', 'config.toml');
-    const err = await refused(
+    const err = await refusal(
       assertPrivateOnWindows(outsideFile, strict(), only(outsideFile, broad(EVERYONE))),
     );
     expect(err.message).toContain('/inheritance:d');
@@ -233,7 +229,7 @@ describe('assertPrivateOnWindows — a broad ACL', () => {
     // would be to strip BUILTIN\Users from C:\Users, which removes every other
     // account's traverse to its own profile.
     const outside = join(ROOT, 'Users', 'config.toml');
-    const err = await refused(
+    const err = await refusal(
       assertPrivateOnWindows(outside, strict(), only(join(ROOT, 'Users'), broad(
         grant('BUILTIN\\Users', 'BU', 'S-1-5-32-545'),
       ))),
@@ -251,14 +247,14 @@ describe('assertPrivateOnWindows — a broad ACL', () => {
     // answer is "cannot tell". Returning "tightenable" reinstated exactly the advice this
     // guard exists to prevent: strip BUILTIN\Users from a shared directory.
     vi.stubEnv('USERPROFILE', '');
-    const err = await refused(
+    const err = await refusal(
       assertPrivateOnWindows(FILE, strict(), only(DIR, broad(grant('BUILTIN\\Users', 'BU', 'S-1-5-32-545')))),
     );
     expect(err.message).toMatch(/Move the config/);
   });
 
   it('refuses to prescribe ACL surgery on the parent directory', async () => {
-    const err = await refused(
+    const err = await refusal(
       assertPrivateOnWindows(join('..', 'config.toml'), strict(), only('..', broad(EVERYONE))),
     );
     expect(err.message).toMatch(/Move the config/);
@@ -273,7 +269,7 @@ describe('assertPrivateOnWindows — a broad ACL', () => {
     // contains everything leaves the arm as the only thing between these directories and
     // `/inheritance:d` on them.
     vi.stubEnv('USERPROFILE', ROOT);
-    const err = await refused(assertPrivateOnWindows(file, strict(), only(dir, broad(EVERYONE))));
+    const err = await refusal(assertPrivateOnWindows(file, strict(), only(dir, broad(EVERYONE))));
     expect(err.message).toMatch(/Move the config/);
   });
 });
@@ -286,14 +282,14 @@ describe('assertPrivateOnWindows — the profile comparison', () => {
    * and agreed whatever `canonical()` did.
    */
   const BU = grant('BUILTIN\\Users', 'BU', 'S-1-5-32-545');
-  let base: string;
-
-  beforeEach(async () => { base = realpathSync(await mkdtemp(join(tmpdir(), 'ssh-mcp-canon-'))); });
-  afterEach(async () => { await rm(base, { recursive: true, force: true }); });
+  const tmp = useConfigDir('ssh-mcp-canon-');
 
   it('counts a directory reached through a link as inside the profile it resolves into', async () => {
-    // A junction on Windows, a symlink elsewhere: the same shape as an 8.3 short name,
-    // where the two spellings name one directory and only the filesystem knows it.
+    // A junction on Windows, a symlink elsewhere: two spellings of one directory that only
+    // the filesystem can reconcile. This pins that both sides go through realpath; that it
+    // is `realpathSync.native`, the one that also expands an 8.3 short name, only the
+    // Windows live job can see.
+    const base = realpathSync(tmp.dir);
     const profile = join(base, 'profile');
     mkdirSync(join(profile, 'cfg'), { recursive: true });
     const alias = join(base, 'alias');
@@ -301,17 +297,17 @@ describe('assertPrivateOnWindows — the profile comparison', () => {
     vi.stubEnv('USERPROFILE', profile);
 
     const dir = join(alias, 'cfg');
-    const err = await refused(assertPrivateOnWindows(join(dir, 'config.toml'), strict(), only(dir, broad(BU))));
+    const err = await refusal(assertPrivateOnWindows(join(dir, 'config.toml'), strict(), only(dir, broad(BU))));
     expect(err.message).not.toMatch(/Move the config/);
     expect(err.message).toContain('/remove:g *S-1-5-32-545');
   });
 
   it('compares the two sides without regard to case', async () => {
     // Nonexistent on purpose, so both sides take the lexical fallback and the lowercasing
-    // is the only thing that can make them agree. Windows paths compare that way; on a
-    // filesystem that folds case, realpath would already have settled it.
+    // is the only thing that can make them agree. This catches its removal on the POSIX
+    // legs only: on Windows `path.win32.relative` already compares without case.
     vi.stubEnv('USERPROFILE', PROFILE.toUpperCase());
-    const err = await refused(assertPrivateOnWindows(FILE, strict(), only(DIR, broad(BU))));
+    const err = await refusal(assertPrivateOnWindows(FILE, strict(), only(DIR, broad(BU))));
     expect(err.message).not.toMatch(/Move the config/);
     expect(err.message).toContain('/remove:g *S-1-5-32-545');
   });
@@ -319,13 +315,13 @@ describe('assertPrivateOnWindows — the profile comparison', () => {
 
 describe('assertPrivateOnWindows — a NULL DACL', () => {
   it('refuses, because no ACL means full control for everyone', async () => {
-    const err = await refused(assertPrivateOnWindows(FILE, strict(), only(FILE, { status: 'no-dacl' })));
+    const err = await refusal(assertPrivateOnWindows(FILE, strict(), only(FILE, { status: 'no-dacl' })));
     expect(err.message).toContain('no access control list');
   });
 
   it('prescribes granting a DACL rather than removing entries', async () => {
     // There is nothing to /remove:g — the fix is to give the file an ACL at all.
-    const err = await refused(assertPrivateOnWindows(FILE, strict(), only(FILE, { status: 'no-dacl' })));
+    const err = await refusal(assertPrivateOnWindows(FILE, strict(), only(FILE, { status: 'no-dacl' })));
     expect(err.message).toContain('/grant:r');
     expect(err.message).not.toContain('/remove:g');
   });
@@ -373,7 +369,7 @@ describe('assertPrivateOnWindows — the three postures', () => {
     // the same verdict with the same wording — an integrity failure described as a
     // disclosure. The config decides which hosts, roles and approval policy this server
     // honours, so another account being able to rewrite it is an authorization bypass.
-    const err = await refused(assertPrivateOnWindows(FILE, {}, only(FILE, WRITABLE)));
+    const err = await refusal(assertPrivateOnWindows(FILE, {}, only(FILE, WRITABLE)));
     expect(err.message).toMatch(/can be modified by accounts other than its owner/);
     expect(err.message).toContain('Authenticated Users');
   });
@@ -383,13 +379,13 @@ describe('assertPrivateOnWindows — the three postures', () => {
       writer('Authenticated Users', 'AU', 'S-1-5-11'),
       grant('BUILTIN\\Users', 'BU', 'S-1-5-32-545'),
     );
-    const err = await refused(assertPrivateOnWindows(FILE, {}, only(FILE, mixed)));
+    const err = await refusal(assertPrivateOnWindows(FILE, {}, only(FILE, mixed)));
     expect(err.message).toMatch(/modified by accounts other than its owner: Authenticated Users/);
     expect(err.message).toMatch(/and read by BUILTIN\\Users/);
   });
 
   it('refuses a NULL DACL, which is full control rather than read access', async () => {
-    const err = await refused(assertPrivateOnWindows(FILE, {}, only(FILE, { status: 'no-dacl' })));
+    const err = await refusal(assertPrivateOnWindows(FILE, {}, only(FILE, { status: 'no-dacl' })));
     expect(err.message).toContain('no access control list');
     // Nothing to remove; the fix is to give the object an ACL at all.
     expect(err.message).toContain('/grant:r');
@@ -399,7 +395,7 @@ describe('assertPrivateOnWindows — the three postures', () => {
   it('refuses an undeterminable ACL by default', async () => {
     // Not what #138 was about, and flipping it open hands an attacker a free downgrade:
     // make the descriptor unparseable and the loud finding becomes a vague one.
-    const err = await refused(assertPrivateOnWindows(FILE, {}, only(FILE, UNDETERMINABLE)));
+    const err = await refusal(assertPrivateOnWindows(FILE, {}, only(FILE, UNDETERMINABLE)));
     expect(err.message).toContain('could not be checked');
     expect(err.message).toContain('--allowUncheckedConfigAcl');
   });
@@ -429,13 +425,13 @@ describe('assertPrivateOnWindows — the three postures', () => {
 
   it('refuses everything the check objects to under --strictConfigAcl', async () => {
     for (const verdict of [READ_ONLY, WRITABLE, UNDETERMINABLE, MACHINE_SAYS_NOTHING]) {
-      await refused(assertPrivateOnWindows(FILE, strict(), only(FILE, verdict)));
+      await refusal(assertPrivateOnWindows(FILE, strict(), only(FILE, verdict)));
     }
   });
 
   it('refuses instead of reporting, rather than as well', async () => {
     const { warnings, events, opts } = warned();
-    await refused(assertPrivateOnWindows(FILE, strict(opts), only(FILE, READ_ONLY)));
+    await refusal(assertPrivateOnWindows(FILE, strict(opts), only(FILE, READ_ONLY)));
     expect(warnings).toEqual([]);
     expect(events).toEqual([]);
   });
@@ -490,16 +486,17 @@ describe('when the platform will not name the current account', () => {
       };
     });
     const acl = await import('../../../src/config/windows-acl.js');
-    const err = await acl
-      .assertPrivateOnWindows(FILE, { enforce: true }, async (p) =>
+    try {
+      // `Error`: this OperatorError comes from the post-reset module, not the one helpers.ts holds.
+      const err = await refusal(acl.assertPrivateOnWindows(FILE, { enforce: true }, async (p) =>
         p === FILE ? { status: 'broad', grants: [EVERYONE] } : { status: 'restricted' },
-      )
-      .then(() => null, (e: Error) => e);
-    vi.doUnmock('os');
-    vi.unstubAllEnvs();
-    vi.resetModules();
-    expect(err, 'expected a refusal, not a resolve').toBeInstanceOf(Error);
-    return (err as Error).message;
+      ), Error);
+      return err.message;
+    } finally {
+      vi.doUnmock('os');
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
   }
 
   it('still produces the finding instead of escaping as a crash', async () => {
