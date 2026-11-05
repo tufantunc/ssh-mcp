@@ -5,6 +5,35 @@ import type { ClientChannel } from 'ssh2';
 /** A signal request that left the client, by either route. */
 export interface WireEntry { id: number; name: string }
 
+export interface FakeChannelOptions {
+  /** The channel id the requests carry. */
+  id?: number;
+  /** Where requests are recorded; pass one array to collect several channels. */
+  wire?: WireEntry[];
+  /** Run the channel's own `end()` first: the state `exec()` leaves every channel in. */
+  stdinClosed?: boolean;
+  /** The transport under the channel, or `null` for one that cannot be read at all. */
+  sock?: { writable: boolean; ended: boolean } | null;
+  /**
+   * What `_client._protocol.signal` does: record to `wire` (the default), throw, or not
+   * exist. With `client: false` there is no `_client` at all.
+   */
+  protocol?: 'records' | 'throws' | 'absent';
+  client?: boolean;
+  /** Called after each request reaches `wire`, e.g. to close the channel in response. */
+  onWire?: (entry: WireEntry) => void;
+}
+
+interface ChannelState {
+  type: string;
+  writable: boolean;
+  outgoing: { id: number; state: string };
+  _client?: {
+    _sock?: { writable: boolean; _readableState: { ended: boolean } };
+    _protocol?: { signal: (id: number, name: string) => void };
+  };
+}
+
 /**
  * An ssh2 1.17 exec channel, in the state ssh2 hands to `client.exec`'s callback:
  * writable, outgoing state `'open'`, over a socket that will still carry a packet.
@@ -14,71 +43,62 @@ export interface WireEntry { id: number; name: string }
  * outgoing.state === 'open'`, and otherwise returns having sent nothing. A fake that
  * recorded the call instead would pass on the broken code — calling `signal()` was
  * exactly the problem in #146. So there is one observation point, `wire`, and it means
- * "this actually left the client": the public method and the `_protocol` fallback both
- * end there.
+ * "this actually left the client": the public method and the `_protocol` fallback both end
+ * there whatever the options, because the transport and protocol are options rather than
+ * fields a test replaces.
  *
- * `end()` and `close()` perform the transitions ssh2 does, so a test that drives the
- * channel through them exercises the resulting shape rather than a hardcoded guess at
- * it. `overrides` replaces fields wholesale; `afterStdinClosed()` is the usual one. Pass
- * `wire` to collect the requests of several channels in one array.
- *
- * Two test files used to carry their own copies of this, and the copy in
- * exec-late-channel once used the post-`end()` shape where production takes the public
- * path, so its assertions were riding a branch that path does not use.
+ * `end()` and `close()` perform the transitions ssh2 does, and `stdinClosed` goes through
+ * `end()`, so a test exercises the resulting shape rather than a hardcoded guess at it.
+ * `overrides` is for fields outside that, such as `type`, a replaced `signal`, or the
+ * `incoming`/`destroyed` a session reads.
  */
-export function fakeSsh2Channel(
-  overrides: Record<string, unknown> = {},
-  { id = 7, wire = [] as WireEntry[] }: { id?: number; wire?: WireEntry[] } = {},
-) {
-  const channel = Object.assign(new EventEmitter(), {
+export function fakeSsh2Channel(overrides: Record<string, unknown> = {}, options: FakeChannelOptions = {}) {
+  const {
+    id = 7, wire = [], stdinClosed = false, sock = { writable: true, ended: false },
+    protocol = 'records', client = true, onWire,
+  } = options;
+  const record = (to: number, name: string) => {
+    const entry = { id: to, name };
+    wire.push(entry);
+    onWire?.(entry);
+  };
+  const state: ChannelState = {
     type: 'session',
     writable: true,
     outgoing: { id, state: 'open' },
-    _client: {
-      _sock: { writable: true, _readableState: { ended: false } },
-      _protocol: { signal: (to: number, name: string) => { wire.push({ id: to, name }); } },
-    },
+    _client: client ? {
+      ...(sock && { _sock: { writable: sock.writable, _readableState: { ended: sock.ended } } }),
+      ...(protocol === 'records' && { _protocol: { signal: record } }),
+      ...(protocol === 'throws' && { _protocol: { signal: () => { throw new Error('closed'); } } }),
+    } : undefined,
+  };
+  const channel = Object.assign(new EventEmitter(), state, {
     signal(name: string) {
-      const self = channel as unknown as ChannelShape;
-      if (self.type === 'session' && self.writable && self.outgoing.state === 'open') {
-        self._client._protocol.signal(self.outgoing.id, name);
+      if (channel.type === 'session' && channel.writable && channel.outgoing.state === 'open') {
+        channel._client?._protocol?.signal(channel.outgoing.id, name);
       }
     },
-    close: vi.fn(() => { (channel as unknown as ChannelShape).outgoing.state = 'closing'; }),
+    close: vi.fn(() => { channel.outgoing.state = 'closing'; }),
     end: vi.fn(() => {
-      const self = channel as unknown as ChannelShape;
-      self.writable = false;
-      self.outgoing.state = 'eof';
+      channel.writable = false;
+      channel.outgoing.state = 'eof';
     }),
     write: vi.fn(),
     stderr: new EventEmitter(),
-    ...overrides,
-  });
+  }, overrides);
+  if (stdinClosed) {
+    channel.end();
+    channel.end.mockClear();
+  }
   return { channel: channel as unknown as ClientChannel, wire };
 }
 
-interface ChannelShape {
-  type: string;
-  writable: boolean;
-  outgoing: { id: number; state: string };
-  _client: { _protocol: { signal: (id: number, name: string) => void } };
-}
-
 /**
- * The state ssh2 leaves a channel in after `stream.end()`: EOF sent, no longer writable.
- *
- * A factory, not a constant. As a shared literal its `outgoing` object was shared by
- * every fake that spread it, so the first ladder's `close()` moved *every later fake* to
- * `'closing'` and three tests silently stopped testing anything.
+ * A channel that completes on the next tick with exit code 0 and no output, for tests of
+ * what reaches `client.exec` rather than of how a command is stopped.
  */
-export const afterStdinClosed = (id = 7) => ({ writable: false, outgoing: { id, state: 'eof' } });
-
-/** A channel that completes on the next tick with exit code 0 and no output. */
-export function completedChannel() {
-  const stream = Object.assign(new EventEmitter(), {
-    stderr: new EventEmitter(),
-    write: vi.fn(), end: vi.fn(), close: vi.fn(), signal: vi.fn(),
-  });
-  setTimeout(() => stream.emit('close', 0, null), 0);
-  return stream;
+export function completedChannel(): ClientChannel {
+  const { channel } = fakeSsh2Channel();
+  setTimeout(() => channel.emit('close', 0, null), 0);
+  return channel;
 }

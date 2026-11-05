@@ -1,4 +1,4 @@
-import type { Span, Tracer } from '@opentelemetry/api';
+import type { AttributeValue, Span, Tracer } from '@opentelemetry/api';
 
 /** A span as a test sees it: its name, the attributes set on it, and whether it ended. */
 export interface RecordedSpan {
@@ -8,14 +8,11 @@ export interface RecordedSpan {
 }
 
 /**
- * A tracer that keeps every span it starts, for asserting what production records.
- *
- * Without the OpenTelemetry SDK registered, `trace.getTracer()` hands out no-op spans that
- * keep nothing, so an attribute like `ssh.unstopped` could be deleted without a test
- * noticing — measured, removing both of its `setAttribute` calls kept the suite green.
- * Covers the span methods src/ssh/connection.ts calls: `setAttribute` and `end`. An
- * attribute set after `end()` is dropped, as the real SDK drops it, so a test cannot pass
- * on a value no exporter would ever see.
+ * A tracer that records each span's name, attributes and end, for asserting what
+ * production records — without the SDK registered, `trace.getTracer()` hands out spans
+ * that keep nothing. Covers `startSpan`, `setAttribute` and `end`, the only span API src/
+ * uses. Like the SDK it drops an attribute set after `end()` or with a null value, so a
+ * test cannot pass on a value no exporter would see.
  */
 export function recordingTracer(): { tracer: Tracer; spans: RecordedSpan[] } {
   const spans: RecordedSpan[] = [];
@@ -24,8 +21,8 @@ export function recordingTracer(): { tracer: Tracer; spans: RecordedSpan[] } {
       const record: RecordedSpan = { name, attributes: {}, ended: false };
       spans.push(record);
       const span = {
-        setAttribute(key: string, value: unknown) {
-          if (!record.ended) record.attributes[key] = value;
+        setAttribute(key: string, value: AttributeValue | null | undefined) {
+          if (value != null && !record.ended) record.attributes[key] = value;
           return span;
         },
         end() { record.ended = true; },

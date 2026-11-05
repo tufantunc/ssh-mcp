@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { stopAndDescribe } from '../../../src/ssh/connection.js';
 import { COULD_NOT_SIGNAL } from '../../../src/ssh/channel-signal.js';
-import { fakeSsh2Channel, afterStdinClosed } from '../../helpers/fake-channel.js';
+import { fakeSsh2Channel } from '../../helpers/fake-channel.js';
 import { recordingTracer } from '../../helpers/spans.js';
 
 /**
@@ -23,13 +23,13 @@ function stop(reason: 'ssh.timedOut' | 'ssh.aborted', channel: Parameters<typeof
 
 describe('stopAndDescribe', () => {
   it('records a stop that was dispatched as not unstopped, and says nothing more', () => {
-    const { message, attributes } = stop('ssh.timedOut', fakeSsh2Channel(afterStdinClosed()).channel);
+    const { message, attributes } = stop('ssh.timedOut', fakeSsh2Channel({}, { stdinClosed: true }).channel);
     expect(attributes).toEqual({ 'ssh.timedOut': true, 'ssh.unstopped': false });
     expect(message).toBe('');
   });
 
   it('records a stop that could not be dispatched, and warns', () => {
-    const { message, attributes } = stop('ssh.aborted', fakeSsh2Channel({ ...afterStdinClosed(), _client: undefined }).channel);
+    const { message, attributes } = stop('ssh.aborted', fakeSsh2Channel({}, { stdinClosed: true, client: false }).channel);
     expect(attributes).toEqual({ 'ssh.aborted': true, 'ssh.unstopped': true });
     expect(message).toBe(COULD_NOT_SIGNAL);
   });

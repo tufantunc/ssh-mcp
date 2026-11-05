@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import type { Profile } from '../../../src/types.js';
-import { fakeSsh2Channel, type WireEntry } from '../../helpers/fake-channel.js';
+import { fakeSsh2Channel, type WireEntry, type FakeChannelOptions } from '../../helpers/fake-channel.js';
+import { COULD_NOT_SIGNAL } from '../../../src/ssh/channel-signal.js';
 import { recordingTracer, type RecordedSpan } from '../../helpers/spans.js';
 
 /**
@@ -43,10 +44,13 @@ let signalled: WireEntry[];
 let spans: RecordedSpan[];
 /** How long the stubbed server takes to answer the exec request. */
 let execDelayMs: number;
+/** How the channel it answers with differs from a signallable one. */
+let lateChannel: FakeChannelOptions;
 
 beforeEach(() => {
   signalled = [];
   execDelayMs = 300;
+  lateChannel = {};
   vi.resetModules();
   const recording = recordingTracer();
   spans = recording.spans;
@@ -55,7 +59,10 @@ beforeEach(() => {
     class FakeClient extends EventEmitter {
       connect() { setTimeout(() => this.emit('ready'), 0); return this; }
       exec(_cmd: string, _opts: unknown, cb: (err: Error | undefined, stream: unknown) => void) {
-        setTimeout(() => cb(undefined, fakeSsh2Channel({}, { id: 42, wire: signalled }).channel), execDelayMs);
+        // Bound now, not when the timer fires: a test that returns before its late channel
+        // arrives must not have that channel write into the next test's array.
+        const options = { ...lateChannel, id: 42, wire: signalled };
+        setTimeout(() => cb(undefined, fakeSsh2Channel({}, options).channel), execDelayMs);
       }
       end() { /* nothing to tear down */ }
     }
@@ -92,6 +99,18 @@ describe('a channel that arrives after the promise settled', () => {
     expect(late?.ended).toBe(true);
   });
 
+  it('records a late channel it could not signal as unstopped', async () => {
+    // The other side of the lateStop span, which is the only record this outcome gets: the
+    // caller was told "timed out" before the channel existed.
+    lateChannel = { client: false };
+    const conn = await connect();
+    await conn.exec('sleep 30', { timeoutMs: 50 }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 400));
+    expect(signalled).toEqual([]);
+    expect(spans.find((sp) => sp.name === 'ssh.exec.lateStop')?.attributes)
+      .toEqual({ 'ssh.host': 'h', 'ssh.unstopped': true });
+  });
+
   it('does not count the late channel as an open one', async () => {
     // It never becomes `activeStream`, so nothing would ever decrement it.
     const conn = await connect();
@@ -107,7 +126,7 @@ describe('a channel that arrives after the promise settled', () => {
     const conn = await connect();
     const err = await conn.exec('sleep 30', { timeoutMs: 50 }).then(() => null, (e: Error) => e);
     expect(err?.message).toMatch(/timed out/i);
-    expect(err?.message).not.toMatch(/may still be running/);
+    expect(err?.message).not.toContain(COULD_NOT_SIGNAL.trim());
   });
 
   it('still stops a channel that arrived in time', async () => {
