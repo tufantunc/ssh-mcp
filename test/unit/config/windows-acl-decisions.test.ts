@@ -66,7 +66,6 @@ function warned(): { events: AclFinding[]; warnings: string[]; opts: AclOptions 
 /** Refusal is opt-in now, so every refusal test says so. */
 const strict = enforceAcl;
 
-
 beforeEach(() => vi.stubEnv('USERPROFILE', PROFILE));
 
 afterEach(() => {
