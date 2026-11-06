@@ -126,6 +126,20 @@ jobs:
         # from.
         run: npm run coverage
 
+      # #315: ssh2's JavaScript ciphers, which the published Docker image runs, are not
+      # what `npm ci` gives this job — it builds ssh2's native binding. So the ProxyJump
+      # suite runs once more with the binding hidden, after proving the hook hides it, so a
+      # green run cannot have taken the native path.
+      - name: ProxyJump on ssh2's JavaScript ciphers
+        env:
+          SSH_MCP_DISABLE_MAIN: "1"
+          SSH_MCP_REQUIRE_SERVERS: "1"
+          NODE_OPTIONS: --require ./test/integration/fixtures/hide-ssh2-binding.cjs
+        run: |
+          node -e "process.exit(require('ssh2/lib/protocol/crypto.js').bindingAvailable ? 1 : 0)" \
+            || { echo "the hook did not hide ssh2's native binding"; exit 1; }
+          npx vitest --run test/integration/proxy-jump.test.ts
+
       # An empty or missing report uploads happily and renders as 0%, which is
       # indistinguishable from having no tests. Fail here instead, where the
       # cause is obvious — but leave the upload itself non-fatal, so our own

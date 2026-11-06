@@ -1,6 +1,6 @@
 import { Client, type ClientChannel, type ConnectConfig, type ExecOptions } from 'ssh2';
 import type { ConnectionInfo, Profile, ResolvedCredentials, ExecOpts, CommandResult, SessionOpts } from '../types.js';
-import { FROZEN_ALGORITHMS } from './algorithms.js';
+import { FROZEN_ALGORITHMS, FORWARDED_ALGORITHMS } from './algorithms.js';
 import { verifyHostKey, fingerprintPublicKey, type HostKeyMode } from './host-key.js';
 import type { Session, CloseOutcome } from './session.js';
 import { SessionManager } from './session-manager.js';
@@ -313,7 +313,8 @@ export class SSHConnection {
         host: this.profile.host,
         port: this.profile.port,
         username: this.profile.user,
-        algorithms: FROZEN_ALGORITHMS as ConnectConfig['algorithms'],
+        // Over a bastion's channel, chacha20 last: see FORWARDED_ALGORITHMS (#315).
+        algorithms: (this.bastionSock ? FORWARDED_ALGORITHMS : FROZEN_ALGORITHMS) as ConnectConfig['algorithms'],
         hostVerifier: (key: Buffer) => {
           // The pin used to be checked here, as a `return false` ahead of
           // verifyHostKey. That made it reject-only: a *matching* pin fell
