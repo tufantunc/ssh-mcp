@@ -72,9 +72,7 @@ describe('the algorithms a connection offers', () => {
   async function offeredBy(bastionSock?: ClientChannel) {
     const { SSHConnection } = await import('../../../src/ssh/connection.js');
     const { FROZEN_ALGORITHMS: frozen, FORWARDED_ALGORITHMS: forwarded } = await import('../../../src/ssh/algorithms.js');
-    const conn = new SSHConnection(profile, { password: 'x' } as never, new Map(), 'insecure', bastionSock);
-    // Private, and only the handshake is wanted here: every public method also runs a command.
-    await (conn as unknown as { connect(): Promise<void> }).connect();
+    await new SSHConnection(profile, { password: 'x' } as never, new Map(), 'insecure', bastionSock).ensureConnected();
     return { algorithms: offered[0], frozen, forwarded };
   }
 

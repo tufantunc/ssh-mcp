@@ -45,14 +45,16 @@ const CHACHA20 = 'chacha20-poly1305@openssh.com';
  * there, and the outer cipher leaves *its* sequence number in the shared buffer — so the
  * inner payload goes out under the wrong nonce, the server cannot read the first
  * encrypted packet (`ssh-userauth`'s SERVICE_REQUEST), and the handshake hangs (#315,
- * mscdex/ssh2#1523). It takes chacha20 on both hops and the JavaScript path, which is
- * what runs whenever ssh2's optional native binding is absent: the published Docker image
- * installs with `--ignore-scripts`, so every two-hop profile there was affected.
+ * mscdex/ssh2#1523). It takes chacha20 on this hop and on any hop it is carried over —
+ * the write passes through non-chacha hops in between — plus the JavaScript path, which
+ * is what runs whenever ssh2's optional native binding is absent: the published Docker
+ * image installs with `--ignore-scripts`, so every two-hop profile there was affected.
  *
  * Moved rather than removed: any other common cipher is chosen first, and a server that
- * only speaks chacha20 is still reachable — it hangs exactly as before, and nothing that
- * connected stops connecting. test/integration/via-chacha.test.ts fails its control the
- * day ssh2 ships the fix, which is when this goes.
+ * only speaks chacha20 is still offered it. On the JavaScript path such a server inside
+ * a chain still hangs, as it did before; nothing that connected stops connecting.
+ * test/integration/via-chacha.test.ts fails its control the day ssh2 ships the fix, which
+ * is when this goes.
  */
 export const FORWARDED_ALGORITHMS = {
   ...FROZEN_ALGORITHMS,

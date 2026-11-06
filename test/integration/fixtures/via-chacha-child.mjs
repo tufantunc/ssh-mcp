@@ -1,7 +1,8 @@
 // Spawned by via-chacha.test.ts. Connects bastion -> forwardOut -> target with bare ssh2,
 // offering `argv[2]` on the outer hop and `argv[3]` on the inner one ('frozen' or
 // 'forwarded'), and prints one JSON line: whether `echo ok` came back, and whether ssh2
-// had its native binding. A hop that hangs is reported as such rather than awaited.
+// had its native binding. A run that stalls is reported as `hang@<stage>`, naming the
+// last step that completed, rather than awaited.
 import { createRequire } from 'module';
 import { FROZEN_ALGORITHMS, FORWARDED_ALGORITHMS } from '../../../src/ssh/algorithms.ts';
 
@@ -11,17 +12,20 @@ const { bindingAvailable } = require('ssh2/lib/protocol/crypto.js');
 const sets = { frozen: FROZEN_ALGORITHMS, forwarded: FORWARDED_ALGORITHMS };
 const [outerSet, innerSet, host, port, target, targetPort, hangMs] = process.argv.slice(2);
 
+let stage = 'started';
 const report = (result) => {
   process.stdout.write(JSON.stringify({ result, bindingAvailable }) + '\n');
   process.exit(0);
 };
-setTimeout(() => report('hang'), Number(hangMs)).unref();
+setTimeout(() => report(`hang@${stage}`), Number(hangMs)).unref();
 
 const outer = new Client();
 outer.on('error', (e) => report(`outer error: ${e.message}`));
 outer.on('ready', () => {
+  stage = 'outer-ready';
   outer.forwardOut('127.0.0.1', 0, target, Number(targetPort), (err, stream) => {
     if (err) return report(`forwardOut error: ${err.message}`);
+    stage = 'forwarded';
     const inner = new Client();
     inner.on('error', (e) => report(`inner error: ${e.message}`));
     inner.on('ready', () => {

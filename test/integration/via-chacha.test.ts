@@ -55,11 +55,13 @@ describe.skipIf(!bastionUp)('a via profile on ssh2\'s JavaScript ciphers', () =>
     expect(result).toBe('ok');
   }, HANG_MS + 10_000);
 
-  it('still hangs with chacha20 on both hops, which is the ssh2 bug this works around', async () => {
-    // The control. If this starts passing, ssh2 has fixed mscdex/ssh2#1523: retire
-    // FORWARDED_ALGORITHMS rather than keep a workaround for a bug that is gone.
+  it('still hangs in the inner handshake with chacha20 on both hops, the ssh2 bug this works around', async () => {
+    // The control. Only `ok` means ssh2 has fixed mscdex/ssh2#1523 and FORWARDED_ALGORITHMS
+    // can go; a stall anywhere but after the forward, or an error, is something else and
+    // fails with what it was.
     const { result, bindingAvailable } = await twoHops('frozen', 'frozen');
     expect(bindingAvailable).toBe(false);
-    expect(result, 'ssh2 no longer corrupts the nested chacha20 nonce; FORWARDED_ALGORITHMS can go').toBe('hang');
+    expect(result, 'ssh2 no longer corrupts the nested chacha20 nonce; FORWARDED_ALGORITHMS can go').not.toBe('ok');
+    expect(result).toBe('hang@forwarded');
   }, HANG_MS + 10_000);
 });
