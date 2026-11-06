@@ -1,5 +1,17 @@
 # ssh-mcp
 
+## 2.23.1
+
+### Patch Changes
+
+- [#311](https://github.com/tufantunc/ssh-mcp/pull/311) [`517e15b`](https://github.com/tufantunc/ssh-mcp/commit/517e15b0b76c4161d8f7c75d1208e6ea191f8ea7) Thanks [@tufantunc](https://github.com/tufantunc)! - A fatal startup message longer than 64KB now reaches stderr in full on macOS. When stderr was a pipe, which is the case under the stdio transport, the message was cut off at 65,536 bytes. The write now continues until the whole message is out, and retries a full pipe for up to two seconds before it gives up.
+
+- [#316](https://github.com/tufantunc/ssh-mcp/pull/316) [`390b982`](https://github.com/tufantunc/ssh-mcp/commit/390b982598e9d13c0d7b131b9d128ee7b4ece32c) Thanks [@tufantunc](https://github.com/tufantunc)! - A `via` (ProxyJump) profile now connects when both hops are OpenSSH and ssh2's optional native crypto binding is absent. That covers the published Docker image and installs that could not build the binding. Before, the inner handshake hung after its first encrypted packet and then failed with "SSH connection ended during handshake" ([#315](https://github.com/tufantunc/ssh-mcp/issues/315)).
+  
+  The cause is in ssh2 (mscdex/ssh2#1523). Its JavaScript chacha20-poly1305 cipher corrupts the nonce when one connection is carried inside another that also uses chacha20. Connections over a bastion now offer chacha20-poly1305 last, so any other cipher both sides support is chosen first.
+  
+  A server behind a bastion that accepts only chacha20-poly1305 is still offered it. Without the native binding it still hangs, as it did before this change. Nothing that connected before stops connecting.
+
 ## 2.23.0
 
 ### Minor Changes
