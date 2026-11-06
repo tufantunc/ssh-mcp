@@ -29,6 +29,7 @@ outer.on('ready', () => {
     const inner = new Client();
     inner.on('error', (e) => report(`inner error: ${e.message}`));
     inner.on('ready', () => {
+      stage = 'inner-ready';
       inner.exec('echo ok', (e, s) => {
         if (e) return report(`exec error: ${e.message}`);
         let out = '';
