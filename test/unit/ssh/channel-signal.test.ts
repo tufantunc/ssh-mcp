@@ -2,65 +2,21 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ClientChannel } from 'ssh2';
 import { EventEmitter } from 'events';
 import { signalChannel, terminateChannel, waitForChannelClose } from '../../../src/ssh/channel-signal.js';
+import { fakeSsh2Channel } from '../../helpers/fake-channel.js';
 
 /**
  * #146: every signal ssh-mcp sent to stop a timed-out command was a silent no-op,
  * so the command ran to completion on the host while the caller was told it had
  * timed out.
  *
- * The fake channel below mirrors ssh2 1.17's `Channel.signal()` *including its
- * silence* — the real method checks `type === 'session' && writable &&
- * outgoing.state === 'open'` and, when that fails, returns without writing
- * anything. A fake that recorded the call instead would pass on the broken code:
- * we did call `signal()`, and that was exactly the problem. So there is one
- * observation point here, `wire`, and it means "this actually left the client".
+ * The fake channel (test/helpers/fake-channel.ts) mirrors ssh2 1.17's
+ * `Channel.signal()` *including its silence*, so there is one observation point here,
+ * `wire`, and it means "this actually left the client".
  */
-
-interface WireEntry { id: number; name: string }
-
-
-function fakeChannel(overrides: Record<string, unknown> = {}) {
-  const wire: WireEntry[] = [];
-  const closeHandlers: Array<() => void> = [];
-  const channel = {
-    type: 'session',
-    writable: true,
-    outgoing: { id: 7, state: 'open' },
-    // The transport, in the shape a live connection has. `onTheWire` fails closed on an
-    // unreadable one, so every fake has to carry it — which is the point: a guard that
-    // assumed the best when it could not see the socket was the earlier defect.
-    _client: {
-      _sock: { writable: true, _readableState: { ended: false } },
-      _protocol: { signal: (id: number, name: string) => { wire.push({ id, name }); } },
-    },
-    // The real gate, reproduced.
-    signal(name: string) {
-      const self = channel as unknown as { type: string; writable: boolean; outgoing: { id: number; state: string } };
-      if (self.type === 'session' && self.writable && self.outgoing.state === 'open') {
-        channel._client._protocol.signal(self.outgoing.id, name);
-      }
-    },
-    close: vi.fn(() => { (channel.outgoing as { state: string }).state = 'closing'; }),
-    on: vi.fn((event: string, cb: () => void) => { if (event === 'close') closeHandlers.push(cb); return channel; }),
-    once: vi.fn((event: string, cb: () => void) => { if (event === 'close') closeHandlers.push(cb); return channel; }),
-    removeListener: vi.fn(),
-    ...overrides,
-  };
-  return { channel: channel as unknown as ClientChannel, wire, fireClose: () => closeHandlers.forEach((h) => h()) };
-}
-
-/**
- * The state ssh2 leaves a channel in after `stream.end()`: EOF sent, no longer writable.
- *
- * A factory, not a constant. As a shared literal its `outgoing` object was shared by
- * every fake that spread it, so the first ladder's `close()` moved *every later
- * fake* to `'closing'` and three tests silently stopped testing anything.
- */
-const afterStdinClosed = () => ({ writable: false, outgoing: { id: 7, state: 'eof' } });
 
 describe('signalChannel', () => {
   it('uses ssh2\'s own method while it will still send', () => {
-    const { channel, wire } = fakeChannel();
+    const { channel, wire } = fakeSsh2Channel();
     const spy = vi.spyOn(channel, 'signal');
     expect(signalChannel(channel, 'INT')).toBe(true);
     expect(spy).toHaveBeenCalledWith('INT');
@@ -70,7 +26,7 @@ describe('signalChannel', () => {
   // The defect itself. This is the state exec() puts every channel into, one line
   // after dispatching the command.
   it('still reaches the wire after stdin has been closed', () => {
-    const { channel, wire } = fakeChannel(afterStdinClosed());
+    const { channel, wire } = fakeSsh2Channel({}, { stdinClosed: true });
     expect(signalChannel(channel, 'TERM')).toBe(true);
     expect(wire).toEqual([{ id: 7, name: 'TERM' }]);
   });
@@ -78,45 +34,54 @@ describe('signalChannel', () => {
   it('does not call ssh2\'s method when calling it would send nothing', () => {
     // Not cosmetic: a call that silently does nothing, reported as success, is the
     // bug. If the public method is unusable we must know it and route around it.
-    const { channel } = fakeChannel(afterStdinClosed());
+    const { channel } = fakeSsh2Channel({}, { stdinClosed: true });
     const spy = vi.spyOn(channel, 'signal');
     signalChannel(channel, 'TERM');
     expect(spy).not.toHaveBeenCalled();
   });
 
   it.each(['closing', 'closed'])('sends nothing on a %s channel', (state) => {
-    const { channel, wire } = fakeChannel({ writable: false, outgoing: { id: 7, state } });
+    const { channel, wire } = fakeSsh2Channel({ writable: false, outgoing: { id: 7, state } });
     expect(signalChannel(channel, 'KILL')).toBe(false);
     expect(wire).toEqual([]);
   });
 
   it('sends nothing on a channel that is not a session', () => {
     // ssh2 gates on this too: a forwarded-tcpip channel has no process to signal.
-    const { channel, wire } = fakeChannel({ type: 'direct-tcpip' });
+    const { channel, wire } = fakeSsh2Channel({ type: 'direct-tcpip' });
     expect(signalChannel(channel, 'INT')).toBe(false);
     expect(wire).toEqual([]);
+  });
+
+  it('still asks ssh2 on a shape it does not recognise, and reports failure anyway', () => {
+    // The last rung: ssh2 will not send through its public gate and there is no protocol
+    // object to route around it with. Asking costs nothing and is insurance against a
+    // future ssh2 whose gate is wider than our copy — so this fake's `signal` sends
+    // after EOF, as that version would — but nothing here can confirm the request left,
+    // so the answer is still "could not signal".
+    const asked: string[] = [];
+    const { channel } = fakeSsh2Channel(
+      { signal: (name: string) => { asked.push(name); } },
+      { stdinClosed: true, protocol: 'absent' },
+    );
+    expect(signalChannel(channel, 'TERM')).toBe(false);
+    expect(asked).toEqual(['TERM']);
   });
 
   it('reports failure rather than throwing when the internals are not there', () => {
     // The cost of routing around ssh2's public API: a future version may not
     // expose this shape. Then the answer has to be "could not signal", not a crash
     // and not a false success.
-    const { channel } = fakeChannel({ ...afterStdinClosed(), _client: undefined });
+    const { channel } = fakeSsh2Channel({}, { stdinClosed: true, client: false });
     expect(signalChannel(channel, 'INT')).toBe(false);
   });
 
   it('reports failure when the protocol call throws', () => {
-    // `afterStdinClosed()`, called. Spread as a bare function it contributes no own
-    // properties, so this channel stayed writable-and-open, the *public* path ran, and
-    // the fallback's catch — the only line in this module that depends on ssh2 internals
-    // — had no coverage while a test claimed otherwise.
-    const { channel, wire } = fakeChannel({
-      ...afterStdinClosed(),
-      _client: {
-        _sock: { writable: true, _readableState: { ended: false } },
-        _protocol: { signal: () => { throw new Error('closed'); } },
-      },
-    });
+    // After EOF, so the fallback runs. A version of this test that left the channel
+    // writable-and-open ran the *public* path instead, and the fallback's catch — the only
+    // line in this module that depends on ssh2 internals — had no coverage while a test
+    // claimed otherwise. The spy below is what keeps that from happening again.
+    const { channel, wire } = fakeSsh2Channel({}, { stdinClosed: true, protocol: 'throws' });
     const spy = vi.spyOn(channel, 'signal');
     expect(signalChannel(channel, 'INT')).toBe(false);
     expect(spy, 'the fallback branch must be the one under test here').not.toHaveBeenCalled();
@@ -131,13 +96,7 @@ describe('signalChannel', () => {
     // below passed and `signalChannel` reported delivery of a packet ssh2 threw away.
     // Reachable via `SSHConnection.close()` or the idle reaper closing a connection
     // under a running command.
-    const { channel, wire } = fakeChannel({
-      ...afterStdinClosed(),
-      _client: {
-        _sock: { writable: false, _readableState: { ended: true } },
-        _protocol: { signal: (id: number, name: string) => { wire.push({ id, name }); } },
-      },
-    });
+    const { channel, wire } = fakeSsh2Channel({}, { stdinClosed: true, sock: { writable: false, ended: true } });
     expect(signalChannel(channel, 'TERM')).toBe(false);
     expect(wire, 'nothing may be claimed as sent through a dead socket').toEqual([]);
   });
@@ -148,39 +107,27 @@ describe('signalChannel', () => {
     // requires `_readableState.ended === false` — is false. Measured: a socket with
     // allowHalfOpen sits in that state indefinitely, and ssh2's transport for a `via`
     // profile is a forwarded channel, which defaults to allowHalfOpen.
-    const { channel, wire } = fakeChannel({
-      ...afterStdinClosed(),
-      _client: {
-        _sock: { writable: true, _readableState: { ended: true } },
-        _protocol: { signal: (id: number, name: string) => { wire.push({ id, name }); } },
-      },
-    });
+    const { channel, wire } = fakeSsh2Channel({}, { stdinClosed: true, sock: { writable: true, ended: true } });
     expect(signalChannel(channel, 'TERM')).toBe(false);
     expect(wire).toEqual([]);
   });
 
   it('refuses when the transport cannot be read at all', () => {
     // Fail closed, matching every other unknown-shape branch in the module.
-    const { channel, wire } = fakeChannel({ ...afterStdinClosed(), _client: { _protocol: { signal: () => {} } } });
+    const { channel, wire } = fakeSsh2Channel({}, { stdinClosed: true, sock: null });
     expect(signalChannel(channel, 'TERM')).toBe(false);
     expect(wire).toEqual([]);
   });
 
   it('sends through a socket that is still writable', () => {
     // The other half, so the guard cannot be satisfied by refusing everything.
-    const { channel, wire } = fakeChannel({
-      ...afterStdinClosed(),
-      _client: {
-        _sock: { writable: true, _readableState: { ended: false } },
-        _protocol: { signal: (id: number, name: string) => { wire.push({ id, name }); } },
-      },
-    });
+    const { channel, wire } = fakeSsh2Channel({}, { stdinClosed: true, sock: { writable: true, ended: false } });
     expect(signalChannel(channel, 'TERM')).toBe(true);
     expect(wire).toEqual([{ id: 7, name: 'TERM' }]);
   });
 
   it('reports failure when ssh2\'s own method throws', () => {
-    const { channel } = fakeChannel({ signal: () => { throw new Error('server mode'); } });
+    const { channel } = fakeSsh2Channel({ signal: () => { throw new Error('server mode'); } });
     expect(signalChannel(channel, 'INT')).toBe(false);
   });
 });
@@ -190,7 +137,7 @@ describe('terminateChannel', () => {
   afterEach(() => vi.useRealTimers());
 
   it('escalates INT, TERM, KILL and then drops the channel', () => {
-    const { channel, wire } = fakeChannel(afterStdinClosed());
+    const { channel, wire } = fakeSsh2Channel({}, { stdinClosed: true });
     terminateChannel(channel);
     expect(wire.map((w) => w.name)).toEqual(['INT']);
     vi.advanceTimersByTime(1000);
@@ -203,17 +150,17 @@ describe('terminateChannel', () => {
   });
 
   it('reports whether the first signal left the client', () => {
-    expect(terminateChannel(fakeChannel(afterStdinClosed()).channel)).toBe(true);
-    expect(terminateChannel(fakeChannel({ ...afterStdinClosed(), _client: undefined }).channel)).toBe(false);
+    expect(terminateChannel(fakeSsh2Channel({}, { stdinClosed: true }).channel)).toBe(true);
+    expect(terminateChannel(fakeSsh2Channel({}, { stdinClosed: true, client: false }).channel)).toBe(false);
   });
 
   it('stops escalating once the channel closes', () => {
     // KILL costs the command its chance to clean up, so it is only for a process
     // that ignored the gentler two. Sending it after the process is already gone
     // also races a channel id that ssh2 may have reused.
-    const { channel, wire, fireClose } = fakeChannel(afterStdinClosed());
+    const { channel, wire } = fakeSsh2Channel({}, { stdinClosed: true });
     terminateChannel(channel);
-    fireClose();
+    channel.emit('close');
     vi.advanceTimersByTime(5000);
     expect(wire.map((w) => w.name)).toEqual(['INT']);
     expect(channel.close).not.toHaveBeenCalled();
@@ -232,7 +179,7 @@ describe('terminateChannel', () => {
       return h;
     }) as never);
     try {
-      terminateChannel(fakeChannel(afterStdinClosed()).channel);
+      terminateChannel(fakeSsh2Channel({}, { stdinClosed: true }).channel);
     } finally {
       spy.mockRestore();
     }
