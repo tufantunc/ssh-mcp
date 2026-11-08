@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { checkAllServers, allServersUp, setupEnv, createConnection, type ServerStatus } from './fixtures.js';
 import type { SSHConnection } from '../../src/ssh/connection.js';
+import type { BackgroundSession } from '../../src/ssh/session.js';
 import { treeSize, killMarkers } from './process-table.js';
 
 let status: ServerStatus;
@@ -66,4 +67,26 @@ describe.skipIf(!allServersUp(await checkAllServers()))('Session TTL and idle re
     expect(conn.isConnected()).toBe(true);
     await conn.closeSession('keep-alive');
   });
+
+  it('a polled session survives past its idle TTL, an unpolled one does not', async () => {
+    // The bug this pins: a background command whose output goes to a file emits
+    // nothing on the channel, so lastActivity froze at creation and the reaper
+    // closed the session under a caller that was reading it every second. Both
+    // sessions here are silent; the only difference is that one is read.
+    const ttl = 1_000;
+    await conn.openSession({ name: 'polled', type: 'background', command: 'exec sleep 5', ttlMs: ttl });
+    await conn.openSession({ name: 'ignored', type: 'background', command: 'exec sleep 5', ttlMs: ttl });
+
+    const started = Date.now();
+    while (Date.now() - started < ttl * 3) {
+      (conn.getSession('polled') as BackgroundSession | undefined)?.readOutput(5);
+      await new Promise((r) => setTimeout(r, 250));
+    }
+
+    expect(conn.getSession('polled')?.isExpired()).toBe(false);
+    expect(conn.getSession('ignored')?.isExpired()).toBe(true);
+
+    await conn.closeSession('polled').catch(() => {});
+    await conn.closeSession('ignored').catch(() => {});
+  }, 30000);
 });

@@ -388,6 +388,13 @@ export class BackgroundSession extends Session {
   }
 
   readOutput(lines = 50): string {
+    // Reading a live session is a liveness signal, not a no-op: a caller polling
+    // it is watching the session. Without this touch, a background command whose
+    // output is redirected to a file emits nothing on the channel, so lastActivity
+    // froze at creation, the idle reaper closed the session under the caller's
+    // feet, and monitoring was indistinguishable from abandonment — measured as a
+    // job killed at exactly the 10-minute default while it was read every minute.
+    this.touch();
     // Include the in-flight partial line so output that has not yet ended with
     // a newline is still visible to a caller polling the session.
     const all = this.partialLine ? [...this.ringBuffer, this.partialLine] : this.ringBuffer;
