@@ -98,8 +98,10 @@ function checkReservedKeys(
 export const defaultsSchema = z.object({
   defaultProfile: z.string().optional(),
   sessionMaxPerConnection: z.number().int().positive().default(5),
-  sessionIdleTimeoutMs: z.number().int().positive().default(600_000),
-  sessionBackgroundMaxMs: z.number().int().positive().default(3_600_000),
+  // 0 = unlimited, as in commandMaxChars below: a session is then bounded only by
+  // the connection, not by a clock. Needed for jobs that legitimately run for days.
+  sessionIdleTimeoutMs: z.number().int().nonnegative().default(600_000),
+  sessionBackgroundMaxMs: z.number().int().nonnegative().default(3_600_000),
   commandTimeoutMs: z.number().int().positive().default(60_000),
   // 0 = unlimited, matching `--maxChars=none` on the CLI. normalizeConfig()
   // maps it to Number.MAX_SAFE_INTEGER so both surfaces hand the rest of the
@@ -189,8 +191,8 @@ export const profileSchema = z.object({
   maxOutputBytes: z.number().int().positive().optional(),
   approvalPolicy: approvalModeSchema.optional(),
   sessionMaxPerConnection: z.number().int().positive().optional(),
-  sessionIdleTimeoutMs: z.number().int().positive().optional(),
-  sessionBackgroundMaxMs: z.number().int().positive().optional(),
+  sessionIdleTimeoutMs: z.number().int().nonnegative().optional(),
+  sessionBackgroundMaxMs: z.number().int().nonnegative().optional(),
   commandQuotaPerDay: z.number().int().nonnegative().optional(),
   // Per-profile, unlike transferRoot: how large a transfer may be, and how long
   // a silent wire is tolerated, are properties of the link to that host. Same

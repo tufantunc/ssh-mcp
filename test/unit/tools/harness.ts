@@ -50,6 +50,8 @@ export interface Harness {
    * every unit test — including the ones written to cover it.
    */
   setCloseOutcome(outcome: CloseOutcome): void;
+  /** Every `openSession` call the tool layer made, options included. */
+  openSessionCalls: any[];
   close(): Promise<void>;
 }
 
@@ -60,6 +62,7 @@ export async function createHarness(
 ): Promise<Harness> {
   const profile: Profile = { ...testProfile, ...overrides };
   const execCalls: ExecCall[] = [];
+  const openSessionCalls: any[] = [];
   const auditRecords: any[] = [];
   let approve = true;
   let closeOutcome: CloseOutcome = 'closed';
@@ -88,7 +91,12 @@ export async function createHarness(
     // Matches SSHConnection.listSessions(): Session objects, not SessionInfo —
     // the handler calls toInfo() itself.
     listSessions: () => [...sessions.values()],
-    async openSession({ name, type }: any) {
+    async openSession(opts: any) {
+      const { name, type } = opts;
+      // Recorded whole: the tool layer is the only place that decides whether a
+      // per-call ttlMs reaches SessionManager, and a stub that destructured
+      // `{ name, type }` could not tell the two apart.
+      openSessionCalls.push(opts);
       const session = {
         toInfo: () => ({ id: name, name, profile: profile.name, type, status: 'active', createdAt: new Date(), lastActivity: new Date(), ttlMs: 1000 }),
         run: async (command: string) => { execCalls.push({ command }); return makeResult(command); },
@@ -143,6 +151,7 @@ export async function createHarness(
   return {
     client,
     execCalls,
+    openSessionCalls,
     auditRecords,
     setExecResult(result) { execResult = result; },
     setApproval(value) { approve = value; },
