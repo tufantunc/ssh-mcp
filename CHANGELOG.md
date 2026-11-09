@@ -1,5 +1,43 @@
 # ssh-mcp
 
+## 2.24.0
+
+### Minor Changes
+
+- [#320](https://github.com/tufantunc/ssh-mcp/pull/320) [`b6cbe29`](https://github.com/tufantunc/ssh-mcp/commit/b6cbe29605342c9f5de03bb96e74970cf4435786) Thanks [@st4inl3s5](https://github.com/st4inl3s5)! - A session can now be given its own idle timeout, per call, and `0` means "no
+  cap" for the session timeouts in the config.
+  
+  `open-session` accepts `ttlMs`. It may shorten the profile's idle timeout for
+  that session. It may lengthen it only up to a ceiling the operator already set:
+  `sessionBackgroundMaxMs` for a background session. Where that cap is `0`, the
+  ceiling is the profile's own `sessionIdleTimeoutMs`, since turning the absolute
+  cap off does not turn the idle timeout off. An interactive session has no
+  absolute cap, so its ceiling is always the profile's own `sessionIdleTimeoutMs`. A call
+  above the ceiling is refused, and the refusal names the ceiling. A call cannot
+  ask for `0`: the timeout is the operator's control, and the agent can narrow
+  what the operator allows but not widen it.
+  
+  `sessionIdleTimeoutMs` / `sessionBackgroundMaxMs` in the config file, and
+  `--sessionTtl`, now accept `0` = no cap. This is the spelling
+  `commandMaxChars` and `commandQuotaPerDay` already use.
+  
+  The comparisons behind it were bare `>`, which read a literal 0 as "expire
+  immediately" — the opposite of the request — and `parseInt(x) || default` turned
+  `--sessionTtl=0` back into the 10-minute default, because 0 is falsy, not
+  invalid.
+
+### Patch Changes
+
+- [#319](https://github.com/tufantunc/ssh-mcp/pull/319) [`62fd3bb`](https://github.com/tufantunc/ssh-mcp/commit/62fd3bb693fde1e284943d96223300335653c7d7) Thanks [@st4inl3s5](https://github.com/st4inl3s5)! - Reading a live session now counts as activity.
+  
+  `lastActivity` only moved when the channel produced a byte, so a background
+  command whose output is redirected to a file — the normal way to run a long job
+  — froze its idle clock at creation. A caller polling such a session every minute
+  was indistinguishable from one that had walked away, and the idle reaper closed
+  the session (and signalled the command) at exactly the timeout: measured at
+  10m22s and 10m56s against a real host with the default 10-minute TTL, while the
+  job was being read every 90 seconds.
+
 ## 2.23.1
 
 ### Patch Changes
