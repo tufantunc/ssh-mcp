@@ -27,6 +27,16 @@ describe('open-session ttlMs', () => {
     }
   });
 
+  it('forwards ttlMs for an interactive session too', async () => {
+    const h = await createHarness();
+    try {
+      await h.client.callTool({ name: 'open-session', arguments: { name: 'sh', type: 'interactive', ttlMs: 30_000 } });
+      expect(h.openSessionCalls[0]).toMatchObject({ name: 'sh', type: 'interactive', ttlMs: 30_000 });
+    } finally {
+      await h.close();
+    }
+  });
+
   it('leaves ttlMs undefined when the caller did not ask, so the profile default applies', async () => {
     const h = await createHarness();
     try {
@@ -51,6 +61,7 @@ describe('open-session ttlMs', () => {
       });
 
       expect(res.isError).toBe(true);
+      expect(textOf(res), 'refused for a reason other than ttlMs').toMatch(/ttlMs/);
       expect(h.openSessionCalls).toHaveLength(0);
     } finally {
       await h.close();

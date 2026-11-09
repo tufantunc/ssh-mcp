@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import type { ClientChannel } from 'ssh2';
 import { useConfigDir } from './helpers.js';
 import { loadConfigWithDigest, getProfile } from '../../../src/config/loader.js';
-import { parseTtlMs } from '../../../src/cli.js';
+import { parseTtlMs, defaultsFromArgv } from '../../../src/cli.js';
 import { BackgroundSession } from '../../../src/ssh/session.js';
 import type { Profile } from '../../../src/types.js';
 
@@ -94,6 +94,34 @@ user = "deploy"
     expect(getProfile(config, 'db').sessionIdleTimeoutMs).toBe(600_000);
   });
 
+  it('takes a per-profile 0 for the absolute cap too, without leaking it', async () => {
+    // `??`, not `||`, in the loader's merge: with `||` this profile's "no cap" became
+    // the 1-hour default in silence.
+    const { config } = await loadConfigWithDigest(await cfg.write(`
+[defaults]
+sessionBackgroundMaxMs = 3600000
+
+[[profiles]]
+name = "web"
+host = "10.0.0.5"
+user = "deploy"
+sessionBackgroundMaxMs = 0
+
+[[profiles]]
+name = "db"
+host = "10.0.0.6"
+user = "deploy"
+`));
+
+    const web = getProfile(config, 'web');
+    expect(web.sessionBackgroundMaxMs).toBe(0);
+    expect(getProfile(config, 'db').sessionBackgroundMaxMs).toBe(3_600_000);
+
+    const session = sessionFrom({ ...web, sessionIdleTimeoutMs: 0 });
+    session.createdAt.setFullYear(session.createdAt.getFullYear() - 1);
+    expect(session.isExpired()).toBe(false);
+  });
+
   it('still honours a finite value', async () => {
     const profile = await profileFor(`
 [defaults]
@@ -116,6 +144,13 @@ ${PROFILE}`)).rejects.toThrow();
 });
 
 describe('--sessionTtl parsing', () => {
+  it('reaches the defaults: --sessionTtl=0 is 0, not the 10-minute default', () => {
+    // Through defaultsFromArgv, the call site, not only the helper: reverting that line
+    // to `parseInt(x) || 600_000` left every helper test green.
+    expect(defaultsFromArgv({ sessionTtl: '0' }).sessionIdleTimeoutMs).toBe(0);
+    expect(defaultsFromArgv({ sessionTtl: 'soon' }).sessionIdleTimeoutMs).toBe(600_000);
+  });
+
   it('keeps 0 instead of falling back to the default', () => {
     // `parseInt(x) || 600_000` turned the one spelling of "unlimited" into the
     // 10-minute default — falsy, not invalid.
