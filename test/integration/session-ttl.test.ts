@@ -68,25 +68,29 @@ describe.skipIf(!allServersUp(await checkAllServers()))('Session TTL and idle re
     await conn.closeSession('keep-alive');
   });
 
-  it('a polled session survives past its idle TTL, an unpolled one does not', async () => {
-    // The bug this pins: a background command whose output goes to a file emits
-    // nothing on the channel, so lastActivity froze at creation and the reaper
-    // closed the session under a caller that was reading it every second. Both
-    // sessions here are silent; the only difference is that one is read.
-    const ttl = 1_000;
-    await conn.openSession({ name: 'polled', type: 'background', command: 'exec sleep 5', ttlMs: ttl });
-    await conn.openSession({ name: 'ignored', type: 'background', command: 'exec sleep 5', ttlMs: ttl });
+  it('the reaper spares a polled session and takes an unpolled one', async () => {
+    // The bug this pins: a background command whose output goes to a file emits nothing
+    // on the channel, so lastActivity froze at creation and the reaper closed the
+    // session under a caller that was reading it. Both sessions here are silent and both
+    // are aged past their TTL; the only difference is that one is then read. Aged by
+    // moving lastActivity back rather than by waiting, so the outcome is not a race
+    // against the clock.
+    const markers = { polled: 4931, ignored: 4932 };
+    try {
+      for (const [name, marker] of Object.entries(markers)) {
+        await conn.openSession({ name, type: 'background', command: `exec sleep ${marker}`, ttlMs: 60_000 });
+        conn.getSession(name)!.lastActivity = new Date(Date.now() - 120_000);
+      }
+      (conn.getSession('polled') as BackgroundSession).readOutput(5);
 
-    const started = Date.now();
-    while (Date.now() - started < ttl * 3) {
-      (conn.getSession('polled') as BackgroundSession | undefined)?.readOutput(5);
-      await new Promise((r) => setTimeout(r, 250));
+      await conn.reapExpiredSessions();
+
+      expect(conn.getSession('polled'), 'the reaper closed a session that was being read').toBeDefined();
+      expect(conn.getSession('ignored'), 'an unread idle session must still be reaped').toBeUndefined();
+      expect(await treeSize(conn, markers.ignored), 'the reaped command outlived its reaping').toBe(0);
+    } finally {
+      await conn.closeSession('polled').catch(() => {});
+      await killMarkers(conn, Object.values(markers));
     }
-
-    expect(conn.getSession('polled')?.isExpired()).toBe(false);
-    expect(conn.getSession('ignored')?.isExpired()).toBe(true);
-
-    await conn.closeSession('polled').catch(() => {});
-    await conn.closeSession('ignored').catch(() => {});
   }, 30000);
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { ClientChannel } from 'ssh2';
 import { BackgroundSession } from '../../../src/ssh/session.js';
@@ -42,13 +42,20 @@ describe('readOutput counts as activity', () => {
   });
 
   it('polling keeps a silent job alive past its TTL', () => {
-    const session = makeSession(1_000);
-    // Four polls at half the TTL: without the touch, the third one is already on a
-    // session the reaper would have closed.
-    for (let i = 0; i < 4; i++) {
-      idleFor(session, 500);
-      session.readOutput();
-      expect(session.isExpired()).toBe(false);
+    // On a fake clock, so the session's age really accumulates: four polls 600ms apart
+    // span 2.4s against a 1s TTL. Without the touch, the second poll already lands on a
+    // session the reaper would have closed. (Resetting lastActivity before each poll,
+    // as idleFor does, would pass without the fix.)
+    vi.useFakeTimers();
+    try {
+      const session = makeSession(1_000);
+      for (let i = 0; i < 4; i++) {
+        vi.advanceTimersByTime(600);
+        session.readOutput();
+        expect(session.isExpired(), `expired at poll ${i + 1}`).toBe(false);
+      }
+    } finally {
+      vi.useRealTimers();
     }
   });
 
