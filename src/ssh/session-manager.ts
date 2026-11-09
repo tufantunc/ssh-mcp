@@ -48,7 +48,9 @@ export class SessionManager {
       throw new Error(`Session "${opts.name}" already exists on ${profile.name}`);
     }
 
-    const ttlMs = opts.ttlMs ?? profile.sessionIdleTimeoutMs;
+    const ttlMs = opts.ttlMs === undefined
+      ? profile.sessionIdleTimeoutMs
+      : boundedTtl(opts.ttlMs, opts.type, profile);
     const id = randomUUID();
 
     if (opts.type === 'interactive') {
@@ -224,4 +226,38 @@ export class SessionManager {
       session.markDisconnected();
     }
   }
+}
+
+/**
+ * A per-call idle timeout, held to what the operator allows.
+ *
+ * The idle timeout is the operator's control and `ttlMs` comes from the agent, whose
+ * arguments this server treats as possibly attacker-influenced — the same reason the
+ * agent can narrow `readOnly`, approval or quota and never widen them. So a call may
+ * shorten the timeout freely and lengthen it only up to a ceiling the operator already
+ * set: a background session's absolute cap, or the profile's own idle timeout where
+ * there is no cap — always for an interactive session, and for a background one whose
+ * cap the operator turned off. Turning the cap off does not turn the idle timeout off,
+ * and a huge `ttlMs` against "no cap" would have done exactly that. Only when the
+ * ceiling it lands on is itself 0 has the operator said "no limit". "No idle limit"
+ * (`0`) is never the agent's to ask for, because an interactive session with it would
+ * never be reaped at all.
+ *
+ * Refused rather than clamped, so the caller learns what it can have.
+ */
+export function boundedTtl(requested: number, type: SessionOpts['type'], profile: Profile): number {
+  if (!Number.isInteger(requested) || requested <= 0) {
+    throw new Error(
+      `ttlMs must be a positive number of milliseconds; "no idle limit" (0) can only be set in the profile.`,
+    );
+  }
+  const [ceiling, what] = type === 'background' && profile.sessionBackgroundMaxMs > 0
+    ? [profile.sessionBackgroundMaxMs, 'the absolute cap for a background session (sessionBackgroundMaxMs)']
+    : [profile.sessionIdleTimeoutMs, type === 'background'
+      ? 'the profile idle timeout (sessionIdleTimeoutMs), since sessionBackgroundMaxMs is 0'
+      : 'the profile idle timeout (sessionIdleTimeoutMs), since an interactive session has no absolute cap'];
+  if (ceiling > 0 && requested > ceiling) {
+    throw new Error(`ttlMs ${requested} exceeds ${ceiling}, ${what} on ${profile.name}.`);
+  }
+  return requested;
 }

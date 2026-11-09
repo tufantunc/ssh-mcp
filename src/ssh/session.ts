@@ -102,10 +102,16 @@ export abstract class Session {
     // The idle TTL alone never fires for a chatty background process, because
     // every data chunk touches lastActivity. The absolute cap is what actually
     // bounds a `tail -f`-style session.
-    if (this.maxLifetimeMs !== undefined && Date.now() - this.createdAt.getTime() > this.maxLifetimeMs) {
+    //
+    // 0 means "no cap" on both, matching the `0 = unlimited` convention the rest
+    // of the config already uses for commandMaxChars and commandQuotaPerDay. A
+    // bare `>` comparison would read 0 as "expire immediately", which is the
+    // opposite of what a caller asking for no cap intends.
+    if (this.maxLifetimeMs !== undefined && this.maxLifetimeMs > 0 &&
+        Date.now() - this.createdAt.getTime() > this.maxLifetimeMs) {
       return true;
     }
-    return Date.now() - this.lastActivity.getTime() > this.ttlMs;
+    return this.ttlMs > 0 && Date.now() - this.lastActivity.getTime() > this.ttlMs;
   }
 
   protected touch(): void {

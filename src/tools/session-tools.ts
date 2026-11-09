@@ -78,6 +78,11 @@ export function registerSessionTools(
       name: z.string().describe('Session name (alphanumeric, dash, underscore, max 64 chars)'),
       type: z.enum(['interactive', 'background']).default('interactive').describe('Session type'),
       command: z.string().optional().describe('Command for background sessions'),
+      ttlMs: z.number().int().positive().optional().describe(
+        'Idle timeout for THIS session in ms (the profile default applies when omitted). May shorten the '
+        + 'profile timeout; may lengthen it only up to sessionBackgroundMaxMs for a background session, '
+        + 'or not at all for an interactive one',
+      ),
       profile: z.string().optional().describe('Profile name (uses default if omitted)'),
     },
     // No annotations object here on purpose. The SDK's overload resolution
@@ -85,7 +90,7 @@ export function registerSessionTools(
     // `{}`), so passing `{}` in the annotations slot made it consume the
     // callback slot instead — leaving this tool registered with no handler and
     // failing every call with "cb is not a function".
-    async ({ name, type, command, profile }, extra) => {
+    async ({ name, type, command, ttlMs, profile }, extra) => {
       const cleanName = sanitizeSessionName(name);
       const isBackground = type === 'background' && Boolean(command);
 
@@ -108,6 +113,10 @@ export function registerSessionTools(
             name: cleanName,
             type,
             command: isBackground ? rt.command : command,
+            // SessionManager.open already honoured opts.ttlMs; the tool was the only
+            // layer not passing one. How far a call may move the operator's idle
+            // timeout is decided there (boundedTtl), not here.
+            ttlMs,
           });
           return {
             audited: syntheticSuccess(rt.profileName),

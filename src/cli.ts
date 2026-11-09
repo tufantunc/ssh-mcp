@@ -158,6 +158,20 @@ export function parseMaxChars(raw: string | null | undefined): number {
 }
 
 /**
+ * `--sessionTtl`, with `0` preserved as the documented "no idle expiry" value.
+ *
+ * `parseInt(...) || default` swallowed the 0 (falsy), so the one spelling a caller
+ * would use to ask for an unlimited session silently became the 10-minute default —
+ * the opposite of the request. Malformed input still falls back to the default.
+ */
+export function parseTtlMs(raw: string | null | undefined, fallback: number): number {
+  if (typeof raw !== 'string' || raw === '') return fallback;
+  const parsed = parseInt(raw);
+  if (isNaN(parsed)) return fallback;
+  return parsed < 0 ? fallback : parsed;
+}
+
+/**
  * `--opaTimeoutMs`, bounded on both sides.
  *
  * Too low turns an explicit OPA deny into an allow whenever the sidecar is slow, which is
@@ -255,7 +269,7 @@ export function resolveHostGroup(argv: Record<string, string | null>): string {
 export function defaultsFromArgv(argv: Record<string, string | null>): Defaults {
   return {
     sessionMaxPerConnection: parseInt(argv.sessionMax as string) || 5,
-    sessionIdleTimeoutMs: parseInt(argv.sessionTtl as string) || 600_000,
+    sessionIdleTimeoutMs: parseTtlMs(argv.sessionTtl, 600_000),
     sessionBackgroundMaxMs: 3_600_000,
     commandTimeoutMs: parseInt(argv.timeout as string) || 60_000,
     commandMaxChars: parseMaxChars(argv.maxChars),
