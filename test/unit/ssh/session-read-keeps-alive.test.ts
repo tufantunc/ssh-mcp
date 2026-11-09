@@ -59,9 +59,12 @@ describe('readOutput counts as activity', () => {
     }
   });
 
-  it('leaves a session without a reader on the ordinary expiry path', () => {
+  it('does not count looking at a session as reading it', () => {
+    // list-sessions reads toInfo() for every session on the connection; if that kept
+    // sessions alive, listing them would stop any of them from ever being reaped.
     const session = makeSession(1_000);
     idleFor(session, 2_000);
+    session.toInfo();
     expect(session.isExpired()).toBe(true);
   });
 
