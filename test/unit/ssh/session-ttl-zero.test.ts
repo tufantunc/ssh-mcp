@@ -64,33 +64,65 @@ describe('maxLifetimeMs = 0 means no absolute cap', () => {
  * The manager is where a per-call ttlMs and the profile default meet. `open()`'s
  * `opts.ttlMs ?? profile.sessionIdleTimeoutMs` is one line, but a test that only
  * built a Session by hand would not notice it being dropped.
+ *
+ * It is also where the per-call value is bounded. The idle timeout is the operator's
+ * control and `ttlMs` comes from the agent, whose arguments this server treats as
+ * possibly attacker-influenced: a call may shorten the timeout freely, lengthen it only
+ * up to a ceiling the operator set — the absolute cap for a background session, the
+ * profile's own idle timeout for an interactive one, which has no cap — and never ask
+ * for "no idle limit", which only the profile can grant.
  */
 describe('SessionManager.open ttlMs', () => {
-  function managerFor(sessionIdleTimeoutMs: number): SessionManager {
+  let opened: number;
+  function managerFor(overrides: { sessionIdleTimeoutMs: number; sessionBackgroundMaxMs?: number }): SessionManager {
+    opened = 0;
     return new SessionManager({
-      profile: () => makeProfile({ sessionIdleTimeoutMs }),
-      openShell: async () => fakeChannel(),
-      openExec: async () => fakeChannel(),
+      profile: () => makeProfile(overrides),
+      openShell: async () => { opened++; return fakeChannel(); },
+      openExec: async () => { opened++; return fakeChannel(); },
       onChannelOpened: () => {},
       onChannelClosed: () => {},
     });
   }
-
-  it('uses the per-call value when one is given', async () => {
-    const session = await managerFor(1_000).open({
-      name: 'job', type: 'background', command: 'sleep 1', ttlMs: 0,
-    });
-
-    expect(session.ttlMs).toBe(0);
-    idleFor(session as BackgroundSession, 60_000);
-    expect(session.isExpired()).toBe(false);
-  });
+  const background = (ttlMs?: number) => ({ name: 'job', type: 'background' as const, command: 'sleep 1', ttlMs });
+  const interactive = (ttlMs?: number) => ({ name: 'sh', type: 'interactive' as const, ttlMs });
 
   it('falls back to the profile default when the call omits it', async () => {
-    const session = await managerFor(1_000).open({ name: 'job', type: 'background', command: 'sleep 1' });
+    const session = await managerFor({ sessionIdleTimeoutMs: 1_000 }).open(background());
 
     expect(session.ttlMs).toBe(1_000);
     idleFor(session as BackgroundSession, 2_000);
     expect(session.isExpired()).toBe(true);
+  });
+
+  it('lets a call shorten the idle timeout', async () => {
+    const session = await managerFor({ sessionIdleTimeoutMs: 600_000 }).open(background(1_000));
+    expect(session.ttlMs).toBe(1_000);
+  });
+
+  it('lets a background session run idle up to its absolute cap, and no further', async () => {
+    const manager = managerFor({ sessionIdleTimeoutMs: 600_000, sessionBackgroundMaxMs: 3_600_000 });
+    expect((await manager.open(background(3_600_000))).ttlMs).toBe(3_600_000);
+
+    const over = managerFor({ sessionIdleTimeoutMs: 600_000, sessionBackgroundMaxMs: 3_600_000 });
+    await expect(over.open(background(3_600_001))).rejects.toThrow(/3600000/);
+    expect(opened, 'a refused session must not open a channel').toBe(0);
+  });
+
+  it('holds an interactive session to the profile idle timeout, since it has no absolute cap', async () => {
+    const manager = managerFor({ sessionIdleTimeoutMs: 600_000, sessionBackgroundMaxMs: 3_600_000 });
+    await expect(manager.open(interactive(600_001))).rejects.toThrow(/600000/);
+    expect(opened).toBe(0);
+  });
+
+  it('has no ceiling where the operator set the relevant value to 0', async () => {
+    const noCap = managerFor({ sessionIdleTimeoutMs: 600_000, sessionBackgroundMaxMs: 0 });
+    expect((await noCap.open(background(86_400_000))).ttlMs).toBe(86_400_000);
+  });
+
+  it.each([0, -1])('refuses ttlMs %d from a call: "no idle limit" is the profile\'s to grant', async (ttlMs) => {
+    const manager = managerFor({ sessionIdleTimeoutMs: 600_000 });
+    await expect(manager.open(background(ttlMs))).rejects.toThrow(/positive/);
+    expect(opened).toBe(0);
   });
 });

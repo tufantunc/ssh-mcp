@@ -7,7 +7,8 @@ import { createHarness, textOf } from './harness.js';
  * SessionManager.open() already honoured `opts.ttlMs`, but the tool schema never
  * exposed it, so the layer that hands a command over was the only one that could
  * not ask for a session longer-lived than the profile's idle timeout. A job that
- * runs for hours — or days — had to change a global setting instead.
+ * runs for hours — or days — had to change a global setting instead. How far a call
+ * may go is SessionManager.open()'s to decide; see test/unit/ssh/session-ttl-zero.test.ts.
  */
 
 describe('open-session ttlMs', () => {
@@ -16,11 +17,11 @@ describe('open-session ttlMs', () => {
     try {
       await h.client.callTool({
         name: 'open-session',
-        arguments: { name: 'long-job', type: 'background', command: 'sleep 100', ttlMs: 0 },
+        arguments: { name: 'long-job', type: 'background', command: 'sleep 100', ttlMs: 1_800_000 },
       });
 
       expect(h.openSessionCalls).toHaveLength(1);
-      expect(h.openSessionCalls[0]).toMatchObject({ name: 'long-job', type: 'background', ttlMs: 0 });
+      expect(h.openSessionCalls[0]).toMatchObject({ name: 'long-job', type: 'background', ttlMs: 1_800_000 });
     } finally {
       await h.close();
     }
@@ -40,12 +41,13 @@ describe('open-session ttlMs', () => {
     }
   });
 
-  it('rejects a negative ttlMs instead of passing it on', async () => {
+  it.each([-1, 0])('rejects ttlMs %d at the tool boundary instead of passing it on', async (ttlMs) => {
+    // 0 is "no idle limit", which only the operator can set, in the profile.
     const h = await createHarness();
     try {
       const res: any = await h.client.callTool({
         name: 'open-session',
-        arguments: { name: 'bad', type: 'background', command: 'sleep 1', ttlMs: -1 },
+        arguments: { name: 'bad', type: 'background', command: 'sleep 1', ttlMs },
       });
 
       expect(res.isError).toBe(true);

@@ -152,7 +152,7 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 |------|---------|:--------:|:----------:|
 | `list-connections` | Discover available hosts and connection status | ✅ | — |
 | `list-sessions` | List active sessions per host | ✅ | — |
-| `open-session` | Create a named interactive (stateful) or background session (`ttlMs` overrides the profile's idle timeout for that session; `0` = never idle-expire) | — | — |
+| `open-session` | Create a named interactive (stateful) or background session (`ttlMs` sets that session's idle timeout: it may shorten the profile's, and lengthen it only up to `sessionBackgroundMaxMs` for a background session; `0` = never idle-expire is the profile's to set, not the call's) | — | — |
 | `close-session` | Close a session. A background session's command is signalled (INT/TERM/KILL) before its channel is dropped | — | ✅ |
 | `read-session-output` | Read output from background sessions (e.g., `tail -f`) | ✅ | — |
 | `read-command` | Execute allowlisted read-only commands (`ls`, `cat`, `grep`, ...) | ✅ | — |

@@ -78,8 +78,10 @@ export function registerSessionTools(
       name: z.string().describe('Session name (alphanumeric, dash, underscore, max 64 chars)'),
       type: z.enum(['interactive', 'background']).default('interactive').describe('Session type'),
       command: z.string().optional().describe('Command for background sessions'),
-      ttlMs: z.number().int().nonnegative().optional().describe(
-        'Idle timeout for THIS session in ms; 0 = never expire on idle (the profile default applies when omitted)',
+      ttlMs: z.number().int().positive().optional().describe(
+        'Idle timeout for THIS session in ms (the profile default applies when omitted). May shorten the '
+        + 'profile timeout; may lengthen it only up to sessionBackgroundMaxMs for a background session, '
+        + 'or not at all for an interactive one',
       ),
       profile: z.string().optional().describe('Profile name (uses default if omitted)'),
     },
@@ -112,9 +114,8 @@ export function registerSessionTools(
             type,
             command: isBackground ? rt.command : command,
             // SessionManager.open already honoured opts.ttlMs; the tool was the only
-            // layer not passing one, so a caller could not ask for a session that
-            // outlives the profile's idle timeout — a multi-hour or multi-day job
-            // had to change a global setting instead.
+            // layer not passing one. How far a call may move the operator's idle
+            // timeout is decided there (boundedTtl), not here.
             ttlMs,
           });
           return {
