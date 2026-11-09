@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { ClientChannel } from 'ssh2';
 import { BackgroundSession } from '../../../src/ssh/session.js';
-import { SessionManager } from '../../../src/ssh/session-manager.js';
+import { SessionManager, boundedTtl } from '../../../src/ssh/session-manager.js';
 import { makeProfile } from '../../fixtures/profile.js';
 
 /**
@@ -115,9 +115,21 @@ describe('SessionManager.open ttlMs', () => {
     expect(opened).toBe(0);
   });
 
-  it('has no ceiling where the operator set the relevant value to 0', async () => {
-    const noCap = managerFor({ sessionIdleTimeoutMs: 600_000, sessionBackgroundMaxMs: 0 });
-    expect((await noCap.open(background(86_400_000))).ttlMs).toBe(86_400_000);
+  it('falls back to the idle timeout as the ceiling when the background cap is off', async () => {
+    // Turning the absolute cap off does not turn the idle timeout off: without this, a
+    // huge ttlMs against "no cap" was "no idle limit" by another spelling.
+    const capOff = managerFor({ sessionIdleTimeoutMs: 600_000, sessionBackgroundMaxMs: 0 });
+    await expect(capOff.open(background(Number.MAX_SAFE_INTEGER))).rejects.toThrow(/600000/);
+    expect(opened).toBe(0);
+    expect((await capOff.open(background(600_000))).ttlMs).toBe(600_000);
+  });
+
+  it('has no ceiling where the operator turned the ceiling it lands on off', async () => {
+    const noLimits = managerFor({ sessionIdleTimeoutMs: 0, sessionBackgroundMaxMs: 0 });
+    expect((await noLimits.open(background(86_400_000))).ttlMs).toBe(86_400_000);
+    // Interactive, through the bound itself: opening one needs a shell handshake this
+    // fake channel cannot answer.
+    expect(boundedTtl(86_400_000, 'interactive', makeProfile({ sessionIdleTimeoutMs: 0 }))).toBe(86_400_000);
   });
 
   it.each([0, -1])('refuses ttlMs %d from a call: "no idle limit" is the profile\'s to grant', async (ttlMs) => {

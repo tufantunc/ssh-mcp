@@ -152,7 +152,7 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 |------|---------|:--------:|:----------:|
 | `list-connections` | Discover available hosts and connection status | ✅ | — |
 | `list-sessions` | List active sessions per host | ✅ | — |
-| `open-session` | Create a named interactive (stateful) or background session (`ttlMs` sets that session's idle timeout: it may shorten the profile's, and lengthen it only up to `sessionBackgroundMaxMs` for a background session; `0` = never idle-expire is the profile's to set, not the call's) | — | — |
+| `open-session` | Create a named interactive (stateful) or background session (`ttlMs` sets that session's idle timeout: it may shorten the profile's, and lengthen it only up to `sessionBackgroundMaxMs` for a background session (the profile's own when that is `0`); `0` = never idle-expire is the profile's to set, not the call's) | — | — |
 | `close-session` | Close a session. A background session's command is signalled (INT/TERM/KILL) before its channel is dropped | — | ✅ |
 | `read-session-output` | Read output from background sessions (e.g., `tail -f`) | ✅ | — |
 | `read-command` | Execute allowlisted read-only commands (`ls`, `cat`, `grep`, ...) | ✅ | — |
@@ -292,7 +292,7 @@ POSIX-specific, not merely non-`cmd`.
 [defaults]
 defaultProfile = "dev"
 sessionMaxPerConnection = 5
-sessionIdleTimeoutMs = 600000       # 10min; 0 = never idle-expire
+sessionIdleTimeoutMs = 600000       # 10min; 0 = never idle-expire (and the connection is then never idle-reaped)
 sessionBackgroundMaxMs = 3600000    # 1hr absolute cap; 0 = no cap
 commandTimeoutMs = 60000
 commandMaxChars = 5000              # 0 = unlimited, the config spelling of --maxChars=none

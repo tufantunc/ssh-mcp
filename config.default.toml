@@ -11,7 +11,7 @@
 [defaults]
 defaultProfile = "dev"            # Profile used when none is specified
 sessionMaxPerConnection = 5       # Max interactive+background sessions per host
-sessionIdleTimeoutMs = 600000     # 10min idle -> auto-close session; 0 = never idle-expire
+sessionIdleTimeoutMs = 600000     # 10min idle -> auto-close session; 0 = never idle-expire (the connection then stays open too)
 sessionBackgroundMaxMs = 3600000  # 1hr max for background sessions; 0 = no cap
 commandTimeoutMs = 60000          # Per-command timeout
 commandMaxChars = 5000            # Max command length

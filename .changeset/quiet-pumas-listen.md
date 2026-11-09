@@ -7,8 +7,10 @@ cap" for the session timeouts in the config.
 
 `open-session` accepts `ttlMs`. It may shorten the profile's idle timeout for
 that session. It may lengthen it only up to a ceiling the operator already set:
-`sessionBackgroundMaxMs` for a background session. An interactive session has no
-absolute cap, so its ceiling is the profile's own `sessionIdleTimeoutMs`. A call
+`sessionBackgroundMaxMs` for a background session. Where that cap is `0`, the
+ceiling is the profile's own `sessionIdleTimeoutMs`, since turning the absolute
+cap off does not turn the idle timeout off. An interactive session has no
+absolute cap, so its ceiling is always the profile's own `sessionIdleTimeoutMs`. A call
 above the ceiling is refused, and the refusal names the ceiling. A call cannot
 ask for `0`: the timeout is the operator's control, and the agent can narrow
 what the operator allows but not widen it.
