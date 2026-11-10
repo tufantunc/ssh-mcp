@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { join, parse } from 'path';
+import { dirname, join, parse } from 'path';
 import { mkdirSync, realpathSync, symlinkSync } from 'fs';
 import {
   inspectAcl,
@@ -10,6 +10,7 @@ import {
 // The verdict vocabulary belongs to the parser, so these come from the other side of the
 // cut — which is the dependency the split exists to make visible.
 import type { AclVerdict, Grant, UnknownReason } from '../../../src/config/sddl.js';
+import { getConfigPath } from '../../../src/config/paths.js';
 import { enforceAcl, refusal, useConfigDir } from './helpers.js';
 
 /**
@@ -453,6 +454,74 @@ describe('assertPrivateOnWindows — the three postures', () => {
     const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
     await assertPrivateOnWindows(FILE, {}, only(FILE, READ_ONLY));
     expect(String(warn.mock.calls[0][0])).toMatch(/Warning: /);
+  });
+});
+
+describe('where the messages tell the operator to put the config', () => {
+  /**
+   * Each of these said `%APPDATA%\ssh-mcp`, which is where the config lives only when
+   * APPDATA is set: `getConfigPath()` falls back to the profile's AppData\Roaming when it
+   * is not. The messages name the directory the server would actually read instead.
+   *
+   * Asserted against `getConfigPath()` itself, so the assertion holds on every platform —
+   * on this one it names whatever the local default is, which is the point: the text
+   * follows the function rather than a spelling of it.
+   */
+  const location = dirname(getConfigPath());
+
+  it('names it when recommending a move away from a directory it will not tighten', async () => {
+    const err = await refusal(
+      assertPrivateOnWindows(join(ROOT, 'config.toml'), strict(), only(ROOT, broad(EVERYONE))),
+    );
+    expect(err.message).toContain(`Move the config under ${location} instead`);
+    expect(err.message).not.toContain('%APPDATA%');
+  });
+
+  it('names it when the check could not run', async () => {
+    const err = await refusal(
+      assertPrivateOnWindows(FILE, strict(), only(FILE, unknown('read-refused', 'Access is denied'))),
+    );
+    expect(err.message).toContain(`move the config under ${location}, or pass`);
+    expect(err.message).not.toContain('%APPDATA%');
+  });
+
+  it('names it when describing what a private config looks like', async () => {
+    const err = await refusal(
+      assertPrivateOnWindows(FILE, strict(), only(FILE, broad(EVERYONE))),
+    );
+    expect(err.message).toContain(`which is what a file under ${location} looks like`);
+    expect(err.message).not.toContain('%APPDATA%');
+  });
+
+  it('still refuses, naming %APPDATA%, when there is no home directory to build the path from', async () => {
+    // `homedir()` throws for a process with no profile — a Windows service under a virtual
+    // account, or USERPROFILE set empty, which is how the Windows CI job caught this. The
+    // path is only being *named* here, so failing to compute it must not turn the refusal
+    // into a raw SystemError; the same reasoning as the `userInfo()` guard below.
+    vi.resetModules();
+    vi.doMock('os', async () => {
+      const actual = await vi.importActual<typeof import('os')>('os');
+      return {
+        ...actual,
+        homedir: () => {
+          throw Object.assign(new Error('A system error occurred: uv_os_homedir returned ENOENT'), {
+            code: 'ERR_SYSTEM_ERROR',
+          });
+        },
+      };
+    });
+    try {
+      const acl = await import('../../../src/config/windows-acl.js');
+      const errors = await import('../../../src/errors.js');
+      // The OperatorError class comes from the post-reset module graph.
+      const err = await refusal(acl.assertPrivateOnWindows(
+        join(ROOT, 'config.toml'), { enforce: true }, only(ROOT, broad(EVERYONE)),
+      ), errors.OperatorError);
+      expect(err.message).toContain('Move the config under %APPDATA%\\ssh-mcp instead');
+    } finally {
+      vi.doUnmock('os');
+      vi.resetModules();
+    }
   });
 });
 

@@ -3,9 +3,10 @@ import { promisify } from 'util';
 import { existsSync, realpathSync } from 'fs';
 import { mkdtemp, readFile, rm } from 'fs/promises';
 import { tmpdir, userInfo } from 'os';
-import { join, resolve, parse as parsePath } from 'path';
+import { dirname, join, resolve, parse as parsePath } from 'path';
 import { OperatorError } from '../errors.js';
 import { isWithinRoot } from './path-containment.js';
+import { getConfigPath } from './paths.js';
 import {
   parseDacl,
   aclIdentity,
@@ -441,9 +442,28 @@ function remediation(path: string, kind: 'file' | 'directory', grants: Grant[] =
     'The first converts inherited entries into entries this object owns — an inherited ' +
     'entry cannot be removed while it is still inherited, which is why it takes two ' +
     'commands. The second grants you full access and drops the broad ones. SYSTEM and ' +
-    'Administrators keep theirs, which is what a file under %APPDATA% looks like.' +
+    `Administrators keep theirs, which is what a file under ${recommendedLocation()} looks like.` +
     byHand
   );
+}
+
+/**
+ * The directory every message recommends, spelled as the path the server would read.
+ *
+ * It used to be the literal `%APPDATA%\ssh-mcp`, which is that directory only when APPDATA
+ * is set; `getConfigPath()` falls back to the profile's AppData\Roaming when it is not, and
+ * a message naming a path this code does not read is the defect #138's fix set out to remove.
+ */
+function recommendedLocation(): string {
+  // Guarded: `getConfigPath()` calls `homedir()`, which throws for a process with no
+  // profile — a service under a virtual account. This is the reporting path, and a throw
+  // here would turn the refusal into a raw SystemError (see the `userInfo()` guard). The
+  // conventional spelling is still worth printing when the path cannot be computed.
+  try {
+    return dirname(getConfigPath());
+  } catch {
+    return '%APPDATA%\\ssh-mcp';
+  }
 }
 
 function relocation(path: string, kind: 'file' | 'directory', grants: Grant[]): string {
@@ -458,7 +478,7 @@ function relocation(path: string, kind: 'file' | 'directory', grants: Grant[]): 
   // directory exactly as open as it was: the defect this whole change is about,
   // reproduced one arm over.
   return (
-    'Move the config under %APPDATA%\\ssh-mcp instead, which inherits an ACL restricted ' +
+    `Move the config under ${recommendedLocation()} instead, which inherits an ACL restricted ` +
     'to you, SYSTEM and Administrators.\n' +
     `${path} is a filesystem root, or sits outside your user profile, so removing the ` +
     'broad entries from it could take access away from every other account on the ' +
@@ -489,7 +509,7 @@ function describe(path: string, kind: 'file' | 'directory', verdict: AclVerdict)
       message:
         `Config ${kind} ${path} could not be checked for access by other accounts ` +
         `(${verdict.reason}: ${verdict.detail}).\n` +
-        'Either fix the cause, move the config under %APPDATA%\\ssh-mcp, or pass ' +
+        `Either fix the cause, move the config under ${recommendedLocation()}, or pass ` +
         '--allowUncheckedConfigAcl to accept it unverified.',
     };
   }

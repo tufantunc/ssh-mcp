@@ -38,13 +38,17 @@ async function main() {
     return;
   }
 
+  // Before the config load, because it depends on argv alone and the load can refuse —
+  // on Windows after running icacls. Checked after it, a typo here cost two restarts: fix
+  // what the loader refused, start again, and only then learn the flag was misspelled.
+  const hostKeyMode = resolveHostKeyMode(argv);
+
   // The whole of it, not just `config`: the reloader needs to know where the live config
   // came from, its hash and when it was loaded.
   // The ACL posture, once: startup's load and every reload check the file with it.
   const aclOptions = aclOptionsFromArgv(argv);
   const startup = await loadAppConfig(argv, aclOptions);
   const { config } = startup;
-  const hostKeyMode = resolveHostKeyMode(argv);
   const entropyScan = flagEnabled(argv, 'auditEntropyScan');
   const tamperEvident = flagEnabled(argv, 'auditTamperEvident');
 
