@@ -492,6 +492,37 @@ describe('where the messages tell the operator to put the config', () => {
     expect(err.message).toContain(`which is what a file under ${location} looks like`);
     expect(err.message).not.toContain('%APPDATA%');
   });
+
+  it('still refuses, naming %APPDATA%, when there is no home directory to build the path from', async () => {
+    // `homedir()` throws for a process with no profile — a Windows service under a virtual
+    // account, or USERPROFILE set empty, which is how the Windows CI job caught this. The
+    // path is only being *named* here, so failing to compute it must not turn the refusal
+    // into a raw SystemError; the same reasoning as the `userInfo()` guard below.
+    vi.resetModules();
+    vi.doMock('os', async () => {
+      const actual = await vi.importActual<typeof import('os')>('os');
+      return {
+        ...actual,
+        homedir: () => {
+          throw Object.assign(new Error('A system error occurred: uv_os_homedir returned ENOENT'), {
+            code: 'ERR_SYSTEM_ERROR',
+          });
+        },
+      };
+    });
+    try {
+      const acl = await import('../../../src/config/windows-acl.js');
+      const errors = await import('../../../src/errors.js');
+      // The OperatorError class comes from the post-reset module graph.
+      const err = await refusal(acl.assertPrivateOnWindows(
+        join(ROOT, 'config.toml'), { enforce: true }, only(ROOT, broad(EVERYONE)),
+      ), errors.OperatorError);
+      expect(err.message).toContain('Move the config under %APPDATA%\\ssh-mcp instead');
+    } finally {
+      vi.doUnmock('os');
+      vi.resetModules();
+    }
+  });
 });
 
 describe('when the platform will not name the current account', () => {

@@ -455,7 +455,15 @@ function remediation(path: string, kind: 'file' | 'directory', grants: Grant[] =
  * a message naming a path this code does not read is the defect #138's fix set out to remove.
  */
 function recommendedLocation(): string {
-  return dirname(getConfigPath());
+  // Guarded: `getConfigPath()` calls `homedir()`, which throws for a process with no
+  // profile — a service under a virtual account. This is the reporting path, and a throw
+  // here would turn the refusal into a raw SystemError (see the `userInfo()` guard). The
+  // conventional spelling is still worth printing when the path cannot be computed.
+  try {
+    return dirname(getConfigPath());
+  } catch {
+    return '%APPDATA%\\ssh-mcp';
+  }
 }
 
 function relocation(path: string, kind: 'file' | 'directory', grants: Grant[]): string {
