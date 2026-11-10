@@ -20,6 +20,12 @@ COPY package*.json ./
 # the image, which is why nobody noticed. Copying the sources first would also work
 # but throws away dependency layer caching on every source change; the build runs
 # explicitly below, once there is something to compile.
+#
+# The flag also skips ssh2's optional native crypto binding, so the image runs
+# ssh2's JavaScript ciphers. That is a property of the image, not only of this
+# layer: moving off -slim to a base with a toolchain would not bring the binding
+# back while this flag stays. #315's chacha20 failure over a bastion was on that
+# JavaScript path, which CI covers in its own step.
 RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src/ ./src/
@@ -40,8 +46,10 @@ COPY config.default.toml ./config.default.toml
 
 # 0700 because the loader refuses a config whose directory is group- or
 # world-readable, and mkdir under Docker's default umask produces 0755 — so a
-# container with a config bind-mounted at this path met that refusal on every
-# start, with no way to chmod a directory baked into the image (#138 review).
+# container with a config *file* bind-mounted into this directory met that
+# refusal on every start, with no way to chmod a directory baked into the image
+# (#138 review). It covers only that case: a *directory* bind-mounted at this
+# path replaces the image's, mode included, and has to be 0700 on the host.
 RUN mkdir -p /home/appuser/.config/ssh-mcp && \
     chmod 700 /home/appuser/.config /home/appuser/.config/ssh-mcp && \
     chown -R appuser:appgroup /home/appuser /app

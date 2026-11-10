@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { readFile, stat } from 'fs/promises';
-import { homedir, platform } from 'os';
-import { join, dirname } from 'path';
+import { platform } from 'os';
+import { dirname } from 'path';
 import { parse as parseTOML } from 'smol-toml';
 import { configSchema, type RawConfig } from './schema.js';
 import {
@@ -12,23 +12,11 @@ import {
   UnconfiguredError,
 } from '../errors.js';
 import { assertPrivateOnWindows, type AclOptions } from './windows-acl.js';
+import { getConfigPath } from './paths.js';
 import type { AppConfig, Profile, Defaults } from '../types.js';
 
-export function getConfigPath(customPath?: string): string {
-  if (customPath) return customPath;
-
-  const home = homedir();
-  const p = platform();
-
-  if (p === 'darwin') {
-    return join(home, 'Library', 'Application Support', 'ssh-mcp', 'config.toml');
-  }
-  if (p === 'win32') {
-    return join(process.env.APPDATA || join(home, 'AppData', 'Roaming'), 'ssh-mcp', 'config.toml');
-  }
-  const xdgConfig = process.env.XDG_CONFIG_HOME || join(home, '.config');
-  return join(xdgConfig, 'ssh-mcp', 'config.toml');
-}
+// Re-exported so the callers that have always imported it from here keep doing so.
+export { getConfigPath };
 
 /**
  * Check that nobody but the owner can reach a config file, because it holds the hosts,

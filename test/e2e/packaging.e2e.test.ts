@@ -87,6 +87,32 @@ describe.skipIf(!serverBuilt)('E2E — packaging', () => {
   }, 20000);
 
   /**
+   * A flag that is wrong on its face is reported before anything is read from disk.
+   *
+   * `--hostKeyMode` is a pure function of argv, but it was checked after the config load,
+   * which can itself refuse — on Windows after running icacls up to three times. A typo
+   * therefore cost two restarts: fix whatever the loader refused, start again, and only
+   * then learn the flag was misspelled. A 0644 config is the portable way to make the
+   * loader refuse, which is all the ordering needs.
+   */
+  it('rejects an invalid --hostKeyMode before the config file is checked', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ssh-mcp-e2e-order-'));
+    try {
+      const config = join(dir, 'config.toml');
+      await writeFile(config, '', { mode: 0o644 });
+      const err = await runIsolated([SERVER_ENTRY, `--config=${config}`, '--hostKeyMode=strct'])
+        .then(
+          () => { throw new Error('expected a non-zero exit for --hostKeyMode=strct'); },
+          (e: { stderr: string }) => e,
+        );
+      expect(err.stderr).toContain('Invalid --hostKeyMode=strct');
+      expect(err.stderr).not.toContain('group/world accessible');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  /**
    * How the error is *presented*, which only a spawned process can show.
    *
    * Every failure used to go through `console.error('Fatal error:', error)`,
