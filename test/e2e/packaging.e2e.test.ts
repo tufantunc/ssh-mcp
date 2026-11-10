@@ -87,6 +87,32 @@ describe.skipIf(!serverBuilt)('E2E — packaging', () => {
   }, 20000);
 
   /**
+   * A misspelled flag is refused before anything is read from disk.
+   *
+   * `--allowUncheckedConfigAcl` is the way out of a startup the server is refusing, so a
+   * typo in it used to repeat that refusal with nothing to say a flag had been passed. A
+   * 0644 config makes the loader refuse on any platform; the unknown flag has to be what
+   * the operator hears about.
+   */
+  it('refuses an unknown flag, before the config file is checked', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ssh-mcp-e2e-flags-'));
+    try {
+      const config = join(dir, 'config.toml');
+      await writeFile(config, '', { mode: 0o644 });
+      const err = await runIsolated([SERVER_ENTRY, `--config=${config}`, '--allowUncheckedConfigAc'])
+        .then(
+          () => { throw new Error('expected a non-zero exit for an unknown flag'); },
+          (e: { stderr: string; code: number }) => e,
+        );
+      expect(err.stderr).toContain('Unknown flag: --allowUncheckedConfigAc (did you mean --allowUncheckedConfigAcl?)');
+      expect(err.stderr).not.toContain('group/world accessible');
+      expect(err.code).toBe(2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  /**
    * How the error is *presented*, which only a spawned process can show.
    *
    * Every failure used to go through `console.error('Fatal error:', error)`,

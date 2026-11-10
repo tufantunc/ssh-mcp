@@ -34,11 +34,13 @@ import type { ConfigSource, LoadedConfig } from './config/loaded.js';
  * on a stderr stream an MCP client typically swallows. Only "asked for nothing" softens;
  * a half-given or empty-valued quick start is a typo and still refuses.
  */
-function nothingRequested(argv: Record<string, string | null>): boolean {
+function nothingRequested(argv: Argv): boolean {
   return !('host' in argv) && !('user' in argv);
 }
 
-export function parseArgv(args: string[] = process.argv.slice(2)): Record<string, string | null> {
+export function parseArgv(args: string[] = process.argv.slice(2)): Argv {
+  // Typed as Argv on the way out although any `--word` lands here: the keys are what
+  // `checkUnknownFlags` exists to check, and everything after it may rely on the type.
   const config: Record<string, string | null> = {};
   for (const arg of args) {
     if (arg.startsWith('--')) {
@@ -117,9 +119,9 @@ export function parseHttpSessionTtl(raw: string | null | undefined): number | un
 /** Far above any real budget; the point is that there is one. */
 const MAX_AUTH_FAILURE_LIMIT = 10_000;
 
-export function flagEnabled(argv: Record<string, string | null>, name: string): boolean {
-  if (!(name in argv)) return false;
+export function flagEnabled(argv: Argv, name: Flag): boolean {
   const value = argv[name];
+  if (value === undefined) return false;
   if (value === null || value === '') return true;
   return !['false', '0', 'no', 'off'].includes(value.toLowerCase());
 }
@@ -135,7 +137,35 @@ const REMOVED_V1_FLAGS: Record<string, string> = {
   disableSudo: 'Sudo is now a separate tool; restrict it with a role/policy that disallows the "privileged" class.',
 };
 
-export function checkRemovedFlags(argv: Record<string, string | null>): void {
+/**
+ * Every flag the server reads — the README's "CLI Flags (v2)" table, which a test holds
+ * this list to.
+ *
+ * `Argv` is keyed by it, so reading a flag that is not listed here is a type error rather
+ * than a flag the server refuses at startup.
+ */
+export const KNOWN_FLAGS = [
+  'config', 'host', 'user', 'port', 'key', 'workdir', 'group',
+  'timeout', 'maxChars', 'sessionMax', 'sessionTtl',
+  'transport', 'httpPort', 'httpHost', 'bearerToken', 'rateLimit', 'httpSessionTtl',
+  'authFailureLimit', 'trustProxy', 'trustedProxies', 'allowedHosts',
+  'hostKeyMode', 'insecureHostKey',
+  'allowUncheckedConfigAcl', 'strictConfigAcl',
+  'disableApproval', 'opaUrl', 'opaFailClosed', 'opaTimeoutMs',
+  'commandQuota', 'approvalGrantTtl',
+  'auditEntropyScan', 'auditTamperEvident',
+  'otelEndpoint', 'otelServiceName', 'dumpToolHashes',
+] as const;
+
+export type Flag = (typeof KNOWN_FLAGS)[number];
+
+/** The command line as `parseArgv` reads it: `null` for a flag written without `=`. */
+export type Argv = Partial<Record<Flag, string | null>>;
+
+/** Any keys at all, for the two checks whose job is the keys `Argv` does not name. */
+type RawArgv = Readonly<Record<string, string | null | undefined>>;
+
+export function checkRemovedFlags(argv: RawArgv): void {
   const found = Object.keys(REMOVED_V1_FLAGS).filter((f) => f in argv);
   if (found.length === 0) return;
   throw new OperatorError(
@@ -143,6 +173,65 @@ export function checkRemovedFlags(argv: Record<string, string | null>): void {
     found.map((f) => `  --${f}: ${REMOVED_V1_FLAGS[f]}`).join('\n') +
     '\nSee the "Migrating from v1" section of the README.',
   );
+}
+
+/**
+ * Refuse a flag the server does not read, rather than drop it.
+ *
+ * `parseArgv` takes any `--word`, and nothing looked at the keys afterwards. The flag
+ * this bit hardest is `--allowUncheckedConfigAcl`, the way out of a startup the server is
+ * already refusing: misspelled, it produced the same refusal again with no sign anything
+ * had been passed. Every unknown flag is named at once, so fixing them costs one restart.
+ *
+ * Removed v1 flags are left to `checkRemovedFlags`, which says what replaced them.
+ */
+export function checkUnknownFlags(argv: RawArgv): void {
+  const known: readonly string[] = KNOWN_FLAGS;
+  const unknown = Object.keys(argv).filter((f) => !known.includes(f) && !(f in REMOVED_V1_FLAGS));
+  if (unknown.length === 0) return;
+  const described = unknown.map((f) => {
+    const near = nearestFlag(f);
+    return near ? `--${f} (did you mean --${near}?)` : `--${f}`;
+  });
+  throw new OperatorError(
+    `Unknown flag${unknown.length > 1 ? 's' : ''}: ${described.join(', ')}\n` +
+    'The flags this server reads are listed under "CLI Flags (v2)" in the README.',
+  );
+}
+
+/**
+ * The known flag a misspelling most likely meant: at most two edits away, ignoring case,
+ * so an all-lowercase spelling is distance 0. Two, because a closer bound misses a
+ * transposition (`--hots`), which costs two.
+ */
+function nearestFlag(word: string): Flag | undefined {
+  const lower = word.toLowerCase();
+  let best: Flag | undefined;
+  let bestDistance = 3;
+  for (const f of KNOWN_FLAGS) {
+    const d = editDistance(lower, f.toLowerCase());
+    if (d < bestDistance) {
+      best = f;
+      bestDistance = d;
+    }
+  }
+  return best;
+}
+
+function editDistance(a: string, b: string): number {
+  let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(
+        previous[j] + 1,
+        current[j - 1] + 1,
+        previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    previous = current;
+  }
+  return previous[b.length];
 }
 
 /**
@@ -229,7 +318,7 @@ export function parseOpaUrl(raw: string | null | undefined): string {
  * yet host-key.ts pointed users at a `--acceptNewHostKey` flag that never
  * existed. `--insecureHostKey` is kept as an alias for the documented flag.
  */
-export function resolveHostKeyMode(argv: Record<string, string | null>): HostKeyMode {
+export function resolveHostKeyMode(argv: Argv): HostKeyMode {
   if (flagEnabled(argv, 'insecureHostKey')) return 'insecure';
   const mode = argv.hostKeyMode;
   if (mode === null || mode === undefined) return 'tofu';
@@ -248,7 +337,7 @@ export function resolveHostKeyMode(argv: Record<string, string | null>): HostKey
  * The default stays `prod`. Guessing an unknown host is production is the safe
  * direction; what was missing was a way to correct the guess.
  */
-export function resolveHostGroup(argv: Record<string, string | null>): string {
+export function resolveHostGroup(argv: Argv): string {
   const group = argv.group;
   if (group === null || group === undefined) return 'prod';
   if ((HOST_GROUPS as readonly string[]).includes(group)) return group;
@@ -266,7 +355,7 @@ export function resolveHostGroup(argv: Record<string, string | null>): string {
  * the registry's defaults, which exist long before any profile does, so the two paths have
  * to agree.
  */
-export function defaultsFromArgv(argv: Record<string, string | null>): Defaults {
+export function defaultsFromArgv(argv: Argv): Defaults {
   return {
     sessionMaxPerConnection: parseInt(argv.sessionMax as string) || 5,
     sessionIdleTimeoutMs: parseTtlMs(argv.sessionTtl, 600_000),
@@ -288,7 +377,7 @@ export function defaultsFromArgv(argv: Record<string, string | null>): Defaults 
   };
 }
 
-export function aclOptionsFromArgv(argv: Record<string, string | null>): AclOptions {
+export function aclOptionsFromArgv(argv: Argv): AclOptions {
   // The way past an ACL that could not be read, rather than an operator with no
   // exit. See assertPrivateOnWindows.
   // The sink is supplied here rather than left to the module's default, which is the
@@ -320,7 +409,7 @@ function loaded(config: AppConfig, source: ConfigSource, path: string, sha256: s
  * the same options to the reloader.
  */
 export async function loadAppConfig(
-  argv: Record<string, string | null>,
+  argv: Argv,
   aclOpts: AclOptions = aclOptionsFromArgv(argv),
 ): Promise<LoadedConfig> {
   if (argv.config !== undefined) {

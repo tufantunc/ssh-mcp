@@ -21,22 +21,22 @@ describe('flagEnabled', () => {
 
   it('is off when absent', () => {
     expect(flagEnabled({}, 'disableApproval')).toBe(false);
-    expect(flagEnabled({ other: null }, 'disableApproval')).toBe(false);
+    expect(flagEnabled({ host: null }, 'disableApproval')).toBe(false);
   });
 
   it.each(['1', 'true', 'yes', 'on', 'anything'])('accepts =%s as on', (value) => {
-    expect(flagEnabled({ f: value }, 'f')).toBe(true);
+    expect(flagEnabled({ trustProxy: value }, 'trustProxy')).toBe(true);
   });
 
   it.each(['false', 'FALSE', '0', 'no', 'off'])('accepts =%s as off', (value) => {
     // A flag baked into a wrapper script needs a way back off without editing
     // the script.
-    expect(flagEnabled({ f: value }, 'f')).toBe(false);
+    expect(flagEnabled({ trustProxy: value }, 'trustProxy')).toBe(false);
   });
 
   it('treats an empty value as on', () => {
     // `--flag=` is a slip, not an intent to disable; on matches the bare form.
-    expect(flagEnabled({ f: '' }, 'f')).toBe(true);
+    expect(flagEnabled({ trustProxy: '' }, 'trustProxy')).toBe(true);
   });
 });
 
