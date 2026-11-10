@@ -42,6 +42,26 @@ async function main() {
   // on Windows after running icacls. Checked after it, a typo here cost two restarts: fix
   // what the loader refused, start again, and only then learn the flag was misspelled.
   const hostKeyMode = resolveHostKeyMode(argv);
+  // The same holds for every flag whose value is checked, so they are all parsed here.
+  // Under the same conditions as where they are used: a stdio run never read the HTTP
+  // flags, and refusing them now would stop a start that works today.
+  // Presence, not truthiness — the trap `flagEnabled` was written for. A space-separated
+  // `--opaUrl http://…` stores null, so the old guard dropped it silently, and dropped
+  // any `--opaFailClosed` the operator asked for with it.
+  const opa = 'opaUrl' in argv
+    ? { url: parseOpaUrl(argv.opaUrl), timeoutMs: parseOpaTimeout(argv.opaTimeoutMs) }
+    : undefined;
+  const opaFailClosed = flagEnabled(argv, 'opaFailClosed');
+  if (!opa && opaFailClosed) {
+    throw new OperatorError('--opaFailClosed does nothing without --opaUrl.');
+  }
+  const transportMode = argv.transport || 'stdio';
+  const httpLimits = transportMode === 'http'
+    ? {
+        sessionIdleTtlMs: parseHttpSessionTtl(argv.httpSessionTtl),
+        authFailureLimit: parseFailureLimit(argv.authFailureLimit),
+      }
+    : undefined;
 
   // The whole of it, not just `config`: the reloader needs to know where the live config
   // came from, its hash and when it was loaded.
@@ -71,18 +91,9 @@ async function main() {
   const policy = new PolicyEngine(resolvePolicyRules(config.profiles, config.policy));
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);
 
-  if ('opaUrl' in argv) {
-    // Presence, not truthiness — the trap `flagEnabled` was written for. A
-    // space-separated `--opaUrl http://…` stores null, so the old guard dropped it
-    // silently, and dropped any `--opaFailClosed` the operator asked for with it.
-    policy.setOpaUrl(
-      parseOpaUrl(argv.opaUrl),
-      flagEnabled(argv, 'opaFailClosed'),
-      parseOpaTimeout(argv.opaTimeoutMs),
-    );
+  if (opa) {
+    policy.setOpaUrl(opa.url, opaFailClosed, opa.timeoutMs);
     console.error(`OPA sidecar enabled: ${argv.opaUrl}`);
-  } else if (flagEnabled(argv, 'opaFailClosed')) {
-    throw new OperatorError('--opaFailClosed does nothing without --opaUrl.');
   }
 
   // One reloader for the process: every MCP server below (one under stdio, one per HTTP
@@ -102,17 +113,14 @@ async function main() {
     return server;
   };
 
-  const transportMode = argv.transport || 'stdio';
-
-  if (transportMode === 'http') {
+  if (httpLimits) {
     const { startHttpServer } = await import('./transport/http.js');
     await startHttpServer(createMcpServer, {
       port: parseInt(argv.httpPort as string) || 3000,
       host: (argv.httpHost as string) || '127.0.0.1',
       bearerToken: argv.bearerToken as string | undefined,
       rateLimit: parseInt(argv.rateLimit as string) || 0,
-      sessionIdleTtlMs: parseHttpSessionTtl(argv.httpSessionTtl),
-      authFailureLimit: parseFailureLimit(argv.authFailureLimit),
+      ...httpLimits,
       trustProxy: flagEnabled(argv, 'trustProxy'),
       trustedProxies: (argv.trustedProxies as string)?.split(',').map((h) => h.trim()).filter(Boolean),
       allowedHosts: (argv.allowedHosts as string)?.split(',').map((h) => h.trim()).filter(Boolean),
