@@ -1,5 +1,17 @@
 # ssh-mcp
 
+## 2.25.0
+
+### Minor Changes
+
+- [#324](https://github.com/tufantunc/ssh-mcp/pull/324) [`ae9e7a2`](https://github.com/tufantunc/ssh-mcp/commit/ae9e7a2fae116b45f4b545d3d431ac411ac1efdf) Thanks [@tufantunc](https://github.com/tufantunc)! - Unknown command-line flags are now refused at startup instead of being silently ignored, and a likely misspelling gets a suggestion (`Unknown flag: --allowUncheckedConfigAc (did you mean --allowUncheckedConfigAcl?)`). The refusal comes before the config file is read.
+  
+  **Upgrade note:** a launch command or wrapper script that passes a flag this server does not read — a typo, or a flag from another tool — previously started anyway and now exits with status 2 and names the flag. Remove or correct it; the accepted flags are the "CLI Flags (v2)" table in the README.
+
+### Patch Changes
+
+- [#323](https://github.com/tufantunc/ssh-mcp/pull/323) [`ce50a7e`](https://github.com/tufantunc/ssh-mcp/commit/ce50a7eefccc448543d1766af1d459b920e773e7) Thanks [@tufantunc](https://github.com/tufantunc)! - An invalid `--hostKeyMode` is now reported before the config file is read, instead of after the loader has checked (and possibly refused) it, so a typo no longer costs a second restart. The Windows config-ACL messages now name the directory the server actually reads its config from, rather than the literal `%APPDATA%\ssh-mcp`, which was wrong whenever `APPDATA` is unset.
+
 ## 2.24.0
 
 ### Minor Changes
