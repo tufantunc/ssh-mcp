@@ -18,6 +18,7 @@ import {
   loadAppConfig,
   aclOptionsFromArgv,
   checkRemovedFlags,
+  checkUnknownFlags,
   flagEnabled,
   parseFailureLimit,
   parseHttpSessionTtl,
@@ -28,7 +29,9 @@ import {
 
 async function main() {
   const argv = parseArgv();
+  // Removed flags first: they get the message that says what replaced them.
   checkRemovedFlags(argv);
+  checkUnknownFlags(argv);
 
   if (argv.dumpToolHashes !== undefined) {
     console.log(JSON.stringify(getToolHashes(), null, 2));

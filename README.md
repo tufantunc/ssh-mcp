@@ -1051,7 +1051,7 @@ The Docker image runs as non-root UID 65532, with a minimal `node:22-slim` base.
 
 ## CLI Flags (v2)
 
-Secrets are **never** passed as CLI arguments.
+Secrets are **never** passed as CLI arguments. A flag not in this table is refused at startup, with the nearest flag suggested when there is one, rather than ignored.
 
 | Flag | Default | Description |
 |------|---------|-------------|
