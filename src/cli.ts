@@ -326,6 +326,45 @@ export function resolveHostKeyMode(argv: Argv): HostKeyMode {
   throw new OperatorError(`Invalid --hostKeyMode=${mode}. Expected one of: tofu, strict, insecure.`);
 }
 
+/** What `parseStartupFlags` hands to `main()`: the checked flags, absent where unused. */
+export interface StartupFlags {
+  hostKeyMode: HostKeyMode;
+  opa?: { url: string; failClosed: boolean; timeoutMs: number | undefined };
+  http?: { sessionIdleTtlMs: number | undefined; authFailureLimit: number | undefined };
+}
+
+/**
+ * Every flag whose value is checked, parsed before the config load.
+ *
+ * They depend on argv alone, and the load can refuse — on Windows after running icacls.
+ * Checked after it, a typo cost two restarts: fix what the loader refused, start again,
+ * and only then learn the flag was misspelled.
+ *
+ * Under the same conditions as where they are used: a stdio run never read the HTTP
+ * flags, and `--opaTimeoutMs` without `--opaUrl` was ignored, so refusing either now
+ * would stop a start that works today.
+ */
+export function parseStartupFlags(argv: Argv): StartupFlags {
+  const hostKeyMode = resolveHostKeyMode(argv);
+  // Presence, not truthiness — the trap `flagEnabled` was written for. A space-separated
+  // `--opaUrl http://…` stores null, so the old guard dropped it silently, and dropped
+  // any `--opaFailClosed` the operator asked for with it.
+  const failClosed = flagEnabled(argv, 'opaFailClosed');
+  const opa = 'opaUrl' in argv
+    ? { url: parseOpaUrl(argv.opaUrl), failClosed, timeoutMs: parseOpaTimeout(argv.opaTimeoutMs) }
+    : undefined;
+  if (!opa && failClosed) {
+    throw new OperatorError('--opaFailClosed does nothing without --opaUrl.');
+  }
+  const http = argv.transport === 'http'
+    ? {
+        sessionIdleTtlMs: parseHttpSessionTtl(argv.httpSessionTtl),
+        authFailureLimit: parseFailureLimit(argv.authFailureLimit),
+      }
+    : undefined;
+  return { hostKeyMode, opa, http };
+}
+
 /**
  * Which policy tier a CLI-configured host belongs to.
  *

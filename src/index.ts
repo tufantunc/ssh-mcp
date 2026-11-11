@@ -2,7 +2,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { reportFatal, OperatorError } from './errors.js';
+import { reportFatal } from './errors.js';
 import { ConnectionRegistry } from './ssh/connection-registry.js';
 import { PolicyEngine, resolvePolicyRules } from './policy/engine.js';
 import { AuditStore } from './audit/store.js';
@@ -20,11 +20,7 @@ import {
   checkRemovedFlags,
   checkUnknownFlags,
   flagEnabled,
-  parseFailureLimit,
-  parseHttpSessionTtl,
-  parseOpaUrl,
-  parseOpaTimeout,
-  resolveHostKeyMode,
+  parseStartupFlags,
 } from './cli.js';
 
 async function main() {
@@ -38,30 +34,8 @@ async function main() {
     return;
   }
 
-  // Before the config load, because it depends on argv alone and the load can refuse —
-  // on Windows after running icacls. Checked after it, a typo here cost two restarts: fix
-  // what the loader refused, start again, and only then learn the flag was misspelled.
-  const hostKeyMode = resolveHostKeyMode(argv);
-  // The same holds for every flag whose value is checked, so they are all parsed here.
-  // Under the same conditions as where they are used: a stdio run never read the HTTP
-  // flags, and refusing them now would stop a start that works today.
-  // Presence, not truthiness — the trap `flagEnabled` was written for. A space-separated
-  // `--opaUrl http://…` stores null, so the old guard dropped it silently, and dropped
-  // any `--opaFailClosed` the operator asked for with it.
-  const opa = 'opaUrl' in argv
-    ? { url: parseOpaUrl(argv.opaUrl), timeoutMs: parseOpaTimeout(argv.opaTimeoutMs) }
-    : undefined;
-  const opaFailClosed = flagEnabled(argv, 'opaFailClosed');
-  if (!opa && opaFailClosed) {
-    throw new OperatorError('--opaFailClosed does nothing without --opaUrl.');
-  }
-  const transportMode = argv.transport || 'stdio';
-  const httpLimits = transportMode === 'http'
-    ? {
-        sessionIdleTtlMs: parseHttpSessionTtl(argv.httpSessionTtl),
-        authFailureLimit: parseFailureLimit(argv.authFailureLimit),
-      }
-    : undefined;
+  // Before the config load; `parseStartupFlags` says why.
+  const { hostKeyMode, opa, http } = parseStartupFlags(argv);
 
   // The whole of it, not just `config`: the reloader needs to know where the live config
   // came from, its hash and when it was loaded.
@@ -92,7 +66,7 @@ async function main() {
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);
 
   if (opa) {
-    policy.setOpaUrl(opa.url, opaFailClosed, opa.timeoutMs);
+    policy.setOpaUrl(opa.url, opa.failClosed, opa.timeoutMs);
     console.error(`OPA sidecar enabled: ${argv.opaUrl}`);
   }
 
@@ -113,14 +87,16 @@ async function main() {
     return server;
   };
 
-  if (httpLimits) {
+  const transportMode = argv.transport || 'stdio';
+
+  if (transportMode === 'http') {
     const { startHttpServer } = await import('./transport/http.js');
     await startHttpServer(createMcpServer, {
       port: parseInt(argv.httpPort as string) || 3000,
       host: (argv.httpHost as string) || '127.0.0.1',
       bearerToken: argv.bearerToken as string | undefined,
       rateLimit: parseInt(argv.rateLimit as string) || 0,
-      ...httpLimits,
+      ...http,
       trustProxy: flagEnabled(argv, 'trustProxy'),
       trustedProxies: (argv.trustedProxies as string)?.split(',').map((h) => h.trim()).filter(Boolean),
       allowedHosts: (argv.allowedHosts as string)?.split(',').map((h) => h.trim()).filter(Boolean),
