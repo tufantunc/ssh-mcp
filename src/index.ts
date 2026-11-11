@@ -2,7 +2,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { reportFatal, OperatorError } from './errors.js';
+import { reportFatal } from './errors.js';
 import { ConnectionRegistry } from './ssh/connection-registry.js';
 import { PolicyEngine, resolvePolicyRules } from './policy/engine.js';
 import { AuditStore } from './audit/store.js';
@@ -20,11 +20,7 @@ import {
   checkRemovedFlags,
   checkUnknownFlags,
   flagEnabled,
-  parseFailureLimit,
-  parseHttpSessionTtl,
-  parseOpaUrl,
-  parseOpaTimeout,
-  resolveHostKeyMode,
+  parseStartupFlags,
 } from './cli.js';
 
 async function main() {
@@ -38,10 +34,8 @@ async function main() {
     return;
   }
 
-  // Before the config load, because it depends on argv alone and the load can refuse —
-  // on Windows after running icacls. Checked after it, a typo here cost two restarts: fix
-  // what the loader refused, start again, and only then learn the flag was misspelled.
-  const hostKeyMode = resolveHostKeyMode(argv);
+  // Before the config load; `parseStartupFlags` says why.
+  const { hostKeyMode, opa, http } = parseStartupFlags(argv);
 
   // The whole of it, not just `config`: the reloader needs to know where the live config
   // came from, its hash and when it was loaded.
@@ -71,18 +65,9 @@ async function main() {
   const policy = new PolicyEngine(resolvePolicyRules(config.profiles, config.policy));
   const audit = new AuditStore(undefined, entropyScan, tamperEvident);
 
-  if ('opaUrl' in argv) {
-    // Presence, not truthiness — the trap `flagEnabled` was written for. A
-    // space-separated `--opaUrl http://…` stores null, so the old guard dropped it
-    // silently, and dropped any `--opaFailClosed` the operator asked for with it.
-    policy.setOpaUrl(
-      parseOpaUrl(argv.opaUrl),
-      flagEnabled(argv, 'opaFailClosed'),
-      parseOpaTimeout(argv.opaTimeoutMs),
-    );
+  if (opa) {
+    policy.setOpaUrl(opa.url, opa.failClosed, opa.timeoutMs);
     console.error(`OPA sidecar enabled: ${argv.opaUrl}`);
-  } else if (flagEnabled(argv, 'opaFailClosed')) {
-    throw new OperatorError('--opaFailClosed does nothing without --opaUrl.');
   }
 
   // One reloader for the process: every MCP server below (one under stdio, one per HTTP
@@ -111,8 +96,7 @@ async function main() {
       host: (argv.httpHost as string) || '127.0.0.1',
       bearerToken: argv.bearerToken as string | undefined,
       rateLimit: parseInt(argv.rateLimit as string) || 0,
-      sessionIdleTtlMs: parseHttpSessionTtl(argv.httpSessionTtl),
-      authFailureLimit: parseFailureLimit(argv.authFailureLimit),
+      ...http,
       trustProxy: flagEnabled(argv, 'trustProxy'),
       trustedProxies: (argv.trustedProxies as string)?.split(',').map((h) => h.trim()).filter(Boolean),
       allowedHosts: (argv.allowedHosts as string)?.split(',').map((h) => h.trim()).filter(Boolean),

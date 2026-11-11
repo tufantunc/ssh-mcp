@@ -89,24 +89,59 @@ describe.skipIf(!serverBuilt)('E2E — packaging', () => {
   /**
    * A flag that is wrong on its face is reported before anything is read from disk.
    *
-   * `--hostKeyMode` is a pure function of argv, but it was checked after the config load,
-   * which can itself refuse — on Windows after running icacls up to three times. A typo
+   * These are pure functions of argv, but they were checked after the config load, which
+   * can itself refuse — on Windows after running icacls up to three times. A typo
    * therefore cost two restarts: fix whatever the loader refused, start again, and only
    * then learn the flag was misspelled. A 0644 config is the portable way to make the
    * loader refuse, which is all the ordering needs.
    */
-  it('rejects an invalid --hostKeyMode before the config file is checked', async () => {
+  it.each([
+    [['--hostKeyMode=strct'], 'Invalid --hostKeyMode=strct'],
+    [['--opaUrl=localhost:8181'], '--opaUrl must be http or https'],
+    [['--opaUrl=http://localhost:8181', '--opaTimeoutMs=5'], '--opaTimeoutMs must be a whole number'],
+    [['--opaFailClosed'], '--opaFailClosed does nothing without --opaUrl'],
+    [['--transport=http', '--httpSessionTtl=0'], '--httpSessionTtl must be a positive safe integer'],
+    [['--transport=http', '--authFailureLimit=off'], '--authFailureLimit needs a non-negative whole number'],
+  ])('rejects %j before the config file is checked', async (flags, message) => {
     const dir = await mkdtemp(join(tmpdir(), 'ssh-mcp-e2e-order-'));
     try {
       const config = join(dir, 'config.toml');
       await writeFile(config, '', { mode: 0o644 });
-      const err = await runIsolated([SERVER_ENTRY, `--config=${config}`, '--hostKeyMode=strct'])
+      const err = await runIsolated([SERVER_ENTRY, `--config=${config}`, ...flags])
         .then(
-          () => { throw new Error('expected a non-zero exit for --hostKeyMode=strct'); },
+          () => { throw new Error(`expected a non-zero exit for ${flags.join(' ')}`); },
           (e: { stderr: string }) => e,
         );
-      expect(err.stderr).toContain('Invalid --hostKeyMode=strct');
+      expect(err.stderr).toContain(message);
       expect(err.stderr).not.toContain('group/world accessible');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  /**
+   * The other half of the ordering: a flag is checked only where it is used.
+   *
+   * A stdio run never read the HTTP flags, and `--opaTimeoutMs` without `--opaUrl` was
+   * ignored, so a start that carries a stale one works today. Parsing them earlier must
+   * not turn that into a refusal; reaching the loader's refusal shows nothing stopped it
+   * first. POSIX only, because that refusal is the mode check.
+   */
+  it.skipIf(process.platform === 'win32').each([
+    [['--httpSessionTtl=0']],
+    [['--authFailureLimit=off']],
+    [['--opaTimeoutMs=5']],
+  ])('still ignores %j where nothing reads it', async (flags) => {
+    const dir = await mkdtemp(join(tmpdir(), 'ssh-mcp-e2e-order-'));
+    try {
+      const config = join(dir, 'config.toml');
+      await writeFile(config, '', { mode: 0o644 });
+      const err = await runIsolated([SERVER_ENTRY, `--config=${config}`, ...flags])
+        .then(
+          () => { throw new Error('expected the 0644 config to be refused'); },
+          (e: { stderr: string }) => e,
+        );
+      expect(err.stderr).toContain('group/world accessible');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
