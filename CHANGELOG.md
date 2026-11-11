@@ -1,5 +1,11 @@
 # ssh-mcp
 
+## 2.25.1
+
+### Patch Changes
+
+- [#326](https://github.com/tufantunc/ssh-mcp/pull/326) [`a7bfd83`](https://github.com/tufantunc/ssh-mcp/commit/a7bfd8375733007b5b0bb6a310ca8d3aa520aed6) Thanks [@tufantunc](https://github.com/tufantunc)! - `--opaUrl`, `--opaTimeoutMs`, `--opaFailClosed`, `--httpSessionTtl` and `--authFailureLimit` are now checked before the config file is loaded, as `--hostKeyMode` already is. A wrong value in one of them is reported first, instead of after whatever the loader refused, which cost a second restart. The conditions are unchanged: the HTTP flags are still read only with `--transport=http`, and `--opaTimeoutMs` only with `--opaUrl`.
+
 ## 2.25.0
 
 ### Minor Changes
