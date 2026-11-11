@@ -16,6 +16,10 @@
 # A zero threshold penalises exactly the measurement limit that comment accepts,
 # so every change touching main() would fail on arrival.
 #
+# Since then CI measures main() as well: the e2e suite's server processes write V8
+# coverage, scripts/e2e-coverage.mjs maps it to src/, and the `test` job uploads it
+# with the unit report. The 1% stays for the reason it was set.
+#
 # 1% is a noise margin, not a licence. A real regression clears it easily: the
 # project is ~1400 instrumented lines, so 1% is roughly fourteen of them.
 # Two jobs upload coverage — `test` on Linux and `windows` — and Codecov posts a status

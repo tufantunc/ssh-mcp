@@ -27,9 +27,10 @@ export default defineConfig({
       include: ['src/**/*.ts'],
       // Only modules that carry no logic: types.ts is interfaces, which erase
       // to nothing, and version.ts is a single constant. index.ts stays in
-      // despite scoring low — the e2e suite drives it as a spawned process, so
-      // in-process instrumentation cannot follow it, and excluding it would
-      // hide genuinely untested wiring behind a nicer number.
+      // despite scoring low here — the e2e suite drives it as a spawned process,
+      // so in-process instrumentation cannot follow it, and excluding it would
+      // hide genuinely untested wiring behind a nicer number. CI measures those
+      // processes separately (scripts/e2e-coverage.mjs), which repeats this list.
       exclude: ['src/types.ts', 'src/version.ts'],
     },
   },
