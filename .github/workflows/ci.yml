@@ -46,8 +46,10 @@ jobs:
       - run: npm ci
 
       - name: Build
-        # Also required by the e2e suite, which drives the built artifact.
-        run: npm run build
+        # Also required by the e2e suite, which drives the built artifact. With source
+        # maps, which scripts/e2e-coverage.mjs maps the server processes' coverage back
+        # to src/ through. The release builds with `npm run build`, so none reach npm.
+        run: npm run build:coverage
 
       - name: Dependency resolution check
         run: npm ls zod zod-to-json-schema @modelcontextprotocol/sdk --all
@@ -121,10 +123,23 @@ jobs:
           # Without this, integration tests silently skip themselves when a
           # server is unreachable and CI reports green with zero of them run.
           SSH_MCP_REQUIRE_SERVERS: "1"
+          # Every process the suite starts writes its V8 coverage here on exit, the
+          # e2e suite's server processes among them. Measured: vitest's own report is
+          # byte-identical with and without it.
+          NODE_V8_COVERAGE: ${{ runner.temp }}/e2e-v8
         # Same suite as `npm test`, with the v8 reporter attached so the run
         # that proves the code works is also the one the coverage report comes
         # from.
         run: npm run coverage
+
+      # main() runs only in the e2e suite's server processes, which in-process
+      # coverage cannot follow. Converted here, and checked like the report below: a
+      # file with nothing in index.ts would read as main() going untested again.
+      - name: Convert the e2e server processes' coverage
+        run: |
+          node scripts/e2e-coverage.mjs "$RUNNER_TEMP/e2e-v8" coverage/e2e/lcov.info
+          awk '/^SF:src\/index.ts$/{f=1} f&&/^LH:/{print; if ($0 == "LH:0") bad=1; found=1; exit} END{exit (found && !bad) ? 0 : 1}' coverage/e2e/lcov.info \
+            || { echo "coverage/e2e/lcov.info has no hit line in src/index.ts"; exit 1; }
 
       # #315: ssh2's JavaScript ciphers, which the published Docker image runs, are not
       # what `npm ci` gives this job — it builds ssh2's native binding. So the ProxyJump
@@ -149,11 +164,13 @@ jobs:
           test -s coverage/lcov.info || { echo "coverage/lcov.info missing or empty"; exit 1; }
           echo "lcov records: $(grep -c '^SF:' coverage/lcov.info)"
 
+      # One upload with both files, so `after_n_builds: 2` in codecov.yml still counts
+      # this job and `windows`.
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage/lcov.info
+          files: ./coverage/lcov.info,./coverage/e2e/lcov.info
 
       # Service containers surface their logs in the UI automatically; compose
       # containers do not, so a failure would otherwise be undebuggable.
