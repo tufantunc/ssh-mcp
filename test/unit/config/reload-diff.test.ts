@@ -5,6 +5,7 @@ import {
   POLICY_FIELDS,
   diffProfiles,
   disposition,
+  planReload,
 } from '../../../src/config/reload-diff.js';
 import type { Profile } from '../../../src/types.js';
 
@@ -41,45 +42,70 @@ function fullProfile(overrides: Partial<Profile> = {}): Profile {
   };
 }
 
-// A Record, not a sample object: a Record<keyof Profile, true> literal fails typecheck for
-// any Profile key added without an entry here (optional ones included) and for any stale key,
+type FieldClass = 'name' | 'connection' | 'session' | 'policy';
+
+// What a reload does with each Profile field, decided here once and checked against the three
+// lists below. A Record, not a sample object: a Record<keyof Profile, …> literal fails typecheck
+// for any Profile key added without an entry here (optional ones included) and for any stale key,
 // whereas the keys of a hand-written Profile literal silently miss a new optional field.
-const ALL_PROFILE_KEYS: Record<keyof Profile, true> = {
-  name: true,
-  host: true,
-  port: true,
-  user: true,
-  auth: true,
-  keyRef: true,
-  keychainEntry: true,
-  via: true,
-  group: true,
-  workdir: true,
-  trustedHostKey: true,
-  tty: true,
-  timeout: true,
-  maxChars: true,
-  maxOutputBytes: true,
-  outputTruncation: true,
-  role: true,
-  readOnly: true,
-  approvalPolicy: true,
-  cert: true,
-  announceAgent: true,
-  sessionMaxPerConnection: true,
-  sessionIdleTimeoutMs: true,
-  sessionBackgroundMaxMs: true,
-  commandQuotaPerDay: true,
-  transferMaxBytes: true,
-  transferTimeoutMs: true,
+// `changed` differs from fullProfile()'s value for that field.
+const FIELD_CLASS: Record<keyof Profile, { cls: FieldClass; changed: unknown }> = {
+  name: { cls: 'name', changed: 'other' },
+  host: { cls: 'connection', changed: 'moved.example' },
+  port: { cls: 'connection', changed: 2222 },
+  user: { cls: 'connection', changed: 'v' },
+  auth: { cls: 'connection', changed: 'agent' },
+  keyRef: { cls: 'connection', changed: 'k2' },
+  keychainEntry: { cls: 'connection', changed: 'kc2' },
+  cert: { cls: 'connection', changed: true },
+  via: { cls: 'connection', changed: 'jump2' },
+  trustedHostKey: { cls: 'connection', changed: 'SHA256:def' },
+  workdir: { cls: 'session', changed: '/srv/app' },
+  tty: { cls: 'session', changed: true },
+  timeout: { cls: 'session', changed: 2000 },
+  maxOutputBytes: { cls: 'session', changed: 2000 },
+  outputTruncation: { cls: 'session', changed: 'tail' },
+  announceAgent: { cls: 'session', changed: false },
+  sessionMaxPerConnection: { cls: 'session', changed: 8 },
+  sessionIdleTimeoutMs: { cls: 'session', changed: 2000 },
+  sessionBackgroundMaxMs: { cls: 'session', changed: 2000 },
+  role: { cls: 'policy', changed: 'viewer' },
+  group: { cls: 'policy', changed: 'dev' },
+  approvalPolicy: { cls: 'policy', changed: 'ask-all' },
+  readOnly: { cls: 'policy', changed: true },
+  commandQuotaPerDay: { cls: 'policy', changed: 10 },
+  maxChars: { cls: 'policy', changed: 200 },
+  transferMaxBytes: { cls: 'policy', changed: 2000 },
+  transferTimeoutMs: { cls: 'policy', changed: 2000 },
 };
 
+const fieldsOf = (cls: FieldClass) =>
+  (Object.keys(FIELD_CLASS) as (keyof Profile)[]).filter((k) => FIELD_CLASS[k].cls === cls).sort();
+
 describe('field classification', () => {
-  it('puts every Profile key in exactly one list, or is name', () => {
-    const lists = [CONNECTION_FIELDS, SESSION_FIXED_FIELDS, POLICY_FIELDS];
-    const classified = lists.flat();
-    expect(new Set(classified).size, 'a field is in two lists').toBe(classified.length);
-    expect([...classified, 'name'].sort()).toEqual(Object.keys(ALL_PROFILE_KEYS).sort());
+  // Pins membership, not just coverage: moving a field from one list to another fails here.
+  it.each([
+    ['connection', CONNECTION_FIELDS],
+    ['session', SESSION_FIXED_FIELDS],
+    ['policy', POLICY_FIELDS],
+  ] as const)('the %s list holds exactly the fields classed so', (cls, list) => {
+    expect([...list].sort()).toEqual(fieldsOf(cls));
+  });
+
+  // What each class means to a reload with the profile live: the connection closes, or it
+  // stays open and the report names the field, or it stays open and nothing is reported.
+  it.each(
+    (Object.keys(FIELD_CLASS) as (keyof Profile)[]).filter((k) => k !== 'name'),
+  )('reloading a change to %s does what its class says', (field) => {
+    const { cls, changed } = FIELD_CLASS[field];
+    const next = fullProfile({ [field]: changed });
+    const plan = planReload([fullProfile()], [next], ['p']);
+
+    expect(plan.diff.changed).toEqual([{ name: 'p', fields: [field] }]);
+    expect([...plan.closing]).toEqual(cls === 'connection' ? [['p', 'connection-field']] : []);
+    expect(plan.sessionFieldsChanged).toEqual(
+      cls === 'session' ? [{ name: 'p', fields: [field] }] : [],
+    );
   });
 });
 
