@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 const authMethodSchema = z.enum(['agent', 'key', 'password', 'keychain']);
 const approvalModeSchema = z.enum(['auto', 'ask-destructive', 'ask-all', 'deny']);
+const outputTruncationSchema = z.enum(['head', 'tail']);
 const commandClassSchema = z.enum(['read-only', 'safe', 'destructive', 'privileged']);
 
 /**
@@ -108,6 +109,11 @@ export const defaultsSchema = z.object({
   // code an identical Profile.
   commandMaxChars: z.number().int().nonnegative().default(5000),
   commandMaxOutputBytes: z.number().int().positive().default(1_048_576),
+  // Which end of a command's output survives commandMaxOutputBytes. "head" is the
+  // historical answer and stays the default so an existing config sees no change;
+  // "tail" is for log reads, where the recent lines are the ones that matter and
+  // the oldest-first default made a grep look like it had finished.
+  commandOutputTruncation: outputTruncationSchema.default('head'),
   connectionIdleReapMs: z.number().int().positive().default(900_000),
   // 0 = unlimited. A circuit breaker for runaway agents, not a rate limit.
   commandQuotaPerDay: z.number().int().nonnegative().default(0),
@@ -189,6 +195,9 @@ export const profileSchema = z.object({
   // 0 = unlimited, as in [defaults].commandMaxChars above.
   maxChars: z.number().int().nonnegative().optional(),
   maxOutputBytes: z.number().int().positive().optional(),
+  // Optional like the other per-profile overrides; normalizeConfig() fills it from
+  // [defaults].commandOutputTruncation, so "omitted" stays distinguishable.
+  outputTruncation: outputTruncationSchema.optional(),
   approvalPolicy: approvalModeSchema.optional(),
   sessionMaxPerConnection: z.number().int().positive().optional(),
   sessionIdleTimeoutMs: z.number().int().nonnegative().optional(),

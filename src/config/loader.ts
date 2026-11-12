@@ -218,6 +218,7 @@ function normalizeConfig(raw: RawConfig): AppConfig {
     timeout: p.timeout ?? defaults.commandTimeoutMs,
     maxChars: uncapZero(p.maxChars ?? defaults.commandMaxChars),
     maxOutputBytes: p.maxOutputBytes ?? defaults.commandMaxOutputBytes,
+    outputTruncation: p.outputTruncation ?? defaults.commandOutputTruncation,
     approvalPolicy: p.approvalPolicy ?? defaults.approvalMode,
     sessionMaxPerConnection: p.sessionMaxPerConnection ?? defaults.sessionMaxPerConnection,
     sessionIdleTimeoutMs: p.sessionIdleTimeoutMs ?? defaults.sessionIdleTimeoutMs,

@@ -37,6 +37,7 @@ const testProfile: Profile = {
   timeout: 10_000,
   maxChars: 5000,
   maxOutputBytes: 1_048_576,
+  outputTruncation: 'head',
   role: 'admin',
   readOnly: false,
   announceAgent: true,

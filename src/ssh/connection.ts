@@ -10,6 +10,7 @@ import { redactText } from '../guard/redactor.js';
 import { shellSingleQuote } from '../guard/sanitizer.js';
 import { openWithRetry } from './channel-retry.js';
 import { terminateChannel, COULD_NOT_SIGNAL } from './channel-signal.js';
+import { appendCapped, finalizeCapped } from './output-buffer.js';
 import { OperatorError } from '../errors.js';
 
 /** Fixed text: a reload-closed connection's refusal names nothing from the config. */
@@ -457,6 +458,12 @@ export class SSHConnection {
         let stdout = '';
         let stderr = '';
         const maxOutput = this.profile.maxOutputBytes;
+        // Read once per command, like maxOutput: a reload mid-stream applies to the
+        // next command, not to a buffer already trimmed the other way.
+        const truncation = this.profile.outputTruncation;
+        // Progress reports what arrived, not the buffer's length: in tail mode the
+        // buffer shrinks on every trim, and MCP progress must not go backwards.
+        let received = 0;
         let lastProgressSent = 0;
         const PROGRESS_INTERVAL = 500;
 
@@ -496,7 +503,8 @@ export class SSHConnection {
         }
 
         stream.on('data', (data: Buffer) => {
-          if (stdout.length < maxOutput) stdout += data.toString();
+          received += data.length;
+          stdout = appendCapped(stdout, data.toString(), maxOutput, truncation);
           if (opts.onProgress && Date.now() - lastProgressSent >= PROGRESS_INTERVAL) {
             lastProgressSent = Date.now();
             let tail = stdout;
@@ -505,11 +513,11 @@ export class SSHConnection {
               if (idx < 0) break;
               tail = tail.substring(idx + 1);
             }
-            opts.onProgress(stdout.length, redactText(tail.trim(), { entropyScan: true }));
+            opts.onProgress(received, redactText(tail.trim(), { entropyScan: true }));
           }
         });
         stream.stderr.on('data', (data: Buffer) => {
-          if (stderr.length < maxOutput) stderr += data.toString();
+          stderr = appendCapped(stderr, data.toString(), maxOutput, truncation);
         });
 
         stream.on('close', (code: number, signal: string) => {
@@ -519,8 +527,8 @@ export class SSHConnection {
             clearTimeout(timeoutId);
             this.lastActivity = new Date();
             resolve({
-              stdout,
-              stderr,
+              stdout: finalizeCapped(stdout, maxOutput, truncation),
+              stderr: finalizeCapped(stderr, maxOutput, truncation),
               exitCode: code,
               durationMs: Date.now() - startTime,
               profile: this.profile.name,

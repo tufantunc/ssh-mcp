@@ -297,6 +297,7 @@ sessionBackgroundMaxMs = 3600000    # 1hr absolute cap; 0 = no cap
 commandTimeoutMs = 60000
 commandMaxChars = 5000              # 0 = unlimited, the config spelling of --maxChars=none
 commandMaxOutputBytes = 1048576     # 1MB
+commandOutputTruncation = "head"    # head | tail; see below
 connectionIdleReapMs = 900000       # 15min
 commandQuotaPerDay = 0              # 0 = unlimited; circuit breaker for runaway agents
 approvalGrantTtlMs = 0              # 0 = always prompt; see "Approval Grants"
@@ -327,6 +328,7 @@ sessionMaxPerConnection = 3         # per-profile override
 sessionIdleTimeoutMs = 300000       # stricter for prod
 commandQuotaPerDay = 200            # per-profile override
 maxChars = 2000                     # per-profile override; stricter for prod
+outputTruncation = "tail"           # per-profile override
 transferMaxBytes = 16777216         # per-profile override; transferRoot is not per-profile
 transferTimeoutMs = 60000           # per-profile override
 
@@ -340,6 +342,19 @@ denylist = ["^terraform\\s+destroy", "\\.ssh/authorized_keys$"]
 [policy.roleBindings.operator]
 prod = ["read-only", "safe", "destructive"]
 ```
+
+`commandOutputTruncation` chooses which end of a command's output survives
+`commandMaxOutputBytes` (counted in characters, as that cap always has been). The
+default, `"head"`, keeps the start — unchanged behaviour, which can run past the cap
+by the last chunk read. Set it to `"tail"` when the recent end is the part worth
+keeping: `grep pattern /var/log/big.log`, a log window, or any command whose answer
+is "what happened last". In head mode an over-cap `grep` returns the oldest matches
+and silently drops the rest, which can read as "nothing recent happened"; tail mode
+drops from the front instead and returns at most the cap, starting at the first
+whole line, so redaction does not see a line whose name was cut off (only output
+with no line break inside the cap is cut mid-line). While the command runs, tail
+mode holds a few times the cap per stream. Per-profile override:
+`outputTruncation`.
 
 Unknown sections and keys are a startup error, not a warning, so a typo cannot
 leave you running defaults you thought you had overridden. That extends to role
@@ -483,7 +498,7 @@ so no tool call sees part of each. For each open connection, by profile name:
 | Changed on the profile | What happens |
 |---|---|
 | `role`, `group`, `approvalPolicy`, `readOnly`, `commandQuotaPerDay`, `maxChars`, `transferMaxBytes`, `transferTimeoutMs`, or the `[policy]` section | The connection stays open; the change applies from its next command |
-| `workdir`, `tty`, `timeout`, `maxOutputBytes`, `announceAgent`, `sessionMaxPerConnection`, `sessionIdleTimeoutMs`, `sessionBackgroundMaxMs` | The connection stays open; the new values apply to new sessions and commands, and the report names these fields |
+| `workdir`, `tty`, `timeout`, `maxOutputBytes`, `outputTruncation`, `announceAgent`, `sessionMaxPerConnection`, `sessionIdleTimeoutMs`, `sessionBackgroundMaxMs` | The connection stays open; the new values apply to new sessions and commands, and the report names these fields |
 | `host`, `port`, `user`, `auth`, `keyRef`, `keychainEntry`, `cert`, `via`, `trustedHostKey` | The connection closes with its sessions; the next call connects with the new profile |
 | the profile was removed | The connection closes with its sessions |
 

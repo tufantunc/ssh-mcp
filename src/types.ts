@@ -2,6 +2,8 @@
 
 export type AuthMethod = 'agent' | 'key' | 'password' | 'keychain';
 export type ApprovalMode = 'auto' | 'ask-destructive' | 'ask-all' | 'deny';
+/** Which end of a command's output survives the `maxOutputBytes` cap. */
+export type OutputTruncation = 'head' | 'tail';
 
 export interface Profile {
   name: string;
@@ -20,6 +22,8 @@ export interface Profile {
   timeout: number;
   maxChars: number;
   maxOutputBytes: number;
+  /** Keep the first (`head`) or last (`tail`) `maxOutputBytes` of a command's output. */
+  outputTruncation: OutputTruncation;
   role: string;
   readOnly: boolean;
   approvalPolicy: ApprovalMode;
@@ -51,6 +55,7 @@ export interface Defaults {
   commandTimeoutMs: number;
   commandMaxChars: number;
   commandMaxOutputBytes: number;
+  commandOutputTruncation: OutputTruncation;
   connectionIdleReapMs: number;
   commandQuotaPerDay: number;
   /** Lifetime of a just-in-time approval grant; 0 = always prompt. */

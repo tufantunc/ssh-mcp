@@ -20,6 +20,7 @@ export const SESSION_FIXED_FIELDS: readonly (keyof Profile)[] = [
   'tty',
   'timeout',
   'maxOutputBytes',
+  'outputTruncation',
   'announceAgent',
   'sessionMaxPerConnection',
   'sessionIdleTimeoutMs',

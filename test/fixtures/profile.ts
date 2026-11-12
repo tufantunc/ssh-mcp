@@ -17,6 +17,7 @@ export function makeProfile(overrides: Partial<Profile> = {}): Profile {
     timeout: 5000,
     maxChars: 5000,
     maxOutputBytes: 1_048_576,
+    outputTruncation: 'head',
     role: 'admin',
     readOnly: false,
     announceAgent: true,
