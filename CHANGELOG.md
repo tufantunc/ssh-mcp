@@ -1,5 +1,11 @@
 # ssh-mcp
 
+## 2.26.0
+
+### Minor Changes
+
+- [#329](https://github.com/tufantunc/ssh-mcp/pull/329) [`2999711`](https://github.com/tufantunc/ssh-mcp/commit/299971186ad8b54483ce7bbf6e5b4beb278f1331) Thanks [@dved123](https://github.com/dved123)! - Add `commandOutputTruncation` so operators can keep the tail of a command's output. `[defaults] commandOutputTruncation = "head" | "tail"` (per-profile `outputTruncation`) chooses which end survives `commandMaxOutputBytes`. `"tail"` keeps the end of the output, starting at the first whole line, so a `grep` over a large log no longer returns only the oldest matches; the default `"head"` keeps today's behaviour unchanged.
+
 ## 2.25.1
 
 ### Patch Changes
