@@ -10,6 +10,7 @@ import { redactText } from '../guard/redactor.js';
 import { shellSingleQuote } from '../guard/sanitizer.js';
 import { openWithRetry } from './channel-retry.js';
 import { terminateChannel, COULD_NOT_SIGNAL } from './channel-signal.js';
+import { appendCapped, finalizeCapped } from './output-buffer.js';
 import { OperatorError } from '../errors.js';
 
 /** Fixed text: a reload-closed connection's refusal names nothing from the config. */
@@ -457,6 +458,10 @@ export class SSHConnection {
         let stdout = '';
         let stderr = '';
         const maxOutput = this.profile.maxOutputBytes;
+        // Read once per command, like maxOutput: the buffer's trim mode cannot change
+        // halfway through a stream without making the retained window ambiguous. The
+        // default lives here rather than in every Profile literal.
+        const truncation = this.profile.outputTruncation ?? 'head';
         let lastProgressSent = 0;
         const PROGRESS_INTERVAL = 500;
 
@@ -496,7 +501,7 @@ export class SSHConnection {
         }
 
         stream.on('data', (data: Buffer) => {
-          if (stdout.length < maxOutput) stdout += data.toString();
+          stdout = appendCapped(stdout, data.toString(), maxOutput, truncation);
           if (opts.onProgress && Date.now() - lastProgressSent >= PROGRESS_INTERVAL) {
             lastProgressSent = Date.now();
             let tail = stdout;
@@ -509,7 +514,7 @@ export class SSHConnection {
           }
         });
         stream.stderr.on('data', (data: Buffer) => {
-          if (stderr.length < maxOutput) stderr += data.toString();
+          stderr = appendCapped(stderr, data.toString(), maxOutput, truncation);
         });
 
         stream.on('close', (code: number, signal: string) => {
@@ -519,8 +524,8 @@ export class SSHConnection {
             clearTimeout(timeoutId);
             this.lastActivity = new Date();
             resolve({
-              stdout,
-              stderr,
+              stdout: finalizeCapped(stdout, maxOutput, truncation),
+              stderr: finalizeCapped(stderr, maxOutput, truncation),
               exitCode: code,
               durationMs: Date.now() - startTime,
               profile: this.profile.name,

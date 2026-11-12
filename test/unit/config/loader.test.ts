@@ -41,6 +41,7 @@ approvalMode = "ask-all"
 commandTimeoutMs = 30000
 commandMaxChars = 1234
 commandMaxOutputBytes = 2048
+commandOutputTruncation = "tail"
 sessionBackgroundMaxMs = 111000
 sessionMaxPerConnection = 9
 sessionIdleTimeoutMs = 222000
@@ -58,6 +59,7 @@ user = "test"
     expect(p.timeout).toBe(30000);
     expect(p.maxChars).toBe(1234);
     expect(p.maxOutputBytes).toBe(2048);
+    expect(p.outputTruncation).toBe('tail');
     expect(p.sessionBackgroundMaxMs).toBe(111000);
     expect(p.sessionMaxPerConnection).toBe(9);
     expect(p.sessionIdleTimeoutMs).toBe(222000);
@@ -170,6 +172,29 @@ user = "test"
     expect(p.approvalPolicy).toBe('ask-destructive');
     expect(p.timeout).toBe(60_000);
     expect(p.maxOutputBytes).toBe(1_048_576);
+    expect(p.outputTruncation).toBe('head');
+  });
+
+  it('lets a profile override outputTruncation', async () => {
+    const path = await cfg.write(`
+[defaults]
+commandOutputTruncation = "tail"
+
+[[profiles]]
+name = "inherits"
+host = "localhost"
+user = "test"
+
+[[profiles]]
+name = "overrides"
+host = "localhost"
+user = "test"
+outputTruncation = "head"
+`);
+    const { config } = await loadConfigWithDigest(path);
+    expect(config.defaults.commandOutputTruncation).toBe('tail');
+    expect(config.profiles.find((p) => p.name === 'inherits')?.outputTruncation).toBe('tail');
+    expect(config.profiles.find((p) => p.name === 'overrides')?.outputTruncation).toBe('head');
   });
 
   it('rejects unknown profile keys instead of silently dropping them', async () => {

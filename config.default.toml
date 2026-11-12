@@ -16,6 +16,12 @@ sessionBackgroundMaxMs = 3600000  # 1hr max for background sessions; 0 = no cap
 commandTimeoutMs = 60000          # Per-command timeout
 commandMaxChars = 5000            # Max command length
 commandMaxOutputBytes = 1048576   # 1MB output cap per command
+# Which end of a command's output survives that cap: "head" keeps the first
+# bytes (the historical behaviour), "tail" keeps the most recent bytes. Prefer
+# "tail" for log reads such as `grep ... /var/log/x.log`, where the old
+# first-bytes behaviour silently returned only the oldest matches. Per-profile
+# override: outputTruncation.
+commandOutputTruncation = "head"
 connectionIdleReapMs = 900000     # 15min -> close idle connection
 approvalMode = "ask-destructive"  # auto | ask-destructive | ask-all | deny
 

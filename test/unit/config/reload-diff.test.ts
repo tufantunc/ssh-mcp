@@ -59,6 +59,7 @@ const ALL_PROFILE_KEYS: Record<keyof Profile, true> = {
   timeout: true,
   maxChars: true,
   maxOutputBytes: true,
+  outputTruncation: true,
   role: true,
   readOnly: true,
   approvalPolicy: true,

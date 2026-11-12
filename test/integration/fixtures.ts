@@ -97,6 +97,7 @@ export function createAppConfig(): AppConfig {
     commandTimeoutMs: 15000,
     commandMaxChars: 5000,
     commandMaxOutputBytes: 1048576,
+    commandOutputTruncation: 'head',
     connectionIdleReapMs: 60000,
     commandQuotaPerDay: 0,
     transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,
