@@ -31,6 +31,7 @@ const profileFor = (port: number): Profile => ({
   timeout: 2000,
   maxChars: 5000,
   maxOutputBytes: 1_048_576,
+  outputTruncation: 'head',
   role: 'admin',
   readOnly: false,
   announceAgent: true,

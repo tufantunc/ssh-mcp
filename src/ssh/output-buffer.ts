@@ -1,58 +1,64 @@
 import type { OutputTruncation } from '../types.js';
 
 /**
- * Bounded accumulation for command output.
+ * Bounded accumulation for a command's stdout and stderr.
  *
- * `read-command` used to keep the *first* `maxOutputBytes` of a stream and drop
- * everything after it. That is a bad default for the case operators hit most:
- * `grep pattern /var/log/big.log` returns the oldest matches and silently loses
- * every recent one, so a plausible-looking truncated answer says "nothing
- * happened" about the window the caller actually cared about. A visible error is
- * safer than truncation that looks complete; where truncation is unavoidable,
- * `tail` mode makes the recent end the one that survives without asking the
- * operator to remember `| tail` on every command.
+ * The cap is `maxOutputBytes`, counted, as it always was, in JavaScript string length
+ * (UTF-16 code units), not bytes on the wire. `head` keeps the start of the stream and
+ * `tail` keeps the end; which one an operator wants depends on the command, and for a
+ * `grep` over a large log it is the end.
  *
- * Tail mode keeps up to twice the cap while streaming, then drops down to one cap
- * from the front. The 2x slack is the whole point: trimming back to the cap on
- * every chunk would copy the whole buffer per chunk (quadratic in the stream
- * length), while the slack keeps memory bounded at 2x the configured cap and
- * makes the copies amortised. `finalizeCapped` then hands the caller exactly the
- * last `maxBytes` characters.
- *
- * Lengths are JavaScript string lengths (UTF-16 code units), matching the cap that
- * `maxOutputBytes` already enforced; this is not a count of bytes on the wire.
+ * Tail mode never hands back a partial first line when the window holds a line break.
+ * Redaction runs on this module's output, and its name-keyed layer reads the name to
+ * the left of `=` or `Bearer`: a cut through `DB_PASSWORD=...` that left `SSWORD=...`
+ * would pass the value through unmasked. Head mode never had that exposure, because it
+ * cuts at the end, where the name has already been kept. So the window starts after the
+ * first line break past the cut, and only a window with no line break in it is cut
+ * mid-line — then at a character boundary, never inside a surrogate pair.
  */
 
 /**
  * Append a chunk under a cap.
  *
- * Head mode is the historical behaviour, kept byte-for-byte: stop appending once
- * the buffer has reached the cap. Tail mode always appends, but once the buffer
- * passes twice the cap it is cut back to the last `maxBytes`.
+ * Head mode is the historical behaviour, kept exactly: stop appending once the buffer
+ * has reached the cap, so the chunk that crosses it is kept whole and the result can
+ * exceed the cap by up to one chunk. Tail mode always appends and, once the buffer
+ * passes twice the cap, trims it back to one cap's worth. The slack keeps the trim
+ * amortised; trimming on every chunk would copy the buffer per chunk.
  */
 export function appendCapped(
   previous: string,
   chunk: string,
-  maxBytes: number,
+  maxChars: number,
   mode: OutputTruncation,
 ): string {
-  if (mode === 'head') return previous.length >= maxBytes ? previous : previous + chunk;
-  // The config schema requires a positive cap; treating a non-positive one as
-  // "keep nothing" keeps `slice(-0)` from returning the whole stream.
-  if (maxBytes <= 0) return '';
+  if (mode === 'head') return previous.length >= maxChars ? previous : previous + chunk;
   const next = previous + chunk;
-  return next.length > maxBytes * 2 ? next.slice(-maxBytes) : next;
+  return next.length > maxChars * 2 ? tailWindow(next, maxChars) : next;
 }
 
 /**
- * The value the caller sees.
- *
- * Head mode returns the buffer untouched, so today's output is unchanged. Tail
- * mode bounds it to the last `maxBytes`, which is also the final trim if the
- * stream ended before the 2x slack was reached.
+ * The value the caller sees: head output untouched, tail output trimmed to at most one
+ * cap, starting on a line boundary where the window allows it.
  */
-export function finalizeCapped(value: string, maxBytes: number, mode: OutputTruncation): string {
-  if (mode === 'head') return value;
-  if (maxBytes <= 0) return '';
-  return value.length > maxBytes ? value.slice(-maxBytes) : value;
+export function finalizeCapped(value: string, maxChars: number, mode: OutputTruncation): string {
+  if (mode === 'head' || value.length <= maxChars) return value;
+  return tailWindow(value, maxChars);
+}
+
+/**
+ * The last `maxChars` of `value` at most, moved forward to the next line start. Both
+ * callers pass a value longer than `maxChars`, so `cut` is positive, and a cap of 0
+ * keeps nothing rather than reaching `slice(-0)`, which would keep everything.
+ */
+function tailWindow(value: string, maxChars: number): string {
+  const cut = value.length - maxChars;
+  if (value[cut - 1] === '\n') return value.slice(cut);
+  const lineBreak = value.indexOf('\n', cut);
+  // A break with text after it: start there. A break only at the very end (or none)
+  // means the window is one line; dropping it would return nothing.
+  if (lineBreak !== -1 && lineBreak + 1 < value.length) return value.slice(lineBreak + 1);
+  const code = value.charCodeAt(cut);
+  const lowSurrogate = code >= 0xdc00 && code <= 0xdfff;
+  return value.slice(lowSurrogate ? cut + 1 : cut);
 }

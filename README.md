@@ -344,14 +344,17 @@ prod = ["read-only", "safe", "destructive"]
 ```
 
 `commandOutputTruncation` chooses which end of a command's output survives
-`commandMaxOutputBytes`. The default, `"head"`, keeps the first N characters —
-unchanged behaviour. Set it to `"tail"` when the recent end is the part worth
-keeping: `grep pattern /var/log/big.log`, a log window, or any command whose
-answer is "what happened last". In head mode an over-cap `grep` returns the
-oldest matches and silently drops the rest, which can read as "nothing recent
-happened"; tail mode keeps the most recent N characters and drops from the
-front instead. It buffers up to twice the cap while streaming and returns
-exactly the cap's worth at the end. Per-profile override: `outputTruncation`.
+`commandMaxOutputBytes` (counted in characters, as that cap always has been). The
+default, `"head"`, keeps the start — unchanged behaviour, which can run past the cap
+by the last chunk read. Set it to `"tail"` when the recent end is the part worth
+keeping: `grep pattern /var/log/big.log`, a log window, or any command whose answer
+is "what happened last". In head mode an over-cap `grep` returns the oldest matches
+and silently drops the rest, which can read as "nothing recent happened"; tail mode
+drops from the front instead and returns at most the cap, starting at the first
+whole line, so redaction does not see a line whose name was cut off (only output
+with no line break inside the cap is cut mid-line). While the command runs, tail
+mode holds a few times the cap per stream. Per-profile override:
+`outputTruncation`.
 
 Unknown sections and keys are a startup error, not a warning, so a typo cannot
 leave you running defaults you thought you had overridden. That extends to role

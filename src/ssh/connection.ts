@@ -458,10 +458,12 @@ export class SSHConnection {
         let stdout = '';
         let stderr = '';
         const maxOutput = this.profile.maxOutputBytes;
-        // Read once per command, like maxOutput: the buffer's trim mode cannot change
-        // halfway through a stream without making the retained window ambiguous. The
-        // default lives here rather than in every Profile literal.
-        const truncation = this.profile.outputTruncation ?? 'head';
+        // Read once per command, like maxOutput: a reload mid-stream applies to the
+        // next command, not to a buffer already trimmed the other way.
+        const truncation = this.profile.outputTruncation;
+        // Progress reports what arrived, not the buffer's length: in tail mode the
+        // buffer shrinks on every trim, and MCP progress must not go backwards.
+        let received = 0;
         let lastProgressSent = 0;
         const PROGRESS_INTERVAL = 500;
 
@@ -501,6 +503,7 @@ export class SSHConnection {
         }
 
         stream.on('data', (data: Buffer) => {
+          received += data.length;
           stdout = appendCapped(stdout, data.toString(), maxOutput, truncation);
           if (opts.onProgress && Date.now() - lastProgressSent >= PROGRESS_INTERVAL) {
             lastProgressSent = Date.now();
@@ -510,7 +513,7 @@ export class SSHConnection {
               if (idx < 0) break;
               tail = tail.substring(idx + 1);
             }
-            opts.onProgress(stdout.length, redactText(tail.trim(), { entropyScan: true }));
+            opts.onProgress(received, redactText(tail.trim(), { entropyScan: true }));
           }
         });
         stream.stderr.on('data', (data: Buffer) => {

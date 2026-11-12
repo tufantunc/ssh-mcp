@@ -25,6 +25,7 @@ function fullProfile(overrides: Partial<Profile> = {}): Profile {
     timeout: 1000,
     maxChars: 100,
     maxOutputBytes: 1000,
+    outputTruncation: 'head',
     role: 'operator',
     readOnly: false,
     approvalPolicy: 'auto',

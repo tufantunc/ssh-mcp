@@ -22,12 +22,8 @@ export interface Profile {
   timeout: number;
   maxChars: number;
   maxOutputBytes: number;
-  /**
-   * Keep the first (`head`) or last (`tail`) `maxOutputBytes` of a command.
-   * Optional so profile literals need not repeat the default; the connection
-   * resolves an absent value to `head`, which is the historical behaviour.
-   */
-  outputTruncation?: OutputTruncation;
+  /** Keep the first (`head`) or last (`tail`) `maxOutputBytes` of a command's output. */
+  outputTruncation: OutputTruncation;
   role: string;
   readOnly: boolean;
   approvalPolicy: ApprovalMode;

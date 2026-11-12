@@ -197,6 +197,12 @@ outputTruncation = "head"
     expect(config.profiles.find((p) => p.name === 'overrides')?.outputTruncation).toBe('head');
   });
 
+  it('keeps head as the truncation default when run from flags, with no config file', () => {
+    // defaultsFromArgv is its own copy of the defaults; the schema test above does not
+    // reach it, and a 'tail' here would change every flags-only setup.
+    expect(defaultsFromArgv({}).commandOutputTruncation).toBe('head');
+  });
+
   it('rejects unknown profile keys instead of silently dropping them', async () => {
     const path = await cfg.write(`
 [[profiles]]

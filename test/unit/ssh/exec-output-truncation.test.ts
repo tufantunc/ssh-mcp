@@ -43,35 +43,63 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.doUnmock('ssh2');
   vi.resetModules();
 });
 
-async function exec(overrides: Partial<Profile>) {
+async function connect(overrides: Partial<Profile>) {
   const { SSHConnection } = await import('../../../src/ssh/connection.js');
-  const conn = new SSHConnection(
+  return new SSHConnection(
     makeProfile({ maxOutputBytes: 5, ...overrides }),
     { password: 'x' } as never,
     new Map(),
     'insecure',
   );
-  return conn.exec('cat /var/log/big.log', { timeoutMs: 30_000 });
+}
+
+async function exec(overrides: Partial<Profile>) {
+  return (await connect(overrides)).exec('cat /var/log/big.log', { timeoutMs: 30_000 });
 }
 
 describe('exec() applies the configured truncation to both streams', () => {
+  // Each stream passes twice the cap mid-stream and ends between one and two caps, so
+  // the append and the final trim each change the answer: skipping either, or wiring
+  // a stream back to head mode, gives a different string.
   it('tail keeps the last bytes of stdout and stderr', async () => {
-    stdoutChunks = ['AAAA', 'BBBB', 'CCCC'];
-    stderrChunks = ['ERR1', 'ERR2'];
+    stdoutChunks = ['AAAA', 'BBBB', 'CCCC', 'DD'];
+    stderrChunks = ['ERR1', 'ERR2', 'ERR3', 'E4'];
     const result = await exec({ outputTruncation: 'tail' });
-    expect(result.stdout).toBe('BCCCC');
-    expect(result.stderr).toBe('1ERR2');
+    expect(result.stdout).toBe('CCCDD');
+    expect(result.stderr).toBe('RR3E4');
   });
 
-  it('defaults to head when the profile omits outputTruncation', async () => {
-    stdoutChunks = ['AAAA', 'BBBB', 'CCCC'];
-    stderrChunks = ['ERR1', 'ERR2'];
-    const result = await exec({});
+  it('head keeps the start of both streams', async () => {
+    stdoutChunks = ['AAAA', 'BBBB', 'CCCC', 'DD'];
+    stderrChunks = ['ERR1', 'ERR2', 'ERR3', 'E4'];
+    const result = await exec({ outputTruncation: 'head' });
     expect(result.stdout).toBe('AAAABBBB');
     expect(result.stderr).toBe('ERR1ERR2');
+  });
+
+  it('reads the mode per command, so a reload applies to the next one', async () => {
+    stdoutChunks = ['AAAA', 'BBBB', 'CCCC', 'DD'];
+    const conn = await connect({ outputTruncation: 'head' });
+    expect((await conn.exec('cat x', { timeoutMs: 30_000 })).stdout).toBe('AAAABBBB');
+    conn.replaceProfile({ ...conn.profile, outputTruncation: 'tail' });
+    expect((await conn.exec('cat x', { timeoutMs: 30_000 })).stdout).toBe('CCCDD');
+  });
+
+  it('reports progress as data received, which never goes backwards', async () => {
+    // Tail mode shrinks the buffer at each trim; MCP progress must only increase.
+    let now = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => (now += 1_000));
+    stdoutChunks = ['AAAA', 'BBBB', 'CCCC', 'DD'];
+    const reported: number[] = [];
+    await (await connect({ outputTruncation: 'tail' })).exec('cat x', {
+      timeoutMs: 30_000,
+      onProgress: (bytes) => reported.push(bytes),
+    });
+    expect(reported).toEqual([4, 8, 12, 14]);
   });
 });

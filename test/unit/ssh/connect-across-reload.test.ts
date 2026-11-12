@@ -54,7 +54,7 @@ afterEach(() => {
 
 const profile = (name: string, overrides: Partial<Profile> = {}): Profile => ({
   name, group: 'dev', host: `${name}.example.test`, port: 22, user: 'deploy', auth: 'password',
-  tty: false, timeout: 30_000, maxChars: 5000, maxOutputBytes: 1000, role: 'admin', readOnly: false,
+  tty: false, timeout: 30_000, maxChars: 5000, maxOutputBytes: 1000, outputTruncation: 'head', role: 'admin', readOnly: false,
   announceAgent: true, approvalPolicy: 'auto', cert: false, sessionMaxPerConnection: 5,
   sessionIdleTimeoutMs: 10_000, sessionBackgroundMaxMs: 10_000, commandQuotaPerDay: 0,
   transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,

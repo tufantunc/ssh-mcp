@@ -20,6 +20,7 @@ const baseProfile: Omit<Profile, 'name' | 'host' | 'port' | 'user' | 'role'> = {
   timeout: 15000,
   maxChars: 5000,
   maxOutputBytes: 1048576,
+  outputTruncation: 'head',
   readOnly: false,
   announceAgent: true,
   approvalPolicy: 'ask-destructive',
