@@ -275,7 +275,13 @@ jobs:
       # `--retry-all-errors` rather than a hand-rolled loop. The registry serves a
       # published version to the CDN asynchronously, so this URL can 404 for a while
       # after `npm publish` returns; `-f` turns that into exit 22 and
-      # `--retry-all-errors` is what makes curl retry it. `registry` keeps its own loop
+      # `--retry-all-errors` is what makes curl retry it.
+      #
+      # Fifteen minutes (90 × 10 s), not five. 2.25.1 was served 76 s after publish;
+      # 2.26.0 took about 7 minutes, so a five-minute wait failed this job, the
+      # registry listing and the release check on a package npm had accepted, and
+      # the release needed a manual `gh run rerun --failed`. The wait costs nothing
+      # when npm is quick: curl stops at the first success. `registry` keeps its own loop
       # for a reason documented there (packument caching) that does not apply to a
       # tarball GET, so this does not reuse it — and note the two jobs both hang off
       # `release` and run concurrently, so neither warms the other's CDN object.
@@ -294,7 +300,7 @@ jobs:
           version="$(node -p 'require("./package.json").version')"
           name="$(node -p 'require("./package.json").name')"
 
-          curl -fsSL --retry 30 --retry-delay 10 --retry-all-errors \
+          curl -fsSL --retry 90 --retry-delay 10 --retry-all-errors \
             -o package.tgz "https://registry.npmjs.org/$name/-/$name-$version.tgz"
 
           # The registry metadata goes to a file and node reads it as data. Piping curl
@@ -510,7 +516,7 @@ jobs:
       # of a pinned schema would have gone stale the first time that URL moved.
       #
       # Before the npm wait, not after: it takes a second, and there is no reason
-      # to spend five minutes on propagation only to fail on a malformed listing.
+      # to spend up to fifteen minutes on propagation only to fail on a malformed listing.
       - name: Validate server.json against the registry schema
         run: ./mcp-publisher validate
 
@@ -526,9 +532,10 @@ jobs:
       #   `npm view pkg@version` fetches the whole packument and resolves the
       #   version locally, and npm serves packuments with `max-age=300` while
       #   defaulting `prefer-online` to false. Attempt 1 would cache a document
-      #   that lacks the new version and attempts 2..30 could all be answered
-      #   from it — a 290-second window entirely inside the 300-second one. The
-      #   loop would report "never became visible" while npm was serving it.
+      #   that lacks the new version, and every attempt in the next 300 seconds
+      #   could be answered from it. With the 290-second loop this once had, the
+      #   whole wait fit inside that window and reported "never became visible"
+      #   while npm was serving it.
       #
       #   And the name has to come from server.json's identifier, not a literal:
       #   the identifier is what the registry resolves, so polling anything else
@@ -541,7 +548,9 @@ jobs:
           identifier="$(node -p 'require("./server.json").packages.find((p) => p.registryType === "npm").identifier')"
           version="$(node -p 'require("./package.json").version')"
           url="https://registry.npmjs.org/$identifier/$version"
-          attempts=30
+          # Fifteen minutes, matching the sbom job's tarball wait; see the
+          # 2.26.0 note there for why five was not enough.
+          attempts=90
           for i in $(seq 1 "$attempts"); do
             # Keep the reason. Discarding it made a 404, a 429, an npm outage and
             # a runner DNS failure all read as "not yet visible", on the one job
