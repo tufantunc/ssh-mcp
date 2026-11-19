@@ -76,6 +76,33 @@ export interface ToolDeps {
  * and audit store. Tool groups receive the result and never touch those four
  * directly, so there is exactly one path from caller input to a remote command.
  */
+/**
+ * Under `approvalPolicy = "client-tool"`, the tools whose call is itself the approval.
+ *
+ * Each one does one kind of thing, and the client's own consent prompt for it shows
+ * exactly what will run (the command, the path, the pid), so a user who keeps "ask"
+ * on these tools in their client approves every gated call there. `run-command` is
+ * deliberately absent: it carries safe and destructive commands alike, so a user who
+ * always-allows it for the safe ones would be approving everything. A gated command
+ * on a tool not listed here is refused and pointed at `destructive-command`.
+ *
+ * An explicit list rather than "every tool but run-command", so that a tool added
+ * later is refused at the gate until someone decides its prompt is enough.
+ */
+export const CLIENT_CONSENT_TOOLS: ReadonlySet<string> = new Set([
+  'destructive-command',
+  'privileged-command',
+  'signal-process',
+  'open-session',
+  'sftp-upload',
+  'sftp-upload-file',
+  'sftp-download',
+  'sftp-download-file',
+]);
+
+/** The audit `approver` for a call approved by the client's own tool-call prompt. */
+export const CLIENT_TOOL_APPROVER = 'client-tool-consent';
+
 export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
   const quota = new CommandQuota();
   // Both read live: a reload changes the TTL, and moves the generation that retires
@@ -103,6 +130,9 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       // or against a connection the reload has since closed.
       const genAtEval = registry.generation;
       const conn = await resolveConn(profileName);
+      // Read before evaluating: a reload swaps conn.profile in place, and which gate
+      // applies has to follow the rules the evaluation was made under.
+      const approvalPolicyAtEval = conn.profile.approvalPolicy;
       const evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName, resource);
       span.setAttribute('policy.decision', evaluation.decision);
       span.setAttribute('command.class', evaluation.commandClass);
@@ -113,6 +143,41 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
           `POLICY_DENIED: ${evaluation.reason || 'Command not allowed'}`,
           evaluation,
         );
+      }
+
+      if (evaluation.decision === 'require-approval' && approvalPolicyAtEval === 'client-tool') {
+        // No elicitation: the approval is the client's consent prompt for this tool
+        // call, which the user answered before the call reached us. That only holds
+        // for a tool that does one gated thing (CLIENT_CONSENT_TOOLS).
+        span.setAttribute('policy.approval', 'client-tool');
+        if (!CLIENT_CONSENT_TOOLS.has(toolName)) {
+          throw new PolicyRefusedError(
+            `APPROVAL_VIA_TOOL: profile "${conn.profile.name}" uses approvalPolicy = "client-tool", so ` +
+            `${evaluation.commandClass} commands are not run from ${toolName}. Call destructive-command ` +
+            `with the same arguments instead; your MCP client asks the user to approve that tool call, ` +
+            `and that answer is the approval.`,
+            { ...evaluation, decision: 'deny', ruleId: 'approval-via-tool' },
+          );
+        }
+        if (registry.generation !== genAtEval) {
+          // Consent was given under rules that are no longer live. It carries over only
+          // if the new rules still leave this to the client's prompt.
+          const recheck = await recheckAfterReload(conn, command, toolName, resource, evaluation, 'approval');
+          if (recheck.evaluation.decision === 'require-approval' && conn.profile.approvalPolicy !== 'client-tool') {
+            throw new PolicyRefusedError(
+              'CONFIG_RELOADED: The configuration was reloaded while this command was being checked, ' +
+              'and the decision does not carry over to the new rules; retry the call.',
+              {
+                ...recheck.evaluation,
+                decision: 'deny',
+                ruleId: 'config-reloaded',
+                reason: 'The configuration was reloaded while the command was being checked; the command was not run.',
+              },
+            );
+          }
+          return { conn, evaluation: recheck.evaluation, approver: CLIENT_TOOL_APPROVER };
+        }
+        return { conn, evaluation, approver: CLIENT_TOOL_APPROVER };
       }
 
       if (evaluation.decision === 'require-approval') {

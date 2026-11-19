@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { startE2E, e2eAvailable, textOf } from './harness.js';
 import { createConnection } from '../integration/fixtures.js';
 
-// §5 of the readiness report: exercise all 15 tools through a real MCP client
+// §5 of the readiness report: exercise all 16 tools through a real MCP client
 // over a real transport against a real SSH server. This is the check that would
 // have caught open-session being registered without a handler — the in-process
 // harness found it, but only because it too went through the MCP layer.
@@ -17,10 +17,10 @@ beforeAll(async () => {
 afterAll(async () => { await e2e?.cleanup(); });
 
 describe.skipIf(!available)('E2E — tool surface over stdio', () => {
-  it('advertises all 15 tools to a real client', async () => {
+  it('advertises all 16 tools to a real client', async () => {
     const { tools } = await e2e.client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
-      'close-session', 'list-connections', 'list-sessions', 'open-session',
+      'close-session', 'destructive-command', 'list-connections', 'list-sessions', 'open-session',
       'privileged-command', 'read-command', 'read-session-output',
       'reload-config', 'run-command', 'sftp-download', 'sftp-download-file', 'sftp-list',
       'sftp-upload', 'sftp-upload-file', 'signal-process',

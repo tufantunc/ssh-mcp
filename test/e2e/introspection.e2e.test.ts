@@ -29,7 +29,7 @@ import { SERVER_ENTRY, serverBuilt } from './harness.js';
  */
 
 /** The complete registered set. A reduced list would mean the config had leaked into the metadata. */
-const TOOL_COUNT = 15;
+const TOOL_COUNT = 16;
 
 /**
  * Every tool description, as a client receives it.
@@ -54,6 +54,7 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
   "read-session-output": "Read recent output from a background session (e.g., tail -f logs).",
   "read-command": "Execute a READ-ONLY command from an allowlist (ls, cat, grep, find, stat, df, etc.). This tool does NOT modify the system. Prefer this tool for all read operations. Single-line only: a command containing a line break is refused, so upload a multi-line script with sftp-upload and run it by path.",
   "run-command": "Execute an arbitrary shell command on the remote server. May modify the system. Commands classified destructive or privileged go through the approval gate; approvalPolicy on the profile decides whether that is a prompt, an automatic allow, or a refusal. Single-line only: a command containing a line break is refused, so upload a multi-line script with sftp-upload and run it by path.",
+  "destructive-command": "Execute a shell command that changes the remote system (deletes, overwrites, restarts, installs). Same arguments and behaviour as run-command; use it when run-command refuses a command with APPROVAL_VIA_TOOL. On a profile with approvalPolicy = \"client-tool\", calling this tool is the approval: the MCP client asks the user before the call runs. Single-line only: a command containing a line break is refused, so upload a multi-line script with sftp-upload and run it by path.",
   "privileged-command": "Execute a command with sudo elevation. Goes through the approval gate; approvalPolicy on the profile decides whether that is a prompt, an automatic allow, or a refusal. The sudo password is piped via stdin for the prompt only (never visible in process list); the command itself runs with stdin at /dev/null, so it can never read the password back. Single-line only: a command containing a line break is refused, so upload a multi-line script with sftp-upload and run it by path.",
   "sftp-upload": "Upload a file to the remote server via SFTP (secure file transfer, not shell-based). Replaces an existing file at that path unconditionally — there is no overwrite flag and no way to require a new destination.",
   "sftp-download": "Download a file from the remote server via SFTP.",

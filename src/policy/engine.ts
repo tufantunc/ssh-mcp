@@ -626,7 +626,9 @@ export class PolicyEngine {
     const mode: ApprovalMode = profile.approvalPolicy;
     if (mode === 'auto') return false;
     if (mode === 'ask-all') return true;
-    // ask-destructive and deny both gate on destructive/privileged commands.
+    // ask-destructive, deny and client-tool all gate on destructive/privileged
+    // commands; they differ in what the gate does (prompt, refuse, or require the
+    // call to arrive on a tool the client asked the user about).
     return needsApproval;
   }
 
