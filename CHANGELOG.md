@@ -33,6 +33,11 @@
   
   Upgrade note: a `split --filter` command that ran as `safe` is now asked for approval, or refused, depending on the role and tier.
 
+### Security
+
+- Fixed [GHSA-hmrp-r5wm-5mqf](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-hmrp-r5wm-5mqf): a command inside the shell's own grammar (a subshell, a brace group, after a reserved word, behind a redirection) or behind an interpreter's options (`sh -c -- CMD`, `python3 -W ignore -c CODE`) reached class `safe`, with no never-allowed match.
+- Fixed [GHSA-gpfp-xjq7-64hv](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-gpfp-xjq7-64hv): `split --filter=COMMAND` reached class `safe` when the filter held no space, with no never-allowed match. Reported by @chrispham-cyber.
+
 ## 2.26.0
 
 ### Minor Changes
