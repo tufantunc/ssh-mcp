@@ -14,11 +14,14 @@ describe('nesting far deeper than a call stack', () => {
     }
   });
 
+  // Twelve thousand levels: a function that calls itself runs out of stack near ten
+  // thousand. The classifier's time grows faster than the depth here, and under the
+  // coverage run of CI twenty-one thousand levels took over two minutes.
   it('gets an answer from the classifier', () => {
     for (const unit of ['"$(', '$("', '${x:-"']) {
-      const command = `echo ${unit.repeat(21_000)}`;
+      const command = `echo ${unit.repeat(12_000)}`;
       expect(() => classifyCommand(command), unit).not.toThrow();
       expect(() => findForbiddenMatch(command), unit).not.toThrow();
     }
-  }, 120_000);
+  }, 240_000);
 });
