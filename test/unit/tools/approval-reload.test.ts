@@ -453,3 +453,57 @@ describe('a decision made while a reload landed', () => {
     expect(h.exec).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('a client-tool consent when the config is reloaded mid-call', () => {
+  beforeEach(() => {
+    approve.mockReset();
+  });
+
+  // Consent from the client's tool prompt was given under the old rules. If the reload
+  // moves the profile to a policy that would have prompted, it does not carry over.
+  function reloadDuringEvaluation(next: Profile) {
+    const profile: Profile = { ...testProfile, approvalPolicy: 'client-tool' };
+    const policy = new PolicyEngine(DEFAULT_RULES);
+    const ctx = setup(profile, policy);
+    const original = policy.evaluateWithOpa.bind(policy);
+    let first = true;
+    vi.spyOn(policy, 'evaluateWithOpa').mockImplementation(async (...args) => {
+      const result = await original(...args);
+      if (first) {
+        first = false;
+        ctx.registry.applyConfig(configOf(next));
+      }
+      return result;
+    });
+    const run = () => ctx.pipeline.runAudited(
+      COMMAND,
+      { toolName: 'destructive-command', failureClass: 'safe', profile: profile.name, extra: {} },
+      ctx.pipeline.execAndReport(),
+    );
+    return { ...ctx, run };
+  }
+
+  it('is refused when the reload switches the profile to ask-destructive', async () => {
+    const { exec, records, run } = reloadDuringEvaluation({ ...testProfile, approvalPolicy: 'ask-destructive' });
+
+    await expect(run()).rejects.toThrow(/CONFIG_RELOADED/);
+    expect(exec).not.toHaveBeenCalled();
+    expect(approve).not.toHaveBeenCalled();
+    expect(records.at(-1)).toMatchObject({ decision: 'deny', ruleId: 'config-reloaded' });
+  });
+
+  it('is refused when the reload denies the command', async () => {
+    const { exec, run } = reloadDuringEvaluation({ ...testProfile, approvalPolicy: 'deny' });
+
+    await expect(run()).rejects.toThrow(/reloaded/i);
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('still runs when the reload keeps client-tool', async () => {
+    const { exec, records, run } = reloadDuringEvaluation({ ...testProfile, approvalPolicy: 'client-tool', timeout: 9_000 });
+
+    await run();
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(records.at(-1)).toMatchObject({ approver: 'client-tool-consent' });
+  });
+});

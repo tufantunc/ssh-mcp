@@ -30,37 +30,48 @@ export function registerCommandTools(
     },
   );
 
-  // ─── run-command ───────────────────────────────────────────────────────
+  // ─── run-command / destructive-command ────────────────────────────────
+  // One handler, two tools. They differ only at the approval gate, and only under
+  // approvalPolicy = "client-tool": there a gated command is refused on run-command
+  // and runs on destructive-command, whose client-side consent prompt is the
+  // approval (see CLIENT_CONSENT_TOOLS). Under every other policy the two behave
+  // identically, so a model that reaches for either gets the same gate.
+  const shellCommandShape = {
+    command: z.string().describe('Shell command to execute'),
+    profile: z.string().optional().describe('Profile name'),
+    session: z.string().optional().describe('Run in an existing interactive session (stateful)'),
+    tty: z.boolean().optional().describe('Allocate a pseudo-terminal'),
+  };
+  const runShellCommand = (toolName: 'run-command' | 'destructive-command') =>
+    async (
+      { command, profile, session, tty }: { command: string; profile?: string; session?: string; tty?: boolean },
+      extra: any,
+    ) => runAudited(
+      command,
+      { toolName, failureClass: 'safe', profile, session, extra },
+      async (rt) => {
+        // A session run keeps the caller's shell state; a plain exec does not.
+        let audited: CommandResult;
+        if (session) {
+          const sess = rt.conn.getSession(session);
+          if (!sess) throw new Error(`Session "${session}" not found`);
+          audited = await sess.run(rt.command, undefined, rt.abortSignal);
+        } else {
+          audited = await rt.conn.exec(rt.command, {
+            tty, onProgress: rt.onProgress, abortSignal: rt.abortSignal,
+          });
+        }
+        return { audited, output: commandOutput(audited) };
+      },
+    );
+
+  server.tool('run-command', D["run-command"], shellCommandShape, { destructiveHint: true }, runShellCommand('run-command'));
   server.tool(
-    'run-command',
-    D["run-command"],
-    {
-      command: z.string().describe('Shell command to execute'),
-      profile: z.string().optional().describe('Profile name'),
-      session: z.string().optional().describe('Run in an existing interactive session (stateful)'),
-      tty: z.boolean().optional().describe('Allocate a pseudo-terminal'),
-    },
+    'destructive-command',
+    D["destructive-command"],
+    shellCommandShape,
     { destructiveHint: true },
-    async ({ command, profile, session, tty }, extra) => {
-      return runAudited(
-        command,
-        { toolName: 'run-command', failureClass: 'safe', profile, session, extra },
-        async (rt) => {
-          // A session run keeps the caller's shell state; a plain exec does not.
-          let audited: CommandResult;
-          if (session) {
-            const sess = rt.conn.getSession(session);
-            if (!sess) throw new Error(`Session "${session}" not found`);
-            audited = await sess.run(rt.command, undefined, rt.abortSignal);
-          } else {
-            audited = await rt.conn.exec(rt.command, {
-              tty, onProgress: rt.onProgress, abortSignal: rt.abortSignal,
-            });
-          }
-          return { audited, output: commandOutput(audited) };
-        },
-      );
-    },
+    runShellCommand('destructive-command'),
   );
 
   // ─── privileged-command ────────────────────────────────────────────────

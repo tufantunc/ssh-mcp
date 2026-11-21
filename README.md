@@ -146,7 +146,7 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 
 ---
 
-## Tools (15)
+## Tools (16)
 
 | Tool | Purpose | readOnly | destructive |
 |------|---------|:--------:|:----------:|
@@ -157,6 +157,7 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 | `read-session-output` | Read output from background sessions (e.g., `tail -f`) | ✅ | — |
 | `read-command` | Execute allowlisted read-only commands (`ls`, `cat`, `grep`, ...) | ✅ | — |
 | `run-command` | Execute arbitrary commands (destructive/privileged need approval, unless `approvalPolicy = "auto"`) | — | — |
+| `destructive-command` | Same as `run-command`; the tool to use for destructive/privileged commands under `approvalPolicy = "client-tool"` (see [Approval Modes](#approval-modes)) | — | ✅ |
 | `privileged-command` | Execute with sudo (needs approval, unless `approvalPolicy = "auto"`) | — | ✅ |
 | `sftp-upload` | Upload a file via SFTP (replaces the destination unconditionally) | — | ✅ |
 | `sftp-download` | Download a file via SFTP | ✅ | — |
@@ -301,7 +302,7 @@ commandOutputTruncation = "head"    # head | tail; see below
 connectionIdleReapMs = 900000       # 15min
 commandQuotaPerDay = 0              # 0 = unlimited; circuit breaker for runaway agents
 approvalGrantTtlMs = 0              # 0 = always prompt; see "Approval Grants"
-approvalMode = "ask-destructive"    # auto | ask-destructive | ask-all | deny
+approvalMode = "ask-destructive"    # auto | ask-destructive | ask-all | deny | client-tool
 # transferRoot = "/srv/ssh-mcp-transfers"   # enables the streaming file tools; see above
 transferMaxBytes = 268435456        # 256MB per streaming transfer
 transferTimeoutMs = 300000          # 5min with no bytes moving (idle, not total)
@@ -775,6 +776,33 @@ startup rather than degrading silently.
   [SECURITY.md](./SECURITY.md) before relying on this in production.
 - `ask-all` — prompt for every command
 - `deny` — reject destructive/privileged commands outright (no prompt)
+- `client-tool` — for MCP clients that cannot show an elicitation prompt (see below). The
+  client's own "allow this tool call?" prompt is the approval, instead of a prompt from this server
+
+#### Clients without elicitation: `client-tool`
+
+The `ask-*` modes ask through MCP elicitation, and a client that does not support it can
+never answer, so every gated command is refused with `APPROVAL_UNAVAILABLE`. Every MCP
+client does ask the user before a tool call, though. `client-tool` uses that prompt:
+
+- `run-command` keeps running read-only and safe commands. A destructive or privileged
+  command there is refused with `APPROVAL_VIA_TOOL`, which tells the model to call
+  `destructive-command` with the same arguments.
+- `destructive-command`, `privileged-command`, `signal-process`, `open-session` and the
+  `sftp-*` transfer tools run gated commands without an elicitation prompt: the call
+  reaching the server is the approval. Each does one kind of thing, and the client's
+  prompt shows its arguments, so the user sees exactly what will run.
+- Role bindings, host groups, the denylist, OPA and the command quota apply as in every
+  other mode. Only the elicitation step is replaced.
+- The audit log records these runs with `approver: "client-tool-consent"`.
+
+In your client, always-allow `read-command` and `run-command` if you like, and keep
+**ask** on `destructive-command`, `privileged-command` and the other tools above.
+
+This is weaker than elicitation, and it is opt-in for that reason. The server cannot tell
+whether a person answered the client's prompt: "Always allow" on `destructive-command`
+makes that profile behave like `auto`. Use it where the alternative would be `auto`, not
+in place of a client that can show the prompt.
 
 ### Approval Grants (just-in-time)
 
@@ -804,7 +832,8 @@ is refused rather than left pending, and the refusal says so; the prompt may
 still be open in your client, in which case run the command again once you are
 ready. If your client does not support elicitation at all, every destructive and
 privileged command is refused with `APPROVAL_UNAVAILABLE` naming that cause —
-approval fails closed by design.
+approval fails closed by design. For such a client, see
+[`client-tool`](#clients-without-elicitation-client-tool).
 
 ### Command Quota
 
@@ -1120,6 +1149,7 @@ replacement, rather than failing later as a confusing auth error.
 |----|----|-------|
 | `exec` | `read-command` | Allowlisted read-only commands. Prefer this for reads. |
 | `exec` | `run-command` | Arbitrary commands. Destructive and privileged ones go through the approval gate, unless `approvalPolicy = "auto"`. |
+| — | `destructive-command` | Same as `run-command`. Under `approvalPolicy = "client-tool"`, the one that runs destructive and privileged commands. |
 | `sudo-exec` | `privileged-command` | Requires approval unless `approvalPolicy = "auto"`. Password is piped via stdin. |
 | `description` parameter | — | Removed. It was an injection vector (#44) and never reached the host. |
 

@@ -14,7 +14,7 @@ describe('MCP tool surface', () => {
     h = await createHarness();
     const { tools } = await h.client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
-      'close-session', 'list-connections', 'list-sessions', 'open-session',
+      'close-session', 'destructive-command', 'list-connections', 'list-sessions', 'open-session',
       'privileged-command', 'read-command', 'read-session-output',
       'reload-config', 'run-command', 'sftp-download', 'sftp-download-file', 'sftp-list',
       'sftp-upload', 'sftp-upload-file', 'signal-process',
