@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyCommand, findForbiddenMatch } from '../../../src/policy/classifier.js';
+import { classifyCommand, findForbiddenMatch, nestedCommands } from '../../../src/policy/classifier.js';
 import { growthRatio } from './cpu-cost.js';
 
 /**
@@ -200,3 +200,36 @@ describe('the check of the last two commits, one line each', () => {
     expect(findForbiddenMatch(command) !== null).toBe(forbidden);
   });
 });
+
+/**
+ * `nestedCommands` looked for the `)` of each `$(`, `<(` and `>(` by reading on from it.
+ * One that never closes read the rest of the line, so a line of them was read once per
+ * opener: four times the input took sixteen times as long. The closing parentheses are
+ * found in one pass now.
+ */
+describe('the scan for substitutions reads the line once', () => {
+  it.each([
+    ['command substitutions that never close', 'echo $( '],
+    ['process substitutions that never close', 'cat <( '],
+    ['openers of three kinds', 'echo $( ${ `; '],
+  ])('%s', (_name, unit) => {
+    const small = unit.repeat(2_000);
+    const large = unit.repeat(8_000);
+    expect(growthRatio(() => nestedCommands(small), () => nestedCommands(large))).toBeLessThan(8);
+  }, 60_000);
+
+  // And finds what it found: the closer of each opener, counting every parenthesis.
+  it.each([
+    ['echo $(id)', ['id']],
+    ['echo $(echo $(id))', ['echo $(id)']],
+    ['echo $(a) $(b', ['a']],
+    ['echo $( $(b) ', ['b']],
+    ['echo ) $(a (b) c) d', ['a (b) c']],
+    ['cat <(a) >(b)', ['a', 'b']],
+    ['echo $((1 + 1)) $(a)', ['a']],
+    ['echo $(a)) $(b)', ['a', 'b']],
+  ] as Array<[string, string[]]>)('%s', (command, inner) => {
+    expect(nestedCommands(command, false)).toEqual(inner);
+  });
+});
+

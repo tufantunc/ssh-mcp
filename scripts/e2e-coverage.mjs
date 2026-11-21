@@ -16,6 +16,10 @@
  *
  * A child that is SIGKILLed writes nothing; the kill-ladder tests are lost to this
  * report, which is a gap in the measurement, not a claim that their code is untested.
+ * One that is killed while it exits has created its dump and not filled it: the file is
+ * empty, or holds half a document. Measured: a SIGKILL 9.2 to 9.5 ms after a SIGTERM
+ * left an empty file in 5 of 400 tries. Such a dump is passed over and named in the
+ * output, for the same reason. A dump that is whole and is not coverage still fails.
  *
  *   node scripts/e2e-coverage.mjs <NODE_V8_COVERAGE dir> <output lcov path>
  */
@@ -78,8 +82,19 @@ async function source(path) {
 
 const dumps = (await readdir(rawDir)).filter((f) => f.endsWith('.json'));
 let scripts = 0;
+/** Dumps their process did not finish writing. */
+const skipped = [];
 for (const dump of dumps) {
-  const { result } = JSON.parse(await readFile(join(rawDir, dump), 'utf8'));
+  const text = await readFile(join(rawDir, dump), 'utf8');
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    skipped.push(`${dump} (${text.length} characters)`);
+    continue;
+  }
+  const { result } = parsed;
   for (const script of result) {
     if (!script.url.startsWith('file://')) continue;
     const path = fileURLToPath(script.url);
@@ -127,4 +142,7 @@ for (const [path, acc] of [...files].sort(([a], [b]) => a.localeCompare(b))) {
 
 await mkdir(dirname(resolve(outPath)), { recursive: true });
 await writeFile(outPath, lines.join('\n') + '\n');
-console.log(`e2e coverage: ${scripts} scripts from ${dumps.length} processes -> ${outPath}`);
+console.log(`e2e coverage: ${scripts} scripts from ${dumps.length - skipped.length} processes -> ${outPath}`);
+if (skipped.length > 0) {
+  console.log(`skipped ${skipped.length} unfinished dump(s), each from a process killed while it exited: ${skipped.join(', ')}`);
+}

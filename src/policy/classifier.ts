@@ -1245,6 +1245,24 @@ export function nestedCommands(command: string, speculativeOperands = true, dial
   // `$(...)`, `<(...)`, `>(...)` — scanned rather than matched, because a regex
   // cannot balance parentheses and `echo $(echo $(sudo id))` is the case that
   // matters most.
+  // Which `)` closes each `(`, counting every parenthesis and nothing else, found in
+  // one pass. Looking for it from each opener in turn read the rest of the line once
+  // per opener that never closes: `echo $( ` repeated was quadratic.
+  let closers: Map<number, number> | null = null;
+  const closerOf = (open: number): number | undefined => {
+    if (closers === null) {
+      closers = new Map();
+      const pending: number[] = [];
+      for (let j = 0; j < command.length; j++) {
+        if (command[j] === '(') pending.push(j);
+        else if (command[j] === ')') {
+          const opened = pending.pop();
+          if (opened !== undefined) closers.set(opened, j);
+        }
+      }
+    }
+    return closers.get(open);
+  };
   for (let i = 0; i < command.length; i++) {
     const opensSubstitution = command[i] === '$' && command[i + 1] === '(';
     const opensProcess = (command[i] === '<' || command[i] === '>') && command[i + 1] === '(';
@@ -1254,18 +1272,10 @@ export function nestedCommands(command: string, speculativeOperands = true, dial
     // prompt off `echo $((1 + 1))`.
     if (opensSubstitution && command[i + 2] === '(') continue;
 
-    let depth = 0;
-    for (let j = i + 1; j < command.length; j++) {
-      if (command[j] === '(') depth++;
-      else if (command[j] === ')') {
-        depth--;
-        if (depth === 0) {
-          found.push(command.slice(i + 2, j));
-          i = j;
-          break;
-        }
-      }
-    }
+    const close = closerOf(i + 1);
+    if (close === undefined) continue;
+    found.push(command.slice(i + 2, close));
+    i = close;
   }
 
   // Backticks. No nesting to balance — the shell requires escaping to nest them.
