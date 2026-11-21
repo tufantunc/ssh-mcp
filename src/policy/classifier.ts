@@ -2,6 +2,7 @@ import type { CommandClass, ParsedCommand, ReadOnlyRejection } from '../types.js
 import { AWK_NAMES, readAwkInvocation, type AwkFindings } from './awk.js';
 import { matchesGrammar, type ArgGrammar } from './reader-grammar.js';
 import { findNeverAllowedWriteTarget, neverAllowedWriteLabel, type NeverAllowedWriteTarget } from './never-allowed-writes.js';
+import { readShellGrammar } from './shell-grammar.js';
 
 /**
  * Anything through which the shell can start a second command.
@@ -731,37 +732,174 @@ const CLASS_RANK: Record<CommandClass, number> = {
 // a command word, which is a free string, so on a plain object `INTERPRETERS['toString']`
 // resolves to a function and reading `.programBearingWords` off it throws inside the
 // policy gate.
+/**
+ * How an interpreter reads its own options, for the walk from its name to its program.
+ *
+ * Only what is known to take no word of its own is listed. An option that is not here
+ * is taken to have a value, attached or as the next word: a table of the options that
+ * take a value left the program unread whenever it lacked one (`node -r ./x -e CODE`
+ * before `-r` was listed), and an option missing from this one makes a script's own
+ * argument look like the interpreter's instead (`python3 --new-flag run.py -c cfg`),
+ * which costs an approval and hides nothing.
+ */
+interface OptionModel {
+  /** Letters that take no value; they may stand in a cluster (`-Bs`). */
+  switches: string;
+  /** Letters whose value is the rest of their word and never the next word (`-i.bak`). */
+  attached: string;
+  /** Letters whose value is the rest of their word or, with none, the next word (`-I lib`). */
+  valued: string;
+  /** Letters after which the words are a module's or a script's (`python3 -m mod …`). */
+  enders: string;
+  /** Long options that take no value. */
+  plain: ReadonlySet<string>;
+  /** A long option that matches takes no value (`--no-warnings`). */
+  plainLike?: RegExp;
+  /** Letters followed by one letter that is theirs (`-Ke`). */
+  oneLetter?: string;
+  /** `-0x1F` is a hex number (perl); elsewhere an `x` after a `0` is its own option. */
+  hexAfterZero?: boolean;
+}
+
+const NO_LONG_OPTIONS: ReadonlySet<string> = new Set();
+const PYTHON_OPTIONS: OptionModel = {
+  switches: 'bBdEhiIOPqRsStuvVx', attached: '', valued: 'WXQ', enders: 'm',
+  plain: new Set(['--help', '--version', '--help-env', '--help-xoptions', '--help-all']),
+};
+// `-l` and `-0` take digits, `-C`, `-D` and `-V` letters of their own or nothing, `-d` a
+// `t` or a `:MODULE`: read as switches, so a program letter behind them is still found.
+// ruby's `-K` and `-T` likewise; php's `-f FILE` and expect's `-f FILE` and `-b` take a
+// word and the options go on after it.
+const PERL_OPTIONS: OptionModel = {
+  switches: 'acCdDfghlnpsStTuUvVwWX', attached: 'FimMx', valued: 'I', enders: '', plain: NO_LONG_OPTIONS,
+  hexAfterZero: true,
+};
+const RUBY_OPTIONS: OptionModel = {
+  switches: 'acdhlnpsSTUvwWy', attached: 'Fix', valued: 'CEIrX', enders: '', oneLetter: 'K',
+  plain: new Set(['--copyright', '--debug', '--verbose', '--version', '--help', '--yydebug', '--jit', '--yjit', '--zjit', '--rjit', '--mjit', '--profile']),
+  plainLike: /^--(?:(?:en|dis)able-|[yzrm]?jit-(?:stats|verbose|wait|debug)$)/,
+};
+// From `node --help` (24): every option it documents without `=…`.
+const NODE_OPTIONS: OptionModel = {
+  switches: 'chiv', attached: '', valued: 'rC', enders: '',
+  plain: new Set(('--abort-on-uncaught-exception --allow-addons --allow-child-process --allow-inspector --allow-openssl-store'
+    + ' --allow-wasi --allow-worker --build-snapshot --check --completion-bash --cpu-prof --disable-sigusr1'
+    + ' --disable-wasm-trap-handler --disallow-code-generation-from-strings --enable-etw-stack-walking --enable-fips'
+    + ' --enable-fips-indicator-events --enable-network-family-autoselection --enable-source-maps --entry-url'
+    + ' --experimental-addon-modules --experimental-default-config-file --experimental-eventsource'
+    + ' --experimental-import-meta-resolve --experimental-import-text --experimental-inspector-network-resource'
+    + ' --experimental-network-inspection --experimental-print-required-tla --experimental-storage-inspection'
+    + ' --experimental-stream-iter --experimental-strip-types --experimental-test-coverage'
+    + ' --experimental-test-module-mocks --experimental-transform-types --experimental-vm-modules'
+    + ' --experimental-webstorage --experimental-worker-inspection --expose-gc --force-context-aware --force-fips'
+    + ' --force-node-api-uncaught-exceptions-policy --frozen-intrinsics --harmony --heap-prof --help'
+    + ' --insecure-http-parser --inspect --inspect-brk --inspect-wait --interactive --interpreted-frames-native-stack'
+    + ' --jitless --node-memory-debug --openssl-legacy-provider --openssl-shared-config --pending-deprecation'
+    + ' --permission --permission-audit --preserve-symlinks --preserve-symlinks-main --prof --prof-process'
+    + ' --report-compact --report-exclude-env --report-exclude-network --report-on-fatalerror --report-on-signal'
+    + ' --report-uncaught-exception --require-module --test --test-force-exit --test-only --test-randomize'
+    + ' --test-update-snapshots --throw-deprecation --tls-max-v1.2 --tls-max-v1.3 --tls-min-v1.0 --tls-min-v1.1'
+    + ' --tls-min-v1.2 --tls-min-v1.3 --trace-deprecation --trace-env --trace-env-js-stack --trace-env-native-stack'
+    + ' --trace-exit --trace-promises --trace-sigint --trace-sync-io --trace-tls --trace-uncaught --trace-warnings'
+    + ' --track-heap-objects --use-bundled-ca --use-env-proxy --use-openssl-ca --use-strict --use-system-ca'
+    + ' --v8-options --version --watch --watch-preserve-output --zero-fill-buffers').split(' ')),
+  // Every `--experimental-…` but the ones documented with a value.
+  // Every `--no-…`, every `--experimental-…` but the ones documented with a value, and
+  // the families of V8 and of older releases that are switches (`--trace-gc`,
+  // `--harmony-…`, `--expose_gc`: V8 reads `_` as `-`).
+  plainLike: /^--(?:no[-_]|experimental[-_](?!loader|default-type|config-file|sea-config|test-isolation|package-map|specifier-resolution|policy|test-tag-filter|permission-)|harmony|trace[-_](?!event|require-module)|expose[-_]|allow[-_]natives|prof\b|log[-_]|print[-_]|use[-_]strict|strict\b|abort[-_]on|enable[-_]source)/,
+};
+const PHP_OPTIONS: OptionModel = {
+  switches: 'aCehHilmnqsvw', attached: '', valued: 'cdfFStz', enders: '',
+  plain: new Set(['--interactive', '--no-chdir', '--no-header', '--no-php-ini', '--info', '--syntax-check', '--modules',
+    '--syntax-highlight', '--syntax-highlighting', '--strip', '--version', '--help', '--usage', '--ini']),
+};
+const LUA_OPTIONS: OptionModel = { switches: 'iEvW', attached: 'O', valued: 'lj', enders: 'b', plain: NO_LONG_OPTIONS };
+const OSASCRIPT_OPTIONS: OptionModel = { switches: 'i', attached: '', valued: 'ls', enders: '', plain: NO_LONG_OPTIONS };
+// From `bun --help` (1.3): every option it documents without `=<val>`.
+const BUN_OPTIONS: OptionModel = {
+  switches: 'bhiv', attached: '', valued: 'rF', enders: '',
+  plain: new Set(('--bun --cpu-prof --cpu-prof-md --experimental-http2-fetch --experimental-http3-fetch --expose-gc --heap-prof'
+    + ' --heap-prof-md --help --hot --if-present --parallel --prefer-latest --prefer-offline --redis-preconnect --revision'
+    + ' --inspect --inspect-brk --inspect-wait --sequential --silent --smol --sql-preconnect --throw-deprecation --use-bundled-ca --use-openssl-ca'
+    + ' --use-system-ca --version --watch --workspaces --zero-fill-buffers').split(' ')),
+  plainLike: /^--no-/,
+};
+// Every option of Rscript is `--name` or `--name=value`.
+const RSCRIPT_OPTIONS: OptionModel = { switches: '', attached: '', valued: '', enders: '', plain: NO_LONG_OPTIONS, plainLike: /^--/ };
+const DENO_OPTIONS: OptionModel = { switches: 'hqV', attached: '', valued: 'L', enders: '', plain: new Set(['--help', '--quiet', '--version']) };
+const EXPECT_OPTIONS: OptionModel = { switches: 'dinNv', attached: '', valued: 'bDf', enders: '', plain: NO_LONG_OPTIONS };
+const FISH_OPTIONS: OptionModel = {
+  switches: 'hilnNPv', attached: '', valued: 'dfop', enders: '',
+  plain: new Set(['--help', '--interactive', '--login', '--no-config', '--no-execute', '--private', '--version',
+    '--print-rusage-self', '--print-debug-categories']),
+};
+const CSH_OPTIONS: OptionModel = { switches: 'bdefilmnqstvVxX', attached: '', valued: '', enders: '', plain: NO_LONG_OPTIONS };
+
 /** One entry of the interpreter table — named so the lookup helper below can share it. */
 interface InterpreterSpec {
   programBearingWords: string[];
   readable: boolean;
+  /**
+   * How the walk past its options reads this interpreter (`programsPastOptions`): by
+   * the model of its options, as a shell (`-c` is a switch and the program an operand),
+   * or wherever its program flags stand (vim and gdb read them after operands too).
+   * Without one the interpreter has its own walk (PowerShell) or no program flag.
+   */
+  options?: OptionModel | 'shell' | 'vim' | 'gdb';
+  /**
+   * Program flags only that walk reads. `programAfterFlag` takes the word after the
+   * first flag it knows, so a flag added to `programBearingWords` changes which word
+   * that is on lines it reads today: `php -B -r 'sudo id'` is `privileged` by `-r`,
+   * and would be read as `-B` handed the word `-r`.
+   */
+  alsoProgramWords?: string[];
 }
+
+const SHELL: InterpreterSpec = { programBearingWords: ['-c'], readable: true, options: 'shell' };
+const PYTHON: InterpreterSpec = { programBearingWords: ['-c'], readable: false, options: PYTHON_OPTIONS };
+// `-p`/`--print` evaluate exactly as `-e` does and then print the result.
+const NODE: InterpreterSpec = { programBearingWords: ['-e', '--eval', '-p', '--print'], readable: false, options: NODE_OPTIONS };
+const LUA: InterpreterSpec = { programBearingWords: ['-e'], readable: false, options: LUA_OPTIONS };
+const RUBY: InterpreterSpec = { programBearingWords: ['-e'], readable: false, options: RUBY_OPTIONS };
+// The program is C shell or fish text, which this file does not read: its presence is
+// what counts, and what it names is still classified as the command it would be in sh.
+const CSH: InterpreterSpec = { programBearingWords: ['-c'], readable: false, options: CSH_OPTIONS };
+// The same gap as the osascript/lua block below, measured on 2.19.1
+// (GHSA-cm4c-4q74-mgmj): `gdb -ex`, `expect -c` and `vi/vim/ex -c` each
+// hand a program to an executor and each classified `safe` — the one class
+// that never reaches the approval gate. `readable: false` throughout: the
+// program is gdb command language / expect / ex, not shell text, so its
+// presence is what counts, exactly like python's `-c`.
+const VIM: InterpreterSpec = { programBearingWords: ['-c', '--cmd'], readable: false, options: 'vim' };
+const GDB: InterpreterSpec = {
+  programBearingWords: ['-ex', '--eval-command', '-iex', '--init-eval-command'], readable: false, options: 'gdb',
+};
 
 const INTERPRETERS: Record<string, InterpreterSpec> = Object.assign(
   Object.create(null) as Record<string, InterpreterSpec>,
   {
-  sh: { programBearingWords: ['-c'], readable: true },
-  bash: { programBearingWords: ['-c'], readable: true },
-  dash: { programBearingWords: ['-c'], readable: true },
-  zsh: { programBearingWords: ['-c'], readable: true },
-  ksh: { programBearingWords: ['-c'], readable: true },
-  ash: { programBearingWords: ['-c'], readable: true },
-  python: { programBearingWords: ['-c'], readable: false },
-  python2: { programBearingWords: ['-c'], readable: false },
-  python3: { programBearingWords: ['-c'], readable: false },
-  perl: { programBearingWords: ['-e', '-E'], readable: false },
-  ruby: { programBearingWords: ['-e'], readable: false },
-  // `-p`/`--print` evaluate exactly as `-e` does and then print the result.
-  node: { programBearingWords: ['-e', '--eval', '-p', '--print'], readable: false },
-  php: { programBearingWords: ['-r'], readable: false },
+  sh: SHELL, bash: SHELL, dash: SHELL, zsh: SHELL, ksh: SHELL, ash: SHELL,
+  ksh93: SHELL, mksh: SHELL, pdksh: SHELL, oksh: SHELL, lksh: SHELL, rksh: SHELL, rbash: SHELL, yash: SHELL, posh: SHELL,
+  csh: CSH, tcsh: CSH,
+  fish: { programBearingWords: ['-c', '--command', '-C', '--init-command'], readable: false, options: FISH_OPTIONS },
+  python: PYTHON, python2: PYTHON, python3: PYTHON, pypy: PYTHON, pypy3: PYTHON,
+  perl: { programBearingWords: ['-e', '-E'], readable: false, options: PERL_OPTIONS },
+  ruby: RUBY, jruby: RUBY,
+  node: NODE, nodejs: NODE,
+  // `-B`, `-R` and `-E` run code before, for and after each line of input as `-r` runs it once.
+  php: {
+    programBearingWords: ['-r'], readable: false, options: PHP_OPTIONS,
+    alsoProgramWords: ['--run', '-B', '--process-begin', '-R', '--process-code', '-E', '--process-end'],
+  },
   // Measured on 2.11.0: each of these classified `safe` while the identical
   // attack through python3 -c classified `destructive` (GHSA-qmx6-47vm-3vf7).
   // `readable: false` throughout, matching python/perl/node: the program is not
   // shell text, so its presence is what counts rather than its content.
-  osascript: { programBearingWords: ['-e'], readable: false },
-  lua: { programBearingWords: ['-e'], readable: false },
-  Rscript: { programBearingWords: ['-e'], readable: false },
-  bun: { programBearingWords: ['-e'], readable: false },
+  osascript: { programBearingWords: ['-e'], readable: false, options: OSASCRIPT_OPTIONS },
+  lua: LUA, luajit: LUA,
+  Rscript: { programBearingWords: ['-e'], readable: false, options: RSCRIPT_OPTIONS },
+  bun: { programBearingWords: ['-e'], readable: false, options: BUN_OPTIONS, alsoProgramWords: ['--eval', '-p', '--print'] },
   // No program-bearing flag: real tclsh takes a script FILE as its positional
   // argument or reads one from stdin, unlike sh/bash/python/pwsh, none of
   // which have a `-c` of its own. An empty list still marks tclsh as an
@@ -770,23 +908,13 @@ const INTERPRETERS: Record<string, InterpreterSpec> = Object.assign(
   // on its own command line, so there is no flag to name here.
   tclsh: { programBearingWords: [], readable: false },
   // `eval` is a subcommand, not a flag — the field is named for what it holds.
-  deno: { programBearingWords: ['eval'], readable: false },
+  deno: { programBearingWords: ['eval'], readable: false, options: DENO_OPTIONS },
   pwsh: { programBearingWords: ['-c', '-Command', '-e', '-EncodedCommand'], readable: false },
   powershell: { programBearingWords: ['-c', '-Command', '-e', '-EncodedCommand'], readable: false },
-  // The same gap as the osascript/lua block above, measured on 2.19.1
-  // (GHSA-cm4c-4q74-mgmj): `gdb -ex`, `expect -c` and `vi/vim/ex -c` each
-  // hand a program to an executor and each classified `safe` — the one class
-  // that never reaches the approval gate. `readable: false` throughout: the
-  // program is gdb command language / expect / ex, not shell text, so its
-  // presence is what counts, exactly like python's `-c`.
-  gdb: { programBearingWords: ['-ex', '--eval-command', '-iex', '--init-eval-command'], readable: false },
-  expect: { programBearingWords: ['-c'], readable: false },
-  vi: { programBearingWords: ['-c', '--cmd'], readable: false },
-  vim: { programBearingWords: ['-c', '--cmd'], readable: false },
-  ex: { programBearingWords: ['-c', '--cmd'], readable: false },
-  view: { programBearingWords: ['-c', '--cmd'], readable: false },
-  gvim: { programBearingWords: ['-c', '--cmd'], readable: false },
-  vimdiff: { programBearingWords: ['-c', '--cmd'], readable: false },
+  gdb: GDB, 'gdb-multiarch': GDB,
+  expect: { programBearingWords: ['-c'], readable: false, options: EXPECT_OPTIONS },
+  vi: VIM, vim: VIM, ex: VIM, view: VIM, gvim: VIM, vimdiff: VIM,
+  nvim: VIM, rvim: VIM, rview: VIM, gview: VIM, 'vim.tiny': VIM, 'vim.basic': VIM, 'vim.nox': VIM,
   },
 );
 
@@ -833,8 +961,18 @@ const WINDOWS_EXE_SUFFIX = /\.(exe|cmd|bat)$/i;
 function resolveInterpreter(word: string): InterpreterSpec | undefined {
   const exact = INTERPRETERS[word];
   if (exact !== undefined) return exact;
-  return INTERPRETERS_BY_LOWERCASE_NAME[word.replace(WINDOWS_EXE_SUFFIX, '').toLowerCase()];
+  const folded = word.replace(WINDOWS_EXE_SUFFIX, '').toLowerCase();
+  const named = INTERPRETERS_BY_LOWERCASE_NAME[folded];
+  if (named !== undefined) return named;
+  // The name a distribution installs beside the plain one: `python3.11`, `perl5.36.0`,
+  // `php8.2`, `lua5.4`, `bash-5.2`. With a dot in the number only: `node1` and `node-0`
+  // are hosts and pods far more often than they are node.
+  const versioned = VERSIONED_NAME.exec(folded);
+  return versioned === null ? undefined : INTERPRETERS_BY_LOWERCASE_NAME[versioned[1]];
 }
+
+/** A name, and a version number after it. */
+const VERSIONED_NAME = /^(.*?[a-z])-?\d+(?:\.\d+)+$/;
 
 /** `find … -exec <cmd> +` runs cmd. */
 const FIND_EXEC_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
@@ -1293,6 +1431,9 @@ export function nestedCommands(command: string, speculativeOperands = true, dial
     // carries nothing.
     found.push(...tarCheckpointExecPrograms(words));
     found.push(...sqliteShellPrograms(words));
+    found.push(...splitFilterPrograms(words));
+    found.push(...trapActionPrograms(words));
+    for (const { program } of programsPastOptions(words)) found.push(program);
   }
 
   // A pipe stage whose command word is an interpreter with no program of its own runs
@@ -1665,10 +1806,367 @@ function tarCheckpointExecPrograms(words: string[]): string[] {
 }
 
 /**
+ * GNU split's `--filter=COMMAND` runs `sh -c COMMAND` once per output chunk
+ * (GHSA-gpfp-xjq7-64hv). Every spelling coreutils 9.11 was measured running:
+ * attached and detached, under any prefix from `--f` up — no other `split`
+ * long option starts with `--f`, so `getopt_long` takes each as unambiguous.
+ * The value is returned whatever its shape: `--filter=reboot` is one word and
+ * a whole command, which the operand catch-all, reading only values that
+ * hold whitespace, never saw. Head-gated like `tarCheckpointExecPrograms`,
+ * so `--filter` on another binary (`docker ps --filter name=x`) or in an
+ * `echo` is not one. `gsplit` is the same binary under the name Homebrew and
+ * the BSDs install GNU coreutils with.
+ */
+const SPLIT_HEADS = new Set(['split', 'gsplit']);
+const SPLIT_FILTER_FLAG = /^--f(?:i(?:l(?:t(?:e(?:r)?)?)?)?)?$/;
+const SPLIT_FILTER_ATTACHED = /^--f(?:i(?:l(?:t(?:e(?:r)?)?)?)?)?=([\s\S]+)$/;
+
+function splitFilterPrograms(words: string[]): string[] {
+  const programs: string[] = [];
+  for (const { index, head } of commandHeads(words)) {
+    if (!SPLIT_HEADS.has(head)) continue;
+    for (let i = index + 1; i < words.length; i++) {
+      const attached = SPLIT_FILTER_ATTACHED.exec(words[i]);
+      if (attached) {
+        programs.push(attached[1]);
+        continue;
+      }
+      if (SPLIT_FILTER_FLAG.test(words[i]) && words[i + 1] !== undefined) {
+        programs.push(words[i + 1]);
+        i++;
+      }
+    }
+  }
+  return programs;
+}
+
+/**
  * Builders whose every invocation runs recipes — shell commands read from a
  * file this classifier never sees. `make deploy` is as arbitrary as
  * `sh -c '…'`; the Makefile is simply elsewhere (GHSA-cm4c-4q74-mgmj).
  */
+/**
+ * `trap ACTION SIGNAL…`: the shell runs ACTION as a command line when the signal
+ * arrives, so it is a carrier like `sh -c` whose program is one operand.
+ *
+ * The outer command is not raised on its own account, unlike `split --filter`:
+ * `trap 'rm -f "$tmp"' EXIT` is everyday script text and the action is shell text
+ * this file reads, so the class is the action's. The forms that run nothing
+ * (`trap - SIG`, `trap '' SIG`, `trap -l`, `trap -p SIG`) need no rule: their first
+ * operand is then read as a command named `-`, `-l` or nothing at all.
+ */
+function trapActionPrograms(words: string[]): string[] {
+  const programs: string[] = [];
+  for (const { index, head } of commandHeads(words)) {
+    if (head !== 'trap') continue;
+    const at = words[index + 1] === '--' ? index + 2 : index + 1;
+    // With no signal after it the one operand is a signal name, not an action.
+    if (words[at] === undefined || words[at + 1] === undefined) continue;
+    programs.push(words[at]);
+  }
+  return programs;
+}
+
+/** bash's long options with a value, which it takes with one dash as well. */
+const BASH_LONG_OPTIONS_WITH_A_VALUE = new Set(['rcfile', 'init-file']);
+/** bash's own long options without one. With one dash another shell reads a cluster. */
+const BASH_LONG_OPTIONS = new Set(['debug', 'debugger', 'dump-po-strings', 'dump-strings', 'help', 'login', 'noediting',
+  'noprofile', 'norc', 'posix', 'pretty-print', 'restricted', 'verbose', 'version']);
+/** What an option of a shell looks like: a cluster of letters and digits, or a long name with its value. */
+const SHELL_OPTION_WORD = /^(?:[-+][A-Za-z0-9]+|--[A-Za-z0-9][A-Za-z0-9_-]*(?:=[\s\S]*)?)$/;
+/** A character of program text that an option's name or a path as its value does not hold. */
+const NOT_AN_OPTION_VALUE = /[\s()[\]{};$!*<>|&"'`\\]/;
+/** vim's `+N`, `+` and `+/PATTERN` place the cursor; any other `+CMD` is `-c CMD`, and so is what follows a `|`. */
+const VIM_POSITION = /^\+(?:\d*|\/[^|]*)$/;
+/**
+ * gdb's options that take a command, by the name after the dashes. It reads an option
+ * with one dash or two and by any prefix no other option shares.
+ */
+const GDB_COMMAND_OPTIONS: ReadonlyArray<readonly [name: string, shortest: number]> = [
+  ['ex', 2], ['iex', 2], ['eiex', 3], ['eval-command', 2], ['init-eval-command', 6], ['early-init-eval-command', 12],
+];
+const GDB_OPTION = /^--?([a-z-]+)(?:=([\s\S]*))?$/;
+
+interface ProgramPastOptions {
+  program: string;
+  /** Shell text, as against a program in a language this file does not read. */
+  readable: boolean;
+}
+
+/**
+ * The program of `sh -c`: its first operand, wherever among the options `-c` stands.
+ *
+ * `-c` is a switch and not an option with a value, so `sh -c -- CMD`, `sh -c -e CMD`
+ * and `sh -o errexit -c CMD` all run CMD. A word after the first operand is `$0` or
+ * `$1`, and with no `-c` the operand is a script file: neither is a program here.
+ *
+ * Which word is the first operand depends on which options take a word, and the shells
+ * differ (`-o NAME`; zsh's `-oNAME` and `--emulate MODE`; bash's `-rcfile FILE`; ksh's
+ * `-R FILE`). Where that is not known the word is taken both ways: it is a program if
+ * `-c` was seen, and the walk goes on to the next.
+ */
+function shellPrograms(words: string[], from: number, shell: 'bash' | 'zsh' | 'other', walked: Set<string>): string[] {
+  const bash = shell === 'bash';
+  const programs: string[] = [];
+  let switched = false;
+  /** Words owed to the options read so far: certainly an option's, and possibly one. */
+  let owed = 0;
+  let maybeOwed = 0;
+  /** bash reads its long options before the first cluster only; after one, `-rcfile` is `-r -c -f …`. */
+  let clustered = false;
+  for (let j = from + 1; j < words.length; j++) {
+    // A walk from a later shell on the line that reaches the same word in the same
+    // state finds what this one does.
+    const state = `${j} ${owed} ${maybeOwed} ${switched} ${shell} ${clustered}`;
+    if (walked.has(state)) break;
+    walked.add(state);
+    const word = words[j];
+    // An empty word is the program once `-c` is seen, and the shell runs nothing.
+    if (word === '') {
+      if (switched) break;
+      continue;
+    }
+    if (!/^[-+]/.test(word)) {
+      if (owed > 0) owed--;
+      else {
+        if (switched) programs.push(word);
+        if (maybeOwed === 0) break;
+        maybeOwed--;
+      }
+      continue;
+    }
+    owed = 0;
+    maybeOwed = 0;
+    if (word === '--' || word === '-') {
+      if (switched && words[j + 1] !== undefined) programs.push(words[j + 1]);
+      break;
+    }
+    // No shell has an option spelled like this (`-v; reboot`): it may be the operand.
+    if (switched && !SHELL_OPTION_WORD.test(word)) programs.push(word);
+    const long = word.replace(/^--?/, '');
+    // bash's own long options, which it reads with one dash as well, and zsh's one.
+    const bashLong = bash && !clustered;
+    if (bashLong ? BASH_LONG_OPTIONS_WITH_A_VALUE.has(long) : shell === 'zsh' && word === '--emulate') owed = 1;
+    else if (bashLong && BASH_LONG_OPTIONS.has(long)) continue;
+    // Any other long option may take a word, in a shell this file does not know.
+    else if (word.startsWith('--')) maybeOwed = 1;
+    else {
+      // A cluster, zsh's digits included; `+c` is read as `-c` is.
+      const body = word.slice(1);
+      clustered = true;
+      if (body.includes('c')) switched = true;
+      // Each `o` of a cluster takes a word of its own (`-eo pipefail`), unless the name
+      // is attached (zsh's `-oerrexit`); ksh's `-R` and mksh's `-T` take one as well.
+      // `-O` takes one in bash and is a switch in zsh; elsewhere it may.
+      const names = body.replace(shell === 'zsh' ? /[^oRT]/g : /[^oORT]/g, '').length;
+      if (bash ? /[oO]$/.test(body) : /o$/.test(body)) {
+        owed = 1;
+        maybeOwed = names - 1;
+      } else maybeOwed = names;
+      if (BASH_LONG_OPTIONS_WITH_A_VALUE.has(long)) maybeOwed = Math.max(maybeOwed, 1);
+    }
+  }
+  return programs;
+}
+
+/**
+ * The programs behind an interpreter's options, read by its model of them.
+ *
+ * `atHead` says the interpreter is the segment's command under some reading. Elsewhere
+ * its name may be another command's argument, and a longer word that holds a program
+ * letter is more often that command's own option (`find . -name perl -newer f`), so
+ * there a cluster is believed up to three letters, as `clusterCarriesFlag` does.
+ */
+function modelledPrograms(
+  words: string[], from: number, spec: InterpreterSpec, model: OptionModel, atHead: boolean, walked: Set<string>,
+  /** Nothing is taken for a value that is not known to be one. */
+  strict = false,
+): string[] {
+  const programs: string[] = [];
+  const flags = [...spec.programBearingWords, ...(spec.alsoProgramWords ?? [])];
+  const letters = flags.filter((flag) => /^-[A-Za-z]$/.test(flag)).map((flag) => flag[1]).join('');
+  /** The option before may have the next word for its value. */
+  let owed = false;
+  for (let j = from + 1; j < words.length; j++) {
+    if (strict && owed && !model.valued.includes(words[j - 1].slice(-1))) owed = false;
+    const state = `${j} ${owed} ${atHead} ${strict}`;
+    if (walked.has(state)) break;
+    walked.add(state);
+    const word = words[j];
+    if (word === '') continue;
+    if (!word.startsWith('-') || word === '-') {
+      // `deno eval CODE`: a program word that is no flag.
+      if (flags.includes(word)) {
+        const program = programAfterFlag(words, j - 1, flags)?.program;
+        if (program !== undefined) programs.push(program);
+        break;
+      }
+      // A value (`-W -` has `-` for one), or the script: what follows a script is its own.
+      if (!owed) break;
+      owed = false;
+      continue;
+    }
+    owed = false;
+    if (word === '--') break;
+    if (word.startsWith('--')) {
+      const equals = word.indexOf('=');
+      const name = equals === -1 ? word : word.slice(0, equals);
+      if (flags.includes(name)) {
+        const program = equals === -1 ? words[++j] : word.slice(equals + 1);
+        if (program !== undefined) programs.push(program);
+      } else if (equals === -1 && !model.plain.has(name) && model.plainLike?.test(name) !== true) owed = true;
+      continue;
+    }
+    const body = word.slice(1);
+    if (!atHead && body.length > 3) {
+      // Not believed as a cluster here. A program attached to its flag is one word, and
+      // is told from another command's option (`-error-limit=3`, `-e2e`) by a character
+      // no option name or path holds.
+      if (letters.includes(body[0]) && NOT_AN_OPTION_VALUE.test(body.slice(1))) programs.push(body.slice(1));
+      // `-Ilib`, `-Werror`: a letter known to take a value has it in the rest of the word.
+      else owed = !(model.valued + model.attached).includes(body[0]);
+      continue;
+    }
+    let hex = false;
+    for (let k = 0; k < body.length; k++) {
+      const letter = body[k];
+      const rest = body.slice(k + 1);
+      if (letters.includes(letter)) {
+        // `-e'CODE'` is one word; `-pe CODE` is two flags and the program is the next.
+        if (rest !== '' && /[^A-Za-z]/.test(rest)) programs.push(rest);
+        else if (words[j + 1] !== undefined) programs.push(words[++j]);
+        else if (rest !== '') programs.push(rest);
+        break;
+      }
+      if (model.enders.includes(letter)) return programs;
+      // Digits belong to the letter before them, and so do the `x` and the hex digits
+      // of perl's `-0x1F`.
+      if (hex && /[0-9A-Fa-f]/.test(letter)) continue;
+      hex = model.hexAfterZero === true && /[xX]/.test(letter) && body[k - 1] === '0';
+      if (hex || /\d/.test(letter)) continue;
+      // ruby's `-K` takes one letter for the encoding (`-Ke` is EUC, not `-e`).
+      if (model.oneLetter?.includes(letter) === true) {
+        k++;
+        continue;
+      }
+      if (model.switches.includes(letter)) continue;
+      // The rest of the word is this option's value, or the next word is.
+      if (model.valued.includes(letter)) owed = rest === '';
+      // Not known: it may take the next word, and may be a switch with a program
+      // letter behind it.
+      else if (!model.attached.includes(letter) && /[A-Za-z]/.test(letter)) {
+        owed = true;
+        if ([...rest].some((other) => letters.includes(other)) && words[j + 1] !== undefined) programs.push(words[j + 1]);
+      }
+      break;
+    }
+  }
+  return programs;
+}
+
+/** The commands vim or gdb is handed, wherever among its words: they read options after operands too. */
+function programsAnywhere(words: string[], from: number, kind: 'vim' | 'gdb'): { programs: string[]; end: number } {
+  const programs: string[] = [];
+  let j = from + 1;
+  for (; j < words.length; j++) {
+    const word = words[j];
+    // What follows is file names, or with gdb's `--args` another program's arguments.
+    if (word === '--' || (kind === 'gdb' && /^--?args$/.test(word))) break;
+    if (kind === 'vim') {
+      if (word === '-c' || word === '--cmd') {
+        if (words[j + 1] !== undefined) programs.push(words[++j]);
+      } else if (/^-[A-Za-z0-9]*c/.test(word)) {
+        // vim reads a word of options letter by letter: what follows `c` is the
+        // command, and with nothing after it the next word is (`-nNesc CMD`).
+        const rest = word.slice(word.indexOf('c') + 1);
+        if (rest !== '') programs.push(rest);
+        else if (words[j + 1] !== undefined) programs.push(words[++j]);
+      }
+      else if (word.startsWith('+') && !VIM_POSITION.test(word)) programs.push(word.slice(1));
+      continue;
+    }
+    const option = GDB_OPTION.exec(word);
+    if (option === null) continue;
+    if (!GDB_COMMAND_OPTIONS.some(([name, shortest]) => option[1].length >= shortest && name.startsWith(option[1]))) continue;
+    if (option[2] !== undefined) programs.push(option[2]);
+    else if (words[j + 1] !== undefined) programs.push(words[++j]);
+  }
+  return { programs, end: j };
+}
+
+/**
+ * The programs an interpreter is handed past options `programAfterFlag` cannot follow.
+ *
+ * That walk allows only flags between an interpreter and its program flag and takes
+ * the word after the flag. Three kinds of invocation run a program it does not reach:
+ *
+ *  - a shell's program is its first operand (`shellPrograms`);
+ *  - an option's value stands before the program flag (`python3 -W ignore -c CODE`), a
+ *    flag stands in a cluster or the program is attached to it (`modelledPrograms`);
+ *  - vim and gdb read their options after operands too (`vim FILE -c CMD`), and vim's
+ *    `+CMD` is `-c CMD` (`programsAnywhere`).
+ *
+ * Every word is looked at, as the walk beside it does and for its reason: behind a
+ * wrapper no table lists (`unshare -m`, `docker exec c`) the interpreter is not the
+ * segment's command word. A command whose operands are data is left alone, and so is a
+ * name that is the value of a flag. What is found is added to what `programAfterFlag`
+ * finds and never replaces it; what that walk finds itself is left out, or a nested
+ * `sh -c` would be read twice at every level.
+ */
+function programsPastOptions(words: string[]): ProgramPastOptions[] {
+  const found: ProgramPastOptions[] = [];
+  const heads = new Set(commandHeads(words).map(({ index }) => index));
+  const everyWord = !operandsAreData(words);
+  /** The states each kind of walk has been in, so that a line of names is walked once. */
+  const walks = new Map<InterpreterSpec['options'], Set<string>>();
+  for (let index = 0; index < words.length; index++) {
+    const atHead = heads.has(index);
+    if (!atHead && !everyWord) continue;
+    const name = stripPath(unquote(words[index]));
+    const spec = resolveInterpreter(name);
+    if (spec?.options === undefined) continue;
+    const flags = spec.programBearingWords;
+    // A shell's name after a `-c` is more often a wrapper's switch and the shell it
+    // runs (`unshare -c sh -c CMD`) than a value; for the others the skip stands.
+    if (!atHead && !spec.readable && isFlagValue(words, index, [...flags, ...(spec.alsoProgramWords ?? [])])) continue;
+    // `deploy/python` is a path of something else; a command is a name, `/usr/bin/…`,
+    // `./x`, `~/…`, `$HOME/…` or a path through a `bin` directory.
+    if (!atHead && /^[^/.~$]+\//.test(unquote(words[index])) && !/(?:^|\/)s?bin\//.test(unquote(words[index]))) continue;
+    let walked = walks.get(spec.options);
+    if (walked === undefined) walks.set(spec.options, walked = new Set());
+    let programs: string[];
+    if (spec.options === 'shell') {
+      programs = shellPrograms(words, index, /^r?bash/i.test(name) ? 'bash' : /^zsh/i.test(name) ? 'zsh' : 'other', walked);
+    } else if (spec.options === 'vim' || spec.options === 'gdb') {
+      // A walk reads everything up to where it stops (`--`), behind other names too:
+      // a name before that point is read already, one behind it starts a walk.
+      const [reached = -1] = [...walked].map(Number);
+      if (index < reached) continue;
+      // `ex` and `view` are words of other commands (`gh pr view 123 -c`, `git switch
+      // view -c x`): away from the command word they are not walked past operands.
+      if (!atHead && /^r?(?:ex|view)$/i.test(name)) continue;
+      const walk = programsAnywhere(words, index, spec.options);
+      // One entry: the furthest any walk of this kind has reached.
+      walked.clear();
+      walked.add(String(walk.end));
+      programs = walk.programs;
+    } else {
+      // A name right after another command's long option is that option's value more
+      // often than a command (`docker run --name node -e KEY=VALUE -p 3000:3000 IMAGE`):
+      // there only an option known to have a value has one, as on the walk beside this.
+      const afterLong = !atHead && /^--[^=]+$/.test(words[index - 1] ?? '');
+      programs = modelledPrograms(words, index, spec, spec.options, atHead, walked, afterLong);
+    }
+    if (programs.length === 0) continue;
+    // What the walk beside this one reads already, unless it skips this name.
+    const known = isFlagValue(words, index, flags) ? undefined : programAfterFlag(words, index, flags)?.program;
+    for (const program of programs) {
+      if (program !== known) found.push({ program, readable: spec.readable });
+    }
+  }
+  return found;
+}
+
 const RECIPE_RUNNERS = new Set(['make', 'gmake']);
 
 /** Root user spellings, with or without docker's `user[:group]` suffix. */
@@ -2271,6 +2769,187 @@ const FORBIDDEN_RULES: ForbiddenRule[] = [
   })),
 ];
 
+/** An interpreter given only these prints and exits, in every shell and interpreter here. */
+const INFORMATION_FLAG = /^(?:--version|--help)$/;
+
+/**
+ * What the shell's grammar hides from the segment reading: the command with its groups,
+ * reserved words and redirections removed, and the other commands that reading finds
+ * (`shell-grammar.ts`). Each is classified as a command of its own.
+ */
+function grammarCommands(command: string, dialect: ShellDialect): GrammarCommands {
+  if (grammarCache === null) return readGrammarCommands(command, dialect);
+  const key = `${dialect}\n${command}`;
+  let answer = grammarCache.get(key);
+  if (answer === undefined) {
+    answer = readGrammarCommands(command, dialect);
+    grammarCache.set(key, answer);
+  }
+  return answer;
+}
+
+interface GrammarCommands {
+  readonly read: readonly string[];
+  readonly loose: readonly string[];
+  /** Asked by name and by the never-allowed rules, and not read any further. */
+  readonly plain: readonly string[];
+  /** The line has a substitution that holds a `case`: where it ends is not known. */
+  readonly holdsCase: boolean;
+}
+
+/**
+ * What the lexer made of each text, for the length of one call from outside: the same
+ * text is reached by more than one route (a carrier's program stands in the line, in
+ * its flattened reading and in the reading that leaves nothing out).
+ */
+let grammarCache: Map<string, GrammarCommands> | null = null;
+/**
+ * The class of each text read in full at each depth, for the same length of time. Only
+ * what was read with nothing skipped is kept: a reading that skipped what its caller
+ * had read already may be lower than the text's own.
+ */
+let classCache: Map<string, ParsedCommand> | null = null;
+/**
+ * What the never-allowed scan found in a text, and how far it had to look.
+ *
+ * `level` is how many carriers below the text the match stands (0: the text itself).
+ * `truncated` says the scan met the depth cap somewhere under the text, so a scan
+ * allowed more levels might find what this one did not.
+ */
+interface ForbiddenAnswer {
+  readonly match: string | null;
+  readonly level: number;
+  readonly truncated: boolean;
+}
+/** And which never-allowed rule each text trips, with the levels the scan was allowed. */
+let forbiddenCache: Map<string, ForbiddenAnswer & { readonly budget: number }> | null = null;
+/** The same for a text read by the rules alone. */
+let ruleCache: Map<string, string | null> | null = null;
+
+function withGrammarCache<T>(run: () => T): T {
+  if (grammarCache !== null) return run();
+  grammarCache = new Map();
+  classCache = new Map();
+  forbiddenCache = new Map();
+  ruleCache = new Map();
+  try {
+    return run();
+  } finally {
+    grammarCache = null;
+    classCache = null;
+    forbiddenCache = null;
+    ruleCache = null;
+  }
+}
+
+function readGrammarCommands(command: string, dialect: ShellDialect): GrammarCommands {
+  const reading = readShellGrammar(command, dialect);
+  const found = new Set<string>();
+  if (reading.flattened !== null) found.add(reading.flattened);
+  for (const other of reading.alternates) found.add(other);
+  // Substitutions: the two the scan in `nestedCommands` has no rule for, and its own
+  // kind as well — that scan counts parentheses, a quoted one included, so
+  // `$(reboot; echo '(')` never closes for it.
+  for (const inner of reading.substitutions) found.add(inner);
+
+  /** Whether a command reads its program from standard input: a shell with no script. */
+  const reads = new Map<string, boolean>();
+  const readsStdin = (text: string): boolean => {
+    let answer = reads.get(text);
+    if (answer === undefined) {
+      const words = tokenizeSegments(text, dialect)[0];
+      // `bash --version` reads no program, whatever stands on its standard input.
+      answer = words !== undefined && readsProgramFromStdin(words)
+        && !(words.length > 1 && words.slice(1).every((w) => INFORMATION_FLAG.test(w)));
+      reads.set(text, answer);
+    }
+    return answer;
+  };
+  // Every reading of the line, and the line itself: a here-string is found in a
+  // reading that holds no other grammar, too.
+  const texts = [command, ...(reading.flattened === null ? [] : [reading.flattened]), ...reading.alternates];
+  /** The shells on the line, and whether a pipe on it leads to one of `names`. */
+  const readers = new Set<string>();
+  let pipedTo = false;
+  const names = new Set(reading.functionNames);
+  for (const text of texts) {
+    for (const { words, sep } of tokenizeSegmentsDetailed(text, true, dialect)) {
+      const joined = words.join(' ');
+      if (readsStdin(joined)) readers.add(joined);
+      if (sep === '|' && commandHeads(words).some(({ index }) => names.has(words[index]))) pipedTo = true;
+    }
+  }
+
+  // Text that reaches a shell on standard input without a pipe standing next to it.
+  if (readers.size > 0) {
+    // `sh <<< TEXT`, `( sh ) <<< TEXT`, `x | sh <<< TEXT`: with a here-string and a
+    // shell on the line, the text is classified as that shell's program, and `: | sh`
+    // carries the answer the pipe spelling already has for a program this file cannot
+    // read. Which command the here-string is written on does not decide it:
+    // `exec <<< TEXT; sh` feeds the shell too.
+    if (reading.hereStrings.length > 0) {
+      for (const word of reading.hereStrings) found.add(readDequotedWord(word, 0, dialect));
+      for (const reader of readers) found.add(`: | ${reader}`);
+    }
+    // `f() { sh; }; curl … | f`: a pipe to a function reaches whatever its body runs.
+    // Which body is not followed; the line is read once more as one pipeline that ends
+    // in a shell, for the rules that read a pipeline's stages together.
+    if (pipedTo && reading.flattened !== null) {
+      const [first] = readers;
+      found.add(`${reading.flattened.split('; ').join(' | ')} | ${first}`);
+    }
+  }
+  // `curl … | { :; sh; }`: a pipe into a group reaches every command in it, so the
+  // pipe is put back in front of each shell it reaches, and each pipeline that gains
+  // one is read as a line of its own (the rules that read a pipeline's stages together
+  // start from a line's first command).
+  for (const commands of [reading.commands, ...reading.otherCommands]) {
+    let pipeline = '';
+    let start = 0;
+    let gained = false;
+    commands.forEach(({ text, join, fed, from }, at) => {
+      if (fed) {
+        // Behind the pipe with the rest of its group: a shell among them reads from it,
+        // and the others neither end the pipeline nor belong in it.
+        if (pipeline !== '' && readsStdin(text)) {
+          pipeline += ` | ${text}`;
+          gained = true;
+        }
+      } else if (join === ' | ' && from === start && pipeline !== '') pipeline += ` | ${text}`;
+      else {
+        if (gained) found.add(pipeline);
+        // After a group, everything in it feeds the pipe: `{ a; b; } | c`.
+        start = join === ' | ' ? from : at;
+        pipeline = commands.slice(start, at + 1).map((one) => one.text).join(' | ');
+        gained = false;
+      }
+    });
+    if (gained) found.add(pipeline);
+  }
+  return { read: [...found], loose: reading.loose.filter((text) => !found.has(text)), plain: reading.plain, holdsCase: reading.holdsCase };
+}
+
+/**
+ * Whether a command word holds an unquoted glob or brace expansion.
+ *
+ * The shell rewrites such a word before it runs anything, so `/usr/bin/sud? id` runs a
+ * binary whose name is nowhere in the text. That is `hasUnnameableCommand`'s case with
+ * another character. The lexer knows which words expand (it still has the quoting);
+ * `commandHeads` knows which words are command words, wrappers read past.
+ */
+function hasExpandingCommandWord(command: string): boolean {
+  const reading = readShellGrammar(command, 'posix');
+  if (reading.expandingWords.length === 0) return false;
+  const expanding = new Set(reading.expandingWords.map((word) => readDequotedWord(word, 0, 'posix')));
+  for (const text of [command, reading.flattened, ...reading.alternates]) {
+    if (text === null) continue;
+    for (const words of tokenizeSegments(text, 'posix')) {
+      if (commandHeads(words).some(({ index }) => expanding.has(words[index]))) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Which never-allowed rule this command trips, or null. The single entry point:
  * FORBIDDEN_PATTERNS is deliberately not exported, because half of the list
@@ -2283,16 +2962,70 @@ export function findForbiddenMatch(command: string, depth = 0): string | null {
   // reading is a refusal. The destructive-class consultation *inside* a
   // dialect pass (`isDestructive`) stays in-dialect — that pass is already one
   // reading of the whole string.
-  if (command.includes('\\')) {
-    const windows = findForbiddenMatchInDialect(command, depth, 'windows');
-    if (windows !== null) return windows;
-  }
-  return findForbiddenMatchInDialect(command, depth, 'posix');
+  return withGrammarCache(() => {
+    if (command.includes('\\')) {
+      const windows = findForbiddenMatchInDialect(command, depth, 'windows');
+      if (windows !== null) return windows;
+    }
+    return findForbiddenMatchInDialect(command, depth, 'posix');
+  });
 }
 
-function findForbiddenMatchInDialect(command: string, depth: number, dialect: ShellDialect): string | null {
+function findForbiddenMatchInDialect(
+  command: string,
+  depth: number,
+  dialect: ShellDialect,
+  skip?: ReadonlySet<string>,
+): string | null {
+  return forbiddenAnswer(command, depth, dialect, skip).match;
+}
+
+/**
+ * The scan's answer for a text, from the cache where an earlier scan settles it.
+ *
+ * The class of a text asks this of it at every level, starting from depth 0 each time,
+ * and the scan above it has asked already with fewer levels left: keyed by depth, every
+ * text was scanned once per level it stands at. An answer is the same for another
+ * number of levels in two cases, and only then is it taken:
+ *
+ *  - nothing found: with no more levels than the scan had, or with any number when it
+ *    never met the cap (it saw everything there is);
+ *  - a match `level` carriers down: with at least that many levels and no more than the
+ *    scan had. With more, an earlier carrier may hold a deeper match and its label would
+ *    be the answer.
+ */
+function forbiddenAnswer(
+  command: string,
+  depth: number,
+  dialect: ShellDialect,
+  skip: ReadonlySet<string> | undefined,
+): ForbiddenAnswer {
+  const budget = MAX_NESTING_DEPTH - depth;
+  const key = `${dialect}\n${command}`;
+  const known = forbiddenCache?.get(key);
+  if (known !== undefined) {
+    const settled = known.match === null
+      ? budget <= known.budget || !known.truncated
+      : known.level <= budget && budget <= known.budget;
+    if (settled) return known;
+  }
+  const answer = scanForForbidden(command, depth, dialect, skip);
+  if (skip === undefined && (known === undefined || budget > known.budget)) {
+    forbiddenCache?.set(key, { ...answer, budget });
+  }
+  return answer;
+}
+
+const NOTHING_FORBIDDEN: ForbiddenAnswer = { match: null, level: 0, truncated: false };
+
+function scanForForbidden(
+  command: string,
+  depth: number,
+  dialect: ShellDialect,
+  skip: ReadonlySet<string> | undefined,
+): ForbiddenAnswer {
   for (const rule of FORBIDDEN_RULES) {
-    if (rule.test(command, dialect)) return rule.label;
+    if (rule.test(command, dialect)) return { match: rule.label, level: 0, truncated: false };
   }
 
   // The same carriers the class scan reads, for the same reason. This list is the
@@ -2314,12 +3047,61 @@ function findForbiddenMatchInDialect(command: string, depth: number, dialect: Sh
   // `$()`, backticks and `sh -c` are certain carriers, not guesses — the shell
   // really does run what they hold — and are unaffected: they are pushed by
   // `nestedCommands` regardless of this flag.
-  if (depth >= MAX_NESTING_DEPTH) return null;
-  for (const inner of nestedCommands(command, false, dialect)) {
-    const match = findForbiddenMatchInDialect(inner, depth + 1, dialect);
-    if (match !== null) return match;
+  if (depth >= MAX_NESTING_DEPTH) return { match: null, level: 0, truncated: true };
+  let truncated = false;
+  const nested = nestedCommands(command, false, dialect);
+  for (const inner of nested) {
+    if (skip?.has(inner)) continue;
+    const below = forbiddenAnswer(inner, depth + 1, dialect, undefined);
+    if (below.match !== null) return { match: below.match, level: below.level + 1, truncated: false };
+    truncated ||= below.truncated;
   }
-  return null;
+
+  // The command without the shell's grammar, as in `classifyCommandInDialect`. This is a
+  // certain carrier, not a guess: the shell does run what stands in a group, after
+  // `then` or behind a redirection, so it reaches the denylist like `$()` and `sh -c`.
+  const grammar = grammarCommands(command, dialect);
+  const found = new Set(nested);
+  // Each other, too: the flattened command still holds a `=(…)` whose inside is read
+  // here as a command of its own.
+  const within = new Set([...nested, ...grammar.read]);
+  // The reading that leaves nothing out as well: every command this scan follows is
+  // one the shell certainly runs, and a never-allowed command is one by name.
+  for (const inner of [...grammar.read, ...grammar.loose]) {
+    if (found.has(inner) || skip?.has(inner)) continue;
+    const below = forbiddenAnswer(inner, depth + 1, dialect, within);
+    if (below.match !== null) return { match: below.match, level: below.level + 1, truncated: false };
+    truncated ||= below.truncated;
+  }
+  // And the line with no span and no quote, where a substitution holds a `case`: by the
+  // rules alone, and not read any further.
+  for (const inner of grammar.plain) {
+    const match = forbiddenByRule(inner, dialect);
+    if (match !== null) return { match, level: 1, truncated: false };
+  }
+  return truncated ? { match: null, level: 0, truncated: true } : NOTHING_FORBIDDEN;
+}
+
+/** Whether the never-allowed scan of a text met the depth cap and found nothing above it. */
+function stoppedReading(command: string, depth: number, dialect: ShellDialect): boolean {
+  const answer = forbiddenAnswer(command, depth, dialect, undefined);
+  return answer.match === null && answer.truncated;
+}
+
+/** Which rule a text trips as it stands, nothing inside it followed. Kept per call. */
+function forbiddenByRule(text: string, dialect: ShellDialect): string | null {
+  const key = `${dialect}\n${text}`;
+  const known = ruleCache?.get(key);
+  if (known !== undefined) return known;
+  let match: string | null = null;
+  for (const rule of FORBIDDEN_RULES) {
+    if (rule.test(text, dialect)) {
+      match = rule.label;
+      break;
+    }
+  }
+  ruleCache?.set(key, match);
+  return match;
 }
 
 export function isForbidden(command: string, dialect: ShellDialect = 'posix'): boolean {
@@ -2342,8 +3124,8 @@ export function isForbidden(command: string, dialect: ShellDialect = 'posix'): b
  * matchesEitherForm, as FORBIDDEN_RULES still does for its two regex
  * survivors, when one needs no tokenisation to read.
  */
-function isDestructive(command: string, dialect: ShellDialect = 'posix'): boolean {
-  return isForbidden(command, dialect) || deletesAbsolutePath(command, dialect);
+function isDestructive(command: string, dialect: ShellDialect = 'posix', depth = 0): boolean {
+  return findForbiddenMatchInDialect(command, depth, dialect) !== null || deletesAbsolutePath(command, dialect);
 }
 
 const LEADING_PRIVILEGE_PREFIXES = [
@@ -3022,7 +3804,9 @@ function hasUnreadableProgram(command: string, dialect: ShellDialect = 'posix'):
       if (RECIPE_RUNNERS.has(head)) return true;
       if (head === 'ssh' && operands.some((w) => !w.startsWith('-'))) return true;
     }
-    if (sqliteShellPrograms(words).length > 0 || tarCheckpointExecPrograms(words).length > 0) return true;
+    if (sqliteShellPrograms(words).length > 0 || tarCheckpointExecPrograms(words).length > 0
+      || splitFilterPrograms(words).length > 0) return true;
+    if (programsPastOptions(words).some(({ readable }) => !readable)) return true;
 
     if (!operandsAreData(words)) {
       for (let j = 0; j < words.length; j++) {
@@ -3129,20 +3913,71 @@ export function classifyCommand(command: string, depth = 0): ParsedCommand {
   // escape or as a path separator, so policy must hold on whichever host
   // receives the command (GHSA-972x-g47g-3922). A command without a backslash
   // is byte-identical under both dialects, so it keeps the single pass.
-  if (!command.includes('\\')) return classifyCommandInDialect(command, depth, 'posix');
-  const posix = classifyCommandInDialect(command, depth, 'posix');
-  const windows = classifyCommandInDialect(command, depth, 'windows');
-  return CLASS_RANK[windows.class] > CLASS_RANK[posix.class] ? windows : posix;
+  return withGrammarCache(() => classifyCommandCached(command, depth));
 }
 
-function classifyCommandInDialect(command: string, depth: number, dialect: ShellDialect): ParsedCommand {
-  const trimmed = command.trim();
-  const outer = classifyOuter(trimmed, dialect);
+function classifyCommandCached(command: string, depth: number): ParsedCommand {
+  const inDialect = (dialect: ShellDialect): ParsedCommand => {
+    const seen = new Set<string>();
+    const read = classifyCommandInDialect(command, depth, dialect, undefined, seen);
+    // Nothing ranks above it, and a line that reached the depth cap is the costliest to
+    // read again.
+    if (read.class === 'privileged') return read;
+    const loose = classifyLoosely(command, depth, dialect, seen);
+    return loose !== null && CLASS_RANK[loose.class] > CLASS_RANK[read.class]
+      ? { binary: loose.binary, fullCommand: read.fullCommand, class: loose.class }
+      : read;
+  };
+  const posix = inDialect('posix');
+  const windows = command.includes('\\') ? inDialect('windows') : posix;
+  const parsed = CLASS_RANK[windows.class] > CLASS_RANK[posix.class] ? windows : posix;
 
-  if (depth >= MAX_NESTING_DEPTH) {
+  // A glob or a brace expansion in a command word: "we cannot tell", like a `$` there.
+  // Only for the command as it was sent — a nested command may be a guess about an
+  // operand, and a `*` in the first word of a search pattern is not a command word —
+  // and only in the POSIX reading: a glob is expanded by a POSIX shell, and read as
+  // Windows a backslash stops escaping, which turns arguments into command words.
+  if (depth === 0 && CLASS_RANK[parsed.class] < CLASS_RANK.destructive && hasExpandingCommandWord(command.trim())) {
+    return { binary: parsed.binary, fullCommand: parsed.fullCommand, class: 'destructive' as CommandClass };
+  }
+  return parsed;
+}
+
+function classifyCommandInDialect(
+  command: string,
+  depth: number,
+  dialect: ShellDialect,
+  skip?: ReadonlySet<string>,
+  /** Every text this reading classifies, for `classifyLoosely` not to do it again. */
+  seen?: Set<string>,
+): ParsedCommand {
+  const trimmed = command.trim();
+  seen?.add(trimmed);
+  const key = `${dialect}\n${depth}\n${trimmed}`;
+  const known = classCache?.get(key);
+  if (known !== undefined) return known;
+  const parsed = classifyUncached(trimmed, depth, dialect, skip, seen);
+  if (skip === undefined) classCache?.set(key, parsed);
+  return parsed;
+}
+
+function classifyUncached(
+  trimmed: string,
+  depth: number,
+  dialect: ShellDialect,
+  skip: ReadonlySet<string> | undefined,
+  seen: Set<string> | undefined,
+): ParsedCommand {
+  // The never-allowed scan is asked with the levels this text has left, not from the
+  // top again: asked from the top for every text, it read each text once per level it
+  // stands at, and nine times over is where a nested line's time went.
+  const outer = classifyOuter(trimmed, dialect, false, depth);
+
+  if (depth >= MAX_NESTING_DEPTH || stoppedReading(trimmed, depth, dialect)) {
     // Nesting this deep is not something an operator writes, and we have stopped
     // reading. Refusing to guess is the only answer consistent with the rest of this
-    // file.
+    // file. That holds for the never-allowed scan as it does for this one: where it
+    // met the cap under this text, a command it would refuse may stand below.
     return { binary: outer.binary, fullCommand: trimmed, class: 'privileged' as CommandClass };
   }
 
@@ -3157,11 +3992,44 @@ function classifyCommandInDialect(command: string, depth: number, dialect: Shell
     highest = { binary: verb, fullCommand: trimmed, class: floor };
   }
 
-  for (const inner of nestedCommands(trimmed, true, dialect)) {
-    const parsed = classifyCommandInDialect(inner, depth + 1, dialect);
+  const nested = nestedCommands(trimmed, true, dialect);
+  for (const inner of nested) {
+    if (skip?.has(inner)) continue;
+    const parsed = classifyCommandInDialect(inner, depth + 1, dialect, undefined, seen);
     // `binary` follows the winning side deliberately: it is what the audit record and
     // the refusal message name, and naming the outer `echo` would describe the wrong
     // process as the one that ran as root.
+    if (CLASS_RANK[parsed.class] > CLASS_RANK[highest.class]) highest = parsed;
+  }
+
+  // The shell's own grammar hides a command from everything above: inside a group, after
+  // a reserved word or behind a redirection, the segment's command word is `(`, `then`
+  // or `>/dev/null`, and no table here has an entry for those. So the command is read a
+  // second time with the grammar removed, and the higher class wins — the rule the
+  // substitutions above and the two dialects already follow. Nothing above is changed
+  // by this, so it can raise a class and cannot lower one.
+  //
+  // The second reading holds every carrier the first one found (`( sh -c '…' )` names
+  // the same program both times), so those are skipped inside it. Without that each
+  // level of nesting classified its contents twice.
+  const grammar = grammarCommands(trimmed, dialect);
+  // A substitution that holds a `case`: a pattern's `)` ends it early for every count of
+  // parentheses, and the shells do not agree on which `)` is a pattern's. Reading the
+  // text behind that point by name finds what it names and misses what it cannot
+  // pair; so the line is not called `safe`, whatever was found in it.
+  if (grammar.holdsCase && CLASS_RANK[highest.class] < CLASS_RANK.destructive) {
+    highest = { binary: outer.binary, fullCommand: trimmed, class: 'destructive' as CommandClass };
+  }
+  const found = new Set(nested);
+  // Each other, too: the flattened command still holds a `=(…)` whose inside is read
+  // here as a command of its own. Without this each level of nesting read it twice.
+  const within = new Set([...nested, ...grammar.read]);
+  for (const inner of grammar.read) {
+    // Already read above, as the same text: a here-string's quoted word is one.
+    // Or read by the caller, which holds this command's substitutions as well.
+    if (found.has(inner) || skip?.has(inner)) continue;
+    // One level deeper: the depth cap is what stops a reading that keeps finding more.
+    const parsed = classifyCommandInDialect(inner, depth + 1, dialect, within, seen);
     if (CLASS_RANK[parsed.class] > CLASS_RANK[highest.class]) highest = parsed;
   }
 
@@ -3181,8 +4049,71 @@ function classifyCommandInDialect(command: string, depth: number, dialect: Shell
   return result;
 }
 
+/**
+ * The line once more with nothing left out, for the commands this file knows by name.
+ *
+ * `classifyCommandInDialect` decides which words are `case` patterns, which parentheses
+ * are subshells and where a bracket is a subscript, and the shells do not agree on any
+ * of it: wherever it decides wrong for one of them, a command is skipped. The lexer's
+ * other reading skips nothing — a pattern, an array's elements and the inside of
+ * `[[ … ]]` are all read as commands — so it finds `sudo` and `reboot` wherever any
+ * shell would run them. It is asked only what a command is by name: a pattern that
+ * starts with a variable is not "a command this file cannot name".
+ *
+ * And only for text the shell certainly runs, not for an operand that is a guess
+ * (`git commit -m 'fix(sudo): x'`). That is the line as sent and, from any such text:
+ * what a certain carrier holds (`$(…)`, `sh -c`), what the lexer made of it, and the
+ * reading that leaves nothing out, which is read that way again. Each text is visited
+ * once, whatever route leads to it and however sure the route was that found it first.
+ */
+/** What a text is by the names of its commands, nothing inside it followed. Kept per call. */
+function classifyByName(text: string, dialect: ShellDialect, depth: number): ParsedCommand {
+  const key = `name\n${dialect}\n${depth}\n${text}`;
+  const known = classCache?.get(key);
+  if (known !== undefined) return known;
+  const outer = classifyOuter(text, dialect, true, depth);
+  const parsed = stoppedReading(text, depth, dialect)
+    ? { binary: outer.binary, fullCommand: text, class: 'privileged' as CommandClass }
+    : outer;
+  classCache?.set(key, parsed);
+  return parsed;
+}
+
+function classifyLoosely(command: string, depth: number, dialect: ShellDialect, seen: Set<string>): ParsedCommand | null {
+  let best: ParsedCommand | null = null;
+  const raise = (parsed: ParsedCommand) => {
+    if (best === null || CLASS_RANK[parsed.class] > CLASS_RANK[best.class]) best = parsed;
+  };
+  const visited = new Set<string>();
+  const queue: Array<{ text: string; depth: number; named: boolean }> = [{ text: command.trim(), depth, named: false }];
+  for (let next = queue.pop(); next !== undefined; next = queue.pop()) {
+    const { text, named } = next;
+    const key = (named ? 'n' : 'f') + text;
+    if (visited.has(key)) continue;
+    visited.add(key);
+    if (next.depth >= MAX_NESTING_DEPTH) {
+      // As in `classifyCommandInDialect`: this deep, reading has stopped.
+      return { binary: extractBinary(text, dialect), fullCommand: text, class: 'privileged' as CommandClass };
+    }
+    const below = next.depth + 1;
+    for (const inner of nestedCommands(text, false, dialect)) queue.push({ text: inner.trim(), depth: below, named: false });
+    const grammar = grammarCommands(text, dialect);
+    if (named) raise(classifyByName(text, dialect, next.depth));
+    else {
+      // A carrier found only in a reading that leaves nothing out: read in full here.
+      if (!seen.has(text)) raise(classifyCommandInDialect(text, next.depth, dialect, undefined, seen));
+      for (const inner of grammar.read) queue.push({ text: inner.trim(), depth: below, named: false });
+    }
+    for (const inner of grammar.loose) queue.push({ text: inner.trim(), depth: below, named: true });
+    // By name and no further: this text is not one any shell runs as it stands.
+    for (const inner of grammar.plain) raise(classifyByName(inner, dialect, below));
+    if ((best as ParsedCommand | null)?.class === 'privileged') break;
+  }
+  return best;
+}
+
 /** The class of the command itself, reading none of what it carries. */
-function classifyOuter(trimmed: string, dialect: ShellDialect): ParsedCommand {
+function classifyOuter(trimmed: string, dialect: ShellDialect, namedOnly = false, depth = 0): ParsedCommand {
   const binary = extractBinary(trimmed, dialect);
   const fullCommand = trimmed;
 
@@ -3204,7 +4135,7 @@ function classifyOuter(trimmed: string, dialect: ShellDialect): ParsedCommand {
   }
 
   if (hasUnreadableProgram(trimmed, dialect) || hasDangerousAwk(trimmed, dialect)
-    || isDestructive(trimmed, dialect) || hasDisqualifyingArgs(trimmed, dialect)) {
+    || isDestructive(trimmed, dialect, depth) || hasDisqualifyingArgs(trimmed, dialect)) {
     return { binary, fullCommand, class: 'destructive' as CommandClass };
   }
 
@@ -3216,7 +4147,7 @@ function classifyOuter(trimmed: string, dialect: ShellDialect): ParsedCommand {
   // `destructive` rather than `privileged`: this is "we cannot tell", not "this is
   // root". It gates on approval instead of refusing outright, which keeps
   // `$PREFIX/bin/tool` usable for a role that holds `destructive` on the tier.
-  if (hasUnnameableCommand(trimmed, dialect)) {
+  if (!namedOnly && hasUnnameableCommand(trimmed, dialect)) {
     return { binary, fullCommand, class: 'destructive' as CommandClass };
   }
 

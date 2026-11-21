@@ -384,3 +384,81 @@ export const anyString = fc.oneof(
   fc.array(fc.constantFrom('"', "'", '`', '$(', ')', '\\', ';', '|', '&', '\n', ' ', 'sudo', 'x'), { maxLength: 60 })
     .map((parts) => parts.join('')),
 );
+
+/**
+ * The places the shell's grammar puts a command, each as a function of the command it
+ * holds. A command that classifies lower inside one of these than on its own is the
+ * shape the grammar reading exists to close.
+ */
+export const GRAMMAR_FORMS: Array<(c: string) => string> = [
+  (c) => `( ${c} )`,
+  (c) => `{ ${c}; }`,
+  (c) => `if ${c}; then :; fi`,
+  (c) => `if :; then ${c}; fi`,
+  (c) => `if false; then :; elif ${c}; then :; else ${c}; fi`,
+  (c) => `while :; do ${c}; done`,
+  (c) => `until ${c}; do :; done`,
+  (c) => `for i in 1 2; do ${c}; done`,
+  (c) => `! ${c}`,
+  (c) => `f() { ${c}; }`,
+  (c) => `function f { ${c}; }`,
+  (c) => `case x in x) ${c} ;; esac`,
+  (c) => `>/dev/null ${c}`,
+  (c) => `2>&1 ${c}`,
+  (c) => `${c} >/dev/null`,
+  (c) => `( { ${c}; } )`,
+  (c) => `if :; then ( ${c} ); fi`,
+  (c) => `if false; then :; elif ${c}; then :; fi`,
+  (c) => `if false; then :; else ${c}; fi`,
+  // Glued: no space between the grammar and the command.
+  (c) => `(${c})`,
+  (c) => `{ ${c};}`,
+  (c) => `if ${c};then :;fi`,
+  (c) => `${c}>/dev/null`,
+  (c) => `>f ${c}`,
+  (c) => `time ${c}`,
+  (c) => `time -p ${c}`,
+  (c) => `coproc ${c}`,
+  (c) => `for ((i=0;i<1;i++)) do ${c}; done`,
+  (c) => `for i do ${c}; done`,
+  (c) => `function f() { ${c}; }`,
+  (c) => `(( 1 )) && ${c}`,
+  (c) => `[[ -n x ]] && ${c}`,
+  (c) => `x | { :; ${c}; }`,
+  (c) => `{ ${c}; } <<< x`,
+  // Where the shells do not agree on what a word is.
+  (c) => `case x in esac; ${c}`,
+  (c) => `case x in esac; ( ${c} )`,
+  (c) => `echo hi; time case x in x) ${c} ;; esac`,
+  (c) => `echo hi; function f { case x in x) ${c} ;; esac; }`,
+  (c) => `f()case x in x) ${c} ;; esac`,
+  (c) => `(case y in y) :;; esac; ${c})`,
+  (c) => `if [[ -n a && -n b ]] { ${c} }`,
+  (c) => `x=(a b) ${c}`,
+  (c) => `x | ( { :; ${c}; } )`,
+  // zsh, and the substitutions the classifier has no scan for.
+  (c) => `repeat 2 ${c}`,
+  (c) => `noglob ${c}`,
+  (c) => `for x (a) ${c}`,
+  (c) => `{ ${c} }`,
+  (c) => `cat =(${c})`,
+  (c) => `echo \${ ${c}; }`,
+  // Quoting the classifier's tokeniser reads another way.
+  (c) => `echo $'a' ; ${c}`,
+  (c) => `echo "\${x:-'}"'}" ; ${c} ; echo "\${x:-'}"'}"`,
+  (c) => `echo a # ; ${c}`,
+];
+export const grammarForm = fc.constantFrom(...GRAMMAR_FORMS);
+
+/** Runs of the tokens the shell's grammar is made of, balanced or not. */
+export const grammarSoup = fc
+  .array(
+    fc.constantFrom(
+      '(', ')', '{', '}', 'if', 'then', 'else', 'fi', 'while', 'do', 'done', 'for', 'in', 'case', 'esac',
+      ';;', ';', '|', '&', '&&', '||', '\n', ' ', ' ', '>', '<', '>>', '<<', '<<<', '2>', '&>', '#',
+      '$(', '${', '`', "'", '"', '\\', '[[', ']]', '((', '))', 'f()', '!', 'x', 'sudo', 'id', 'a=1', '*',
+      ' case x in ', ' esac ', "$'", '=(', ' time ', ' function f ', ' repeat 2 ', ' end ', ' select ', ' until ', ',',
+    ),
+    { maxLength: 60, size: 'max' },
+  )
+  .map((parts) => parts.join(''));
