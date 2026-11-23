@@ -79,26 +79,40 @@ export interface ToolDeps {
 /**
  * Under `approvalPolicy = "client-tool"`, the tools whose call is itself the approval.
  *
- * Each one does one kind of thing, and the client's own consent prompt for it shows
- * exactly what will run (the command, the path, the pid), so a user who keeps "ask"
- * on these tools in their client approves every gated call there. `run-command` is
- * deliberately absent: it carries safe and destructive commands alike, so a user who
- * always-allows it for the safe ones would be approving everything. A gated command
- * on a tool not listed here is refused and pointed at `destructive-command`.
+ * Each one does one gated kind of thing, and the client is expected to ask before each
+ * call: a user who keeps "ask" on these tools in their client approves every gated call
+ * there. What the client's prompt shows is the tool's arguments: the command for the two
+ * shell tools, the paths for the transfers. Left out on purpose:
  *
- * An explicit list rather than "every tool but run-command", so that a tool added
- * later is refused at the gate until someone decides its prompt is enough.
+ *  - `run-command`, `read-command` and a background `open-session`: they carry commands of
+ *    every class, so a user who always-allows them for the safe ones would be approving
+ *    everything. A gated command there is refused and pointed at `destructive-command`.
+ *  - `sftp-download`: annotated read-only, which clients take as a reason not to ask.
+ *  - `signal-process`, `sftp-list`: they do not reach the gate under the default rules.
+ *
+ * An interactive `open-session` is consent as well (`clientConsentCovers`): it runs no
+ * command, and its prompt shows what it opens.
+ *
+ * An explicit list rather than "every tool but run-command", so that a tool added later
+ * is refused at the gate until someone decides its prompt is enough.
  */
 export const CLIENT_CONSENT_TOOLS: ReadonlySet<string> = new Set([
   'destructive-command',
   'privileged-command',
-  'signal-process',
-  'open-session',
   'sftp-upload',
   'sftp-upload-file',
-  'sftp-download',
   'sftp-download-file',
 ]);
+
+/** The tool that runs gated shell commands under client-tool, and only there. */
+const CLIENT_TOOL_SHELL = 'destructive-command';
+/** Tools whose arguments `destructive-command` takes as they are. */
+const SHELL_TOOLS: ReadonlySet<string> = new Set(['run-command', 'read-command']);
+
+/** Whether the client's prompt for this call is the approval for it under client-tool. */
+function clientConsentCovers(toolName: string, synthetic: boolean): boolean {
+  return CLIENT_CONSENT_TOOLS.has(toolName) || (toolName === 'open-session' && synthetic);
+}
 
 /** The audit `approver` for a call approved by the client's own tool-call prompt. */
 export const CLIENT_TOOL_APPROVER = 'client-tool-consent';
@@ -120,6 +134,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     profileName: string,
     toolName: string,
     resource: PolicyResource = {},
+    synthetic = false,
   ) {
     const span = tracer.startSpan('policy.evaluate');
     span.setAttribute('tool.name', toolName);
@@ -133,6 +148,22 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       // Read before evaluating: a reload swaps conn.profile in place, and which gate
       // applies has to follow the rules the evaluation was made under.
       const approvalPolicyAtEval = conn.profile.approvalPolicy;
+      // destructive-command exists for every installation, and a rule written for
+      // run-command (OPA's `input.action.tool`, a client's per-tool permission) does not
+      // match it. Outside client-tool it runs nothing, and OPA is never asked about it.
+      if (toolName === CLIENT_TOOL_SHELL && approvalPolicyAtEval !== 'client-tool') {
+        throw new PolicyRefusedError(
+          `CLIENT_TOOL_ONLY: ${CLIENT_TOOL_SHELL} runs commands only on a profile with approvalPolicy = ` +
+          `"client-tool", and profile "${conn.profile.name}" uses "${approvalPolicyAtEval}". ` +
+          'Call run-command with the same arguments instead.',
+          {
+            ...policy.evaluate(command, conn.profile, resource),
+            decision: 'deny',
+            ruleId: 'client-tool-only',
+            reason: `${CLIENT_TOOL_SHELL} is only for profiles with approvalPolicy = "client-tool".`,
+          },
+        );
+      }
       const evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName, resource);
       span.setAttribute('policy.decision', evaluation.decision);
       span.setAttribute('command.class', evaluation.commandClass);
@@ -149,32 +180,23 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
         // No elicitation: the approval is the client's consent prompt for this tool
         // call, which the user answered before the call reached us. That only holds
         // for a tool that does one gated thing (CLIENT_CONSENT_TOOLS).
-        span.setAttribute('policy.approval', 'client-tool');
-        if (!CLIENT_CONSENT_TOOLS.has(toolName)) {
+        if (!clientConsentCovers(toolName, synthetic)) {
+          span.setAttribute('policy.approval', 'client-tool-refused');
           throw new PolicyRefusedError(
             `APPROVAL_VIA_TOOL: profile "${conn.profile.name}" uses approvalPolicy = "client-tool", so ` +
-            `${evaluation.commandClass} commands are not run from ${toolName}. Call destructive-command ` +
-            `with the same arguments instead; your MCP client asks the user to approve that tool call, ` +
-            `and that answer is the approval.`,
+            `${evaluation.commandClass} commands are not run from ${toolName}. ` +
+            (SHELL_TOOLS.has(toolName)
+              ? `Call ${CLIENT_TOOL_SHELL} with the same arguments instead; your MCP client asks the user to ` +
+                'approve that tool call, and that answer is the approval.'
+              : `The client's approval of a ${toolName} call is not taken as approval under this policy; run ` +
+                `a shell command with ${CLIENT_TOOL_SHELL}, or use a profile with another approvalPolicy.`),
             { ...evaluation, decision: 'deny', ruleId: 'approval-via-tool' },
           );
         }
+        span.setAttribute('policy.approval', 'client-tool');
         if (registry.generation !== genAtEval) {
-          // Consent was given under rules that are no longer live. It carries over only
-          // if the new rules still leave this to the client's prompt.
-          const recheck = await recheckAfterReload(conn, command, toolName, resource, evaluation, 'approval');
-          if (recheck.evaluation.decision === 'require-approval' && conn.profile.approvalPolicy !== 'client-tool') {
-            throw new PolicyRefusedError(
-              'CONFIG_RELOADED: The configuration was reloaded while this command was being checked, ' +
-              'and the decision does not carry over to the new rules; retry the call.',
-              {
-                ...recheck.evaluation,
-                decision: 'deny',
-                ruleId: 'config-reloaded',
-                reason: 'The configuration was reloaded while the command was being checked; the command was not run.',
-              },
-            );
-          }
+          // Consent was given under rules that are no longer live.
+          const recheck = await recheckAfterReload(conn, command, toolName, resource, evaluation, 'client-consent');
           return { conn, evaluation: recheck.evaluation, approver: CLIENT_TOOL_APPROVER };
         }
         return { conn, evaluation, approver: CLIENT_TOOL_APPROVER };
@@ -236,7 +258,13 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
    * - after an approval, `allow`, or `require-approval` again, for the class the human
    *   approved: the new rules would still have put this same decision to them;
    * - after an `allow` or a reused grant, `allow` for the same class. A decision nobody
-   *   was asked about is not carried over to rules that would now ask, or refuse.
+   *   was asked about is not carried over to rules that would now ask, or refuse;
+   * - after the client's prompt under client-tool (`'client-consent'`), `allow` or
+   *   `require-approval` for the same class, and only while the profile still uses
+   *   client-tool: under any other policy that prompt is not an approval.
+   *
+   * Whatever the kind, `destructive-command` stands only on a profile that still uses
+   * client-tool, the one policy it runs anything under.
    *
    * Anything else refuses with `config-reloaded` rather than prompting again: a second
    * prompt for a call already in flight is a surprise, and a retry asks under the new
@@ -249,15 +277,18 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     toolName: string,
     resource: PolicyResource,
     decided: PolicyEvaluation,
-    after: 'approval' | 'decision',
+    after: 'approval' | 'decision' | 'client-consent',
   ): Promise<{ evaluation: PolicyEvaluation; generation: number }> {
     const refuse = (): never => {
       throw new PolicyRefusedError(
         after === 'approval'
           ? 'CONFIG_RELOADED: The configuration was reloaded while this command awaited approval, ' +
             'and the approval does not carry over to the new rules; retry the call.'
-          : 'CONFIG_RELOADED: The configuration was reloaded while this command was being checked, ' +
-            'and the decision does not carry over to the new rules; retry the call.',
+          : after === 'client-consent'
+            ? 'CONFIG_RELOADED: The configuration was reloaded while this command was being checked, ' +
+              "and the client's approval of the tool call does not carry over to the new rules; retry the call."
+            : 'CONFIG_RELOADED: The configuration was reloaded while this command was being checked, ' +
+              'and the decision does not carry over to the new rules; retry the call.',
         {
           ...decided,
           decision: 'deny',
@@ -279,9 +310,14 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     const current = await policy.evaluateWithOpa(command, conn.profile, toolName, resource);
     // Another reload during the re-evaluation: this one is stale too.
     if (registry.generation !== genAtRecheck) refuse();
-    const accepted = after === 'approval'
-      ? current.decision === 'allow' || current.decision === 'require-approval'
-      : current.decision === 'allow';
+    // The client's prompt is the approval only under client-tool, and destructive-command
+    // runs nothing outside it: either way the new rules must still be client-tool.
+    if ((after === 'client-consent' || toolName === CLIENT_TOOL_SHELL) && conn.profile.approvalPolicy !== 'client-tool') {
+      refuse();
+    }
+    const accepted = after === 'decision'
+      ? current.decision === 'allow'
+      : current.decision === 'allow' || current.decision === 'require-approval';
     if (!accepted) refuse();
     if (current.commandClass !== decided.commandClass) refuse();
     return { evaluation: current, generation: genAtRecheck };
@@ -463,7 +499,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       }
 
       const { conn, evaluation, approver } = await checkPolicyAndApprove(
-        effective, profileName, opts.toolName, opts.resource,
+        effective, profileName, opts.toolName, opts.resource, opts.synthetic ?? false,
       );
       state.evaluation = evaluation;
 

@@ -31,11 +31,12 @@ export function registerCommandTools(
   );
 
   // ─── run-command / destructive-command ────────────────────────────────
-  // One handler, two tools. They differ only at the approval gate, and only under
-  // approvalPolicy = "client-tool": there a gated command is refused on run-command
-  // and runs on destructive-command, whose client-side consent prompt is the
-  // approval (see CLIENT_CONSENT_TOOLS). Under every other policy the two behave
-  // identically, so a model that reaches for either gets the same gate.
+  // One handler, two tools. They differ only at the approval gate. Under
+  // approvalPolicy = "client-tool" a gated command is refused on run-command and runs
+  // on destructive-command, whose client-side consent prompt is the approval (see
+  // CLIENT_CONSENT_TOOLS). Under any other policy destructive-command runs nothing:
+  // the pipeline refuses it before OPA is asked and points back at run-command, so a
+  // rule written for run-command is never sidestepped by a second tool name.
   const shellCommandShape = {
     command: z.string().describe('Shell command to execute'),
     profile: z.string().optional().describe('Profile name'),

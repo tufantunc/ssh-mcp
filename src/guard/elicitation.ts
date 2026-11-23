@@ -106,9 +106,7 @@ export async function requestApproval(
           `ready to answer it.`
         : `this MCP client could not be asked to approve it. The likely cause is a client without ` +
           `elicitation support; a transport failure or a malformed reply does the same. Approval fails ` +
-          `closed, so the command was refused rather than run. For a client without elicitation, ` +
-          `approvalPolicy = "client-tool" makes the client's own tool-call approval the gate instead. ` +
-          `Underlying error: ${cause}`,
+          `closed, so the command was refused rather than run. Underlying error: ${cause}`,
     };
   }
 }

@@ -459,9 +459,14 @@ describe('a client-tool consent when the config is reloaded mid-call', () => {
     approve.mockReset();
   });
 
-  // Consent from the client's tool prompt was given under the old rules. If the reload
-  // moves the profile to a policy that would have prompted, it does not carry over.
-  function reloadDuringEvaluation(next: Profile) {
+  // Consent from the client's tool prompt was given under the old rules. It carries over
+  // only while the profile still uses client-tool; any other policy, or no profile, and
+  // the call is refused with one message, since nobody was asked anything here.
+  const RELOADED = 'CONFIG_RELOADED: The configuration was reloaded while this command was being checked, ' +
+    "and the client's approval of the tool call does not carry over to the new rules; retry the call.";
+  const REASON = 'The configuration was reloaded while the command was being checked; the command was not run.';
+
+  function reloadDuringEvaluation(next: Profile, toolName = 'destructive-command', command = COMMAND) {
     const profile: Profile = { ...testProfile, approvalPolicy: 'client-tool' };
     const policy = new PolicyEngine(DEFAULT_RULES);
     const ctx = setup(profile, policy);
@@ -476,26 +481,42 @@ describe('a client-tool consent when the config is reloaded mid-call', () => {
       return result;
     });
     const run = () => ctx.pipeline.runAudited(
-      COMMAND,
-      { toolName: 'destructive-command', failureClass: 'safe', profile: profile.name, extra: {} },
+      command,
+      { toolName, failureClass: 'safe', profile: profile.name, extra: {} },
       ctx.pipeline.execAndReport(),
     );
     return { ...ctx, run };
   }
 
-  it('is refused when the reload switches the profile to ask-destructive', async () => {
-    const { exec, records, run } = reloadDuringEvaluation({ ...testProfile, approvalPolicy: 'ask-destructive' });
+  it.each(['ask-destructive', 'ask-all', 'deny', 'auto'] as const)(
+    'is refused when the reload switches the profile to %s',
+    async (approvalPolicy) => {
+      const { exec, records, run } = reloadDuringEvaluation({ ...testProfile, approvalPolicy });
 
-    await expect(run()).rejects.toThrow(/CONFIG_RELOADED/);
+      const err: any = await run().catch((e) => e);
+      expect(err.message).toBe(RELOADED);
+      expect(err.evaluation.reason).toBe(REASON);
+      expect(exec).not.toHaveBeenCalled();
+      expect(approve).not.toHaveBeenCalled();
+      expect(records.at(-1)).toMatchObject({
+        decision: 'deny', ruleId: 'config-reloaded', commandClass: 'destructive',
+      });
+    },
+  );
+
+  it('is refused for privileged-command too when the reload leaves client-tool', async () => {
+    const { exec, run } = reloadDuringEvaluation({ ...testProfile, approvalPolicy: 'auto' }, 'privileged-command');
+
+    await expect(run()).rejects.toThrow(RELOADED);
     expect(exec).not.toHaveBeenCalled();
-    expect(approve).not.toHaveBeenCalled();
-    expect(records.at(-1)).toMatchObject({ decision: 'deny', ruleId: 'config-reloaded' });
   });
 
-  it('is refused when the reload denies the command', async () => {
-    const { exec, run } = reloadDuringEvaluation({ ...testProfile, approvalPolicy: 'deny' });
+  // A safe command on destructive-command needs no consent, but the tool itself is
+  // only for client-tool profiles, and the new rules no longer make this one.
+  it('is refused for a safe command on destructive-command when the reload leaves client-tool', async () => {
+    const { exec, run } = reloadDuringEvaluation({ ...testProfile, approvalPolicy: 'auto' }, 'destructive-command', 'echo hi');
 
-    await expect(run()).rejects.toThrow(/reloaded/i);
+    await expect(run()).rejects.toThrow(/^CONFIG_RELOADED: /);
     expect(exec).not.toHaveBeenCalled();
   });
 
@@ -504,6 +525,21 @@ describe('a client-tool consent when the config is reloaded mid-call', () => {
 
     await run();
     expect(exec).toHaveBeenCalledTimes(1);
-    expect(records.at(-1)).toMatchObject({ approver: 'client-tool-consent' });
+    expect(records.at(-1)).toMatchObject({ decision: 'require-approval', approver: 'client-tool-consent' });
+  });
+
+  // The other direction: a human answered an elicitation prompt, so that approval holds
+  // under client-tool too, and the command runs on run-command where it was asked.
+  it('lets an elicited approval on run-command stand when the reload switches to client-tool', async () => {
+    const profile: Profile = { ...testProfile, approvalPolicy: 'ask-destructive' };
+    const { registry, exec, run } = setup(profile);
+    approve.mockImplementation(async () => {
+      registry.applyConfig(configOf({ ...testProfile, approvalPolicy: 'client-tool' }));
+      return { approved: true, approver: 'elicitation' };
+    });
+
+    await run();
+    expect(approve).toHaveBeenCalledTimes(1);
+    expect(exec).toHaveBeenCalledTimes(1);
   });
 });

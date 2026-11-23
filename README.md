@@ -157,7 +157,7 @@ claude mcp add --transport stdio ssh-mcp -- ssh-mcp
 | `read-session-output` | Read output from background sessions (e.g., `tail -f`) | ✅ | — |
 | `read-command` | Execute allowlisted read-only commands (`ls`, `cat`, `grep`, ...) | ✅ | — |
 | `run-command` | Execute arbitrary commands (destructive/privileged need approval, unless `approvalPolicy = "auto"`) | — | — |
-| `destructive-command` | Same as `run-command`; the tool to use for destructive/privileged commands under `approvalPolicy = "client-tool"` (see [Approval Modes](#approval-modes)) | — | ✅ |
+| `destructive-command` | Runs a shell command on a profile with `approvalPolicy = "client-tool"`, where the call is the approval; refused on any other profile (see [Approval Modes](#approval-modes)) | — | ✅ |
 | `privileged-command` | Execute with sudo (needs approval, unless `approvalPolicy = "auto"`) | — | ✅ |
 | `sftp-upload` | Upload a file via SFTP (replaces the destination unconditionally) | — | ✅ |
 | `sftp-download` | Download a file via SFTP | ✅ | — |
@@ -267,7 +267,7 @@ OpenSSH on Windows 11.
 
 | | Linux / BSD / macOS | Windows OpenSSH |
 |---|:---:|:---:|
-| `read-command`, `run-command`, `privileged-command`, `signal-process` | ✅ | ✅ |
+| `read-command`, `run-command`, `destructive-command`, `privileged-command`, `signal-process` | ✅ | ✅ |
 | `sftp-upload`, `sftp-download` | ✅ | ✅ |
 | `sftp-list` | ✅ | ✅ |
 | `sftp-upload-file`, `sftp-download-file` | ✅ | ❌ (local side unverifiable) |
@@ -788,16 +788,27 @@ client does ask the user before a tool call, though. `client-tool` uses that pro
 - `run-command` keeps running read-only and safe commands. A destructive or privileged
   command there is refused with `APPROVAL_VIA_TOOL`, which tells the model to call
   `destructive-command` with the same arguments.
-- `destructive-command`, `privileged-command`, `signal-process`, `open-session` and the
-  `sftp-*` transfer tools run gated commands without an elicitation prompt: the call
-  reaching the server is the approval. Each does one kind of thing, and the client's
-  prompt shows its arguments, so the user sees exactly what will run.
+- `destructive-command`, `privileged-command`, an interactive `open-session`, and
+  `sftp-upload`, `sftp-upload-file` and `sftp-download-file` run gated commands without an
+  elicitation prompt: the call reaching the server is the approval. The client's prompt
+  shows the call's arguments: the command for the two shell tools, the session's name,
+  the paths for the transfers.
+- A background `open-session` and `sftp-download` are not consent: a gated command there
+  is refused with `APPROVAL_VIA_TOOL`. A background session carries commands of every
+  class, as `run-command` does, and `sftp-download` is annotated read-only, which clients
+  take as a reason not to ask.
 - Role bindings, host groups, the denylist, OPA and the command quota apply as in every
-  other mode. Only the elicitation step is replaced.
+  other mode. Only the elicitation step is replaced. OPA sees a gated shell command as
+  `action.tool = "destructive-command"`; a rule matched on `"run-command"` needs that name
+  too.
 - The audit log records these runs with `approver: "client-tool-consent"`.
+- `destructive-command` runs nothing on a profile with any other `approvalPolicy`: it is
+  refused with `CLIENT_TOOL_ONLY`, before OPA is asked, and pointed at `run-command`.
 
 In your client, always-allow `read-command` and `run-command` if you like, and keep
-**ask** on `destructive-command`, `privileged-command` and the other tools above.
+**ask** on `destructive-command`, `privileged-command`, `open-session` and the transfer
+tools above. An interactive session's later commands go through `run-command` and
+`destructive-command` one by one, each classified on its own.
 
 This is weaker than elicitation, and it is opt-in for that reason. The server cannot tell
 whether a person answered the client's prompt: "Always allow" on `destructive-command`
@@ -882,6 +893,10 @@ The request shape is modeled on the AuthZEN Access Evaluation contract:
   }
 }
 ```
+
+`action.tool` is the tool's name. On a profile with `approvalPolicy = "client-tool"`, a
+destructive or privileged shell command arrives as `"destructive-command"`, not
+`"run-command"`; a rule that matches on the tool name should name both.
 
 For the five SFTP tools, `resource` also carries three path keys: `remotePath`,
 the path as given; and `remotePathNormalized` and `remotePathWindows`, the same
@@ -1149,7 +1164,7 @@ replacement, rather than failing later as a confusing auth error.
 |----|----|-------|
 | `exec` | `read-command` | Allowlisted read-only commands. Prefer this for reads. |
 | `exec` | `run-command` | Arbitrary commands. Destructive and privileged ones go through the approval gate, unless `approvalPolicy = "auto"`. |
-| — | `destructive-command` | Same as `run-command`. Under `approvalPolicy = "client-tool"`, the one that runs destructive and privileged commands. |
+| — | `destructive-command` | Under `approvalPolicy = "client-tool"`, the tool that runs destructive and privileged shell commands. Refused on any other profile. |
 | `sudo-exec` | `privileged-command` | Requires approval unless `approvalPolicy = "auto"`. Password is piped via stdin. |
 | `description` parameter | — | Removed. It was an injection vector (#44) and never reached the host. |
 
