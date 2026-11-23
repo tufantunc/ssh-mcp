@@ -9,6 +9,7 @@ import { PolicyEngine, DEFAULT_RULES } from '../../../src/policy/engine.js';
 import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
 import type { Profile } from '../../../src/types.js';
 import { configWithDefaults, plant } from '../../helpers/registry.js';
+import { tracer } from '../../../src/observability/tracer.js';
 import { configSchema } from '../../../src/config/schema.js';
 
 /**
@@ -121,6 +122,33 @@ describe('approvalPolicy = "client-tool"', () => {
     expect(textOf(res)).toMatch(/^APPROVAL_VIA_TOOL: /);
     expect(textOf(res)).toContain('Call destructive-command with the same arguments');
     expect(h.execCalls).toHaveLength(0);
+  });
+
+  // A trace has to tell a call the client's prompt approved from one refused for
+  // arriving on the wrong tool: both reach the same branch with the same decision.
+  it.each([
+    ['destructive-command', 'client-tool'],
+    ['run-command', 'client-tool-refused'],
+  ])('marks the policy span of a gated %s call as %s', async (tool, approval) => {
+    const attributes: Record<string, unknown>[] = [];
+    const startSpan = vi.spyOn(tracer, 'startSpan').mockImplementation(() => {
+      const seen: Record<string, unknown> = {};
+      attributes.push(seen);
+      return {
+        setAttribute: (key: string, value: unknown) => { seen[key] = value; },
+        setAttributes: () => {}, setStatus: () => {}, recordException: () => {}, addEvent: () => {}, end: () => {},
+        isRecording: () => true, spanContext: () => ({}), updateName: () => {},
+      } as any;
+    });
+    try {
+      h = await createHarness({ approvalPolicy: 'client-tool' });
+      await call(tool, { command: DESTRUCTIVE });
+    } finally {
+      startSpan.mockRestore();
+    }
+
+    const policySpans = attributes.filter((a) => a['tool.name'] === tool);
+    expect(policySpans.map((a) => a['policy.approval'])).toEqual([approval]);
   });
 
   it('never lets run-command count as consent', () => {
