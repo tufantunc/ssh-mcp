@@ -130,7 +130,13 @@ jobs:
         # Same suite as `npm test`, with the v8 reporter attached so the run
         # that proves the code works is also the one the coverage report comes
         # from.
-        run: npm run coverage
+        run: npm run coverage -- --reporter=default --reporter=json --outputFile.json="${{ runner.temp }}/vitest-report.json"
+
+      # Where the run's time went, also when it failed: a test that hits its time limit
+      # is otherwise the only one whose duration the log ever shows.
+      - name: Slowest test files and tests
+        if: ${{ !cancelled() }}
+        run: node scripts/slowest-tests.mjs "${{ runner.temp }}/vitest-report.json"
 
       # main() runs only in the e2e suite's server processes, which in-process
       # coverage cannot follow. Converted here, and checked like the report below: a
@@ -220,7 +226,13 @@ jobs:
       # letting it skip here would report its files as untested rather than
       # unrun.
       - name: Run unit and property tests with coverage
-        run: npm run coverage:unit
+        run: npm run coverage:unit -- --reporter=default --reporter=json --outputFile.json="${{ runner.temp }}/vitest-report.json"
+
+      # Where the run's time went, also when it failed: a test that hits its time limit
+      # is otherwise the only one whose duration the log ever shows.
+      - name: Slowest test files and tests
+        if: ${{ !cancelled() }}
+        run: node scripts/slowest-tests.mjs "${{ runner.temp }}/vitest-report.json"
 
       - name: Check the coverage report was produced
         shell: bash
@@ -265,7 +277,13 @@ jobs:
       # SSH_MCP_DISABLE_MAIN=1, without which importing the entry point starts
       # a real server during the suite.
       - name: Run unit and property tests
-        run: npm run test:unit
+        run: npm run test:unit -- --reporter=default --reporter=json --outputFile.json="${{ runner.temp }}/vitest-report.json"
+
+      # Where the run's time went, also when it failed: a test that hits its time limit
+      # is otherwise the only one whose duration the log ever shows.
+      - name: Slowest test files and tests
+        if: ${{ !cancelled() }}
+        run: node scripts/slowest-tests.mjs "${{ runner.temp }}/vitest-report.json"
 
   # One context that fails if any other job fails.
   #

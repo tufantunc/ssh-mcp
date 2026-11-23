@@ -1,5 +1,49 @@
 # ssh-mcp
 
+## 2.27.1
+
+### Patch Changes
+
+- [#342](https://github.com/tufantunc/ssh-mcp/pull/342) [`bdc4110`](https://github.com/tufantunc/ssh-mcp/commit/bdc41106bf72dfedc55cd8f64f0bdf1a2cc05d82) Thanks [@tufantunc](https://github.com/tufantunc)! - The classifier finds the end of every `$(…)`, `<(…)` and `>(…)` in one pass over the command. It looked for each one separately, so a command with many substitutions that never close took time in proportion to the square of its length (0.8 s for 60 KB; 0.26 s now). No class and no never-allowed answer changes.
+
+## 2.27.0
+
+### Minor Changes
+
+- [`949dc85`](https://github.com/tufantunc/ssh-mcp/commit/949dc85d9679777987918a8505a7d8bcf8a58049) Thanks [@tufantunc](https://github.com/tufantunc)! - The classifier now finds the program an interpreter is handed when options stand between the interpreter and the program. A shell's `-c` is a switch, so its program is the first operand wherever `-c` stands: `sh -c -- CMD`, `sh -c -e CMD`, `sh -o errexit -c CMD` and `bash --rcfile FILE -c CMD` are classified, and checked against the never-allowed list, as `CMD`. For the other interpreters the classifier knows the options that take no value and takes every other option to have one, so an option's value no longer hides the program flag behind it (`python3 -W ignore -c CODE`, `perl -I lib -e CODE`, `node -r ./x -e CODE`, `ruby -r json -e CODE`, `php -d a=b -r CODE`, `lua -l os -e CODE`, `osascript -l JavaScript -e CODE`), nor does a cluster of flags (`perl -lane CODE`) or a program attached to its flag (`perl -e'CODE'`). `vim`, `vi`, `ex`, `view`, `nvim` and `gdb` are read with their options after operands too (`vim FILE -c CMD`, `gdb PROG -ex CMD`), and vim's `+CMD` is read as `-c CMD`. This reading applies behind a command the classifier has no table entry for as well (`unshare -m sh -c -- CMD`, `docker exec NAME python3 -W ignore -c CODE`). Before, each of these was `safe`.
+  
+  More names are read as interpreters: a version after the name (`python3.11`, `perl5.36`, `php8.2`, `lua5.4`, `ksh93`), `mksh`, `pdksh`, `oksh`, `yash`, `rbash`, `posh`, `fish`, `csh`, `tcsh`, `nodejs`, `pypy`, `pypy3`, `jruby`, `luajit`, `nvim`, `rvim`, `rview`, `gview` and `gdb-multiarch`. More program flags are read: `php -B`, `-R`, `-E` and `--run`, `bun --eval`, `-p` and `--print`, and gdb's `-eval-command`, `-iex`, `-eiex` and their abbreviations with one dash or two.
+  
+  Upgrade notes:
+  
+  - The invocations above that ran without a prompt now follow the policy for a program handed to an interpreter: `destructive` for code the classifier does not read, and the class of the command itself for a shell's `-c`.
+  - An interpreter option the classifier does not know is taken to have a value. `python3 --some-new-flag run.py -c config.yml` is then read as `-c` handing `config.yml` to python and is `destructive`; with an option it knows (`python3 -u run.py -c config.yml`) the line keeps its class. Report such an option and it is added.
+  - `vim +q FILE`, `ex -s +'%s/a/b/' +wq FILE` and any other `+COMMAND` are `destructive`, and so is a `+/PATTERN` that holds a `|`. `vim +10 FILE`, `vim + FILE` and `vim +/pattern FILE` keep their class.
+  - `fish -c CMD`, `csh -c CMD` and `tcsh -c CMD` are `destructive` at least: their program is not read as POSIX shell text.
+  - A script's own arguments are not read: `python3 -u train.py -c config.yml`, `python3 -m gunicorn -c conf.py app` and `node server.js -p 3000` keep their class.
+
+- [`949dc85`](https://github.com/tufantunc/ssh-mcp/commit/949dc85d9679777987918a8505a7d8bcf8a58049) Thanks [@tufantunc](https://github.com/tufantunc)! - The command classifier now reads the shell's own grammar. A command inside a subshell or a brace group, in an `if`, loop or `case` block, in a function body, next to a redirection, in a `trap` action, behind `builtin`, `coproc` or `time`, in zsh's `repeat`, `foreach` and short loop forms, inside `=(…)` or `${ …; }`, in a `$(…)` that holds a quoted parenthesis, or fed to a shell as a here-string or through a pipe into a group is classified, and checked against the never-allowed list, as the command it runs. Before, most of these were classified by a word that names no program and came out `safe`.
+  
+  Upgrade notes:
+  
+  - Commands of these shapes that ran without a prompt now follow the policy for the command inside them. `(sudo id)` and `if true; then sudo id; fi` are `privileged`, and `{ reboot; }` is refused, exactly as `sudo id` and `reboot` are when sent on their own. Commands whose grammar holds nothing elevating or destructive keep their class: `( cd /srv && ls )`, `for f in *.log; do wc -l "$f"; done`, `{ date; uptime; } > out.txt`.
+  - A command word that the shell rewrites before running it, a glob or a brace expansion such as `./run-*.sh` or `/opt/app-{a,b}/bin/start`, is now `destructive`: the name of what runs is not in the command. Write the name out.
+  - `(( … ))` is read as commands, because `dash` runs it as a subshell. `(( $n > 5 ))` and `(( count*2 > 10 ))` are now `destructive`; `(( n > 5 ))` and `[ $((count*2)) -gt 10 ]` keep their class.
+  - A word that names an elevating or never-allowed command is read as that command wherever some shell would run it: a `case` label after the first (`case $1 in start) …;; reboot) …;; esac`), an array element (`x=(sudo reboot)`). Name the label differently, or build the array from a file.
+  - A line with a `$(…)` that holds a `case` statement (ended by `esac`, or by a `}` as zsh allows) is `destructive` at least, because shells do not agree on where such a substitution ends and nothing behind it is known to be data. The same holds for a `case` statement anywhere behind a `$(`, a backquote or a process substitution on the line (`echo "$(date)"; case "$1" in …`): whether it stands inside is what cannot be told. `v="$(case "$1" in start) echo up ;; esac)"; echo "$v"` now asks for approval. Assign from a `case` statement instead (`case "$1" in start) v=up ;; esac; echo "$v"`), which keeps its class. The text from the substitution to the line's last `)` is still read by command name with quotes ignored, so `v="$(case $1 in a) echo 1 ;; esac)"; echo "run (sudo make install) first"` is `privileged`.
+  - A line nested so deep that the classifier stops reading it (eight levels of substitutions, groups and carriers, counted along every way it reads the line) is `privileged`. This held for the class before; it now holds for the never-allowed scan too, which could stop first.
+  - A word that starts with a bracket expression is a glob to a POSIX shell, so a PowerShell cast as the first word (`[xml](Get-Content web.config)`, `[int]"5"`) is now `destructive`. A static member (`[math]::Round(1.5)`) keeps its class.
+  - A PowerShell condition or block that starts with a variable, `if ($x -gt 5) { … }` or `if (Test-Path $p) { $c = Get-Content $p }`, is now `destructive`. `if (Test-Path $p) { Remove-Item $p }` keeps its class.
+
+- [`949dc85`](https://github.com/tufantunc/ssh-mcp/commit/949dc85d9679777987918a8505a7d8bcf8a58049) Thanks [@tufantunc](https://github.com/tufantunc)! - `split --filter=COMMAND` (GNU coreutils, also installed as `gsplit`) is now read as a carrier: the command it hands to `sh -c` is classified whatever its shape, in every spelling `split` accepts — attached or detached, under any prefix from `--f` up. The command is at least `destructive`, `privileged` when the filter elevates, and the never-allowed list applies to the filter.
+  
+  Upgrade note: a `split --filter` command that ran as `safe` is now asked for approval, or refused, depending on the role and tier.
+
+### Security
+
+- Fixed [GHSA-hmrp-r5wm-5mqf](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-hmrp-r5wm-5mqf): a command inside the shell's own grammar (a subshell, a brace group, after a reserved word, behind a redirection) or behind an interpreter's options (`sh -c -- CMD`, `python3 -W ignore -c CODE`) reached class `safe`, with no never-allowed match.
+- Fixed [GHSA-gpfp-xjq7-64hv](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-gpfp-xjq7-64hv): `split --filter=COMMAND` reached class `safe` when the filter held no space, with no never-allowed match. Reported by @chrispham-cyber.
+
 ## 2.26.0
 
 ### Minor Changes

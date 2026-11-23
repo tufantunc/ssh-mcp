@@ -1,0 +1,9132 @@
+[
+ {
+  "command": "ls -la /var/log",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ls -la /var/log > /tmp/out.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls -la /var/log >/tmp/out.txt 2>&1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls>/tmp/out",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "df -h | grep -v tmpfs",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "df -h 2>/dev/null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat /etc/os-release",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "cat /etc/passwd | cut -d: -f1 | sort",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat < /etc/hosts",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat </etc/hosts",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "wc -l < /var/log/syslog",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "wc -l</var/log/syslog",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sort < a.txt > b.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sort <a.txt >b.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo hello > /tmp/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo hello >> /tmp/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo hello>>/tmp/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"hello\">/tmp/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo done >&2",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo err 1>&2",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls /nope 2>/dev/null || echo missing",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls /nope 2> /dev/null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls /nope &>/dev/null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls /nope &> /dev/null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls /nope >/dev/null 2>&1 && echo ok",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "command -v docker >/dev/null 2>&1 && echo yes",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "which nginx > /dev/null && echo installed",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -E 'error|warn' /var/log/syslog",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -E \"error|fail|fatal\" /var/log/syslog | tail -20",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -E 'shutdown|reboot' /var/log/syslog",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -iE \"sudo|su\" /var/log/auth.log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -E 'kill|rm' ~/.bash_history",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -E '(error|warn)' app.log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -c '^processor' /proc/cpuinfo",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "grep -rn \"TODO(me)\" src",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -P '\\d+<\\d+' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep '<html>' index.html",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep \"a>b\" file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -v '^#' /etc/ssh/sshd_config | grep -v '^$'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "journalctl -u nginx --since \"1 hour ago\" | grep -iE \"error|reboot|killed\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "journalctl -u nginx -n 100 --no-pager",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ps aux | grep -E 'nginx|apache|httpd' | grep -v grep",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ps aux | grep '[n]ginx'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ps -eo pid,comm,%mem --sort=-%mem | head",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk '{print $1}' /var/log/nginx/access.log | sort | uniq -c | sort -rn | head",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk -F: '$3>=1000 {print $1}' /etc/passwd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk '$3 > 100' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk 'NR>1 && $2<5 {print}' data",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -n '1,10p' /etc/hosts",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed 's/<br>/\\n/g' page.html",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -e 's/a|b/c/' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -i 's/foo/bar/g' /etc/app.conf",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.items[] | select(.status==\"ok\") | .name' data.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq -r '.[] | \"\\(.name) \\(.id)\"' data.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.a > 3' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.[0]' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s https://example.com/api | jq .",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s 'https://example.com/api?a=1&b=2'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s \"https://example.com/api?a=1&b=2\" -o /tmp/out.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -sS -H \"Authorization: Bearer x\" https://api.example.com/v1/items>out.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -fsSL https://example.com/install.sh -o install.sh",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -X POST -d '{\"a\":\"b\"}' -H 'Content-Type: application/json' http://localhost:8080/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -X POST -d '{\"q\":\"a|b\"}' http://localhost:8080/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s -o /dev/null -w \"%{http_code}\" http://localhost",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "wget -qO- http://localhost:9200/_cluster/health",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for f in *.log; do echo $f; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for f in /var/log/*.log; do wc -l \"$f\"; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for i in 1 2 3; do echo $i; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for i in {1..5}; do echo $i; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for i in $(seq 1 5); do echo $i; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for h in web1 web2; do ping -c1 $h; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for f in *.txt; do mv \"$f\" \"${f%.txt}.bak\"; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for d in */; do du -sh \"$d\"; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for ((i=0;i<3;i++)); do echo $i; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for (( i=0; i<3; i++ )); do echo $i; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "while read l; do echo $l; done < file.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "while read -r line; do echo \"$line\"; done </etc/hosts",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "while true; do date; sleep 1; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "while ! nc -z localhost 5432; do sleep 1; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "until curl -sf http://localhost:8080/health; do sleep 2; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if [ -f /etc/nginx/nginx.conf ]; then echo yes; else echo no; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if [ -f /etc/nginx/nginx.conf ]; then cat /etc/nginx/nginx.conf; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if [[ -d /opt/app ]]; then ls /opt/app; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if test -e /tmp/x; then echo y; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if command -v docker >/dev/null; then docker ps; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if systemctl is-active --quiet nginx; then echo up; else echo down; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if grep -q foo file; then echo found; elif grep -q bar file; then echo bar; else echo none; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if ! grep -q foo file; then echo missing; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[ -f /etc/x ] && echo yes || echo no",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[[ -n \"$FOO\" ]] && echo set",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[[ $a == b* ]] && echo y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[ \"$a\" \\> \"$b\" ] && echo gt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "test -d /tmp && echo dir",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "! grep -q x y && echo no",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case \"$1\" in start) echo start ;; stop) echo stop ;; *) echo usage ;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case $(uname -s) in Linux) echo linux ;; Darwin) echo mac ;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case \"$(uname -m)\" in x86_64) echo amd64 ;; aarch64|arm64) echo arm64 ;; *) echo other ;; esac",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "case $x in a|b) echo ab ;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case $x in y|Y) echo yes ;; n|N) echo no ;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case $ans in [yY]*) echo yes ;; *) echo no ;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case \"$OS\" in ubuntu|debian) apt-get --version ;; centos|rhel) yum --version ;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case $x in (a) echo a ;; (b) echo b ;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case $action in restart|reload) echo r ;; halt|poweroff) echo h ;; esac",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "echo case closed",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "grep case file.c",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "grep -n case src/main.c | head",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep case file.c; echo $(date)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -c case file.c; echo \"lines: $(wc -l < file.c)\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --grep case --oneline",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo in case of fire; echo $(hostname)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo case; ls $(pwd)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo esac",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "(cd /tmp && ls)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(cd /tmp; ls -la)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "( cd /tmp && ls )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(cd /src && tar cf - .) | (cd /dst && tar xf -)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(echo a; echo b) | sort",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(echo a; echo b) > /tmp/ab",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(sleep 5; echo done) &",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(cd /opt/app && git pull)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(cd /opt/app && git status)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(cd /tmp && echo $(pwd))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(ls)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "((x++))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(( x > 3 )) && echo big",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $((1+2))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $(( 1 + 2 ))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $(( (1+2) * 3 ))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "x=$(( (a+b) * 2 )); echo $x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $(( 10 > 3 ))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $((x<<2))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "i=$((i+1))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{ echo a; echo b; } > /tmp/ab",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{ echo a; echo b; } | sort",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{ ls; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "f() { echo hi; }; f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "f() { ls -la \"$1\"; }; f /tmp",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "function g { echo hi; }; g",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "function g() { echo hi; }; g",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cleanup() { echo bye; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "log() { echo \"[$(date)] $*\"; }; log hi",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "arr=(a b c); echo ${arr[1]}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "arr=( a b c ); echo ${#arr[@]}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "arr=(); echo ${#arr[@]}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "files=(*.txt); echo ${#files[@]}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "x=$(date); echo $x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "x=`date`; echo $x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "x=$(cat file)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "x=$(<file); echo $x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "x=$(< /etc/hostname); echo $x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $(date +%s)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $(basename $(pwd))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"$(date)\" > /tmp/d",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kill $(pidof nginx)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kill -0 $(cat /var/run/app.pid) && echo alive",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kill -0 ${pid} && echo alive",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mkdir $HOME/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cd $(dirname $0) && ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo ${PATH}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo ${HOME:-/root}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $HOME",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"a > b\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo 'a | b'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"a (b) c\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a (b)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"3 < 5\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a->b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"->\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo foo > \"/tmp/a b.txt\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo '{\"a\":1}' > /tmp/a.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo '{\"a\":1}' | jq .",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo hi | tee /tmp/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo hi | tee -a /tmp/x > /dev/null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo hi |& cat",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "printf '%s\\n' a b c",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "printf \"%d>%d\\n\" 1 2",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<EOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<EOF > /tmp/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat > /tmp/x <<EOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<'EOF' > /tmp/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<-EOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat << EOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat<<EOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat > /tmp/x.conf <<EOF\\nkey=value\\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<EOF | grep x\\nxa\\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<EOF\\nif (a > b) then\\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<EOF\\nserver { listen 80; }\\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<EOF\\n* * * * * echo hi\\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat > /tmp/s.sh <<'EOF'\\n#!/bin/sh\\ncase \"$1\" in\\n  start) echo s ;;\\n  *) echo u ;;\\nesac\\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tee /tmp/x <<EOF\\nhello (world)\\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep foo <<< \"$var\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep foo <<<\"$var\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep foo <<<$var",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "bc <<< \"1+2\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "bc <<<\"2*3\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "read a b <<< \"1 2\"; echo $a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "base64 -d <<< aGVsbG8=",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "wc -c <<<hello",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "diff <(sort a) <(sort b)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "diff <(ls /a) <(ls /b)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "comm -12 <(sort a) <(sort b)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tee >(gzip > x.gz) < file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "paste <(cut -f1 a) <(cut -f2 b)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps -a --filter \"status=exited\"",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps --filter name=web --format '{{.Names}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps --format \"{{.Names}}: {{.Status}}\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps --format 'table {{.Names}}\\t{{.Status}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps -q | xargs docker inspect --format '{{.Name}} {{.State.Status}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' web",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker logs --tail 100 web 2>&1 | grep -i error",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker logs web > /tmp/web.log 2>&1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker exec web cat /etc/hosts",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker exec -it web sh -c 'ls /app'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker exec web sh -c 'ls /app | wc -l'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker run --rm -v $(pwd):/work alpine ls /work",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker run --name=reboot img",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker images | awk 'NR>1 {print $1\":\"$2}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker stats --no-stream",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "docker compose ps",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker compose logs --tail=50 web",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker system df",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker rm $(docker ps -aq)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods -A | grep -v Running",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods -o wide --all-namespaces",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods -o jsonpath='{.items[*].metadata.name}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods -o jsonpath={.items[*].metadata.name}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods -o jsonpath=\"{range .items[*]}{.metadata.name}{'\\n'}{end}\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods -l 'app in (web,api)'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods -l app=web,tier!=db",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get nodes -o custom-columns=NAME:.metadata.name,CPU:.status.capacity.cpu",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods --field-selector=status.phase!=Running",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl logs deploy/web --tail=100 | grep -E \"ERROR|WARN\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl describe pod web-123 | grep -A5 Events",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl exec web-123 -- ls /app",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl exec web-123 -- sh -c 'cat /etc/hosts'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl top pods --sort-by=memory",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get events --sort-by='.lastTimestamp'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get secret x -o jsonpath='{.data.token}' | base64 -d",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl apply -f - <<EOF\\napiVersion: v1\\nkind: ConfigMap\\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get deploy -o json | jq '.items[] | {name: .metadata.name, replicas: .spec.replicas}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git status",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "git log --oneline -n 10",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "git log --pretty=format:'%h %an <%ae> %s' -5",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --pretty=format:\"%h|%an|%s\" -5",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --format=%H -1",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "git log --since=\"2 weeks ago\" --author=\"A B\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --grep='fix(sudo)' --oneline",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git commit -m 'fix(sudo): handle x'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git commit -m \"feat(api): add <id> param\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git commit -m \"fix: a > b comparison\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git diff HEAD~1 --stat",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "git diff HEAD~1 > /tmp/p.patch",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git show HEAD:src/a.ts",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "git show HEAD:src/a.ts > /tmp/a.ts",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git branch -a | grep -v HEAD",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git stash list",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git rev-parse --abbrev-ref HEAD",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git -C /opt/app pull",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git config --get remote.origin.url",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git for-each-ref --format='%(refname:short) %(committerdate)' refs/heads",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git for-each-ref --format=%(refname) refs/heads",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git reflog show HEAD@{1}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git diff HEAD@{1}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git checkout -- file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git ls-files '*.ts' | wc -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git ls-files *.ts",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git grep -n 'foo(' -- '*.c'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git grep -n \"if (x > 0)\" src",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl status nginx",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl status nginx --no-pager | head -20",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl is-active nginx || echo down",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl list-units --type=service --state=failed",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl list-units --type=service | grep -E 'nginx|mysql'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl restart nginx",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl show nginx -p ActiveState",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl cat nginx > /tmp/unit",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -name '*.log'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "find . -name *.log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find /var/log -name \"*.log\" -mtime +7",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "find /var/log -type f -size +100M -exec ls -lh {} \\;",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "find . -type f -exec grep -l foo {} +",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "find . \\( -name '*.c' -o -name '*.h' \\) -print",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -name '*.tmp' -delete",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "find / -xdev -type f -size +1G 2>/dev/null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -type f | wc -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -maxdepth 1 -type d ! -name .",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "find . -newer /tmp/ref -print > /tmp/list",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -name '*.js' | xargs grep -l \"require(\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -name \"*.py\" -exec wc -l {} + | sort -n | tail -5",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "find /etc -name '*.conf' -exec grep -H 'listen' {} \\; 2>/dev/null",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "ls *.txt",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ls /var/log/*.gz | wc -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls -d */",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ls ?.txt",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ls [ab]*",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ls -la {a,b}.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cp file{,.bak}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mv a.{txt,bak}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mkdir -p /opt/{a,b,c}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "touch /tmp/file{1..3}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rm -f /tmp/*.tmp",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tail -f /var/log/syslog",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "tail -n 50 /var/log/syslog | grep -i \"out of memory\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tail -n +2 file.csv | cut -d, -f1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "head -c 100 /dev/urandom | base64",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "du -sh /var/* 2>/dev/null | sort -h | tail",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "du -sh * | sort -h",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "du -sh ./* | sort -rh | head",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "free -m",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "uptime",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "uname -a",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "hostname -I",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "whoami",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "id",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "date +%Y-%m-%d",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "date '+%Y-%m-%d %H:%M:%S'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "env | sort",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "env | grep -i proxy",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "printenv PATH",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "export FOO=bar; echo $FOO",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "FOO=bar BAZ=qux env | grep FOO",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "FOO=\"a b\" cmd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "PGPASSWORD=x psql -h localhost -U app -c 'select 1'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -c \"select count(*) from t where a > 3\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -c 'select * from t where a<5' -o /tmp/out",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -Atc \"select now()\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mysql -e \"show databases\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mysql -e 'select a from t where b>1' db",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mysql -u root -p db < dump.sql",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mysqldump db > dump.sql",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mysqldump db | gzip > dump.sql.gz",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "pg_dump db > /tmp/db.sql",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "redis-cli info | grep used_memory",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "redis-cli -h localhost ping",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sqlite3 db.sqlite 'select count(*) from t'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ss -tlnp",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ss -tlnp | grep :80",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "netstat -tlnp 2>/dev/null | grep LISTEN",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ip a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ping -c 3 8.8.8.8",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "dig +short example.com",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "nslookup example.com",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "traceroute example.com",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "lsblk",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mount | column -t",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "lsof -i :8080",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "top -bn1 | head -20",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "vmstat 1 5",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "iostat -x 1 3",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "dmesg | tail -50",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "dmesg -T | grep -i 'killed process'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "last -n 10",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "w",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "crontab -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "crontab -l | grep -v '^#'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "crontab -l 2>/dev/null | { cat; echo \"0 * * * * /x\"; } | crontab -",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "apt list --upgradable 2>/dev/null | wc -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "apt-get update && apt-get -y upgrade",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "dpkg -l | grep nginx",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rpm -qa | grep -i kernel",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "yum check-update",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "pip list --outdated",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "pip install 'requests>=2.0'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "pip install \"requests>=2.0,<3\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "pip install requests>=2.0",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "npm ls --depth=0",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "npm install lodash@\">=4\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "npm test 2>&1 | tail -20",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "npm run build > build.log 2>&1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "node -v",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "node -e 'console.log(1)'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "node -e \"console.log([1,2].map(x => x*2))\"",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "python3 -c 'print(1)'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "python3 -c \"import sys; print(sys.version)\"",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "python3 -c \"print(1 if 2>1 else 0)\"",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "python3 --version",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "python3 -m http.server 8000",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "python3 script.py > out.txt 2> err.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "python3 script.py>out.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "perl -ne 'print if /foo/' file",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "perl -pe 's/a/b/' file",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "ruby -e 'puts 1'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "php -r 'echo 1;'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "bash -c 'echo hi'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "bash -c \"ls | wc -l\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sh -c 'cd /tmp && ls'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "bash script.sh",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sh ./deploy.sh > deploy.log 2>&1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "./run.sh",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "./run.sh > /tmp/log 2>&1 &",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "nohup ./run.sh > /tmp/log 2>&1 &",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "nohup ./server >/dev/null 2>&1 &",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "timeout 5 curl -s http://localhost",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "timeout 10 ping -c1 host > /dev/null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "time ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "time (ls)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "time (sleep 1; ls)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "nice -n 10 gzip big.log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xargs -n1 echo < list.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xargs -I{} echo {} < list.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat list | xargs -I{} sh -c 'echo {}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat list | xargs -I {} cp {} /backup/",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls | xargs -n 1 basename",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "watch -n 2 'df -h'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "watch -n 1 \"ps aux | head\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tar czf /tmp/b.tgz /etc",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tar czf - /etc | ssh host 'cat > /tmp/b.tgz'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "tar xzf a.tgz -C /opt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tar tzf a.tgz | head",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tar czf /tmp/b.tgz --exclude='*.log' /var/www",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "gzip -c file > file.gz",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "gunzip < file.gz > file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "zcat file.gz | grep foo",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "zcat -f /var/log/syslog* | grep -c error",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "openssl x509 -in cert.pem -noout -dates",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "openssl s_client -connect example.com:443 </dev/null 2>/dev/null | openssl x509 -noout -enddate",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo | openssl s_client -connect example.com:443 2>/dev/null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ssh-keygen -l -f ~/.ssh/id_rsa.pub",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rsync -av /src/ /dst/",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rsync -av --exclude='*.tmp' /src/ host:/dst/",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rsync -av -e 'ssh -p 2222' /src/ host:/dst/",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "scp a host:/tmp/",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "split -l 1000 big.txt part_",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "split -b 100M big.bin",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "split --lines=1000 big.txt part_",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "split -l 1000 --additional-suffix=.txt big.txt part_",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "split -d -l 500 file out",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "split --verbose -n 4 file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "split --filter='gzip > $FILE.gz' -l 1000 big.txt part_",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "csplit file '/^---$/' '{*}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap 'rm -f /tmp/x' EXIT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap \"echo bye\" EXIT; echo hi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap cleanup EXIT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap - INT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap '' INT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap -p",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap 'kill $pid' TERM",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "set -e; trap 'echo failed' ERR; ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "set -euo pipefail; ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "set -x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "set +x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cd /tmp && ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cd /tmp; pwd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cd -",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "pushd /tmp > /dev/null; ls; popd > /dev/null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "true",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": ":",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ": > /tmp/empty",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "> /tmp/empty",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ">/tmp/empty",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ">> /tmp/log echo hi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "> /tmp/out ls -la",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "2>/dev/null ls /x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "</etc/hosts cat",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "< /etc/hosts cat",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a; echo b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a && echo b || echo c",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a &",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sleep 1 & wait",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "wait",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls;",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls ;; ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"it's\"",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo 'say \"hi\"'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"unterminated",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo 'unterminated (x) > y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"a (b\" ) c",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo it's (fine) > x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls ) ; ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a ) b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo (",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo foo(",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo foo()",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo foo(bar)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo ) (",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ")(",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "()",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ")",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(((((",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ")))))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "( ( ls ) )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "((ls))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a\\(b\\)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \\(a\\)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \\>x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a\\>b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a \\> b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls C:\\Users\\me",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "type C:\\Users\\me\\file.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "dir C:\\Users\\me > out.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "dir C:\\Users\\me>out.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "copy C:\\a\\b.txt C:\\c\\",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "findstr /s \"foo\" C:\\logs\\*.log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-ChildItem C:\\ | Where-Object { $_.Length -gt 1MB }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-Process | Sort-Object CPU -Descending | Select-Object -First 5",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "powershell -Command \"Get-Service | Where-Object {$_.Status -eq 'Running'}\"",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "Get-Content C:\\logs\\app.log -Tail 50",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo %PATH%",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "type file.txt | find \"x\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if exist C:\\x (echo yes) else (echo no)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for /f %i in ('dir /b') do @echo %i",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls -la | awk '{ if ($5 > 1000) print $9 }'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk 'BEGIN { print \"a\" > \"/tmp/x\" }'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "awk '{print > \"/tmp/out\"}' in",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "awk '/start/,/end/' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk -v n=5 'NR<=n' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk '{s+=$1} END {print s}' nums",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk '!seen[$0]++' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk '{print $NF}' file | sort -u",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "gawk 'BEGIN{print 1<2}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -n '/<body>/,/<\\/body>/p' x.html",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed 's/(a|b)/c/g' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -E 's/(foo|bar)/baz/' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed '/^$/d' file > out",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -i.bak 's|/old/path|/new/path|g' conf",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -n 5p file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tr 'a-z' 'A-Z' < file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tr -d '\\r' < dos.txt > unix.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tr '|' ',' < in > out",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cut -d'|' -f2 file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cut -d '|' -f 2 file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cut -d\\| -f2 file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sort -t'|' -k2 file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sort -t, -k2,2n file.csv | uniq",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "column -t -s'|' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "paste -sd'|' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "paste -sd+ nums | bc",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xmllint --xpath '//a[@href]' x.html",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "yq '.a.b' file.yaml",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "yq e '.spec.replicas' deploy.yaml",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tree -L 2",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "stat -c '%a %n' /etc/passwd",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "stat -c %a /etc/passwd",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "file /bin/ls",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "md5sum file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sha256sum file | cut -d' ' -f1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "chmod 644 file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "chmod +x script.sh",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "chown app:app /opt/app -R",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ln -s /a /b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cp -r /a /b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mv /a /b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rm -rf /tmp/build",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "rm /tmp/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mkdir -p /opt/app/logs",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "touch /tmp/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"$(date): done\" >> /var/log/my.log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"<h1>Hi</h1>\" > /var/www/html/index.html",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo '<?php phpinfo(); ?>' > info.php",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo 127.0.0.1 foo >> /etc/hosts",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"export PATH=$PATH:/opt/bin\" >> ~/.bashrc",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "logger -t app \"started (pid $$)\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"Usage: $0 <file>\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo Usage: prog <file>",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"a;b\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"a&b\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a\\;b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls -la; echo \"exit: $?\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls -la | head -n 5; echo; df -h",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "test -f a && { echo yes; exit 0; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[ -d x ] || { echo \"no dir\" >&2; exit 1; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[ -d x ] || mkdir x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "make",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "make -j4 2>&1 | tee build.log",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "cmake .. && make",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "go build ./...",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "go test ./... 2>&1 | tail",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cargo build --release",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mvn -q package",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "terraform plan -out=plan.tfplan",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ansible all -m ping",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ansible-playbook -i inv site.yml --limit 'web:&prod'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "aws s3 ls s3://bucket/ --recursive | awk '{s+=$3} END {print s}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId,State.Name]' --output text",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "aws ec2 describe-instances --filters \"Name=tag:Name,Values=web*\" --query \"Reservations[].Instances[?State.Name=='running'].InstanceId\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "az vm list --query \"[?powerState=='VM running'].name\" -o tsv",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "gcloud compute instances list --filter=\"status=RUNNING\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "gcloud compute instances list --filter='name~^web AND status=(RUNNING)'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "helm list -A",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "helm upgrade --install web ./chart --set image.tag=1.2,replicas=2",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "nginx -t",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "nginx -s reload",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "apachectl configtest",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "certbot renew --dry-run",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ufw status",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "iptables -L -n",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "iptables -A INPUT -p tcp --dport 22 -j ACCEPT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sysctl -a | grep vm.swappiness",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sysctl -w vm.swappiness=10",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ulimit -n",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "lscpu | grep -E '^(Model name|CPU\\(s\\))'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "lscpu | grep -E \"Model name|Socket\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat /proc/meminfo | grep -E 'MemTotal|MemFree'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat /proc/loadavg",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "cat /sys/class/net/eth0/statistics/rx_bytes",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "getent passwd | awk -F: '$3>=1000'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "getent group docker",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "id -u",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "groups",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "passwd -S user",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "chage -l user",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "useradd -m app",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "usermod -aG docker app",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sudo systemctl restart nginx",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "sudo -u postgres psql -c 'select 1'",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "sudo tail -f /var/log/syslog",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "sudo sh -c 'echo 1 > /proc/sys/x'",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "echo 1 | sudo tee /proc/sys/x",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "su - app -c 'ls'",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "reboot",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "shutdown -h now",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "echo reboot",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo if then else",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo do",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo function",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"{\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo { a }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo !",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo ! hi",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "if",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "then",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "do ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "else ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "! ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "!",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "function",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "function f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "coproc cat",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "builtin echo hi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "builtin cd /tmp",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "exec > /tmp/log 2>&1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "exec 3>&1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "exec 3< file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "exec ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "eval \"ls -la\"",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "eval ls",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "source ~/.bashrc",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ". ~/.profile",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "alias ll='ls -la'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "type ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "hash -r",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "history | tail",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "history | grep ssh",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "fc -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jobs",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "bg",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "fg %1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kill %1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kill -9 1234",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "killall -HUP nginx",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "pkill -f 'python3 app.py'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "pgrep -fa nginx",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "pgrep -f \"java.*(kafka|zookeeper)\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls -la /proc/$$/fd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls -la /proc/self/fd",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo $?",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $$",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $!",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $#",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"$@\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo ${#x}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo ${x//a/b}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo ${x:0:3}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo ${arr[@]}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo ~",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo ~user",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ls ~/*.txt",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo *",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo ?",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "*",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "?",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[ a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[[ a ]]",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "*.sh",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "./*.sh",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "./script-*.sh arg",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "/usr/bin/python3* --version",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "/opt/app-{a,b}/bin/run",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{a,b}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "${CMD} arg",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "$CMD arg",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "\"$CMD\" arg",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "`which ls` -la",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "$(which ls) -la",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "~/bin/run",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a=b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a=b c=d",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a=b; echo $a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a=\"x y\"; echo $a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a=$(ls | wc -l); echo $a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "n=$(grep -c foo file); [ $n -gt 0 ] && echo found",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "count=$(ls | wc -l) && echo $count",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "read -p \"name? \" n; echo $n",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "read x < file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "select o in a b; do echo $o; break; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a |grep a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a| grep a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a|grep a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls|wc -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls 2>&1|wc -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls 2>&1 | tee log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls 2>err.txt 1>out.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls 2>>err.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls 1>/dev/null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls 10>x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls 3>&-",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls >&-",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls <&-",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls >| x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls >|x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cmd <> file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cmd 2>&1 >/dev/null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cmd > a > b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cmd >a>b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cmd<a>b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a<b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a>b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "1>2",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "5 > 3",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ">",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "<",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ">>",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "<<<",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "2>",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "2>&1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "> >",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ">>> x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo > ",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a >",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "x=1>2",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "x=<y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "foo=bar>baz",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo abc>>def>>ghi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"a\">\"b\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"\"> x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "\"\">x ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "''>x sudo ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a 2>",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<<",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<< \"sudo id\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sh<<<'echo hi'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "bash <<< 'echo hi'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "bash <<EOF\\necho hi\\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sh < script.sh",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "bash -s < script.sh",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ssh host 'ls -la'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "ssh host \"df -h | grep sda\"",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "ssh host ls",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "ssh -o StrictHostKeyChecking=no host uptime",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "vi file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "nano file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "less +G /var/log/syslog",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "less file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "more file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "man ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "man awk",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "help cd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "info ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "yes | head -3",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "seq 1 10 | paste -sd+ | bc",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "seq 10 | awk '{s+=$1} END{print s}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "expr 1 + 2",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "expr 5 \\> 3",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "expr 5 '>' 3",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "bc -l <<< \"scale=2; 10/3\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"scale=2; 10/3\" | bc -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "let x=1+2",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "let \"x = 1 + 2\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "declare -a arr=(1 2 3)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "declare -A m=([a]=1 [b]=2)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "local x=(a b)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "typeset -i n=5",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "readonly X=1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "unset X",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "shift",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "exit 0",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "return 1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "break",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "continue",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"multi\\nline\"",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ls -la\\n",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ls\\ndf -h\\nfree -m",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls &&\\n  df -h",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a \\\\\\n b",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "if true\\nthen\\n  echo y\\nfi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for i in 1 2\\ndo\\n  echo $i\\ndone",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "f() {\\n  echo hi\\n}\\nf",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case $x in\\n  a)\\n    echo a\\n    ;;\\n  *)\\n    echo other\\n    ;;\\nesac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "while read p; do\\n  echo \"$p\"\\ndone < <(ls)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat file | while read l; do echo \"$l\"; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls | while read f; do [ -f \"$f\" ] && echo \"$f\"; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls | (while read f; do echo \"$f\"; done)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls | { read a; echo $a; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls | ( head -1 )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo x | (cat)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo x | ( cat ) | wc -c",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(ls; df) | grep x | (sort)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(ls) && (df)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(ls) || (df)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(ls) > out",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(ls)>out",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(ls)|wc",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(ls);(df)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls;(df)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls&&(df)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls &&(df -h)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "x=1;(echo $x)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "$(echo ls)",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "echo $(echo $(echo a))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $( (ls) )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $(ls) )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"$(ls) (x)\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo `ls` (x)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo ok # (comment)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls # comment with ) paren",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls # case",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ls # case x in a) reboot ;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "# just a comment",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"a\" # > b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ": ${FOO:=bar}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ": \"${FOO:?missing}\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[ -z \"${FOO:-}\" ] && echo unset",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[ $# -gt 0 ] && echo args",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[ $a -gt $b ] && echo y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[[ $a > $b ]] && echo y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[[ $a < $b ]] && echo y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[[ \"$s\" =~ ^(a|b)$ ]] && echo m",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "[[ $s =~ ^[0-9]+$ ]] && echo num",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[[ -f a && -f b ]] && echo both",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[[ ( -f a ) ]] && echo a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[ \\( -f a \\) -o \\( -f b \\) ] && echo any",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "test \\( -f a \\) && echo a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(( a > b )) && echo y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "((a>b)) && echo y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(( count++ ))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(( i = i + 1 ))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if (( n > 5 )); then echo big; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if ((n>5)); then echo big; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "while (( i < 5 )); do echo $i; (( i++ )); done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if (ls >/dev/null); then echo ok; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if ! (ls >/dev/null); then echo no; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ps aux | awk '{print $2}' | xargs -r kill -0",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "lsof -ti:3000 | xargs kill -9",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"select 1\" | psql",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo 'print(1)' | python3",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "echo ls | sh",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "echo ls | (sh)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s x | sh",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "curl -s x | (sh)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s x | { sh; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat x.sh | bash",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "ls -la --time-style=long-iso",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ls --color=auto",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ls --hide='*.bak'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "date --date='1 day ago'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "date -d \"yesterday\" +%F",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep --include='*.c' -rn main .",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "grep --exclude-dir={node_modules,.git} -rn foo .",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep --color=always -E 'a|b' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -e 'a|b' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep 'a;b' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep \"x&y\" file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep '(' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep 'foo(' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -F '$(' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -F 'a<b' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -o '<[^>]*>' file.html",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "egrep 'reboot|halt' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -E 'docker|kubectl' ~/.bash_history",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -E \"rm|mv|cp\" history.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -E 'sudo|doas' /var/log/secure",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -E '^(root|admin):' /etc/passwd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -Ev '^(#|$)' /etc/fstab",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -cE 'GET|POST' access.log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rg 'foo|bar' src",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rg -n \"fn (main|run)\" src",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ag 'a|b'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ack 'TODO|FIXME'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "less -p 'error|warn' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "vim +/'foo|bar' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tail -f log | grep --line-buffered -E 'ERROR|FATAL'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "journalctl -g 'fail|error' -b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "dmesg | grep -iE 'oom|kill'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "dmesg | grep -iE \"error|fail|shutdown\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "history | grep -E 'reboot|shutdown'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl list-timers | grep -E 'apt|dnf'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ss -tlnp | grep -E ':(80|443)\\b'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ss -tlnp | grep -E ':80|:443'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "netstat -an | grep -E 'LISTEN|ESTABLISHED' | wc -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "lsmod | grep -E 'kvm|vbox'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mount | grep -E 'ext4|xfs'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ps -ef | grep -E \"[j]ava|[p]ython\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ps -ef | grep -v 'grep\\|ps'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ps aux | grep -E 'chmod|chown|dd'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps --filter 'name=web|api'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps -a | grep -E 'Exited|Dead'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods | grep -E 'CrashLoop|Error|Pending'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods -A | grep -Ev 'Running|Completed'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods --selector='app in (a,b)'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s localhost:9090/metrics | grep -E '^(up|process_)'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tcpdump -i eth0 'port 80 or port 443'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tcpdump -i eth0 'tcp[tcpflags] & (tcp-syn|tcp-fin) != 0'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tcpdump -n 'host 1.2.3.4 and (port 80 or port 443)'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "iptables -L | grep -E 'DROP|REJECT'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -regex '.*\\.\\(c\\|h\\)'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -regextype posix-extended -regex '.*\\.(jpg|png)'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -name '*.log' -o -name '*.txt'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ls | grep -E '\\.(jpg|png)$'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls | egrep -v '^(a|b)$'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "locate -r 'foo|bar'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -E 's/(a|b)//' <<< \"$x\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk '/a|b/' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk -F'|' '{print $2}' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk -F '|' '{print $2}' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk -F'[<>]' '{print $2}' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "perl -lne 'print $1 if /<(\\w+)>/' file",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"$x\" | cut -d'>' -f2",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"$x\" | tr '<>' '[]'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"$x\" | sed 's/>/gt/'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sort -k1,1 -t';' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "IFS=';' read -ra parts <<< \"$x\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "IFS=, read a b <<< \"1,2\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "IFS='|' read -r a b < file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq -r '.[] | [.a, .b] | @tsv' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.[] | select(.n > 5)' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.a // \"none\"' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq -r 'to_entries[] | \"\\(.key)=\\(.value)\"' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq --arg n \"$n\" '.[] | select(.name == $n)' x.json",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "jq -c . < x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq . <x.json >y.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "yq '.a | keys' f.yaml",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mlr --icsv --opprint cat x.csv",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xargs -a list.txt -I{} sh -c 'echo {} | wc -c'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "parallel -j4 'gzip {}' ::: *.log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls *.log | parallel gzip",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tmux new -d -s x 'top'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "screen -dmS x bash -c 'sleep 5; echo hi'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "at now + 1 minute <<< 'echo hi'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo 'echo hi' | at now",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "crontab - <<EOF\\n0 * * * * /usr/bin/true\\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(crontab -l; echo \"0 1 * * * /x\") | crontab -",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(crontab -l 2>/dev/null; echo \"*/5 * * * * /opt/x.sh\") | crontab -",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --pretty='%h (%an) %s' -3",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --pretty=%h\\ (%an)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git commit -m \"wip (do not merge)\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git commit -m wip(x)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git tag -a v1 -m \"release (stable)\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"$(tput bold)hi$(tput sgr0)\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "printf '%s\\n' \"$(ls | wc -l) files\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"Disk: $(df -h / | awk 'NR==2{print $5}')\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"Mem: $(free -m | awk '/Mem/{print $3\"/\"$2}')\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"Up $(uptime -p) on $(hostname)\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[ \"$(id -u)\" -eq 0 ] && echo root",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "[ $(id -u) -eq 0 ] && echo root",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if [ \"$(systemctl is-active nginx)\" = active ]; then echo ok; fi",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "if [ $(df / | awk 'NR==2{print $5}' | tr -d %) -gt 90 ]; then echo full; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "test $(ls | wc -l) -gt 0 && echo nonempty",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "export X=$(cat /tmp/x) && echo $X",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "VAR=$(cmd arg) other",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cd /opt/app && (npm ci && npm run build) > build.log 2>&1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cd /opt/app && { npm ci && npm run build; } > build.log 2>&1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(set -e; cd /opt; ls)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(set -x; ls)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(umask 077; touch /tmp/secret)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(export A=1; env | grep A)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(exit 1); echo $?",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "( : )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(true) && echo ok",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "bash -c '(cd /tmp && ls)'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sh -c 'if [ -f x ]; then cat x; fi'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sh -c 'for f in *; do echo $f; done'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sh -c 'case $1 in a) echo a;; *) echo z;; esac' _ a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "bash -lc 'f() { echo hi; }; f'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ssh host 'for f in /var/log/*.log; do wc -l $f; done'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "ssh host 'case $(uname) in Linux) echo l;; *) echo o;; esac'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "ssh host '(cd /tmp && ls)'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "docker exec web bash -c 'if [ -f /x ]; then cat /x; fi'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker exec web sh -c 'for i in 1 2; do echo $i; done'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl exec p -- sh -c 'ls /app | head; (cd /app && du -sh .)'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "su - app -c '(cd ~ && ls)'",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps --format '{{.Names}} {{.Status}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps --format \"{{.ID}}\\t{{.Names}}\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps --format '{{.Names}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps --format='{{.Names}} {{.Image}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps --format \"{{.Names}} {{.Ports}}\" | sort",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker inspect --format '{{ .State.Status }}' web",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker inspect --format='{{json .Config.Env}}' web",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker inspect -f '{{.State.Running}}' web",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker inspect -f '{{ .NetworkSettings.IPAddress }}' web",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker images --format \"{{.Repository}}:{{.Tag}} {{.Size}}\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker stats --no-stream --format \"{{.Name}} {{.CPUPerc}} {{.MemUsage}}\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker stats --no-stream --format \"table {{.Name}}\\t{{.CPUPerc}}\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker volume ls --format '{{.Name}} {{.Driver}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker network inspect bridge -f '{{range .Containers}}{{.Name}} {{end}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "podman ps --format \"{{.Names}} {{.Status}}\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods -o jsonpath='{range .items[*]}{.metadata.name}{\"\\n\"}{end}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods -o jsonpath='{.items[0].metadata.name} {.items[0].status.phase}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name} {.status.allocatable.cpu}{\"\\n\"}{end}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pods -o go-template='{{range .items}}{{.metadata.name}} {{end}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get pod x -o jsonpath=\"{.status.containerStatuses[*].restartCount}\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl patch deploy web -p '{\"spec\": {\"replicas\": 2}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl patch deploy web -p '{\"spec\":{\"replicas\":2}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "helm template x --set-json 'a={\"b\": 1}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.items[] | .name' data.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.[] | .name' data.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.[0] | keys' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '[.[] | .id]' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '{a: .a, b: .b}' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '{a, b}' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.[] | {id, name}' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq 'map(select(.a)) | length' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.a[] | .b' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq -r '.results[] | [.id, .name] | @csv' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.data | length' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '. | length' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.[] | select(.a == \"b\")' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.[]|.a' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.a|.b' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.items[]|.name' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.[]' x.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s localhost/api | jq '.items[] | .name'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s localhost/api | jq '.[] | {id, name}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -X POST -d '{\"a\": \"b\"}' http://localhost:8080/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -X POST -H 'Content-Type: application/json' -d '{\"name\": \"x\", \"n\": 1}' http://localhost/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -X POST --data '{\"name\": \"x\"}' http://localhost/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -d '{\"a\":\"b\"}' http://localhost/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -d '[1, 2, 3]' http://localhost/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -XPUT localhost:9200/idx/_settings -H 'Content-Type: application/json' -d '{\"index\": {\"number_of_replicas\": 0}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s 'http://localhost:9200/_search?q=a&pretty'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s \"http://localhost:9200/_cat/indices?v&s=index\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s 'http://localhost:9200/_cat/indices?v'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl \"http://localhost:9200/_cluster/health?pretty\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "wget -q 'https://example.com/file?a=1&b=2' -O out",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "wget 'https://example.com/file?token=abc&x=1'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "http GET 'https://example.com/api?a=1&b=2'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ab -n 100 'http://localhost/?a=1&b=2'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "nc -zv host 80",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "lynx -dump 'http://localhost/server-status?auto&x'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xdg-open 'https://example.com/?a=1&b=2'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -c \"select count(*) from t\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -c \"select * from t limit 5\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -c \"select * from t\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -c 'SELECT COUNT(*) FROM users'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -U app -d db -c \"SELECT count(*) FROM orders WHERE status = 'open'\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -c \"select pg_size_pretty(pg_database_size('db'))\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -c \"select now()\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -c \"select max(id) from t\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -Atc \"select count(*) from t\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mysql -e \"select count(*) from t\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mysql -e \"SELECT COUNT(*) FROM db.users\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mysql -e \"select * from t limit 5\" db",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mysql -e 'show processlist'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mysql -N -e \"select count(*) from t\" db",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sqlite3 db.sqlite \"select * from t\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sqlite3 db.sqlite \"select max(id) from t\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "clickhouse-client -q \"select count(*) from t\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "clickhouse-client -q \"select count() from t\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "redis-cli eval \"return redis.call('get', KEYS[1])\" 1 k",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "redis-cli keys 'user:*'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "redis-cli --scan --pattern 'sess:*' | wc -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mongosh --eval 'db.users.countDocuments({})'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mongosh --eval \"db.users.find({a: 1}).count()\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mongo --eval 'db.stats()'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "read -p \"name? \" n",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "read -p \"Continue? (y/n) \" a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "read -p \"Continue? [y/N] \" a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "read -rp \"Are you sure? \" ans",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"name? x\"",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"* * * * * /x\" | crontab -",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"[section] x\"",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "printf \"[%s] %s\\n\" a b",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "printf '{\"a\": %d}\\n' 1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "logger \"[app] started\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "logger -t app \"{json: 1}\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "notify-send \"Done? yes\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git commit -m \"[skip ci] update\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git commit -m \"* fix thing\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git commit -m \"fix: what? nothing\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git commit -m \"{wip} thing\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --grep='[bot] x'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --pretty=format:'[%h] %s'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --pretty=format:'%h %s'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --pretty='{%h} %s'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --format='* %s'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --format=\"- %s (%h)\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git tag -a v1 -m '[release] v1'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "gh pr create --title \"[WIP] thing\" --body \"x y\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "gh issue list --search \"is:open label:bug\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "gh api repos/o/r/pulls --jq '.[] | .title'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "gh pr list --json number,title --jq '.[] | \"\\(.number) \\(.title)\"'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId, State.Name]'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "aws ec2 describe-instances --query 'Reservations[].Instances[].{id: InstanceId, s: State.Name}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "aws ec2 describe-instances --query \"Reservations[*].Instances[*].InstanceId\" --output text",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "aws s3api list-objects --bucket b --query 'Contents[?Size > `100`].Key'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "aws logs filter-log-events --log-group-name x --filter-pattern '{ $.level = \"error\" }'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "aws logs filter-log-events --log-group-name x --filter-pattern '?ERROR ?WARN'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "aws dynamodb get-item --table-name t --key '{\"id\": {\"S\": \"1\"}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "aws lambda invoke --function-name f --payload '{\"a\": 1}' out.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "az vm list --query \"[].{name: name, rg: resourceGroup}\" -o table",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "gcloud compute instances list --format=\"table(name, status)\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "gcloud compute instances list --format='value(name, zone)'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "terraform output -json | jq '.[] | .value'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ansible all -m shell -a 'uptime'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ansible all -m copy -a 'src=a dest=b'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ansible all -e '{\"a\": 1}' -m ping",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -name '* *'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "find . -name '*.log' -newer x",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "find . -name '[a-c]* x'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ls '*weird name*'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "cat '[draft] notes.txt'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "rm '* copy.txt'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cp '[a] b.txt' /tmp/",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep '[0-9]+ errors' log",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "grep '* note' file",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "grep -E '\\[error\\] .*' log",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "grep '? ' file",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "rg '\\{ foo' src",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rg '[a-z]+ foo' src",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rg 'reboot|halt' src",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rg 'sudo|su' src",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ag 'sudo|doas'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "zgrep -E 'reboot|halt' /var/log/syslog.1.gz",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "egrep 'error|warn' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "egrep 'sudo|su' /var/log/auth.log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "fgrep 'a|b' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "pgrep -f 'sudo|su'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "pgrep -fa 'nginx|reboot'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "pkill -f 'foo|bar'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "journalctl -g 'reboot|shutdown'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "journalctl -g 'error|fail'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "journalctl --grep='reboot|shutdown'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "less -p 'reboot|halt' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tcpdump 'tcp[tcpflags] & (tcp-syn|tcp-fin) != 0'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tcpdump -i eth0 '(port 80 or port 443)'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tcpdump -i any 'port 80 or port 443'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -n '/start/,/end/p' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed 's/a b/c d/' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed '1 d' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -E 's/[0-9]+ items/x/' f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed '$ d' file",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "sed 's/^[ \\t]*//' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -e 's/^ *//' -e 's/ *$//' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed 's/.*: //' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed '/^#/d; /^$/d' file",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "sed -n '/^\\[section\\]/,/^\\[/p' cfg.ini",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tr -s ' ' < file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tr '[:upper:]' '[:lower:]' < file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tr -d '[:space:]' < file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tr '[a-z]' '[A-Z]' < f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tr -s '[:space:] ' '\\n' < f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cut -d' ' -f1 file",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "sort -t' ' -k2 file",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "awk '{print $1}' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "perl -pe 's/[aeiou] //g' file",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "perl -ne 'print if /^\\[/' file",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "python3 -c 'print([1, 2])'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "node -e '[1, 2].forEach(x => console.log(x))'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "node -p '[1,2].length'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "node -p '{a: 1}'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "ruby -e '[1, 2].each { |x| puts x }'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "php -r '{ echo 1; }'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "date '+[%Y-%m-%d] %H:%M'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "date +\"[%F %T]\"",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "date '+%F %T'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "stat -c '[%a] %n' file",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "stat -c '%a %n' file",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ps -o 'pid comm' -p 1",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "ps -eo '%p %c'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "xargs -I{} echo '[x] {}' < list",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xargs -I '{}' echo {} < list",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -exec echo '{} found' \\;",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "echo '{} x'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "watch -n 5 'ls *.log | wc -l'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "watch '[ -f x ] && echo y'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ssh host '[ -f /x ] && cat /x'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "ssh host 'ls *.log'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "bash -c '[ -d /x ] && echo y'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "bash -c '[[ -d /x ]] && echo y'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "bash -c '*'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sh -c '{ ls; df; } > /tmp/x'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "su - app -c '[ -f x ] && cat x'",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "timeout 5 bash -c '</dev/tcp/host/80' && echo open",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "timeout 5 bash -c 'cat < /dev/null > /dev/tcp/host/80' && echo open",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo > /dev/tcp/host/80",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "nmap -p '80, 443' host",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ffmpeg -i in.mp4 -vf 'scale=640:-1, fps=10' out.gif",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "convert in.png -resize '50% x' out.png",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rsync -av --include='*.log x' /a /b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tar czf x.tgz --exclude='* tmp' dir",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "zip -r x.zip dir -x '*.git* y'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "make CFLAGS='-O2 -g'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "make 'CFLAGS=-O2 -g'",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "./configure --prefix=/opt CFLAGS='-O2 -g'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cmake -DCMAKE_C_FLAGS='-O2 -g' ..",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "gcc -DX='\"a b\"' f.c",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "env 'A=b c' cmd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemd-run --on-calendar='*-*-* 03:00:00' /x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl list-timers '*backup* x'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemd-analyze calendar '*-*-* 03:00:00'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemd-analyze calendar \"Mon *-*-* 00:00:00\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "at '10:00 tomorrow' < job",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "journalctl --since '2026-01-01 00:00' --until '2026-01-02 00:00'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "journalctl --since \"1 hour ago\"",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "openssl req -new -subj '/CN=x y/O=z' -key k",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "openssl req -subj \"/C=US/ST=New York/CN=x\" -new -key k",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ldapsearch -x '(uid=john smith)'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ldapsearch -x -b dc=x '(&(objectClass=user)(cn=a))'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ldapsearch -x '(|(uid=a)(uid=b))'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "snmpwalk -v2c -c public host",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ethtool eth0 | grep 'Link detected'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "lsblk -o 'NAME SIZE'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "lsblk -o NAME,SIZE",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "df -h --output='source pcent'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "vault kv put secret/x 'k=a b'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "consul kv put x '{\"a\": 1}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "etcdctl put k '{\"a\": 1}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "nomad job run -var 'x=a b' j.hcl",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "slack-notify '{\"text\": \"done\"}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -X POST -H 'Content-type: application/json' --data '{\"text\": \"Deploy done\"}' https://hooks.example.com/x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s -XGET 'localhost:9200/_search' -d '{\"query\": {\"match_all\": {}}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s localhost:9200/_search -H 'Content-Type: application/json' -d '{ \"size\": 1 }'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl 'http://localhost:9200/_cat/indices?v&pretty'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl \"http://localhost:9200/_cat/indices?v&h=index,docs.count\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s \"http://localhost:9200/_cat/shards?v&s=store:desc\" | head",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl 'http://h/p?a=1&b'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl 'http://h/p?a&b=1'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl \"https://api.example.com/items?limit=10&offset=20\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl \"http://localhost:8080/search?q=foo&page=2&sort=asc\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s \"http://localhost:9090/api/v1/query?query=up&time=1\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "wget \"http://h/p?x&y\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -G 'http://h/p' --data-urlencode 'q=a b'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -n 's/.*<version>\\(.*\\)<\\/version>.*/\\1/p' pom.xml",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed 's/.* //' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed 's/  */ /g' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed 's/[[:space:]]*$//' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -E 's/(foo|bar)+/x/' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed 's/reboot|halt/x/' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed 's/<[^>]*>//g' page.html",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -n '/<Directory/,/<\\/Directory>/p' httpd.conf",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed 's/a/b/;s/c/d/' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed 's/*//g' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed '/^ *#/d' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed 's/^[0-9]* //' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -n '10,20 p' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --grep='reboot|shutdown'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --author='A <a@b.c>'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git commit --author='Name<a@b.c>' -m x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log -S'foo(' --oneline",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log -G'a|b'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git grep -E 'a|b'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git grep -E 'sudo|su'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(( $n > 5 )) && echo big",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if (( $# < 1 )); then echo usage; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if (( $(nproc) > 4 )); then echo many; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(( total += $x ))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(( count*2 > 10 )) && echo y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "((count*2>10)) && echo y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(( i++ ))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(( ${#arr[@]} > 0 )) && echo nonempty",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if (( EUID != 0 )); then echo \"not root\"; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if [[ $EUID -ne 0 ]]; then echo \"not root\"; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "while getopts \"ab:\" o; do case $o in a) x=1;; b) y=$OPTARG;; *) echo usage;; esac; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "while getopts \"ab:\" o; do case $o in a) x=1;; ?) echo usage;; esac; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case $1 in -h|--help) echo help;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case $1 in start) ls;; stop) ls;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case $1 in start) ls;; reboot) ls;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case $f in *.txt) echo t;; *.log) echo l;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case \"$x\" in \"a b\") echo ab;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(Get-Item C:\\x).Length",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(Get-Date).AddDays(-1)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(Get-Content C:\\f.txt) -replace 'a','b' | Set-Content C:\\f.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-ChildItem | ? { $_.Name -like '*x*' }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-Process | ? {$_.CPU -gt 100}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-Process | Where-Object {$_.CPU -gt 100}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-ChildItem | % { $_.Name }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-ChildItem | ForEach-Object { $_.Name }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "1..5 | % { $_ * 2 }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if ($x -gt 5) { Write-Host big }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if (Test-Path C:\\x) { Get-Content C:\\x }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "foreach ($f in Get-ChildItem) { $f.Name }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-Service | Where-Object Status -eq Running",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-ChildItem C:\\logs\\*.log | Select-Object -First 5",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-ChildItem -Path C:\\ -Filter *.log -Recurse",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-EventLog -LogName System -Newest 10 | Format-Table -AutoSize",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-WmiObject Win32_LogicalDisk | Select-Object DeviceID,@{n='Free';e={$_.FreeSpace/1GB}}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-Process | Select-Object -First 5 > C:\\out.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-Process 2>$null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-Process *>$null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[System.Environment]::OSVersion",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[math]::Round(1.5)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "@(1,2,3).Count",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "& 'C:\\Program Files\\x\\y.exe' arg",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "& { Get-Process }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Invoke-Command -ScriptBlock { Get-Process }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "powershell -Command \"(Get-Item C:\\x).Length\"",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "powershell -Command \"Get-ChildItem | ? { $_.Length -gt 1 }\"",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "dir /s /b C:\\*.log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "dir *.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "del /q C:\\tmp\\*.tmp",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "type C:\\x.txt | findstr /i \"a b\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for %f in (*.txt) do @echo %f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if exist C:\\x (type C:\\x) else (echo none)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(echo a & echo b) > C:\\out.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "wmic logicaldisk get size,freespace,caption",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "netsh advfirewall firewall show rule name=all | findstr /i \"rule name\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sftp:list /tmp/a (b)/*.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sftp:list /home/u/Docs (old)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sftp:read /tmp/[x] y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sftp:read /tmp/x>y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sftp:upload /home/u/My File (1).txt",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "sftp:upload /srv/*)",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "sftp:stat /tmp/a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sftp:list /tmp",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": ":(){ :|:& };:",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "bomb() { bomb | bomb & }; bomb",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rm -rf /",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "(rm -rf /)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{ rm -rf /; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if true; then rm -rf /; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo x > /dev/sda",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "echo x>/dev/sda",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "dd if=/dev/zero of=/dev/sda",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "cat /dev/zero>/dev/sda",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "mkfs.ext4 /dev/sda1",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "chmod -R 777 /",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "echo x > /etc/passwd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo x >/etc/passwd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo x>/etc/passwd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo x >> /etc/shadow",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo x>>~/.ssh/authorized_keys",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "tee /etc/sudoers < x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat x > /etc/sudoers",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat x >/etc/sudoers.d/a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat x>/etc/sudoers",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sudo id",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "sudo id > /tmp/x",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "sudo id>/tmp/x",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "(sudo id)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls; sudo id",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "ls | sudo tee /x",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"sudo id\"",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo sudo id",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo 'reboot'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "man sudo",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "which sudo",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "type reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls /usr/bin/sudo",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "cat /etc/sudoers",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "apt install sudo",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls > sudo",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls >sudo id",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls 2>reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat < sudo",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo hi > reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ">reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "> reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "> sudo",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a >sudo",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -name sudo",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "find . -exec ls {} + >out",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "find . -exec ls {} +>out",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "find . -exec echo {} \\; > out",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "find . -type f -exec chmod 644 {} \\; 2>/dev/null",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "awk '{print}' file>out",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk '{print}' file > out",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk >out '{print}' file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk '{print $1}' <file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk '{print $1}'<file",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk -F: '{print $1}'</etc/passwd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk '{print}' <<<\"$x\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk '{print $2}' <<< \"a b\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "watch 'ls *.log'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "watch -n1 'ls -la /tmp/*.lock'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "watch \"df -h | grep sd[a-c]\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "watch -n 2 'cat /proc/net/bonding/*'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "watch -d 'ls -l | wc -l'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "timeout 5 ls *.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "nohup ./run-*.sh &",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "env FOO=1 ./bin/tool-?",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "time ./a.out",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xargs -I {} echo {}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xargs -I{} mv {} {}.bak",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xargs -i echo {}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xargs -n1 -I% echo %",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -name '*.c' | xargs -I {} sh -c 'wc -l {}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls | xargs -I {} echo \"file: {}\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "parallel echo {} ::: a b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sudo -u app ./run-*.sh",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "split -l 100 f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "split f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "split --filter=cat f",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "split --number=3 f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "split --bytes=1M f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "split -n 3 --numeric-suffixes f p",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap cleanup EXIT INT TERM",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap \"rm -f $tmp\" EXIT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap 'rm -f \"$tmp\"' EXIT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap \"\" HUP",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap -- cleanup EXIT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap exit INT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap 'exit 1' INT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap ':' INT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap EXIT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap - EXIT INT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap -p EXIT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap 'echo \"line $LINENO\"' ERR",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "function cleanup { rm -f /tmp/x; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "function f { echo hi; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "function f() { echo hi; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "f () { echo hi; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "f ( ) { echo hi; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "f(){ echo hi; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "f(){ echo hi; }; f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "f() (echo hi)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "f() { (cd /tmp && ls) }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "builtin",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "coproc",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "coproc tail -f /var/log/syslog",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "! true",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if ls; then echo y; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if true; then echo y; fi; echo done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "else",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "elif",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "do",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if; then; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "else echo no",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "do echo x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{ echo a; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{echo a}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{ }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{} a",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{}.bak",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo {} ",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "! ",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "!! ",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "!$",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "!ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls -la !(*.txt)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls !(a|b)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "shopt -s extglob; ls !(*.log)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls @(a|b).txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls +(a|b)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls ?(a)b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls *(a)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rm -f !(keep)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo ${x:-(none)}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo ${x:-$(date)}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo ${arr[$((i+1))]}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $[1+2]",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a{1,2}b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo {a..c}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"${x}\" '(lit)' (",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "x=(1 2 3) y=1 cmd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "x=(1 2 3)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "x+=(4 5)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "arr+=(\"a b\" c)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "declare -a a=(1 2)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "local -a a=()",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a=() b=() ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "y=(  )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "z=$( ls )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "z=$(ls) w=$(pwd) env",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $(ls)$(pwd)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo $(ls) $(pwd)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo <(ls)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <(ls) <(pwd)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat<(ls)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(cat <(ls))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(echo $(ls)) > x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(echo $(ls); echo `pwd`)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(a; (b; c); d)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "( (a) ; b )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "((a); b)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(a) (b)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a (b) c",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls -la (",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls ) -la",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls a)b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls a(b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls a(b)c",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls a()",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls ()",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a ) ; reboot",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "echo \"(\" ; ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \")\" ; ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo '(' ')' ",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tr '(' ')'  < f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tr -d '()' < f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tr -d () < f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -c ')' f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep \\) f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep \\( f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cut -d\\( -f2 f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cut -d')' -f1 f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cut -d) -f1 f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cut -d( -f1 f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cut -d\\> -f2 f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cut -d'>' -f2 f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cut -d> -f2 f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cut -d< -f2 f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sort -t\\< f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk -F\\> '{print $1}' f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk -F'>' '{print $1}' f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk -F\">\" '{print $1}' f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a\\<b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"a\"\\>\"b\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"a\"\"b\">c",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo 'x'\"y\">z",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo ''",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"\" \"\"",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"\"",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "\"\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "'' ls",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "\"\" ls",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "\"ls\"",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "\"ls\" -la",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "\"ls -la\"",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "'ls' > x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "\"ls\">x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "l\"s\">x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "l\\s>x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls\\>x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls \\> x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls\\ >x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "2>x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "2 >x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "12>x ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a2>x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a 2>x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a 2 >x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a2 >x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a 22>>x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a 2>>x 3<y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <&3",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a 3<&0",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a >&2",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a 2>&1 | b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a |& b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a &>> x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a &>>x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <<-EOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <<\"EOF\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <<'EOF'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a << 'E O F'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <<EOF b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a<<EOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <<< b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <<<b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a<<<b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <<<\"b c\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <<< 'b c'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a<<<'b c'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <<<$b",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <<<\"$b\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <<< $(b)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a < <(b)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <<<'reboot'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "a <<< reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<< reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<<reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat<<<reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat<<<'sudo id'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo case; dd if=$(echo x) of=/dev/sda",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "echo case; cp $(echo x) /etc/sudoers",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo case; tee $(echo -a) /etc/passwd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo case; find / -name $(echo x) -delete",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "echo case; sort $(echo x) --compress-program=sh",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "echo case; systemctl $(echo -q) reboot",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "echo case; docker run $(echo -it) --privileged x",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "echo case; rm $(echo -r) -rf /",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "echo case; chmod $(echo -R) 777 /",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo case; tar $(echo x) --checkpoint-action=exec=id",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "echo case; mv $(echo a) ~/.ssh/authorized_keys",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "echo case; git $(echo -c x=y) push --force",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo case; kubectl $(echo -n x) delete pod y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo case; sed $(echo -n) -i s/a/b/ f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo case; curl $(echo -s) x | sh",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "grep case f; find . -name $(echo x) -delete",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "grep case f; rm -rf $(pwd) /",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "dd if=$(echo x) of=/dev/sda",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "tee $(echo -a) /etc/passwd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find / -name $(echo x) -delete",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "(dd if=$(echo x) of=/dev/sda)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(tee $(echo -a) /etc/passwd)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(find / -name $(echo x) -delete)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(sort $(echo x) --compress-program=sh)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(cd /var/log && ls $(date +%F) *.log)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(cd /tmp && tar czf $(hostname).tgz *.log)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(cd /app && kill $(cat app.pid))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -c case f.c; ls $(pwd) *.c",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ">\"a\\nb\" sudo id",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": ">'a b' sudo id",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "> \"a b\" sudo id",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -name foo>out -delete",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "find . -delete>out",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find .>out -delete",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "sort --compress-program=sh>out f",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "sort f --compress-program=sh<in",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "dd of=/dev/sda<img",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "dd if=img>log of=/dev/sda",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "tee /etc/passwd<x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tee</tmp/x /etc/passwd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cp a /etc/sudoers>log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cp a>log /etc/sudoers",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cp>log a /etc/sudoers",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tar cf x --checkpoint-action=exec=id>log .",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "sed -i>log s/a/b/ f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl reboot>log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl>log reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl >log reboot",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "docker run --privileged>log x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker>log run --privileged x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git push --force>log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rm -rf />log",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "rm>log -rf /",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rm >log -rf /",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "chmod -R 777 />x",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "kubectl delete>log pod x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl>log delete pod x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kill -9 1>log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "reboot>log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "reboot<x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "python3 -c 'import os'>log",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "python3>log -c 'import os; os.system(\"sudo id\")'",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "sh>log -c 'sudo id'",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "sh -c>log 'sudo id'",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "bash -c 'sudo id'>log",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "ssh host>log ls",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "make>log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk 'BEGIN{system(\"sudo id\")}'>log",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "awk>log 'BEGIN{system(\"sudo id\")}'",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "awk 'BEGIN{print > \"/tmp/x\"}'<in",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "find . -exec rm {} \\;>log",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "find . -exec rm {} +>log",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "find . -exec>log rm {} +",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xargs rm<list",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xargs<list rm -rf /",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl x>f; sh f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl x|sh>log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl x>&1|sh",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "curl x |sh<y",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "wget -O- x|bash>log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "nsenter -t 1>log -m sh",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "case x in x) sudo id;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case x in x) reboot;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case x in (x) reboot;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if true; then reboot; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for i in 1; do reboot; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "while true; do sudo id; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "f() { reboot; }; f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "function f { sudo id; }; f",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{ reboot; }",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(reboot)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "! reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "time reboot",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "coproc reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "builtin reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "then reboot",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk $(echo x) 'BEGIN{system(\"sudo id\")}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk >log 'BEGIN{system(\"sudo id\")}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk 2>/dev/null 'BEGIN{system(\"sudo id\")}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk 'BEGIN{system(\"sudo id\")}' >log",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "grep case notes.txt; rm -rf $(pwd) /",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "case $1 in a) rm -rf $(pwd) / ;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(rm -rf $(pwd) /)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rm -rf $(pwd) /",
+  "class": "destructive",
+  "forbidden": true
+ },
+ {
+  "command": "(docker run $(echo -it) --privileged x)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker run $(echo -it) --privileged x",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "(find $(pwd) -name x -delete)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find $(pwd) -name x -delete",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "(cd /app && find $(pwd)/tmp -type f -delete)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(cd /srv && docker run -v $(pwd):/w --privileged img)",
+  "class": "privileged",
+  "forbidden": false
+ },
+ {
+  "command": "(tar cf $(date +%F).tar --checkpoint=1 --checkpoint-action=exec=id .)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat > /tmp/x.service <<EOF\n[Unit]\nDescription=x\n[Service]\nExecStart=/usr/bin/x\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat > /tmp/my.cnf <<EOF\n[mysqld]\nmax_connections=100\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat > /tmp/a.json <<EOF\n{\n  \"a\": [1, 2]\n}\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat > /tmp/a.json <<'EOF'\n{\"a\": 1}\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat > /tmp/notes.md <<EOF\n# Title\n* item one\n* item two\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat > /tmp/a.yaml <<EOF\nitems:\n  - a\n  - b\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat > /tmp/a.yaml <<EOF\nlist: [a, b]\nmap: {a: 1}\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat > /tmp/nginx.conf <<EOF\nserver {\n  listen 80;\n  location / { return 200; }\n}\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat >> /tmp/cron <<EOF\n*/5 * * * * /opt/x.sh\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tee /tmp/a.toml <<EOF\n[tool]\nname = \"x\"\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<EOF\nDon't (really) do *this*\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<EOF\nHello (world)\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xargs -P4 -I{} gzip {}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls | xargs -n 1 -P 4 -I {} sh -c 'echo {}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xargs --replace={} echo {}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "xargs -0 -I {} mv {} /tmp/",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "flock -n /tmp/x.lock ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "flock -n /var/lock/*.lock ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "taskset -c 0-3 ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "strace -e trace=open,read ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "strace -p 123",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "perf stat -e cycles ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "timeout -s KILL 5 ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "watch \"docker ps --format '{{.Names}}'\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "watch -n 1 'cat /proc/meminfo | grep -E \"MemFree|Dirty\"'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "watch 'kubectl get pods | grep -v Running'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s x | ( sh )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo 'sudo id' | (sh)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo 'sudo id' | sh",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "[Environment]::MachineName",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[DateTime]::Now",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "Get-ChildItem | ? Name -like x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for h in web1 web2 web3; do ping -c1 $h; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for i in 1 2 3; do echo $i; sleep 1; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "for svc in nginx redis; do systemctl status $svc; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "while read -r line; do echo \"$line\"; done < /tmp/list.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "while true; do date; sleep 5; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat hosts.txt | while read h; do host $h; done",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if [ -f /etc/nginx/nginx.conf ]; then nginx -t; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if [ -d /srv/app ]; then ls /srv/app; else echo missing; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if grep -q error /var/log/app.log; then tail -n 50 /var/log/app.log; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if [[ -n \"$HOME\" ]]; then echo \"$HOME\"; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "if ! command -v jq >/dev/null; then echo \"no jq\"; fi",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[ -f x ] && cat x || echo none",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[[ -e /tmp/lock ]] || touch /tmp/lock",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "test -d /srv && ls /srv",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "( cd /srv/app && ls -la )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "( cd /srv/app && git status )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "(cd /tmp && tar czf logs.tgz *.log)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "( set -e; cd /srv; ls )",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{ date; uptime; } > /tmp/status.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{ echo start; df -h; echo end; } | tee /tmp/report",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "{ hostname; uname -a; } 2>&1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap 'echo interrupted' INT TERM",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap - EXIT",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "trap '' HUP",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case \"$1\" in start) echo starting ;; stop) echo stopping ;; *) echo usage ;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "case $(uname) in Linux) echo linux ;; Darwin) echo mac ;; esac",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "log() { echo \"$(date) $*\"; }; log started",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "function greet { echo hello; }; greet",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get nodes -o go-template='{{range .items}}{{.metadata.name}}{{\"\\n\"}}{{end}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "kubectl get deploy -o custom-columns=NAME:.metadata.name,IMG:.spec.template.spec.containers[*].image",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker inspect --format '{{.State.Status}}' web",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker ps --filter \"status=exited\" --format '{{.ID}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "docker stats --no-stream --format 'table {{.Name}}\\t{{.CPUPerc}}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '.items[] | select(.status == \"ok\") | .name' data.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq -r '.[] | \"\\(.id) \\(.name)\"' users.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq '{a: .x, b: (.y | length)}' f.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq 'map(select(.age > 30))' people.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "jq -c '.data | to_entries[] | {k: .key, v: .value}' in.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s -X POST -H 'Content-Type: application/json' -d '{\"name\":\"x\",\"tags\":[\"a\",\"b\"]}' http://localhost:8080/api",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -d '{\"query\":\"{ user(id: 1) { name } }\"}' http://localhost/graphql",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -s 'http://localhost:9090/api/v1/query?query=up{job=\"node\"}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -sS -o /dev/null -w '%{http_code}\\n' https://example.com",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "curl -fsSL https://example.com/a.json > /tmp/a.json",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -c 'select count(*) from users'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -Atc \"select count(*) from orders where status in ('a','b')\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "psql -c \"select pg_size_pretty(pg_database_size('app'))\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "mysql -e 'select count(*) from t where a > 1'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sqlite3 app.db 'select count(*) from t'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rg 'sudo|su' /var/log/auth.log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "rg -n '(error|warn)' app.log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -E 'fail(ed|ure)|denied' /var/log/auth.log",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "grep -c 'sudo:' /var/log/auth.log",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "egrep -o 'user=[a-z]+' access.log | sort | uniq -c",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . \\( -name '*.log' -o -name '*.tmp' \\) -mtime +7",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find /srv \\( -type f -a -size +100M \\) -print",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find . -type f \\( -name a -o -name b \\)",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "find /var/log -name '*.gz' -mtime +30 | wc -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk '{ sum += $3 } END { print sum }' data.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk -F: '$3 > 1000 { print $1 }' /etc/passwd",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "awk 'NR>1 && $2 ~ /(up|ok)/' status.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -n 's/\\(.*\\)=\\(.*\\)/\\2/p' env.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -E 's/(foo|bar)/baz/g' in.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sed -n '/start/,/end/p' log.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --format='%h %an %s' -n 20",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --pretty=format:'%C(yellow)%h%Creset %s (%cr)' -5",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git log --oneline | head -20",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git diff --stat HEAD~1 > /tmp/diff.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "git show HEAD:src/a.ts | wc -l",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls -la > /tmp/out 2>&1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls /nonexistent 2>/dev/null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls 2>&1 | head",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo hello >> /tmp/log.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"a > b\" ",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo 'x | y'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"(parens)\" \"{braces}\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat < /etc/hostname",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "sort < in.txt > out.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "df -h 2>/dev/null | awk 'NR>1 {print $5}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tail -f /var/log/syslog | grep --line-buffered error",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "journalctl -u nginx --since '1 hour ago' | grep -i 'error\\|warn'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ss -tlnp | grep ':80 '",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ip -o addr show | awk '{print $2, $4}'",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "date +'%Y-%m-%d %H:%M:%S'",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "echo $((1 + 2))",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo \"${USER}@$(hostname)\"",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "x=$(date +%s); echo $x",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "N=5; seq $N",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "export PATH=$PATH:/opt/bin; which tool",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cd /srv/app && ls",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "time ls -la",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "true && echo ok",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat <<EOF\nhello\nworld\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "cat > /tmp/note.txt <<'EOF'\nline one (with parens)\nline two { braces }\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tee /tmp/conf <<EOF\nkey=value\nEOF",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "python3 - <<'PY'\nprint(1)\nPY",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "printf '%s\\n' a b c | xargs -n1 echo",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "echo a{1,2,3}.txt",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls *.{log,txt}",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "ls /var/log/*.log",
+  "class": "read-only",
+  "forbidden": false
+ },
+ {
+  "command": "rm -f ./*.tmp",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "[ \"$(id -u)\" = 0 ] && echo root",
+  "class": "destructive",
+  "forbidden": false
+ },
+ {
+  "command": "openssl x509 -in cert.pem -noout -dates 2>/dev/null",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "tar tzf backup.tgz | head",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "nc -zv localhost 5432 2>&1",
+  "class": "safe",
+  "forbidden": false
+ },
+ {
+  "command": "systemctl list-units --type=service --state=running | head",
+  "class": "safe",
+  "forbidden": false
+ }
+]

@@ -6,6 +6,7 @@ import { atLeast, CLASS_RANK, fcParams } from './fc-seed.js';
 import {
   anyString,
   closedCommand,
+  grammarForm,
   isQuotableWord,
   operandFreeWrapper,
   operandWrapper,
@@ -100,6 +101,32 @@ describe('classifyCommand invariants', () => {
       fcParams(1000),
     );
   });
+
+  // A subshell, a brace group, a compound command, a function body, a `case` arm and a
+  // redirection each put a command where its segment's command word is not the command.
+  // The never-allowed half is measured against the command standing after another one in
+  // a plain sequence, because that is where it stands once the grammar is removed.
+  it('never lowers a command by placing it inside the shell\'s grammar', () => {
+    fc.assert(
+      fc.property(grammarForm, closedCommand, (form, command) => {
+        const wrapped = form(command);
+        expect(atLeast(classOf(wrapped), classOf(command)), wrapped).toBe(true);
+        if (isForbidden(`:; ${command}`)) expect(findForbiddenMatch(wrapped), wrapped).not.toBeNull();
+      }),
+      fcParams(2000),
+    );
+  }, 60_000);
+
+  it('never lowers a command by placing it two levels inside the shell\'s grammar', () => {
+    fc.assert(
+      fc.property(grammarForm, grammarForm, closedCommand, (outer, inner, command) => {
+        const wrapped = outer(inner(command));
+        expect(atLeast(classOf(wrapped), classOf(command)), wrapped).toBe(true);
+        if (isForbidden(`:; ${command}`)) expect(findForbiddenMatch(wrapped), wrapped).not.toBeNull();
+      }),
+      fcParams(2000),
+    );
+  }, 60_000);
 
   it('never lowers a command by spelling its command word with a Windows suffix or in upper case', () => {
     const fold = (word: string, how: number) => (how === 0 ? `${word}.exe` : how === 1 ? word.toUpperCase() : `${word.toUpperCase()}.EXE`);
