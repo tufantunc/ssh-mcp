@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 const authMethodSchema = z.enum(['agent', 'key', 'password', 'keychain']);
-const approvalModeSchema = z.enum(['auto', 'ask-destructive', 'ask-all', 'deny']);
+const approvalModeSchema = z.enum(['auto', 'ask-destructive', 'ask-all', 'deny', 'client-tool']);
 const outputTruncationSchema = z.enum(['head', 'tail']);
 const commandClassSchema = z.enum(['read-only', 'safe', 'destructive', 'privileged']);
 

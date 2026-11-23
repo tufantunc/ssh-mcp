@@ -23,7 +23,7 @@ commandMaxOutputBytes = 1048576   # 1MB output cap per command
 # outputTruncation.
 commandOutputTruncation = "head"
 connectionIdleReapMs = 900000     # 15min -> close idle connection
-approvalMode = "ask-destructive"  # auto | ask-destructive | ask-all | deny
+approvalMode = "ask-destructive"  # auto | ask-destructive | ask-all | deny | client-tool
 
 # Streaming SFTP file tools (sftp-list, sftp-upload-file, sftp-download-file).
 #

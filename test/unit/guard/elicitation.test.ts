@@ -77,6 +77,9 @@ describe('requestApproval', () => {
     const result = await requestApproval(server, 'rm /tmp/x', 'dev', mockEvaluation);
     expect(result.unavailable).toMatch(/could not be asked/);
     expect(result.unavailable).toMatch(/elicitation support/);
+    // Advice to weaken the gate belongs to the operator's documentation, not to the
+    // agent that reads this refusal.
+    expect(result.unavailable).not.toContain('client-tool');
     // The underlying error travels with it, so stderr is not the only copy.
     expect(result.unavailable).toContain('Client does not support elicitation');
   });

@@ -619,14 +619,21 @@ export class PolicyEngine {
   }
 
   /**
-   * Whether this command trips the profile's approval gate. What happens at the
-   * gate — prompt or deny — is decided by evaluate() from the approvalPolicy.
+   * Whether this command trips the profile's approval gate. What happens at the gate
+   * is decided in two places. evaluate() turns it into `require-approval`, or under
+   * `deny` into a refusal. How a `require-approval` is then met is the tool
+   * pipeline's: a prompt under the `ask-*` modes, or under `client-tool` the call's
+   * own tool, when that tool counts as consent (`CLIENT_CONSENT_TOOLS` in
+   * src/tools/pipeline.ts), and a refusal when it does not. This file has no tool
+   * name to decide that by.
    */
   private requiresApproval(profile: Profile, needsApproval: boolean): boolean {
     const mode: ApprovalMode = profile.approvalPolicy;
     if (mode === 'auto') return false;
     if (mode === 'ask-all') return true;
-    // ask-destructive and deny both gate on destructive/privileged commands.
+    // ask-destructive, deny and client-tool all gate on destructive/privileged
+    // commands; they differ in what the gate does (prompt, refuse, or require the
+    // call to arrive on a tool the client asked the user about).
     return needsApproval;
   }
 

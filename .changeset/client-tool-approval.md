@@ -1,0 +1,7 @@
+---
+"ssh-mcp": minor
+---
+
+New approval mode for MCP clients that cannot show an elicitation prompt: `approvalPolicy = "client-tool"`. Under the `ask-*` modes such a client never gets to answer, so every destructive and privileged command fails with `APPROVAL_UNAVAILABLE`, and the only way through was `auto`. Under `client-tool` the client's own tool-call consent prompt is the approval. A destructive or privileged command on `run-command` is refused with `APPROVAL_VIA_TOOL` and pointed at the new `destructive-command` tool. That tool, `privileged-command`, an interactive `open-session` and the `sftp-upload`, `sftp-upload-file` and `sftp-download-file` tools run gated commands without elicitation, audited as `approver: "client-tool-consent"`. Role bindings, host groups, the denylist, OPA and quotas apply as before; on such a profile OPA sees a gated shell command as `action.tool = "destructive-command"`, so a Rego rule matched on `input.action.tool == "run-command"` needs the new name too. Opt-in and weaker than elicitation: "Always allow" on `destructive-command` in the client makes the profile behave like `auto`.
+
+Upgrade note: `destructive-command` is listed to every client of every installation. On a profile whose `approvalPolicy` is not `client-tool` it runs nothing, not even a safe command: it is refused with `CLIENT_TOOL_ONLY`, before OPA is asked, and pointed at `run-command`. Nothing else changes for a profile that does not choose `client-tool`.

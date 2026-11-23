@@ -499,7 +499,7 @@ jobs:
           # Nothing links them, so adding a tool means editing all of them, and
           # this is the one no local run catches: the whole suite went green with
           # the image still expecting eleven, and again with it expecting 14.
-          TOOL_COUNT: '15'
+          TOOL_COUNT: '16'
         run: |
           set -euo pipefail
           {

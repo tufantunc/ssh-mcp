@@ -1,7 +1,7 @@
 // ─── Config Types ───────────────────────────────────────────────────────────
 
 export type AuthMethod = 'agent' | 'key' | 'password' | 'keychain';
-export type ApprovalMode = 'auto' | 'ask-destructive' | 'ask-all' | 'deny';
+export type ApprovalMode = 'auto' | 'ask-destructive' | 'ask-all' | 'deny' | 'client-tool';
 /** Which end of a command's output survives the `maxOutputBytes` cap. */
 export type OutputTruncation = 'head' | 'tail';
 
