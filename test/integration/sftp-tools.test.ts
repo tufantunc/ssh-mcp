@@ -40,7 +40,7 @@ const testProfile: Profile = {
   outputTruncation: 'head',
   role: 'admin',
   readOnly: false,
-  announceAgent: true,
+  announceAgent: true, forwardAgent: false,
   // The handler layer is what this file tests, not the elicitation prompt.
   approvalPolicy: 'auto',
   cert: false,

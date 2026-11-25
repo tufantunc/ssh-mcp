@@ -22,7 +22,7 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
     outputTruncation: 'head',
     role: 'operator',
     readOnly: false,
-    announceAgent: true,
+    announceAgent: true, forwardAgent: false,
     approvalPolicy: 'ask-destructive',
     cert: false,
     sessionMaxPerConnection: 5,

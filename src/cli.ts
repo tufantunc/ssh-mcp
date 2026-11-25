@@ -537,6 +537,8 @@ export async function loadAppConfig(
     // Same default as the config schema. A CLI profile is the one-off case —
     // --host/--user with no config file — and it announces like any other.
     announceAgent: true,
+    // CLI one-shots authenticate with a key or a password, never an agent.
+    forwardAgent: false,
     approvalPolicy: flagEnabled(argv, 'disableApproval') ? 'auto' : defaults.approvalMode,
     cert: false,
     sessionMaxPerConnection: defaults.sessionMaxPerConnection,

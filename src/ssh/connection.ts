@@ -217,8 +217,16 @@ export class SSHConnection {
    * `ShellOptions` declare `env` identically — so one accessor serves `exec()`,
    * `openExec` and `openShell` without naming either API.
    */
-  private channelEnv(): { env?: NodeJS.ProcessEnv } {
-    return this.profile.announceAgent === false ? {} : { env: AGENT_ENV };
+  private channelEnv(): { env?: NodeJS.ProcessEnv; agentForward?: boolean } {
+    const opts: { env?: NodeJS.ProcessEnv; agentForward?: boolean } =
+      this.profile.announceAgent === false ? {} : { env: AGENT_ENV };
+    // ssh2 only forwards the agent on a channel when the connection was opened
+    // with agentForward and the channel asks for it again. Both sites go through
+    // here except connect(), which sets the connection flag itself.
+    if (this.profile.forwardAgent && this.credentials.agentSocket) {
+      opts.agentForward = true;
+    }
+    return opts;
   }
 
   async ensureConnected(): Promise<void> {
@@ -332,13 +340,16 @@ export class SSHConnection {
             this.profile.trustedHostKey,
           );
         },
-        readyTimeout: 20000,
+        // An agent handshake can wait on a FIDO touch. 20s expires under that;
+        // key and password auth do not, and keep the shorter bound.
+        readyTimeout: this.credentials.agentSocket ? 60_000 : 20_000,
         keepaliveInterval: 15000,
         keepaliveCountMax: 3,
       };
 
       if (this.credentials.agentSocket) {
         connectConfig.agent = this.credentials.agentSocket;
+        if (this.profile.forwardAgent) connectConfig.agentForward = true;
       }
       if (this.credentials.privateKey) {
         connectConfig.privateKey = this.credentials.certificate

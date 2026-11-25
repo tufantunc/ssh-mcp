@@ -35,6 +35,7 @@ const profileFor = (port: number): Profile => ({
   role: 'admin',
   readOnly: false,
   announceAgent: true,
+  forwardAgent: false,
   approvalPolicy: 'auto',
   cert: false,
   sessionMaxPerConnection: 5,

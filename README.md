@@ -325,6 +325,7 @@ readOnly = false
 approvalPolicy = "ask-all"
 cert = false                        # SSH CA cert auth — auto-detects keyRef-cert.pub
 announceAgent = true                # Send AI_AGENT=ssh-mcp to this host (see below); clear it for a host you do not control
+forwardAgent = false                # Forward the SSH agent; only with auth = "agent". See below.
 sessionMaxPerConnection = 3         # per-profile override
 sessionIdleTimeoutMs = 300000       # stricter for prod
 commandQuotaPerDay = 200            # per-profile override
@@ -404,6 +405,18 @@ set it and any agent can omit it, so it is useful for attributing sessions you
 already trust and must not be used as an authorization or intrusion-detection
 input. Authoritative attribution belongs to the key or principal that
 authenticated.
+
+### Agent forwarding
+
+`forwardAgent = true` asks the host to use the local SSH agent for the life of
+the connection (`auth-agent@openssh.com`). It is off unless a profile sets it,
+and only valid with `auth = "agent"`: a key or a password has no agent to
+forward, and the config is refused at startup. The handshake waits 60 seconds
+when an agent is used, so a FIDO touch can finish; other authentication keeps
+the 20 second bound.
+
+Turn it on for a host whose `sudo` authorizes the forwarded agent. Leave it off
+everywhere else. The remote host can ask that agent to sign.
 
 ### ProxyJump (Bastion)
 
@@ -500,7 +513,7 @@ so no tool call sees part of each. For each open connection, by profile name:
 |---|---|
 | `role`, `group`, `approvalPolicy`, `readOnly`, `commandQuotaPerDay`, `maxChars`, `transferMaxBytes`, `transferTimeoutMs`, or the `[policy]` section | The connection stays open; the change applies from its next command |
 | `workdir`, `tty`, `timeout`, `maxOutputBytes`, `outputTruncation`, `announceAgent`, `sessionMaxPerConnection`, `sessionIdleTimeoutMs`, `sessionBackgroundMaxMs` | The connection stays open; the new values apply to new sessions and commands, and the report names these fields |
-| `host`, `port`, `user`, `auth`, `keyRef`, `keychainEntry`, `cert`, `via`, `trustedHostKey` | The connection closes with its sessions; the next call connects with the new profile |
+| `host`, `port`, `user`, `auth`, `keyRef`, `keychainEntry`, `cert`, `via`, `trustedHostKey`, `forwardAgent` | The connection closes with its sessions; the next call connects with the new profile |
 | the profile was removed | The connection closes with its sessions |
 
 A connection that runs through a bastion that is closing closes too, and so does anything

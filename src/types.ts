@@ -36,6 +36,14 @@ export interface Profile {
    * agent rather than a person is driving.
    */
   announceAgent: boolean;
+  /**
+   * Forward the local SSH agent to this host for the life of the connection.
+   *
+   * Off unless the profile asks. A forwarded agent can sign on the remote host,
+   * which is what `sudo` needs when the host authorizes it from that agent, and
+   * it is also what a hostile host would use. Only valid with `auth = "agent"`.
+   */
+  forwardAgent: boolean;
   sessionMaxPerConnection: number;
   sessionIdleTimeoutMs: number;
   sessionBackgroundMaxMs: number;

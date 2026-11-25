@@ -21,6 +21,7 @@ export function makeProfile(overrides: Partial<Profile> = {}): Profile {
     role: 'admin',
     readOnly: false,
     announceAgent: true,
+    forwardAgent: false,
     approvalPolicy: 'ask-destructive',
     cert: false,
     sessionMaxPerConnection: 5,

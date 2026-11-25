@@ -12,6 +12,8 @@ export const CONNECTION_FIELDS: readonly (keyof Profile)[] = [
   'cert',
   'via',
   'trustedHostKey',
+  // agentForward is fixed when the SSH client is constructed.
+  'forwardAgent',
 ];
 
 /** Fixed when a session opens: the connection survives, the change is reported by name. */
