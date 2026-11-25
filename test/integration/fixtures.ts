@@ -22,7 +22,7 @@ const baseProfile: Omit<Profile, 'name' | 'host' | 'port' | 'user' | 'role'> = {
   maxOutputBytes: 1048576,
   outputTruncation: 'head',
   readOnly: false,
-  announceAgent: true,
+  announceAgent: true, forwardAgent: false,
   approvalPolicy: 'ask-destructive',
   cert: false,
   sessionMaxPerConnection: 5,

@@ -188,6 +188,11 @@ export const profileSchema = z.object({
   // profile. Defaults to true — the announcement is the feature; the switch is for
   // the host you do not control.
   announceAgent: z.boolean().default(true),
+  // Off by default. Forwarding the agent lets the remote host ask it to sign,
+  // which is required for sudo via the agent and is not something to grant to
+  // every host an operator lists. auth = "agent" is checked below: without an
+  // agent there is nothing to forward, and ssh2 refuses the combination.
+  forwardAgent: z.boolean().default(false),
   // Left optional on purpose: normalizeConfig() fills these from [defaults], and
   // a schema-level .default() would make "user omitted it" indistinguishable
   // from "user set the default value", silently shadowing [defaults].
@@ -208,7 +213,15 @@ export const profileSchema = z.object({
   // upper bounds as [defaults], for the same reason.
   transferMaxBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
   transferTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
-}).strict();
+}).strict().superRefine((profile, ctx) => {
+  if (profile.forwardAgent && profile.auth !== 'agent') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['forwardAgent'],
+      message: 'forwardAgent requires auth = "agent"',
+    });
+  }
+});
 
 /**
  * Overrides merged over the compiled-in DEFAULT_RULES at startup.

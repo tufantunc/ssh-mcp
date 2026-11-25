@@ -50,7 +50,7 @@ function profileFor(t: Target): Profile {
     outputTruncation: 'head',
     role: 'admin',
     readOnly: false,
-    announceAgent: true,
+    announceAgent: true, forwardAgent: false,
     approvalPolicy: 'auto',
     cert: false,
     sessionMaxPerConnection: 5,
