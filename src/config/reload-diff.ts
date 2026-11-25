@@ -13,7 +13,6 @@ export const CONNECTION_FIELDS: readonly (keyof Profile)[] = [
   'via',
   'trustedHostKey',
   'keyboardInteractive',
-  'connectTimeoutMs',
 ];
 
 /** Fixed when a session opens: the connection survives, the change is reported by name. */
@@ -39,6 +38,9 @@ export const POLICY_FIELDS: readonly (keyof Profile)[] = [
   'maxChars',
   'transferMaxBytes',
   'transferTimeoutMs',
+  // Read when dialling, from the live profile: a connection that is up has nothing to lose by
+  // the change, and the next login uses the new value.
+  'connectTimeoutMs',
 ];
 
 export interface ProfileChange {

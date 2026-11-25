@@ -6,6 +6,7 @@ import { loadConfigWithDigest, getProfile, checkPermissions } from '../../../src
 import type { AppConfig } from '../../../src/types.js';
 import { defaultsFromArgv, loadAppConfig } from '../../../src/cli.js';
 import { OperatorError } from '../../../src/errors.js';
+import { diffProfiles } from '../../../src/config/reload-diff.js';
 
 const cfg = useConfigDir();
 
@@ -31,7 +32,7 @@ auth = "password"
     expect(config.profiles[0].sessionMaxPerConnection).toBe(5);
   });
 
-  it('reads keyboardInteractive and connectTimeoutMs per profile, unset by default', async () => {
+  it("reads keyboardInteractive and connectTimeoutMs per profile, 'off' and 20000 by default", async () => {
     const path = await cfg.write(`
 [[profiles]]
 name = "plain"
@@ -47,10 +48,28 @@ connectTimeoutMs = 90000
 `);
     const { config } = await loadConfigWithDigest(path);
     const [plain, bmc] = config.profiles;
-    expect(plain.keyboardInteractive).toBeUndefined();
-    expect(plain.connectTimeoutMs).toBeUndefined();
+    expect(plain.keyboardInteractive).toBe('off');
+    expect(plain.connectTimeoutMs).toBe(20000);
     expect(bmc.keyboardInteractive).toBe('password');
     expect(bmc.connectTimeoutMs).toBe(90000);
+  });
+
+  // A config reload compares profiles field by field. If the default existed only as "unset",
+  // writing it out (as the README's example profile does) would read as a change to a field
+  // that closes the connection.
+  it('reads a profile that writes the two defaults out the same as one that leaves them unset', async () => {
+    const profile = (extra: string) => cfg.write(`
+[[profiles]]
+name = "dev"
+host = "localhost"
+user = "u"
+${extra}
+`);
+    const before = (await loadConfigWithDigest(await profile(''))).config.profiles;
+    const after = (await loadConfigWithDigest(
+      await profile('keyboardInteractive = "off"\nconnectTimeoutMs = 20000'),
+    )).config.profiles;
+    expect(diffProfiles(before, after).changed).toEqual([]);
   });
 
   it('refuses a keyboardInteractive mode it does not know, and the old boolean', async () => {
@@ -62,19 +81,27 @@ host = "localhost"
 user = "u"
 keyboardInteractive = ${value}
 `);
-      await expect(loadConfigWithDigest(path)).rejects.toThrow();
+      await expect(loadConfigWithDigest(path)).rejects.toThrow(/keyboardInteractive/);
     }
   });
 
-  it('refuses a connectTimeoutMs that cannot work', async () => {
-    const path = await cfg.write(`
+  // One second to ten minutes. Each bound is checked on both sides, so an off-by-one moves a
+  // test, and a fraction is refused rather than handed to setTimeout.
+  it('takes connectTimeoutMs from 1000 to 600000 whole milliseconds, and nothing else', async () => {
+    const withTimeout = (value: string) => cfg.write(`
 [[profiles]]
 name = "dev"
 host = "localhost"
 user = "u"
-connectTimeoutMs = 0
+connectTimeoutMs = ${value}
 `);
-    await expect(loadConfigWithDigest(path)).rejects.toThrow(/connectTimeoutMs/);
+    for (const value of ['0', '999', '600001', '1500.5']) {
+      await expect(loadConfigWithDigest(await withTimeout(value))).rejects.toThrow(/connectTimeoutMs/);
+    }
+    for (const value of [1000, 600000]) {
+      const { config } = await loadConfigWithDigest(await withTimeout(String(value)));
+      expect(config.profiles[0].connectTimeoutMs).toBe(value);
+    }
   });
 
   // Regression: [defaults] used to be validated but only two session keys were

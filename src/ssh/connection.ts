@@ -12,7 +12,8 @@ import { openWithRetry } from './channel-retry.js';
 import { terminateChannel, COULD_NOT_SIGNAL } from './channel-signal.js';
 import { appendCapped, finalizeCapped } from './output-buffer.js';
 import { OperatorError } from '../errors.js';
-import { keyboardInteractiveAnswers } from './keyboard-interactive.js';
+import { keyboardInteractiveLogin } from './keyboard-interactive.js';
+import { DEFAULT_CONNECT_TIMEOUT_MS } from '../config/schema.js';
 
 /** Fixed text: a reload-closed connection's refusal names nothing from the config. */
 export const RETIRED_BY_RELOAD = 'This connection was closed by a configuration reload; retry the call.';
@@ -100,9 +101,6 @@ export function stopAndDescribe(
   span.setAttribute('ssh.unstopped', !dispatched);
   return dispatched ? '' : COULD_NOT_SIGNAL;
 }
-
-/** How long connecting and logging in may take unless the profile says otherwise. */
-const DEFAULT_CONNECT_TIMEOUT_MS = 20_000;
 
 export class SSHConnection {
   /** Replaced in place by a config reload; see replaceProfile. */
@@ -272,12 +270,15 @@ export class SSHConnection {
         fn();
       };
 
+      // Unset only on a profile that did not come through the config schema (the CLI one-shot).
       const connectTimeoutMs = this.profile.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
       const timeoutId = setTimeout(() => {
         settle(() => {
           try { client.end(); } catch { /* already gone */ }
           if (isCurrent()) this.client = null;
-          reject(new Error('SSH connection timeout'));
+          reject(new Error(
+            `SSH connection timeout after ${connectTimeoutMs} ms; for a host with a slow login, raise connectTimeoutMs on its profile`,
+          ));
         });
       }, connectTimeoutMs);
 
@@ -315,21 +316,9 @@ export class SSHConnection {
       client.on('end', onDisconnect('ended'));
       client.on('close', onDisconnect('closed'));
 
-      const kbdMode = this.profile.keyboardInteractive ?? 'off';
-      if (kbdMode !== 'off') {
-        // See Profile.keyboardInteractive. The password goes out at most once per login: a second
-        // password round means the first answer was refused, and retrying it only burns attempts
-        // against the server's failed-login limit.
-        let passwordSent = false;
-        client.on('keyboard-interactive', (_name, _instructions, _lang, prompts, finish) => {
-          const answers = keyboardInteractiveAnswers(
-            kbdMode,
-            prompts,
-            passwordSent ? undefined : this.credentials.password,
-          );
-          if (answers.length === 1 && answers[0] !== '') passwordSent = true;
-          finish(answers);
-        });
+      const kbdLogin = keyboardInteractiveLogin(this.profile.keyboardInteractive, this.credentials.password);
+      if (kbdLogin) {
+        client.on('keyboard-interactive', (_name, _instructions, _lang, prompts, finish) => finish(kbdLogin.answer(prompts)));
       }
 
       const connectConfig: ConnectConfig = {
@@ -355,10 +344,14 @@ export class SSHConnection {
           );
         },
         readyTimeout: connectTimeoutMs,
-        tryKeyboard: kbdMode !== 'off',
         keepaliveInterval: 15000,
         keepaliveCountMax: 3,
       };
+      if (kbdLogin) {
+        connectConfig.tryKeyboard = true;
+        // ssh2 calls this with `null` before the first attempt, though its types say an array.
+        connectConfig.authHandler = (methodsLeft: string[] | null) => kbdLogin.nextMethod(methodsLeft);
+      }
 
       if (this.credentials.agentSocket) {
         connectConfig.agent = this.credentials.agentSocket;

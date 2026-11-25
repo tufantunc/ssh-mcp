@@ -3,6 +3,7 @@ import { SSHConnection } from '../../src/ssh/connection.js';
 import { isSshServerUp, assertAvailable, SSH_HOST } from './helpers.js';
 import type { Profile, KeyboardInteractiveMode } from '../../src/types.js';
 import type { HostKeyMode } from '../../src/ssh/host-key.js';
+import { makeProfile } from '../fixtures/profile.js';
 
 /**
  * `keyboardInteractive` against a real OpenSSH that takes passwords only through
@@ -19,30 +20,15 @@ const up = await isSshServerUp(SSH_HOST, PORT);
 assertAvailable(up, `kbdint (${SSH_HOST}:${PORT})`);
 
 function profileFor(mode: KeyboardInteractiveMode | undefined): Profile {
-  return {
+  return makeProfile({
     name: 'kbdint',
     host: SSH_HOST,
     port: PORT,
     user: USER,
-    auth: 'password',
-    group: 'dev',
-    tty: false,
     timeout: 15000,
-    maxChars: 5000,
-    maxOutputBytes: 1048576,
-    outputTruncation: 'head',
-    role: 'admin',
-    readOnly: false,
-    announceAgent: true,
     approvalPolicy: 'auto',
-    cert: false,
     keyboardInteractive: mode,
-    sessionMaxPerConnection: 5,
-    sessionIdleTimeoutMs: 60000,
-    sessionBackgroundMaxMs: 3600000,
-    commandQuotaPerDay: 0,
-    transferMaxBytes: 268_435_456, transferTimeoutMs: 300_000,
-  };
+  });
 }
 
 let conn: SSHConnection | undefined;

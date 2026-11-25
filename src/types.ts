@@ -32,7 +32,8 @@ export interface Profile {
   approvalPolicy: ApprovalMode;
   cert: boolean;
   /**
-   * Whether to offer the `keyboard-interactive` method, and what to answer. Unset means `off`.
+   * Whether to offer the `keyboard-interactive` method, and what to answer. The config schema
+   * fills in `off`; unset (a profile built outside it) means the same.
    *
    * - `off`: never offered. ssh2 only tries the method when asked, and a profile that does not
    *   need it should not send an extra attempt to a server that counts failed logins.
@@ -40,16 +41,20 @@ export interface Profile {
    *   with partial success and then runs one more round with no prompts (Dell iDRAC7/8). A real
    *   question gets `''`, so the login fails at once instead of waiting for a person.
    * - `password`: as `empty`, except that a round of exactly one hidden prompt that asks for a
-   *   password is answered with the profile's password, once per login. For a server that takes
-   *   passwords only through keyboard-interactive, such as VMware ESXi with
-   *   `PasswordAuthentication no`. Anything else (a one-time code, several prompts, a prompt that
-   *   echoes, a second password round) still gets `''`, so the password never reaches a question
-   *   it was not meant for and a wrong one is not retried.
+   *   password is answered with the profile's password. For a server that takes passwords only
+   *   through keyboard-interactive, such as VMware ESXi with `PasswordAuthentication no`.
+   *   Anything else (a one-time code, several prompts, a prompt that echoes) still gets `''`, so
+   *   the password never reaches a question it was not meant for.
+   *
+   * In `empty` and `password`, the password goes out at most once per login, by the `password`
+   * method when the server lists it or else by that one prompt; a wrong one is not sent again
+   * within the login. See keyboardInteractiveLogin.
    */
   keyboardInteractive?: KeyboardInteractiveMode;
   /**
-   * Ceiling, in milliseconds, on connecting and logging in. Defaults to 20000. Raise it for a
-   * host with a slow login: an iDRAC7 took 10 to 40 s to accept one.
+   * Ceiling, in milliseconds, on connecting and logging in: 1000 to 600000, 20000 when the
+   * profile sets none (DEFAULT_CONNECT_TIMEOUT_MS). Raise it for a host with a slow login: an
+   * iDRAC7 took 10 to 40 s to accept one.
    */
   connectTimeoutMs?: number;
   /**

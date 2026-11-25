@@ -31,6 +31,8 @@ function fullProfile(overrides: Partial<Profile> = {}): Profile {
     readOnly: false,
     approvalPolicy: 'auto',
     cert: false,
+    keyboardInteractive: 'off',
+    connectTimeoutMs: 20000,
     announceAgent: true,
     sessionMaxPerConnection: 4,
     sessionIdleTimeoutMs: 1000,
@@ -59,7 +61,6 @@ const FIELD_CLASS: Record<keyof Profile, { cls: FieldClass; changed: unknown }> 
   keychainEntry: { cls: 'connection', changed: 'kc2' },
   cert: { cls: 'connection', changed: true },
   keyboardInteractive: { cls: 'connection', changed: 'password' },
-  connectTimeoutMs: { cls: 'connection', changed: 90000 },
   via: { cls: 'connection', changed: 'jump2' },
   trustedHostKey: { cls: 'connection', changed: 'SHA256:def' },
   workdir: { cls: 'session', changed: '/srv/app' },
@@ -79,6 +80,7 @@ const FIELD_CLASS: Record<keyof Profile, { cls: FieldClass; changed: unknown }> 
   maxChars: { cls: 'policy', changed: 200 },
   transferMaxBytes: { cls: 'policy', changed: 2000 },
   transferTimeoutMs: { cls: 'policy', changed: 2000 },
+  connectTimeoutMs: { cls: 'policy', changed: 90000 },
 };
 
 const fieldsOf = (cls: FieldClass) =>

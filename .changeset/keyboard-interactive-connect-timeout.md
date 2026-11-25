@@ -12,10 +12,12 @@ ssh2 only offers the `keyboard-interactive` method when `tryKeyboard` is set, an
 `keyboardInteractive` takes `"off"` (the default when unset), `"empty"` or `"password"`:
 
 - `"empty"` offers the method and answers every prompt with an empty string. That covers the iDRAC. A real question gets `''`, so the login fails at once instead of waiting for a person.
-- `"password"` does the same, except that a round of exactly one hidden prompt that asks for a password is answered with the profile's password, at most once per login. That covers ESXi. A one-time code, several prompts, a prompt that echoes, or a second password round after a refused one all still get `''`: the password never reaches a question it was not meant for, and a wrong one is not retried against the server's failed-login limit.
+- `"password"` does the same, except that a round of exactly one hidden prompt that asks for a password is answered with the profile's password. That covers ESXi. A one-time code, several prompts, or a prompt that echoes all still get `''`, so the password never reaches a question it was not meant for.
+
+With either mode on, the password goes out at most once per login: by the `password` method when the server lists that method, or else by the one prompt. A wrong password is not sent a second time within the login, and the `password` method is not tried on a server that does not offer it (ESXi with `PasswordAuthentication no`), where it would only count as a failed login.
 
 It stays off by default because every extra attempt counts against a server's failed-login limit.
 
-`connectTimeoutMs` (default 20000, unchanged) is the ceiling on connecting and logging in. It replaces the two fixed 20 s bounds, the handshake limit and the connect timer. That iDRAC took 10 to 40 s per login, so the fixed limit refused a login that was going to succeed.
+`connectTimeoutMs` (default 20000, unchanged; 1000 to 600000) is the ceiling on connecting and logging in. It replaces the two fixed 20 s bounds, the handshake limit and the connect timer. That iDRAC took 10 to 40 s per login, so the fixed limit refused a login that was going to succeed. The timeout error now names the limit and the setting.
 
-Both are connection fields: changing either one on a reload closes the live connection.
+On a config reload, a change to `keyboardInteractive` closes the live connection, as a change to `auth` does. A change to `connectTimeoutMs` leaves it open and applies from the next login. Writing either default out (`"off"`, `20000`) is not a change.
