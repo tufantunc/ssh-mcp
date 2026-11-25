@@ -103,7 +103,7 @@ jobs:
 
       - name: Wait for all sshd servers
         run: |
-          for port in 2222 2223 2224 2225 2226 2227; do
+          for port in 2222 2223 2224 2225 2226 2227 2228; do
             ready=false
             for i in $(seq 1 60); do
               if nc -z 127.0.0.1 $port; then echo "sshd on $port ready"; ready=true; break; fi
@@ -190,7 +190,7 @@ jobs:
   # there: checkPermissions read POSIX mode bits, Windows synthesises 0o666 for
   # every file, and the operator was told their config did not exist.
   #
-  # Unit and property tests only. The integration suite drives six sshd
+  # Unit and property tests only. The integration suite drives seven sshd
   # containers from docker-compose.yml, all Linux images; a Windows runner adds
   # nothing there and cannot run them. What it does cover is every path that
   # asks the OS a question — paths, permissions, the audit log location.
@@ -377,12 +377,13 @@ jobs:
               --config=p/command-injection \
               --exclude=docker/alpine-sshd/Dockerfile \
               --exclude=docker/dropbear-sshd/Dockerfile \
+              --exclude=docker/kbdint-sshd/Dockerfile \
               --exclude=.oss-scanner/Dockerfile
 
-      # Excluded above rather than suppressed globally: all three run sshd, which
+      # Excluded above rather than suppressed globally: all four run sshd, which
       # has to be root to authenticate users and open shells as them, so
       # `missing-user` is wrong for these files and right everywhere else. The
-      # first two are throwaway test fixtures; .oss-scanner/Dockerfile is the
+      # first three are throwaway test fixtures; .oss-scanner/Dockerfile is the
       # OSS Scanner's image, whose agent runs as root to start those servers.
 
       - name: gitleaks

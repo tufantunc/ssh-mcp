@@ -83,6 +83,15 @@ services:
     ports:
       - "2227:2222"
 
+  # Passwords only through keyboard-interactive (PAM), with the `password`
+  # method refused: how a hardened VMware ESXi behaves. The only target for
+  # `keyboardInteractive = "password"`.
+  ssh-kbdint:
+    build: ./docker/kbdint-sshd
+    profiles: ["test"]
+    ports:
+      - "2228:2222"
+
   # ─── SSH MCP Server v2 ────────────────────────────────────────────────────
   ssh-mcp:
     # Above the server's own 5s teardown budget (see SHUTDOWN_BUDGET_MS): closing a

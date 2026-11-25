@@ -12,6 +12,8 @@ import { openWithRetry } from './channel-retry.js';
 import { terminateChannel, COULD_NOT_SIGNAL } from './channel-signal.js';
 import { appendCapped, finalizeCapped } from './output-buffer.js';
 import { OperatorError } from '../errors.js';
+import { keyboardInteractiveLogin } from './keyboard-interactive.js';
+import { DEFAULT_CONNECT_TIMEOUT_MS } from '../config/schema.js';
 
 /** Fixed text: a reload-closed connection's refusal names nothing from the config. */
 export const RETIRED_BY_RELOAD = 'This connection was closed by a configuration reload; retry the call.';
@@ -268,13 +270,17 @@ export class SSHConnection {
         fn();
       };
 
+      // Unset only on a profile that did not come through the config schema (the CLI one-shot).
+      const connectTimeoutMs = this.profile.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
       const timeoutId = setTimeout(() => {
         settle(() => {
           try { client.end(); } catch { /* already gone */ }
           if (isCurrent()) this.client = null;
-          reject(new Error('SSH connection timeout'));
+          reject(new Error(
+            `SSH connection timeout after ${connectTimeoutMs} ms; for a host with a slow login, raise connectTimeoutMs on its profile`,
+          ));
         });
-      }, 20000);
+      }, connectTimeoutMs);
 
       client.on('ready', () => {
         settle(() => {
@@ -310,6 +316,11 @@ export class SSHConnection {
       client.on('end', onDisconnect('ended'));
       client.on('close', onDisconnect('closed'));
 
+      const kbdLogin = keyboardInteractiveLogin(this.profile.keyboardInteractive, this.credentials.password);
+      if (kbdLogin) {
+        client.on('keyboard-interactive', (_name, _instructions, _lang, prompts, finish) => finish(kbdLogin.answer(prompts)));
+      }
+
       const connectConfig: ConnectConfig = {
         host: this.profile.host,
         port: this.profile.port,
@@ -332,10 +343,15 @@ export class SSHConnection {
             this.profile.trustedHostKey,
           );
         },
-        readyTimeout: 20000,
+        readyTimeout: connectTimeoutMs,
         keepaliveInterval: 15000,
         keepaliveCountMax: 3,
       };
+      if (kbdLogin) {
+        connectConfig.tryKeyboard = true;
+        // ssh2 calls this with `null` before the first attempt, though its types say an array.
+        connectConfig.authHandler = (methodsLeft: string[] | null) => kbdLogin.nextMethod(methodsLeft);
+      }
 
       if (this.credentials.agentSocket) {
         connectConfig.agent = this.credentials.agentSocket;

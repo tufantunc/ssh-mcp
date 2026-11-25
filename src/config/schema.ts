@@ -3,7 +3,11 @@ import { z } from 'zod';
 const authMethodSchema = z.enum(['agent', 'key', 'password', 'keychain']);
 const approvalModeSchema = z.enum(['auto', 'ask-destructive', 'ask-all', 'deny', 'client-tool']);
 const outputTruncationSchema = z.enum(['head', 'tail']);
+const keyboardInteractiveModeSchema = z.enum(['off', 'empty', 'password']);
 const commandClassSchema = z.enum(['read-only', 'safe', 'destructive', 'privileged']);
+
+/** A profile's `connectTimeoutMs` when it sets none. */
+export const DEFAULT_CONNECT_TIMEOUT_MS = 20_000;
 
 /**
  * Role and tier names, which are free strings so operators can define their own.
@@ -182,6 +186,19 @@ export const profileSchema = z.object({
   role: z.string().default('operator'),
   readOnly: z.boolean().default(false),
   cert: z.boolean().default(false),
+  // Opt-in: 'off' unless set, so a profile that does not need it never sends an extra attempt to
+  // a server that counts failed logins. See Profile.keyboardInteractive.
+  //
+  // Both fields below take their default here rather than being left optional, like tty/cert:
+  // a profile that writes the default out and one that leaves it unset must compare equal on a
+  // config reload, or adding `keyboardInteractive = "off"` would close a live connection.
+  keyboardInteractive: keyboardInteractiveModeSchema.default('off'),
+  // Per profile rather than in [defaults]: how long a login takes is a property of the host.
+  // Bounded on both sides, like --opaTimeoutMs. Under a second no real login completes. Over ten
+  // minutes, a host that accepts the TCP connection and then stalls holds every call to this
+  // profile that long, and every call to a profile that uses it as a bastion: they all wait on
+  // the one connect in flight.
+  connectTimeoutMs: z.number().int().min(1_000).max(600_000).default(DEFAULT_CONNECT_TIMEOUT_MS),
   // A schema-level default rather than a [defaults] entry, like tty/readOnly/cert
   // above: which hosts an operator trusts with the announcement is a property of
   // the individual host, not something worth setting globally and overriding per
