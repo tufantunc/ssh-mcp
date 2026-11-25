@@ -38,6 +38,8 @@ export interface Harness {
   auditRecords: any[];
   /** What the stubbed exec returns; override per test. */
   setExecResult(result: Partial<CommandResult>): void;
+  /** Make the stubbed exec throw this error, as a dropped connection does; `undefined` clears it. */
+  setExecError(error: Error | undefined): void;
   /** Whether the client approves elicitation prompts. */
   setApproval(approve: boolean): void;
   /** How many times the client was actually prompted. */
@@ -68,6 +70,7 @@ export async function createHarness(
   let closeOutcome: CloseOutcome = 'closed';
   let approvalPrompts = 0;
   let execResult: Partial<CommandResult> = {};
+  let execError: Error | undefined;
 
   const makeResult = (command: string): CommandResult => ({
     stdout: `stdout for ${command}`,
@@ -84,6 +87,7 @@ export async function createHarness(
     profile,
     async exec(command: string, opts: any = {}) {
       execCalls.push({ command, stdin: opts.stdin });
+      if (execError) throw execError;
       return makeResult(command);
     },
     getSudoPassword: () => 'sudo-secret',
@@ -154,6 +158,7 @@ export async function createHarness(
     openSessionCalls,
     auditRecords,
     setExecResult(result) { execResult = result; },
+    setExecError(error) { execError = error; },
     setApproval(value) { approve = value; },
     setCloseOutcome(outcome) { closeOutcome = outcome; },
     approvalPrompts: () => approvalPrompts,

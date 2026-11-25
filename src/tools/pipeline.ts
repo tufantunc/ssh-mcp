@@ -27,6 +27,12 @@ export interface AuditState {
   command: string;
   /** Set once the policy engine actually produced a decision. */
   evaluation?: PolicyEvaluation;
+  /**
+   * Who approved the call, set as soon as the approval gate names someone. A call that
+   * fails after that point (a dropped connection mid-run, the quota) was still approved,
+   * and its failure record has to say by whom.
+   */
+  approver?: string;
 }
 
 /** Policy never ran — the input was rejected at the boundary. */
@@ -376,7 +382,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     try {
       await auditResult(ctx, profileName, state.command, evaluation, {
         error: err?.message ?? String(err),
-      });
+      }, state.approver);
     } catch (auditErr) {
       console.error('Audit write failed while recording a tool failure:', auditErr);
     }
@@ -502,6 +508,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
         effective, profileName, opts.toolName, opts.resource, opts.synthetic ?? false,
       );
       state.evaluation = evaluation;
+      state.approver = approver;
 
       if (opts.enforceClass && evaluation.commandClass !== opts.enforceClass) {
         // A command that fell to `safe` because a reader was refused read-only —
