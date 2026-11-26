@@ -10,7 +10,7 @@ import { redactText } from '../guard/redactor.js';
 import { shellSingleQuote } from '../guard/sanitizer.js';
 import { openWithRetry } from './channel-retry.js';
 import { terminateChannel, COULD_NOT_SIGNAL } from './channel-signal.js';
-import { appendCapped, finalizeCapped } from './output-buffer.js';
+import { appendCapped, finalizeCapped, CompleteOutput } from './output-buffer.js';
 import { OperatorError } from '../errors.js';
 import { keyboardInteractiveLogin } from './keyboard-interactive.js';
 import { DEFAULT_CONNECT_TIMEOUT_MS } from '../config/schema.js';
@@ -423,7 +423,7 @@ export class SSHConnection {
       }, timeoutMs);
 
       const execOpts: ExecOptions = { ...this.channelEnv() };
-      if (opts.tty || this.profile.tty) {
+      if (opts.tty ?? this.profile.tty) {
         execOpts.pty = { term: 'xterm-256color', cols: 200, rows: 50 };
       }
 
@@ -474,6 +474,8 @@ export class SSHConnection {
         let stdout = '';
         let stderr = '';
         const maxOutput = this.profile.maxOutputBytes;
+        const completeStdout = opts.suppressTruncatedOutput ? new CompleteOutput(maxOutput) : undefined;
+        const completeStderr = opts.suppressTruncatedOutput ? new CompleteOutput(maxOutput) : undefined;
         // Read once per command, like maxOutput: a reload mid-stream applies to the
         // next command, not to a buffer already trimmed the other way.
         const truncation = this.profile.outputTruncation;
@@ -482,11 +484,6 @@ export class SSHConnection {
         let received = 0;
         let lastProgressSent = 0;
         const PROGRESS_INTERVAL = 500;
-
-        if (opts.stdin) {
-          try { stream.write(opts.stdin); } catch { /* */ }
-        }
-        try { stream.end(); } catch { /* */ }
 
         if (opts.abortSignal) {
           if (opts.abortSignal.aborted) {
@@ -518,11 +515,24 @@ export class SSHConnection {
           stream.on('close', () => { opts.abortSignal!.removeEventListener('abort', onAbort); });
         }
 
+        // Do not write a credential into a channel if cancellation arrived while
+        // the connection or channel was opening. The command may already have
+        // been dispatched, so the cancellation path still attempts to stop it.
+        if (opts.stdin) {
+          try { stream.write(opts.stdin); } catch { /* */ }
+        }
+        try { stream.end(); } catch { /* */ }
+
         stream.on('data', (data: Buffer) => {
           received += data.length;
-          stdout = appendCapped(stdout, data.toString(), maxOutput, truncation);
+          if (completeStdout) completeStdout.append(data);
+          else stdout = appendCapped(stdout, data.toString(), maxOutput, truncation);
           if (opts.onProgress && Date.now() - lastProgressSent >= PROGRESS_INTERVAL) {
             lastProgressSent = Date.now();
+            if (completeStdout) {
+              opts.onProgress(received, 'Privileged command output withheld until completion.');
+              return;
+            }
             let tail = stdout;
             for (let i = 0; i < 3; i++) {
               const idx = tail.lastIndexOf('\n', tail.length - 2);
@@ -533,7 +543,8 @@ export class SSHConnection {
           }
         });
         stream.stderr.on('data', (data: Buffer) => {
-          stderr = appendCapped(stderr, data.toString(), maxOutput, truncation);
+          if (completeStderr) completeStderr.append(data);
+          else stderr = appendCapped(stderr, data.toString(), maxOutput, truncation);
         });
 
         stream.on('close', (code: number, signal: string) => {
@@ -543,8 +554,8 @@ export class SSHConnection {
             clearTimeout(timeoutId);
             this.lastActivity = new Date();
             resolve({
-              stdout: finalizeCapped(stdout, maxOutput, truncation),
-              stderr: finalizeCapped(stderr, maxOutput, truncation),
+              stdout: completeStdout ? completeStdout.finish() : finalizeCapped(stdout, maxOutput, truncation),
+              stderr: completeStderr ? completeStderr.finish() : finalizeCapped(stderr, maxOutput, truncation),
               exitCode: code,
               durationMs: Date.now() - startTime,
               profile: this.profile.name,

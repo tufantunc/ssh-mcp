@@ -63,6 +63,7 @@ port = 22
 user = "deploy"
 auth = "key"
 keyRef = "~/.ssh/id_ed25519"      # Path to private key
+# sudoKeychainEntry = "ssh-mcp/prod-web-1-sudo" # optional, independent of auth; does not grant sudo
 via = "bastion"                   # ProxyJump profile name
 workdir = "/var/www/myapp"
 # trustedHostKey = "SHA256:<real fingerprint>"   # Pin the host key (optional, and the

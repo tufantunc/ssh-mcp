@@ -315,6 +315,7 @@ user = "deploy"
 auth = "agent"                      # agent | key | password | keychain
 keyRef = "~/.ssh/id_ed25519"        # for auth=key
 keychainEntry = "ssh-mcp/prod"      # for auth=keychain (requires @napi-rs/keyring)
+# sudoKeychainEntry = "ssh-mcp/prod-sudo" # independent sudo credential (optional)
 via = "bastion"                     # ProxyJump — route through bastion profile
 group = "prod"                      # Policy tier: prod | staging | dev, or your own (see [policy])
 workdir = "/var/www"
@@ -454,6 +455,99 @@ The certificate file is auto-detected using OpenSSH convention (`keyRef` + `-cer
 
 **Never CLI arguments.** v2 removes `--password`, `--sudoPassword`, `--suPassword` entirely.
 
+### Independent sudo keychain credentials
+
+Set `sudoKeychainEntry = "service/account"` on a profile to obtain its sudo
+password from the native keyring (`@napi-rs/keyring`, an optional dependency).
+Both parts must be nonempty and contain no whitespace or slash. This is
+independent of `auth` and `keychainEntry`; for example, add the following to
+an existing SSH key-authenticated profile:
+
+```toml
+auth = "key"
+keyRef = "~/.ssh/id_ed25519"
+sudoKeychainEntry = "ssh-mcp/server-sudo"
+approvalPolicy = "ask-all"
+```
+
+This does not grant sudo permission: the profile's role, group, read-only
+setting and approval policy still determine whether `privileged-command`
+is allowed. With `ask-all` and `approvalGrantTtlMs = 0` in `[defaults]`,
+each permitted invocation requires a new approval.
+
+Provision the matching service/account entry in the local keyring before
+using it. Use the same keyring backend as the server (the library's default
+backend). For example, from a checkout where `@napi-rs/keyring` is installed,
+this Bash example reads a password without echoing it and supplies it to the
+library through stdin, not an environment variable or a command-line argument:
+
+```bash
+(
+  set +x
+  set +a
+  unset password
+  IFS= read -r -s -p 'Sudo password: ' password || exit 1
+  printf '\n' >&2
+  printf '%s' "$password" | node --input-type=module -e '
+    import { Entry } from "@napi-rs/keyring";
+    import { readFileSync } from "node:fs";
+    const password = readFileSync(0, "utf8");
+    if (!password || /[\r\n\0]/.test(password)) process.exit(1);
+    try {
+      await new Entry("ssh-mcp", "server-sudo").setPassword(password);
+      console.log("Sudo keychain entry saved.");
+    } catch {
+      console.error("Could not save sudo keychain entry.");
+      process.exitCode = 1;
+    }
+  '
+)
+```
+
+Run this yourself in a private terminal, not through an AI tool, and do not
+use shell tracing (`set -x`). The example writes or replaces the entry.
+
+The server fetches the password after policy, any required approval and
+quota checks, for each `privileged-command` invocation. It does not keep it
+in the connection's credential object. Updating or deleting the keyring
+entry takes effect on the next privileged invocation without restarting the
+server. If the configured entry is missing, invalid or inaccessible, the
+command fails without falling back to environment variables. Profiles that
+do not configure `sudoKeychainEntry` retain the existing sudo environment
+credential behavior.
+
+The password travels through the SSH exec channel's stdin, not the command
+line. Keychain-backed sudo commands use a non-PTY channel even when the
+profile requests a PTY; hosts requiring a terminal for sudo are not supported
+by this path. Output previews are withheld while a credential is supplied.
+The final output receives literal-password redaction in addition to the
+existing redaction layers. Each output stream exceeding `maxOutputBytes` is
+withheld rather than truncated, since a cut through the credential could evade
+literal redaction. Request smaller output if this happens. Redaction is best
+effort, not a guarantee against transformed or deliberately disclosed secrets.
+Keychain-backed commands use `sudo -k -S` to ignore existing sudo authentication
+records and avoid refreshing the sudo timestamp. This does not invalidate
+unrelated existing authentication records or override remote `NOPASSWD` rules.
+Profiles without `sudoKeychainEntry` keep the existing sudo wrapper.
+
+The keyring protects stored credentials according to the OS/backend's
+security policy. It is not a security boundary against other processes
+running as the same local user, a compromised SSH host, or unrestricted
+local shell access. Passwords also exist temporarily in process memory;
+JavaScript does not guarantee their immediate erasure. The SSH MCP approval
+policy is separate from the OS keyring's own unlock/access policy.
+
+The opt-in end-to-end test uses a disposable entry in the actual local
+keyring. With the Docker test servers running and the server built, run:
+
+```bash
+SSH_MCP_DISABLE_MAIN=1 SSH_MCP_REQUIRE_SERVERS=1 SSH_MCP_TEST_KEYCHAIN=1 \
+  npx vitest run test/e2e/sudo-keychain.e2e.test.ts
+```
+
+Do not use a production host or a real password for this test.
+
+
 ### Reloading
 
 The config file is read at startup, and again only when you ask: through the
@@ -502,7 +596,7 @@ so no tool call sees part of each. For each open connection, by profile name:
 |---|---|
 | `role`, `group`, `approvalPolicy`, `readOnly`, `commandQuotaPerDay`, `maxChars`, `transferMaxBytes`, `transferTimeoutMs`, `connectTimeoutMs`, or the `[policy]` section | The connection stays open; the change applies from its next command (`connectTimeoutMs` from its next login) |
 | `workdir`, `tty`, `timeout`, `maxOutputBytes`, `outputTruncation`, `announceAgent`, `sessionMaxPerConnection`, `sessionIdleTimeoutMs`, `sessionBackgroundMaxMs` | The connection stays open; the new values apply to new sessions and commands, and the report names these fields |
-| `host`, `port`, `user`, `auth`, `keyRef`, `keychainEntry`, `cert`, `via`, `trustedHostKey`, `keyboardInteractive` | The connection closes with its sessions; the next call connects with the new profile |
+| `host`, `port`, `user`, `auth`, `keyRef`, `keychainEntry`, `sudoKeychainEntry`, `cert`, `via`, `trustedHostKey`, `keyboardInteractive` | The connection closes with its sessions; the next call connects with the new profile |
 | the profile was removed | The connection closes with its sessions |
 
 A connection that runs through a bastion that is closing closes too, and so does anything

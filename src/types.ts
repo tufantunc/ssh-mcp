@@ -16,6 +16,8 @@ export interface Profile {
   auth: AuthMethod;
   keyRef?: string;
   keychainEntry?: string;
+  /** OS keychain service/account for sudo, independent of SSH authentication. */
+  sudoKeychainEntry?: string;
   via?: string;
   /** Explicit policy tier (prod | staging | dev | custom). */
   group?: string;
@@ -173,6 +175,8 @@ export type CommandClass = 'read-only' | 'safe' | 'destructive' | 'privileged';
 
 export interface ExecOpts {
   tty?: boolean;
+  /** Withhold a whole over-budget stream rather than return partial credential-bearing output. */
+  suppressTruncatedOutput?: boolean;
   stdin?: string;
   timeoutMs?: number;
   onProgress?: (bytesReceived: number, recentOutput: string) => void;

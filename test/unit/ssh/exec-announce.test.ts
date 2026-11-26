@@ -133,6 +133,13 @@ describe('every channel opened for a command announces the tool', () => {
     expect(execOpts[0]?.pty, 'the pty request must survive alongside it').toBeTruthy();
   });
 
+  it('exec(): respects an explicit non-PTY request for a PTY profile', async () => {
+    const conn = await connect({ tty: true });
+    await conn.exec('id -un', { tty: false });
+    expect(execOpts).toHaveLength(1);
+    expect(execOpts[0]?.pty).toBeUndefined();
+  });
+
   it('openExec(): a background session', async () => {
     // Its own case because it is its own call site. Measured: with the field
     // deleted here and left in place at the other two, the entire unit suite

@@ -119,12 +119,12 @@ export function registerCommandTools(
           // channel when it does prompt, and the command can never see it.
           // stdin carries nothing else the command could want: the password
           // line was the only thing ever written.
-          wrap: (cleanCmd) => `sudo -p "" -S sh -c ${shellSingleQuote(`exec 0</dev/null; ${cleanCmd}`)}`,
+          // Keychain-backed calls must not consume or refresh sudo timestamps.
+          // Keep the existing wrapper for profiles using legacy credentials.
+          wrap: (cleanCmd, resolvedProfile) =>
+            `sudo${resolvedProfile.sudoKeychainEntry !== undefined ? ' -k' : ''} -p "" -S sh -c ${shellSingleQuote(`exec 0</dev/null; ${cleanCmd}`)}`,
         },
-        (rt) => {
-          const sudoPassword = rt.conn.getSudoPassword();
-          return execAndReport({ stdin: sudoPassword ? sudoPassword + '\n' : undefined })(rt);
-        },
+        execAndReport({ sudo: true }),
       );
     },
   );

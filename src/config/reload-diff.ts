@@ -9,6 +9,7 @@ export const CONNECTION_FIELDS: readonly (keyof Profile)[] = [
   'auth',
   'keyRef',
   'keychainEntry',
+  'sudoKeychainEntry',
   'cert',
   'via',
   'trustedHostKey',

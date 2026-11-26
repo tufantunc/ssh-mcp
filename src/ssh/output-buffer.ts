@@ -1,3 +1,4 @@
+import { StringDecoder } from 'node:string_decoder';
 import type { OutputTruncation } from '../types.js';
 
 /**
@@ -61,4 +62,36 @@ function tailWindow(value: string, maxChars: number): string {
   const code = value.charCodeAt(cut);
   const lowSurrogate = code >= 0xdc00 && code <= 0xdfff;
   return value.slice(lowSurrogate ? cut + 1 : cut);
+}
+
+/**
+ * For credential-bearing execs, do not release an incomplete stream: a cap
+ * can cut a password in half before the caller's literal redaction sees it.
+ * Count bytes and decode UTF-8 across SSH chunk boundaries. Once over budget,
+ * discard the whole stream and retain no further output.
+ */
+export class CompleteOutput {
+  private readonly decoder = new StringDecoder('utf8');
+  private value = '';
+  private bytes = 0;
+  private overflow = false;
+
+  constructor(private readonly maxBytes: number) {}
+
+  append(chunk: Buffer): void {
+    if (this.overflow) return;
+    if (chunk.length > this.maxBytes - this.bytes) {
+      this.overflow = true;
+      this.value = '';
+      this.decoder.end();
+      return;
+    }
+    this.bytes += chunk.length;
+    this.value += this.decoder.write(chunk);
+  }
+
+  finish(): string {
+    if (this.overflow) return '[Output withheld: credential-bearing stream exceeded maxOutputBytes.]';
+    return this.value + this.decoder.end();
+  }
 }
