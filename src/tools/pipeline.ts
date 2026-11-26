@@ -4,6 +4,7 @@ import type { ConnectionRegistry } from '../ssh/connection-registry.js';
 import type { PolicyEngine, PolicyResource } from '../policy/engine.js';
 import type { AuditStore } from '../audit/store.js';
 import { sanitizeCommand } from '../guard/sanitizer.js';
+import { resolveSudoKeychainPassword } from '../config/credential-resolver.js';
 import { requestApproval } from '../guard/elicitation.js';
 import { commandOutput, type ToolResult } from './results.js';
 import { CommandQuota } from '../policy/quota.js';
@@ -11,7 +12,7 @@ import { formatReadOnlyRejection } from '../policy/classifier.js';
 import type { LocalPathContext } from './local-path.js';
 import type { ConfigReloader } from '../config/reload.js';
 import { ApprovalGrants } from '../guard/approval-grants.js';
-import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass } from '../types.js';
+import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass, Profile } from '../types.js';
 
 /**
  * What we know about a request while it is being processed, so a failure can be
@@ -452,7 +453,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     /** Extra check on the sanitized command before policy evaluation. */
     preCheck?: (cleanCmd: string) => void;
     /** Rewrite what policy evaluates and what runs (the sudo wrapper). */
-    wrap?: (cleanCmd: string) => string;
+    wrap?: (cleanCmd: string, profile: Profile) => string;
     /**
      * What the call acts on beyond its command string — its remote path, for the SFTP
      * tools. Forwarded whole to the policy engine, so `[policy].denylist` is tested
@@ -500,7 +501,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       opts.preCheck?.(effective);
 
       if (opts.wrap) {
-        effective = opts.wrap(effective);
+        effective = opts.wrap(effective, profile);
         state.command = effective;
       }
 
@@ -564,19 +565,62 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     }
   }
 
-  /** Run a command over the connection and report it verbatim to the client. */
-  function execAndReport(opts: { stdin?: string } = {}) {
+  /** Run a command over the connection and report it to the client. */
+  function execAndReport(opts: { sudo?: boolean } = {}) {
     return async (rt: RunContext) => {
-      const audited = await rt.conn.exec(rt.command, {
-        stdin: opts.stdin,
-        onProgress: rt.onProgress,
-        abortSignal: rt.abortSignal,
-      });
-      // The sudo password is the one secret that can plausibly end up in this
-      // output (GHSA-9m75-x2ch-j4jr): it is written onto the very channel the
-      // command reads. Scrub it here whatever the exec path was.
-      const sudoPassword = rt.conn.getSudoPassword?.();
+      // This callback runs only after policy, approval and quota checks. Do
+      // not fetch an independent sudo credential when opening the connection.
+      const keychainBacked = opts.sudo && rt.conn.profile.sudoKeychainEntry !== undefined;
+      const generation = registry.generation;
+      if (opts.sudo && rt.abortSignal?.aborted) {
+        throw new Error('Privileged command cancelled before execution.');
+      }
+      const sudoPassword = keychainBacked
+        ? await resolveSudoKeychainPassword(rt.conn.profile)
+        : rt.conn.getSudoPassword?.();
+      if (keychainBacked && !sudoPassword) {
+        throw new Error('Sudo keychain credential unavailable.');
+      }
+      // The keychain lookup introduces a new await after the approval gate.
+      // Reject instead of applying an old decision to a newly loaded profile.
+      if (keychainBacked && registry.generation !== generation) {
+        throw new Error('Configuration changed during sudo credential lookup; the command was not run.');
+      }
+      if (opts.sudo && rt.abortSignal?.aborted) {
+        throw new Error('Privileged command cancelled before execution.');
+      }
+      const sendsPassword = Boolean(opts.sudo && sudoPassword);
       const literalSecrets = sudoPassword ? [sudoPassword] : undefined;
+      // An exact match must be removed before pattern/entropy redaction can
+      // change it. Also cover short credentials in the new keychain path.
+      const scrub = (text: string): string => keychainBacked && sudoPassword
+        ? text.split(sudoPassword).join(`[REDACTED:secret:${sudoPassword.length}]`)
+        : text;
+      let audited: CommandResult;
+      try {
+        audited = await rt.conn.exec(rt.command, {
+          stdin: sendsPassword ? sudoPassword + '\n' : undefined,
+          // Do not request a PTY for the new credential path: terminal echo
+          // and line discipline are inappropriate for a password pipe.
+          ...(keychainBacked ? { tty: false, suppressTruncatedOutput: true } : {}),
+          // A preview may contain only part of a password or already have
+          // been transformed by the SSH layer's redactor. Report bytes only.
+          onProgress: sendsPassword && rt.onProgress
+            ? (bytes) => rt.onProgress!(bytes, 'Privileged command output withheld until completion.')
+            : rt.onProgress,
+          abortSignal: rt.abortSignal,
+        });
+      } catch (err) {
+        // Do not forward a backend exception or its cause from the dynamic
+        // credential path. An SSH error need not mean the command never ran.
+        if (keychainBacked) {
+          throw new Error('Privileged SSH execution failed; verify remote state before retrying.');
+        }
+        throw err;
+      }
+      if (keychainBacked) {
+        audited = { ...audited, stdout: scrub(audited.stdout), stderr: scrub(audited.stderr) };
+      }
       return { audited, output: commandOutput(audited, { literalSecrets }) };
     };
   }

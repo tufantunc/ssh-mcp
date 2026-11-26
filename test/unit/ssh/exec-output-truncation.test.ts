@@ -11,8 +11,8 @@ import { makeProfile } from '../../fixtures/profile.js';
  * the final trim.
  */
 
-let stdoutChunks: string[];
-let stderrChunks: string[];
+let stdoutChunks: (string | Buffer)[];
+let stderrChunks: (string | Buffer)[];
 
 beforeEach(() => {
   stdoutChunks = [];
@@ -31,8 +31,8 @@ beforeEach(() => {
         // `exec()` attaches its listeners in the promise continuation, so the
         // data has to arrive on a later tick than the callback.
         setTimeout(() => {
-          for (const chunk of stdoutChunks) channel.emit('data', Buffer.from(chunk));
-          for (const chunk of stderrChunks) channel.stderr.emit('data', Buffer.from(chunk));
+          for (const chunk of stdoutChunks) channel.emit('data', typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+          for (const chunk of stderrChunks) channel.stderr.emit('data', typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
           channel.emit('close', 0, null);
         }, 1);
       }
@@ -101,5 +101,47 @@ describe('exec() applies the configured truncation to both streams', () => {
       onProgress: (bytes) => reported.push(bytes),
     });
     expect(reported).toEqual([4, 8, 12, 14]);
+  });
+});
+
+
+describe('exec() withholds incomplete credential-bearing streams', () => {
+  for (const mode of ['head', 'tail'] as const) {
+    it(`withholds each over-budget stream in ${mode} mode`, async () => {
+      stdoutChunks = ['abc', 'def', 'ghi'];
+      stderrChunks = ['123', '456'];
+      const result = await (await connect({ outputTruncation: mode })).exec('cat x', {
+        suppressTruncatedOutput: true,
+      });
+      expect(result.stdout).toMatch(/^\[Output withheld:/);
+      expect(result.stderr).toMatch(/^\[Output withheld:/);
+      expect(result.stdout).not.toContain('abc');
+      expect(result.stderr).not.toContain('456');
+    });
+  }
+
+  it('preserves a complete stream independently of an over-budget stream', async () => {
+    stdoutChunks = ['123', '45'];
+    stderrChunks = ['abcdef'];
+    const result = await (await connect({ outputTruncation: 'tail' })).exec('cat x', {
+      suppressTruncatedOutput: true,
+    });
+    expect(result.stdout).toBe('12345');
+    expect(result.stderr).toMatch(/^\[Output withheld:/);
+  });
+
+  it('reassembles UTF-8 split across chunks and keeps progress free of output', async () => {
+    const bytes = Buffer.from('päss');
+    stdoutChunks = [bytes.subarray(0, 2), bytes.subarray(2)];
+    stderrChunks = stdoutChunks;
+    const progress: string[] = [];
+    const result = await (await connect({})).exec('cat x', {
+      suppressTruncatedOutput: true,
+      onProgress: (_bytes, message) => progress.push(message),
+    });
+    expect(result.stdout).toBe('päss');
+    expect(result.stderr).toBe('päss');
+    expect(progress.length).toBeGreaterThan(0);
+    expect(progress.every(message => message === 'Privileged command output withheld until completion.')).toBe(true);
   });
 });

@@ -168,6 +168,10 @@ export const profileSchema = z.object({
   auth: authMethodSchema.default('agent'),
   keyRef: z.string().optional(),
   keychainEntry: z.string().optional(),
+  sudoKeychainEntry: z.string().regex(
+    /^[^/\s]+\/[^/\s]+$/,
+    'sudoKeychainEntry must be a service/account pair without whitespace',
+  ).optional(),
   via: z.string().optional(),
   // Drives the role-binding tier. Without it the tier is guessed from the
   // profile name, and an unrecognised name resolves to the strictest tier.

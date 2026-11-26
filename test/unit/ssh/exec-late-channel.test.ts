@@ -46,11 +46,15 @@ let spans: RecordedSpan[];
 let execDelayMs: number;
 /** How the channel it answers with differs from a signallable one. */
 let lateChannel: FakeChannelOptions;
+let beforeChannel: (() => void) | undefined;
+let writeStdin: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   signalled = [];
   execDelayMs = 300;
   lateChannel = {};
+  beforeChannel = undefined;
+  writeStdin = vi.fn();
   vi.resetModules();
   const recording = recordingTracer();
   spans = recording.spans;
@@ -62,7 +66,12 @@ beforeEach(() => {
         // Bound now, not when the timer fires: a test that returns before its late channel
         // arrives must not have that channel write into the next test's array.
         const options = { ...lateChannel, id: 42, wire: signalled };
-        setTimeout(() => cb(undefined, fakeSsh2Channel({}, options).channel), execDelayMs);
+        const before = beforeChannel;
+        const write = writeStdin;
+        setTimeout(() => {
+          before?.();
+          cb(undefined, fakeSsh2Channel({ write }, options).channel);
+        }, execDelayMs);
       }
       end() { /* nothing to tear down */ }
     }
@@ -134,6 +143,18 @@ describe('a channel that arrives after the promise settled', () => {
     execDelayMs = 0;
     const conn = await connect();
     await expect(conn.exec('sleep 30', { timeoutMs: 80 })).rejects.toThrow(/timed out/i);
+    expect(signalled.map((s) => s.name)).toEqual(['INT']);
+  });
+
+  it('does not send stdin when cancellation arrived while the channel was opening', async () => {
+    execDelayMs = 0;
+    const controller = new AbortController();
+    beforeChannel = () => controller.abort();
+    const conn = await connect();
+    await expect(conn.exec('sudo -S id -u', {
+      timeoutMs: 1000, stdin: 'fictional-password\n', abortSignal: controller.signal,
+    })).rejects.toThrow(/aborted/i);
+    expect(writeStdin).not.toHaveBeenCalled();
     expect(signalled.map((s) => s.name)).toEqual(['INT']);
   });
 });

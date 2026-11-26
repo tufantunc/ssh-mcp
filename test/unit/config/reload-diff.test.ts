@@ -59,6 +59,7 @@ const FIELD_CLASS: Record<keyof Profile, { cls: FieldClass; changed: unknown }> 
   auth: { cls: 'connection', changed: 'agent' },
   keyRef: { cls: 'connection', changed: 'k2' },
   keychainEntry: { cls: 'connection', changed: 'kc2' },
+  sudoKeychainEntry: { cls: 'connection', changed: 'ssh-mcp/other-sudo' },
   cert: { cls: 'connection', changed: true },
   keyboardInteractive: { cls: 'connection', changed: 'password' },
   via: { cls: 'connection', changed: 'jump2' },

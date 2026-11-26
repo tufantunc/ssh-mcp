@@ -32,6 +32,34 @@ auth = "password"
     expect(config.profiles[0].sessionMaxPerConnection).toBe(5);
   });
 
+  it('reads an independent sudo keychain entry with SSH key authentication', async () => {
+    const path = await cfg.write(`
+[[profiles]]
+name = "dev"
+host = "localhost"
+user = "u"
+auth = "key"
+keyRef = "~/.ssh/id_ed25519"
+sudoKeychainEntry = "ssh-mcp/dev-sudo"
+`);
+    const { config } = await loadConfigWithDigest(path);
+    expect(config.profiles[0].auth).toBe('key');
+    expect(config.profiles[0].sudoKeychainEntry).toBe('ssh-mcp/dev-sudo');
+  });
+
+  it.each(['', 'service', 'service/', '/account', 'a/b/c', 'a b/c'])(
+    'rejects malformed sudo keychain entry %j', async (entry) => {
+      const path = await cfg.write(`
+[[profiles]]
+name = "dev"
+host = "localhost"
+user = "u"
+sudoKeychainEntry = ${JSON.stringify(entry)}
+`);
+      await expect(loadConfigWithDigest(path)).rejects.toThrow(/sudoKeychainEntry/);
+    },
+  );
+
   it("reads keyboardInteractive and connectTimeoutMs per profile, 'off' and 20000 by default", async () => {
     const path = await cfg.write(`
 [[profiles]]

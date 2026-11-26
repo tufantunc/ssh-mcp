@@ -33,6 +33,31 @@ export async function setKeychainEntry(service: string, account: string, passwor
   await keyringSet(service, account, password);
 }
 
+/** Resolve only the explicitly configured sudo keychain entry, at execution time. */
+export async function resolveSudoKeychainPassword(profile: Profile): Promise<string | undefined> {
+  if (profile.sudoKeychainEntry === undefined) return undefined;
+
+  const parts = profile.sudoKeychainEntry.split('/');
+  if (parts.length !== 2 || parts.some((part) => !part || /\s/.test(part))) {
+    throw new OperatorError('sudoKeychainEntry must be a service/account pair without whitespace');
+  }
+  if (!keyringGet) {
+    throw new OperatorError(`Sudo keychain unavailable for profile "${profile.name}". Install @napi-rs/keyring.`);
+  }
+
+  let password: string | null;
+  try {
+    password = await keyringGet(parts[0]!, parts[1]!);
+  } catch {
+    // A backend exception may contain sensitive data; do not forward it to the client or logs.
+    throw new OperatorError(`Sudo keychain lookup failed for profile "${profile.name}".`);
+  }
+  if (!password || /[\r\n\0]/.test(password)) {
+    throw new OperatorError(`Missing or invalid sudo keychain credential for profile "${profile.name}".`);
+  }
+  return password;
+}
+
 export async function resolveCredentials(profile: Profile): Promise<ResolvedCredentials> {
   const creds: ResolvedCredentials = {};
 
@@ -74,10 +99,14 @@ export async function resolveCredentials(profile: Profile): Promise<ResolvedCred
     creds.password = creds.password || process.env.SSH_MCP_PASSWORD;
   }
 
-  if (process.env[`${envPrefix}_SUDO_PASSWORD`]) {
-    creds.sudoPassword = process.env[`${envPrefix}_SUDO_PASSWORD`];
-  } else if (process.env.SSH_MCP_SUDO_PASSWORD) {
-    creds.sudoPassword = process.env.SSH_MCP_SUDO_PASSWORD;
+  // Keychain-backed sudo is resolved separately at execution time. Never retain an
+  // environment fallback in the connection when an explicit keychain entry is configured.
+  if (profile.sudoKeychainEntry === undefined) {
+    if (process.env[`${envPrefix}_SUDO_PASSWORD`]) {
+      creds.sudoPassword = process.env[`${envPrefix}_SUDO_PASSWORD`];
+    } else if (process.env.SSH_MCP_SUDO_PASSWORD) {
+      creds.sudoPassword = process.env.SSH_MCP_SUDO_PASSWORD;
+    }
   }
 
   if (process.env[`${envPrefix}_PASSPHRASE`]) {
