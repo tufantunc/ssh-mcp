@@ -45,4 +45,12 @@ describe('privileged-command stdin isolation (GHSA-9m75-x2ch-j4jr)', () => {
     expect(text).not.toContain('sudo-secret');
     expect(text).toContain('[REDACTED:secret:11]');
   });
+
+  it('hands the exec path the sudo password to scrub from progress notifications', async () => {
+    // The connection redacts each progress tail before it reaches the client;
+    // it can only scrub the password verbatim if it is told which one it is.
+    h = await createHarness();
+    await call('privileged-command', { command: 'head -1' });
+    expect(h.execCalls.at(-1)!.literalSecrets).toEqual(['sudo-secret']);
+  });
 });

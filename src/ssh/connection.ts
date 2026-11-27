@@ -529,7 +529,7 @@ export class SSHConnection {
               if (idx < 0) break;
               tail = tail.substring(idx + 1);
             }
-            opts.onProgress(received, redactText(tail.trim(), { entropyScan: true }));
+            opts.onProgress(received, redactText(tail.trim(), { entropyScan: true, literalSecrets: opts.literalSecrets }));
           }
         });
         stream.stderr.on('data', (data: Buffer) => {

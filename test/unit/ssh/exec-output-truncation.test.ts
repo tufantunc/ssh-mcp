@@ -102,4 +102,20 @@ describe('exec() applies the configured truncation to both streams', () => {
     });
     expect(reported).toEqual([4, 8, 12, 14]);
   });
+
+  it('scrubs the literal secrets it is given from the progress tail', async () => {
+    // Short and low-entropy on purpose: only the literal layer can catch it,
+    // so a progress tail redacted with the entropy scan alone would carry it.
+    let now = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => (now += 1_000));
+    stdoutChunks = ['line one\n', 'hunter22\n'];
+    const tails: string[] = [];
+    await (await connect({ maxOutputBytes: 1_000 })).exec('cat x', {
+      timeoutMs: 30_000,
+      literalSecrets: ['hunter22'],
+      onProgress: (_bytes, tail) => tails.push(tail),
+    });
+    expect(tails.at(-1)).toBe('[REDACTED:secret:8]');
+  });
 });
+
