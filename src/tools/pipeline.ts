@@ -567,16 +567,18 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
   /** Run a command over the connection and report it verbatim to the client. */
   function execAndReport(opts: { stdin?: string } = {}) {
     return async (rt: RunContext) => {
+      // The sudo password is the one secret that can plausibly end up in this
+      // output (GHSA-9m75-x2ch-j4jr): it is written onto the very channel the
+      // command reads. Scrub it here whatever the exec path was, from the
+      // progress notifications as well as from the result.
+      const sudoPassword = rt.conn.getSudoPassword?.();
+      const literalSecrets = sudoPassword ? [sudoPassword] : undefined;
       const audited = await rt.conn.exec(rt.command, {
         stdin: opts.stdin,
         onProgress: rt.onProgress,
+        literalSecrets,
         abortSignal: rt.abortSignal,
       });
-      // The sudo password is the one secret that can plausibly end up in this
-      // output (GHSA-9m75-x2ch-j4jr): it is written onto the very channel the
-      // command reads. Scrub it here whatever the exec path was.
-      const sudoPassword = rt.conn.getSudoPassword?.();
-      const literalSecrets = sudoPassword ? [sudoPassword] : undefined;
       return { audited, output: commandOutput(audited, { literalSecrets }) };
     };
   }

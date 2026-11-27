@@ -176,6 +176,12 @@ export interface ExecOpts {
   stdin?: string;
   timeoutMs?: number;
   onProgress?: (bytesReceived: number, recentOutput: string) => void;
+  /**
+   * Values to scrub verbatim from the output sent with `onProgress`, the same
+   * ones the caller scrubs from the final result, so a progress notification
+   * never carries what the result would have redacted.
+   */
+  literalSecrets?: string[];
   abortSignal?: AbortSignal;
 }
 

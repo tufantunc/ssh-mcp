@@ -30,6 +30,8 @@ export const testProfile: Profile = makeProfile();
 export interface ExecCall {
   command: string;
   stdin?: string;
+  /** What the exec path was asked to scrub from its progress notifications. */
+  literalSecrets?: string[];
 }
 
 export interface Harness {
@@ -86,7 +88,7 @@ export async function createHarness(
   const conn: any = {
     profile,
     async exec(command: string, opts: any = {}) {
-      execCalls.push({ command, stdin: opts.stdin });
+      execCalls.push({ command, stdin: opts.stdin, literalSecrets: opts.literalSecrets });
       if (execError) throw execError;
       return makeResult(command);
     },
